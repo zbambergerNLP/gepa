@@ -109,8 +109,8 @@ echo "==> generator up on :${GEN_PORT}"
 # litellm talks to vLLM via the openai/ prefix + api_base.
 # Set OPENAI_API_KEY=EMPTY so litellm doesn't reject the request.
 export OPENAI_API_KEY="EMPTY"
-SOLVER_MODEL="openai/${MODEL}"
-REFLECTION_MODEL="openai/${MODEL}"
+SOLVER_MODEL="hosted_vllm/${MODEL}"
+REFLECTION_MODEL="hosted_vllm/${MODEL}"
 API_BASE="http://localhost:${GEN_PORT}/v1"
 
 DATA_PATH_ARG=()

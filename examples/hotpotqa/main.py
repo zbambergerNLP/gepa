@@ -94,9 +94,9 @@ def main():
     parser = argparse.ArgumentParser(description="HotpotQA evaluation for action-conditioned reflection")
     parser.add_argument("--data-path", type=str, default=None, help="Path to HotpotQA JSONL sample")
     parser.add_argument("--max-metric-calls", type=int, default=200, help="Budget per condition")
-    parser.add_argument("--solver-model", type=str, default="ollama/llama3.1:8b", help="Solver LM model (litellm format)")
-    parser.add_argument("--reflection-model", type=str, default="ollama/llama3.1:8b", help="Reflection LM model (litellm format)")
-    parser.add_argument("--api-base", type=str, default=None, help="Base URL for local model server (e.g. http://localhost:11434 for Ollama)")
+    parser.add_argument("--solver-model", type=str, default="hosted_vllm/Qwen3.5-9B", help="Solver LM model (litellm format)")
+    parser.add_argument("--reflection-model", type=str, default="hosted_vllm/Qwen3.5-9B", help="Reflection LM model (litellm format)")
+    parser.add_argument("--api-base", type=str, default=None, help="Base URL for vLLM server (e.g. http://localhost:8000/v1)")
     parser.add_argument(
         "--condition",
         type=str,

@@ -65,7 +65,7 @@ def run_llm(
     prompt: str,
     context: str,
     question: str,
-    model: str = "ollama/llama3.1:8b",
+    model: str = "hosted_vllm/Qwen3.5-9B",
     api_base: str | None = None,
 ) -> str:
     """Run the solver LM on a single HotpotQA example."""

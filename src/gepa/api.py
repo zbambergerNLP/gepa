@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 if TYPE_CHECKING:
     from gepa.core.callbacks import GEPACallback
+    from gepa.strategies.action_space import ActionSelector
 
 from gepa.adapters.default_adapter.default_adapter import (
     ChatCompletionCallable,
@@ -100,6 +101,8 @@ def optimize(
     sampling_strategy: SamplingStrategy | None = None,
     selection_strategy: SelectionStrategy | None = None,
     reflection_strategy: ReflectionLM | None = None,
+    # Action-conditioned reflection (Rev 1)
+    action_selector: "ActionSelector | None" = None,
 ) -> GEPAResult[RolloutOutput, DataId]:
     """
     GEPA is an evolutionary optimizer that evolves (multiple) text components of a complex system to optimize them towards a given metric.
@@ -245,7 +248,9 @@ def optimize(
     elif reflection_lm is not None:
         from gepa.lm import TrackingLM
 
-        reflection_lm_callable = TrackingLM(reflection_lm) if not hasattr(reflection_lm, "total_cost") else reflection_lm
+        reflection_lm_callable = (
+            TrackingLM(reflection_lm) if not hasattr(reflection_lm, "total_cost") else reflection_lm
+        )
     else:
         reflection_lm_callable = None
 
@@ -413,6 +418,7 @@ def optimize(
         callbacks=callbacks,
         sampling_strategy=sampling_strategy,
         reflection_strategy=reflection_strategy,
+        action_selector=action_selector,
     )
 
     def evaluator_fn(

@@ -12,11 +12,13 @@ become additional implementations in later phases.
 
 from __future__ import annotations
 
+import random
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 from gepa.proposer.reflective_mutation.base import LanguageModel
+from gepa.strategies.action_space import ActionSelector, PromptEditAction, format_action_suffix
 from gepa.strategies.instruction_proposal import InstructionProposalSignature
 
 # One reflection job = (candidate, reflective_dataset, components_to_update).
@@ -92,10 +94,14 @@ class StatelessReflectionLM:
         lm: LanguageModel,
         reflection_prompt_template: str | dict[str, str] | None = None,
         logger: Any | None = None,
+        action_selector: ActionSelector | None = None,
+        rng: random.Random | None = None,
     ):
         self.lm = lm
         self.reflection_prompt_template = reflection_prompt_template
         self.logger = logger
+        self.action_selector = action_selector
+        self.rng = rng if rng is not None else random.Random(0)
         # Components already warned about a missing per-component template (warn once).
         self._missing_template_warnings: set[str] = set()
 
@@ -112,8 +118,18 @@ class StatelessReflectionLM:
             return template
         return self.reflection_prompt_template
 
-    def _render(self, current_instruction_doc: str, dataset_with_feedback: Any, prompt_template: str | None):
-        """Render a reflection prompt and its chat-messages form."""
+    def _render(
+        self,
+        current_instruction_doc: str,
+        dataset_with_feedback: Any,
+        prompt_template: str | None,
+        action: PromptEditAction | None = None,
+    ):
+        """Render a reflection prompt and its chat-messages form.
+
+        When *action* is provided, append the action constraint suffix to the
+        rendered prompt so the reflection LM is constrained to a single edit type.
+        """
         prompt = InstructionProposalSignature.prompt_renderer(
             {
                 "current_instruction_doc": current_instruction_doc,
@@ -121,6 +137,25 @@ class StatelessReflectionLM:
                 "prompt_template": prompt_template,
             }
         )
+
+        # Append action constraint suffix when action-conditioned reflection is active.
+        if action is not None:
+            suffix = format_action_suffix(action)
+            if isinstance(prompt, str):
+                prompt = prompt + suffix
+            else:
+                # Multimodal path: prompt is a list of message dicts.
+                # Append to the text content of the last user message.
+                for msg in reversed(prompt):
+                    if msg.get("role") == "user":
+                        content = msg["content"]
+                        if isinstance(content, str):
+                            msg["content"] = content + suffix
+                        elif isinstance(content, list):
+                            # OpenAI-compatible content parts; append as a new text part.
+                            content.append({"type": "text", "text": suffix})
+                        break
+
         # Normalize to a chat-messages list (matches gepa.lm.LM.__call__).
         messages = [{"role": "user", "content": prompt}] if isinstance(prompt, str) else prompt
         return prompt, messages
@@ -155,14 +190,25 @@ class StatelessReflectionLM:
         # Flatten every (job, component) with feedback into one list of rendered
         # prompts, issue them as a single batched completion, then scatter the
         # parsed results back into one ReflectionProposal per job.
+
+        # Select one action per job when action-conditioned reflection is active.
+        actions: list[PromptEditAction | None]
+        if self.action_selector is not None:
+            actions = list(self.action_selector.select(len(jobs), self.rng))
+        else:
+            actions = [None] * len(jobs)
+
         rendered: list[tuple[int, str, Any, list[dict[str, Any]]]] = []
         for job_idx, (candidate, reflective_dataset, components_to_update) in enumerate(jobs):
+            action = actions[job_idx] if job_idx < len(actions) else None
             for name in components_to_update:
                 # Gracefully handle a selected component with no data in the reflective dataset.
                 if name not in reflective_dataset or not reflective_dataset.get(name):
                     self._log(f"Component '{name}' is not in reflective dataset. Skipping.")
                     continue
-                prompt, messages = self._render(candidate[name], reflective_dataset[name], self._resolve_template(name))
+                prompt, messages = self._render(
+                    candidate[name], reflective_dataset[name], self._resolve_template(name), action=action
+                )
                 rendered.append((job_idx, name, prompt, messages))
 
         raw_outputs = self._batch_complete([r[2] for r in rendered], [r[3] for r in rendered])
@@ -173,6 +219,11 @@ class StatelessReflectionLM:
             proposals[job_idx].new_texts[name] = new_instruction
             proposals[job_idx].prompts[name] = prompt
             proposals[job_idx].raw_lm_outputs[name] = raw_output
+
+        # Record action in proposal metadata for downstream tracking.
+        for job_idx, action in enumerate(actions):
+            if action is not None and job_idx < len(proposals):
+                proposals[job_idx].metadata["action"] = action.name
 
         # Stateless: the next LM is this same object (no carried context).
         return [(proposal, self) for proposal in proposals]

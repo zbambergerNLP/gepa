@@ -123,6 +123,9 @@ Provide the new instructions within ``` blocks."""
 
     @classmethod
     def output_extractor(cls, lm_out: str) -> dict[str, str]:
+        # Strip reasoning model tokens (e.g. <think>...</think>) before parsing.
+        lm_out = re.sub(r"<think>.*?</think>", "", lm_out, flags=re.DOTALL).strip()
+
         def extract_instruction_text() -> str:
             # Find the first and last backtick positions (if any)
             start = lm_out.find("```") + 3

@@ -94,6 +94,21 @@ I hope you didn't get confused.
                 """,
                 "Here are the instructions.",
             ),
+            # Test stripping <think> tags with backtick-delimited instruction
+            (
+                "<think>\nLet me analyze the failures...\n</think>\n\n```\nNew instruction here\n```",
+                "New instruction here",
+            ),
+            # Test stripping <think> tags without backticks
+            (
+                "<think>\nReasoning about the prompt...\n</think>\n\nNew instruction here",
+                "New instruction here",
+            ),
+            # Test stripping multiple <think> blocks (backticks extract inner content)
+            (
+                "<think>\nFirst thought\n</think>\nSome text\n<think>\nSecond thought\n</think>\n\n```\nFinal instruction\n```",
+                "Final instruction",
+            ),
         ],
     )
     def test_extract_code_blocks(self, lm_output, expected_instruction):

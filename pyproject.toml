@@ -87,6 +87,18 @@ langchain = [
     "tqdm>=4.66",
 ]
 
+ifbench = [
+    # Dependencies of the vendored IFBench instruction checkers
+    # (examples/ifbench/utils_ifbench, from allenai/IFBench via gepa-ai/gepa-artifact).
+    "nltk",
+    "spacy",
+    "langdetect",
+    "emoji",
+    "syllapy",
+    "immutabledict",
+    "packaging",
+]
+
 [project.urls]
 "Homepage" = "https://github.com/gepa-ai/gepa"
 "Bug Tracker" = "https://github.com/gepa-ai/gepa/issues"
@@ -102,6 +114,8 @@ testpaths = ["tests"]
 
 [tool.ruff]
 include = ["src/**/*.py"]
+# Vendored IFBench eval library (allenai/IFBench, Apache 2.0) — keep verbatim.
+extend-exclude = ["examples/ifbench/utils_ifbench"]
 line-length = 120
 indent-width = 4
 target-version = "py310"

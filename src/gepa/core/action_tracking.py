@@ -25,11 +25,11 @@ from gepa.core.callbacks import (
 class ActionDiversityCallback:
     """Observational callback tracking per-action statistics and proposal diversity.
 
-    The callback correlates ``on_proposal_end`` events (which carry the proposed
-    instruction text) with ``on_candidate_accepted`` / ``on_candidate_rejected``
-    events (which carry scores) using a per-iteration queue.  This works because
-    the engine fires proposal_end, then accepted/rejected for each proposal in
-    order within an iteration.
+    Each event carries the proposal's metadata (``event["metadata"]``, populated
+    by the proposer and threaded through ``CandidateProposal.metadata``), so
+    accept/reject outcomes are attributed to the action recorded on the event
+    itself.  Correlation is therefore independent of event ordering — the engine
+    fires all rejections before acceptances within an iteration.
 
     Usage::
 
@@ -48,53 +48,39 @@ class ActionDiversityCallback:
         # Proposed texts per action (for textual diversity).
         self.action_texts: dict[str, list[str]] = defaultdict(list)
 
-        # Queue of (action_name, new_instructions) for correlating with accept/reject.
-        self._pending_proposals: list[tuple[str, dict[str, str]]] = []
-
         # Per-iteration sibling texts for diversity measurement.
         self._iteration_texts: dict[int, list[str]] = defaultdict(list)
         self._current_iteration: int = -1
+
+    @staticmethod
+    def _action_from_event(event: Any) -> str | None:
+        metadata = event.get("metadata") or {}
+        return metadata.get("action")
 
     def on_proposal_end(self, event: ProposalEndEvent) -> None:
         """Record the proposed instruction and its action (if present)."""
         self._current_iteration = event["iteration"]
         new_instructions = event["new_instructions"]
 
-        # Extract action name from the prompt suffix (the action constraint
-        # block is appended after the template).  The action name is stored in
-        # ReflectionProposal.metadata["action"] and threaded into
-        # CandidateProposal.metadata, but ProposalEndEvent only carries prompts
-        # and raw_lm_outputs.  We detect the action by scanning for the
-        # "--- ACTION CONSTRAINT ---" marker in the rendered prompt.
-        action_name = self._extract_action_from_prompts(event.get("prompts", {}))
-
+        action_name = self._action_from_event(event)
         if action_name:
             self.action_proposal_counts[action_name] += 1
             # Store the concatenated instruction text for diversity analysis.
-            text = " ".join(new_instructions.values())
-            self.action_texts[action_name].append(text)
-            self._pending_proposals.append((action_name, new_instructions))
-        else:
-            self._pending_proposals.append(("_unconditioned", new_instructions))
+            self.action_texts[action_name].append(" ".join(new_instructions.values()))
 
         # Collect all sibling texts within this iteration for diversity.
-        text = " ".join(new_instructions.values())
-        self._iteration_texts[self._current_iteration].append(text)
+        self._iteration_texts[self._current_iteration].append(" ".join(new_instructions.values()))
 
     def on_candidate_accepted(self, event: CandidateAcceptedEvent) -> None:
-        """Correlate acceptance with the pending proposal's action."""
-        if not self._pending_proposals:
-            return
-        action_name, _ = self._pending_proposals.pop(0)
-        if action_name != "_unconditioned":
+        """Attribute the acceptance to the action recorded on the event."""
+        action_name = self._action_from_event(event)
+        if action_name:
             self.action_acceptance_counts[action_name] += 1
 
     def on_candidate_rejected(self, event: CandidateRejectedEvent) -> None:
-        """Correlate rejection with the pending proposal's action."""
-        if not self._pending_proposals:
-            return
-        action_name, _ = self._pending_proposals.pop(0)
-        if action_name != "_unconditioned":
+        """Attribute the rejection to the action recorded on the event."""
+        action_name = self._action_from_event(event)
+        if action_name:
             self.action_rejection_counts[action_name] += 1
             self.action_score_deltas[action_name].append(event["new_score"] - event["old_score"])
 
@@ -137,32 +123,3 @@ class ActionDiversityCallback:
             "total_proposals": sum(self.action_proposal_counts.values()),
             "total_accepted": sum(self.action_acceptance_counts.values()),
         }
-
-    @staticmethod
-    def _extract_action_from_prompts(prompts: dict[str, Any]) -> str | None:
-        """Extract action name from rendered prompts by looking for the constraint marker."""
-        for _comp, prompt in prompts.items():
-            text = ""
-            if isinstance(prompt, str):
-                text = prompt
-            elif isinstance(prompt, list):
-                # Multimodal messages list.
-                for msg in prompt:
-                    content = msg.get("content", "")
-                    if isinstance(content, str):
-                        text += content
-                    elif isinstance(content, list):
-                        for part in content:
-                            if isinstance(part, dict) and part.get("type") == "text":
-                                text += part.get("text", "")
-
-            marker = "--- ACTION CONSTRAINT ---"
-            idx = text.find(marker)
-            if idx != -1:
-                # Parse "You MUST make exactly one type of edit: <action_name>"
-                after_marker = text[idx + len(marker) :]
-                for line in after_marker.split("\n"):
-                    line = line.strip()
-                    if line.startswith("You MUST make exactly one type of edit:"):
-                        return line.split(":")[-1].strip()
-        return None

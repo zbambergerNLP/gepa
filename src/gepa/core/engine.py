@@ -433,6 +433,7 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
                 old_score=old_sum,
                 new_score=new_sum,
                 reason=reject_reason,
+                metadata=proposal.metadata or {},
             ),
         )
 
@@ -540,6 +541,7 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
                     new_candidate_idx=new_idx,
                     new_score=new_sum,
                     parent_ids=proposal.parent_program_ids,
+                    metadata=proposal.metadata or {},
                 ),
             )
             any_accepted = True
@@ -817,6 +819,7 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
                                         new_candidate_idx=new_idx,
                                         new_score=new_sum,
                                         parent_ids=proposal.parent_program_ids,
+                                        metadata=proposal.metadata or {},
                                     ),
                                 )
                                 continue  # skip reflective this iteration

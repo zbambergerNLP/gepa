@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from gepa.proposer.reflective_mutation.base import LanguageModel
+from gepa.utils.text import strip_think_tags
 
 
 @dataclass(frozen=True)
@@ -60,19 +61,21 @@ class ActionSelector(Protocol):
     ``select()``, providing prompt state for context-aware selection.
     """
 
-    def select(self, n: int, rng: random.Random) -> list[PromptEditAction]: ...
+    def select(self, n: int, rng: random.Random | None = None) -> list[PromptEditAction]: ...
 
 
 class RandomActionSelector:
     """Pick actions uniformly at random from the action space."""
 
     def __init__(self, actions: list[PromptEditAction], rng: random.Random | None = None):
-        assert len(actions) > 0
+        if not actions:
+            raise ValueError("RandomActionSelector requires a non-empty actions list")
         self.actions = actions
         self.rng = rng if rng is not None else random.Random(0)
 
-    def select(self, n: int, rng: random.Random) -> list[PromptEditAction]:
-        return [self.rng.choice(self.actions) for _ in range(n)]
+    def select(self, n: int, rng: random.Random | None = None) -> list[PromptEditAction]:
+        rng = rng if rng is not None else self.rng
+        return [rng.choice(self.actions) for _ in range(n)]
 
 
 VERBALIZED_ACTION_PROMPT = """\
@@ -172,12 +175,15 @@ class VerbalizedActionSelector:
         lm: LanguageModel,
         k: int = 5,
         tau: float = 0.10,
+        rng: random.Random | None = None,
     ):
-        assert len(actions) > 0
+        if not actions:
+            raise ValueError("VerbalizedActionSelector requires a non-empty actions list")
         self.actions = actions
         self.lm = lm
         self.k = k
         self.tau = tau
+        self.rng = rng if rng is not None else random.Random(0)
         self._context: dict[str, str] | None = None
         self._action_by_name: dict[str, PromptEditAction] = {a.name: a for a in actions}
 
@@ -185,7 +191,8 @@ class VerbalizedActionSelector:
         """Provide current prompt state for the next select() call."""
         self._context = {"candidate": candidate, "feedback_summary": feedback_summary}
 
-    def select(self, n: int, rng: random.Random) -> list[PromptEditAction]:
+    def select(self, n: int, rng: random.Random | None = None) -> list[PromptEditAction]:
+        rng = rng if rng is not None else self.rng
         if self._context is None:
             logger.warning("VerbalizedActionSelector.select() called without set_context(); falling back to uniform.")
             return [rng.choice(self.actions) for _ in range(n)]
@@ -199,9 +206,7 @@ class VerbalizedActionSelector:
     def _generate_distribution(self, rng: random.Random) -> ActionDistribution:
         """Call the LM to produce a verbalized probability distribution over actions."""
         assert self._context is not None
-        action_menu = "\n".join(
-            f"- **{a.name}**: {a.description}" for a in self.actions
-        )
+        action_menu = "\n".join(f"- **{a.name}**: {a.description}" for a in self.actions)
         prompt = VERBALIZED_ACTION_PROMPT.format(
             current_prompt=self._context["candidate"],
             feedback_summary=self._context["feedback_summary"],
@@ -214,7 +219,7 @@ class VerbalizedActionSelector:
     def _parse_distribution(self, raw_output: str, rng: random.Random) -> ActionDistribution:
         """Parse XML-formatted action distribution from LM output."""
         # Strip think tags if present (reasoning models).
-        raw_output = re.sub(r"<think>.*?</think>", "", raw_output, flags=re.DOTALL)
+        raw_output = strip_think_tags(raw_output)
 
         entries: list[tuple[PromptEditAction, float, str]] = []
         for candidate_match in re.finditer(r"<candidate>(.*?)</candidate>", raw_output, re.DOTALL):

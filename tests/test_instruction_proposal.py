@@ -4,6 +4,7 @@
 import pytest
 
 from gepa.strategies.instruction_proposal import InstructionProposalSignature
+from gepa.utils.text import strip_think_tags
 
 
 class TestInstructionProposalSignature:
@@ -115,3 +116,27 @@ I hope you didn't get confused.
         """Test extraction of instructions from various code block formats."""
         result = InstructionProposalSignature.output_extractor(lm_output)
         assert result["new_instruction"] == expected_instruction
+
+
+class TestStripThinkTags:
+    """Test the shared <think>-tag stripper."""
+
+    def test_no_tags_passthrough(self):
+        assert strip_think_tags("Just an instruction.") == "Just an instruction."
+
+    def test_strips_closed_block(self):
+        assert strip_think_tags("<think>reasoning</think>answer") == "answer"
+
+    def test_strips_multiple_blocks(self):
+        text = "<think>one</think>a<think>two</think>b"
+        assert strip_think_tags(text) == "ab"
+
+    def test_unclosed_tag_truncates_to_end(self):
+        # Truncated reasoning: the answer never arrived, so nothing after the
+        # dangling <think> should leak through.
+        text = "prefix<think>reasoning that never closes"
+        assert strip_think_tags(text) == "prefix"
+
+    def test_closed_block_followed_by_unclosed_tag(self):
+        text = "<think>done</think>answer<think>truncated"
+        assert strip_think_tags(text) == "answer"

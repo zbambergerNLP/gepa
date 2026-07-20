@@ -117,7 +117,7 @@ def load_hotpotqa_dataset(
     if not os.path.exists(data_path):
         raise FileNotFoundError(
             f"HotpotQA data not found at {data_path}. "
-            f"Expected the POSIT sample at posit/src/envs/hotpotqa/data/hotpotqa_distractor_sample.jsonl"
+            f"Expected the bundled sample at examples/hotpotqa/data/hotpotqa_distractor_sample.jsonl"
         )
 
     records = []

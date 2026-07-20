@@ -5,6 +5,8 @@
 
 import random
 
+import pytest
+
 from gepa.core.action_tracking import ActionDiversityCallback
 from gepa.proposer.reflective_mutation.reflection_lm import (
     ReflectionLM,
@@ -61,7 +63,7 @@ def _reflective_dataset(components):
 class TestRandomActionSelector:
     def test_returns_correct_count(self):
         selector = RandomActionSelector(DEFAULT_ACTIONS, rng=random.Random(42))
-        rng = random.Random(0)  # Not used by RandomActionSelector (uses its own rng)
+        rng = random.Random(0)  # Passed rng takes precedence over the constructor rng.
         actions = selector.select(5, rng)
         assert len(actions) == 5
 
@@ -71,6 +73,25 @@ class TestRandomActionSelector:
         actions = selector.select(20, rng)
         for action in actions:
             assert action in DEFAULT_ACTIONS
+
+    def test_empty_actions_raises(self):
+        with pytest.raises(ValueError):
+            RandomActionSelector([])
+
+    def test_passed_rng_takes_precedence(self):
+        # Different constructor rngs, same passed rng -> identical sequences.
+        selector_a = RandomActionSelector(DEFAULT_ACTIONS, rng=random.Random(1))
+        selector_b = RandomActionSelector(DEFAULT_ACTIONS, rng=random.Random(2))
+        actions_a = selector_a.select(20, random.Random(42))
+        actions_b = selector_b.select(20, random.Random(42))
+        assert [a.name for a in actions_a] == [a.name for a in actions_b]
+
+    def test_falls_back_to_instance_rng(self):
+        selector_a = RandomActionSelector(DEFAULT_ACTIONS, rng=random.Random(7))
+        selector_b = RandomActionSelector(DEFAULT_ACTIONS, rng=random.Random(7))
+        actions_a = selector_a.select(20)
+        actions_b = selector_b.select(20)
+        assert [a.name for a in actions_a] == [a.name for a in actions_b]
 
 
 class TestFormatActionSuffix:
@@ -186,19 +207,37 @@ class TestActionConditionedReflection:
 
 
 class TestActionDiversityCallback:
+    def _metadata(self, action_name: str | None, proposal_id: str = "1-0") -> dict:
+        if action_name is None:
+            return {"proposal_id": proposal_id}
+        return {"proposal_id": proposal_id, "action": action_name}
+
     def _make_proposal_end_event(self, iteration: int, action_name: str | None = None) -> dict:
-        """Build a ProposalEndEvent dict with an action suffix in the prompt."""
-        prompt_text = "I provided an assistant with instructions..."
-        if action_name:
-            prompt_text += (
-                "\n\n--- ACTION CONSTRAINT ---\n"
-                f"You MUST make exactly one type of edit: {action_name}\n"
-            )
+        """Build a ProposalEndEvent dict carrying the action in its metadata."""
         return {
             "iteration": iteration,
             "new_instructions": {"system_prompt": f"instruction from {action_name or 'unconditioned'}"},
-            "prompts": {"system_prompt": prompt_text},
+            "prompts": {"system_prompt": "I provided an assistant with instructions..."},
             "raw_lm_outputs": {"system_prompt": "raw output"},
+            "metadata": self._metadata(action_name),
+        }
+
+    def _accepted_event(self, iteration: int, action_name: str | None, score: float = 0.8) -> dict:
+        return {
+            "iteration": iteration,
+            "new_candidate_idx": 1,
+            "new_score": score,
+            "parent_ids": [0],
+            "metadata": self._metadata(action_name),
+        }
+
+    def _rejected_event(self, iteration: int, action_name: str | None, old: float = 0.8, new: float = 0.6) -> dict:
+        return {
+            "iteration": iteration,
+            "old_score": old,
+            "new_score": new,
+            "reason": "no improvement",
+            "metadata": self._metadata(action_name),
         }
 
     def test_counts_proposals_per_action(self):
@@ -213,10 +252,10 @@ class TestActionDiversityCallback:
     def test_tracks_acceptance_rate(self):
         cb = ActionDiversityCallback()
         cb.on_proposal_end(self._make_proposal_end_event(1, "add_constraint"))
-        cb.on_candidate_accepted({"iteration": 1, "new_candidate_idx": 1, "new_score": 0.8, "parent_ids": [0]})
+        cb.on_candidate_accepted(self._accepted_event(1, "add_constraint"))
 
         cb.on_proposal_end(self._make_proposal_end_event(2, "add_constraint"))
-        cb.on_candidate_rejected({"iteration": 2, "old_score": 0.8, "new_score": 0.6, "reason": "no improvement"})
+        cb.on_candidate_rejected(self._rejected_event(2, "add_constraint"))
 
         assert cb.action_acceptance_counts["add_constraint"] == 1
         assert cb.action_rejection_counts["add_constraint"] == 1
@@ -224,7 +263,7 @@ class TestActionDiversityCallback:
     def test_summary_returns_expected_keys(self):
         cb = ActionDiversityCallback()
         cb.on_proposal_end(self._make_proposal_end_event(1, "restructure"))
-        cb.on_candidate_accepted({"iteration": 1, "new_candidate_idx": 1, "new_score": 0.9, "parent_ids": [0]})
+        cb.on_candidate_accepted(self._accepted_event(1, "restructure", score=0.9))
 
         s = cb.summary()
         assert "action_proposal_counts" in s
@@ -249,10 +288,49 @@ class TestActionDiversityCallback:
     def test_unconditioned_proposals_not_counted(self):
         cb = ActionDiversityCallback()
         cb.on_proposal_end(self._make_proposal_end_event(1, None))
-        cb.on_candidate_accepted({"iteration": 1, "new_candidate_idx": 1, "new_score": 0.8, "parent_ids": [0]})
+        cb.on_candidate_accepted(self._accepted_event(1, None))
 
         assert len(cb.action_proposal_counts) == 0
         assert len(cb.action_acceptance_counts) == 0
+
+    def test_engine_event_order_rejections_before_acceptances(self):
+        """The engine fires ALL rejections before acceptances within an iteration.
+
+        Attribution must come from each event's own metadata, not arrival order
+        (a FIFO pairing would attribute B's and C's rejections to A and B here).
+        """
+        cb = ActionDiversityCallback()
+        cb.on_proposal_end(self._make_proposal_end_event(1, "action_a"))
+        cb.on_proposal_end(self._make_proposal_end_event(1, "action_b"))
+        cb.on_proposal_end(self._make_proposal_end_event(1, "action_c"))
+
+        # Engine order: rejections for B and C first, then A's acceptance.
+        cb.on_candidate_rejected(self._rejected_event(1, "action_b"))
+        cb.on_candidate_rejected(self._rejected_event(1, "action_c", old=0.8, new=0.5))
+        cb.on_candidate_accepted(self._accepted_event(1, "action_a"))
+
+        assert dict(cb.action_acceptance_counts) == {"action_a": 1}
+        assert dict(cb.action_rejection_counts) == {"action_b": 1, "action_c": 1}
+        assert cb.action_score_deltas["action_b"] == [pytest.approx(-0.2)]
+        assert cb.action_score_deltas["action_c"] == [pytest.approx(-0.3)]
+
+    def test_events_without_metadata_tolerated(self):
+        """Events lacking a metadata key (legacy/synthetic) neither crash nor count."""
+        cb = ActionDiversityCallback()
+        cb.on_proposal_end(
+            {
+                "iteration": 1,
+                "new_instructions": {"sp": "text"},
+                "prompts": {"sp": "prompt"},
+                "raw_lm_outputs": {"sp": "raw"},
+            }
+        )
+        cb.on_candidate_accepted({"iteration": 1, "new_candidate_idx": 1, "new_score": 0.8, "parent_ids": [0]})
+        cb.on_candidate_rejected({"iteration": 1, "old_score": 0.8, "new_score": 0.6, "reason": "worse"})
+
+        assert len(cb.action_proposal_counts) == 0
+        assert len(cb.action_acceptance_counts) == 0
+        assert len(cb.action_rejection_counts) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -369,6 +447,18 @@ class TestVerbalizedActionSelector:
         dist = selector._parse_distribution(output_with_think, random.Random(42))
         assert len(dist.entries) == 5
 
+    def test_parse_unclosed_think_falls_back_to_uniform(self):
+        # An unclosed <think> swallows everything after it, so no candidates
+        # remain and the parser must fall back to a uniform distribution.
+        truncated_output = "<think>\nreasoning cut off mid-stream " + VALID_LM_OUTPUT
+        lm = FakeLM(truncated_output)
+        selector = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=lm)
+        dist = selector._parse_distribution(truncated_output, random.Random(42))
+        assert len(dist.entries) == len(DEFAULT_ACTIONS)
+        expected_prob = 1.0 / len(DEFAULT_ACTIONS)
+        for _, p, _ in dist.entries:
+            assert abs(p - expected_prob) < 1e-6
+
     def test_select_returns_correct_count(self):
         lm = FakeLM(VALID_LM_OUTPUT)
         selector = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=lm)
@@ -395,6 +485,18 @@ class TestVerbalizedActionSelector:
         assert len(actions) == 2
         # LM should NOT have been called.
         assert len(lm.calls) == 0
+
+    def test_empty_actions_raises(self):
+        with pytest.raises(ValueError):
+            VerbalizedActionSelector([], lm=FakeLM(VALID_LM_OUTPUT))
+
+    def test_select_without_rng_uses_instance_rng(self):
+        # No context and no passed rng: falls back to the constructor rng deterministically.
+        selector_a = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=FakeLM(VALID_LM_OUTPUT), rng=random.Random(3))
+        selector_b = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=FakeLM(VALID_LM_OUTPUT), rng=random.Random(3))
+        actions_a = selector_a.select(10)
+        actions_b = selector_b.select(10)
+        assert [a.name for a in actions_a] == [a.name for a in actions_b]
 
     def test_context_cleared_after_select(self):
         lm = FakeLM(VALID_LM_OUTPUT)
@@ -425,11 +527,13 @@ class TestVerbalizedActionSelector:
 class TestSampleFromTails:
     def test_samples_only_from_tail(self):
         actions = DEFAULT_ACTIONS[:3]
-        dist = ActionDistribution(entries=[
-            (actions[0], 0.70, "high"),
-            (actions[1], 0.25, "mid"),
-            (actions[2], 0.05, "tail"),
-        ])
+        dist = ActionDistribution(
+            entries=[
+                (actions[0], 0.70, "high"),
+                (actions[1], 0.25, "mid"),
+                (actions[2], 0.05, "tail"),
+            ]
+        )
         rng = random.Random(42)
         # With tau=0.10, only the third entry (p=0.05) is in the tail.
         results = _sample_from_tails(dist, 10, tau=0.10, rng=rng)
@@ -437,10 +541,12 @@ class TestSampleFromTails:
 
     def test_falls_back_when_no_tail(self):
         actions = DEFAULT_ACTIONS[:2]
-        dist = ActionDistribution(entries=[
-            (actions[0], 0.60, "high"),
-            (actions[1], 0.40, "also high"),
-        ])
+        dist = ActionDistribution(
+            entries=[
+                (actions[0], 0.60, "high"),
+                (actions[1], 0.40, "also high"),
+            ]
+        )
         rng = random.Random(42)
         # tau=0.10, but both entries are above 0.10.
         results = _sample_from_tails(dist, 20, tau=0.10, rng=rng)
@@ -451,10 +557,12 @@ class TestSampleFromTails:
 
     def test_respects_weights(self):
         actions = DEFAULT_ACTIONS[:2]
-        dist = ActionDistribution(entries=[
-            (actions[0], 0.01, "very low"),
-            (actions[1], 0.09, "low"),
-        ])
+        dist = ActionDistribution(
+            entries=[
+                (actions[0], 0.01, "very low"),
+                (actions[1], 0.09, "low"),
+            ]
+        )
         rng = random.Random(42)
         results = _sample_from_tails(dist, 1000, tau=0.10, rng=rng)
         count_0 = sum(1 for a in results if a.name == actions[0].name)
@@ -485,3 +593,21 @@ class TestVerbalizedReflectionIntegration:
         assert "--- ACTION CONSTRAINT ---" in prompt_text
         # Proposal should have action metadata.
         assert "action" in results[0][0].metadata
+
+    def test_reflect_many_aggregates_feedback_across_jobs(self):
+        action_lm = FakeLM(VALID_LM_OUTPUT)
+        selector = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=action_lm)
+        reflection = StatelessReflectionLM(BatchRecordingLM(), action_selector=selector)
+
+        ds_a = {"sp": [{"Inputs": "x", "Generated Outputs": "y", "Feedback": "feedback-alpha"}]}
+        ds_b = {"sp": [{"Inputs": "x", "Generated Outputs": "y", "Feedback": "feedback-beta"}]}
+        jobs = [({"sp": "parent one"}, ds_a, ["sp"]), ({"sp": "parent two"}, ds_b, ["sp"])]
+
+        reflection.reflect_many(jobs)
+
+        # One selection call covers the batch, with feedback from ALL jobs.
+        assert len(action_lm.calls) == 1
+        assert "feedback-alpha" in action_lm.calls[0]
+        assert "feedback-beta" in action_lm.calls[0]
+        # Distinct parents are disclosed in the candidate context.
+        assert "2 distinct parent candidates" in action_lm.calls[0]

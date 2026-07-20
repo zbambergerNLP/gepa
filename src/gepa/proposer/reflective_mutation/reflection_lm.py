@@ -212,10 +212,17 @@ class StatelessReflectionLM:
         actions: list[PromptEditAction | None]
         if self.action_selector is not None:
             # Provide context for verbalized selectors (no-op for programmatic ones).
-            if hasattr(self.action_selector, "set_context") and jobs:
+            # One selection call covers the whole batch (deliberate v1 cost tradeoff:
+            # per-job context would mean one selector LM call per job), so aggregate
+            # feedback across all jobs; the candidate text shown is the first job's.
+            set_context = getattr(self.action_selector, "set_context", None)
+            if set_context is not None and jobs:
                 candidate_text = "\n\n".join(jobs[0][0].values())
-                feedback_summary = self._summarize_feedback(jobs[0][1])
-                self.action_selector.set_context(candidate_text, feedback_summary)
+                distinct_parents = any(job[0] != jobs[0][0] for job in jobs[1:])
+                if distinct_parents:
+                    candidate_text += f"\n\n(1 of {len(jobs)} distinct parent candidates shown)"
+                feedback_summary = "\n---\n".join(self._summarize_feedback(job[1]) for job in jobs)
+                set_context(candidate_text, feedback_summary)
             actions = list(self.action_selector.select(len(jobs), self.rng))
         else:
             actions = [None] * len(jobs)

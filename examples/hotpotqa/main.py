@@ -17,6 +17,7 @@ from examples.hotpotqa.utils import (
     run_llm,
 )
 from gepa.core.action_tracking import ActionDiversityCallback
+from gepa.lm import LM
 from gepa.optimize_anything import (
     EngineConfig,
     GEPAConfig,
@@ -24,8 +25,7 @@ from gepa.optimize_anything import (
     SideInfo,
     optimize_anything,
 )
-from gepa.strategies.action_space import DEFAULT_ACTIONS, RoundRobinActionSelector
-
+from gepa.strategies.action_space import DEFAULT_ACTIONS, VerbalizedActionSelector
 
 INITIAL_PROMPT = (
     "You are a multi-hop question answering system. Read the provided context passages "
@@ -148,7 +148,10 @@ def main():
             reflection=ReflectionConfig(
                 reflection_lm=args.reflection_model,
                 reflection_lm_kwargs=reflection_lm_kwargs or None,
-                action_selector=RoundRobinActionSelector(DEFAULT_ACTIONS),
+                action_selector=VerbalizedActionSelector(
+                    DEFAULT_ACTIONS,
+                    lm=LM(args.reflection_model, **(reflection_lm_kwargs or {})),
+                ),
             ),
         )
         results["action"] = run_condition(

@@ -109,6 +109,23 @@ class StatelessReflectionLM:
         if self.logger is not None:
             self.logger.log(message)
 
+    @staticmethod
+    def _summarize_feedback(
+        reflective_dataset: Mapping[str, Sequence[Mapping[str, Any]]],
+        max_chars: int = 500,
+    ) -> str:
+        """Extract a compact feedback summary from the reflective dataset."""
+        parts: list[str] = []
+        for _name, entries in reflective_dataset.items():
+            for entry in entries:
+                fb = entry.get("Feedback") or entry.get("execution_feedback") or ""
+                if fb:
+                    parts.append(str(fb))
+        summary = "\n".join(parts)
+        if len(summary) > max_chars:
+            summary = summary[:max_chars] + "..."
+        return summary or "(no feedback available)"
+
     def _resolve_template(self, name: str) -> str | None:
         if isinstance(self.reflection_prompt_template, dict):
             template = self.reflection_prompt_template.get(name)
@@ -194,6 +211,11 @@ class StatelessReflectionLM:
         # Select one action per job when action-conditioned reflection is active.
         actions: list[PromptEditAction | None]
         if self.action_selector is not None:
+            # Provide context for verbalized selectors (no-op for programmatic ones).
+            if hasattr(self.action_selector, "set_context") and jobs:
+                candidate_text = "\n\n".join(jobs[0][0].values())
+                feedback_summary = self._summarize_feedback(jobs[0][1])
+                self.action_selector.set_context(candidate_text, feedback_summary)
             actions = list(self.action_selector.select(len(jobs), self.rng))
         else:
             actions = [None] * len(jobs)

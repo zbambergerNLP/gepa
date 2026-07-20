@@ -8,14 +8,21 @@ constraining the reflection LM to make a specific type of edit (e.g., add an
 illustration, adjust specificity).  This isolates the effect of each edit
 operation and improves proposal diversity across siblings.
 
-See Revision 1: action-conditioned reflection.
+The primary selector is ``VerbalizedActionSelector``, which uses verbalized
+sampling to let the reflection LM itself choose actions with explicit
+probabilities, then samples from the distribution tails for diversity.
+``RandomActionSelector`` is kept as a simple baseline.
 """
 
 from __future__ import annotations
 
+import logging
 import random
+import re
 from dataclasses import dataclass
 from typing import Protocol
+
+from gepa.proposer.reflective_mutation.base import LanguageModel
 
 
 @dataclass(frozen=True)
@@ -36,35 +43,24 @@ class PromptEditAction:
     instruction_suffix: str
 
 
+logger = logging.getLogger(__name__)
+
+
 class ActionSelector(Protocol):
     """Picks which action(s) to apply to a batch of reflection jobs.
 
-    The protocol is intentionally minimal so that future implementations can
-    use learned selection.  For example, a POSIT-style ``ScoredActionSelector``
-    could use a ColBERT or CrossEncoder reranker to score each action
-    conditioned on the current prompt and reflective dataset, selecting the
-    highest-scoring action rather than cycling blindly.  Such an extension
-    would add an optional ``select_with_context(n, rng, candidate,
-    reflective_dataset)`` method without breaking existing selectors.
+    The primary implementation is ``VerbalizedActionSelector``, which asks
+    the reflection LM to produce a probability distribution over actions
+    conditioned on the current prompt and feedback, then samples from
+    the distribution tails for diversity.  ``RandomActionSelector`` serves
+    as a simple uniform baseline.
+
+    Implementations may optionally expose a ``set_context(candidate,
+    feedback_summary)`` method called by ``StatelessReflectionLM`` before
+    ``select()``, providing prompt state for context-aware selection.
     """
 
     def select(self, n: int, rng: random.Random) -> list[PromptEditAction]: ...
-
-
-class RoundRobinActionSelector:
-    """Cycle through actions deterministically, ensuring full coverage."""
-
-    def __init__(self, actions: list[PromptEditAction]):
-        assert len(actions) > 0
-        self.actions = actions
-        self._counter = 0
-
-    def select(self, n: int, rng: random.Random) -> list[PromptEditAction]:
-        result = []
-        for _ in range(n):
-            result.append(self.actions[self._counter % len(self.actions)])
-            self._counter += 1
-        return result
 
 
 class RandomActionSelector:
@@ -79,15 +75,186 @@ class RandomActionSelector:
         return [self.rng.choice(self.actions) for _ in range(n)]
 
 
-class AllActionsSelector:
-    """Return all actions regardless of ``n`` (for best-of-N expansion)."""
+VERBALIZED_ACTION_PROMPT = """\
+You are selecting which edit action(s) to apply to improve a prompt.
 
-    def __init__(self, actions: list[PromptEditAction]):
+## Current prompt
+```
+{current_prompt}
+```
+
+## Recent feedback summary
+{feedback_summary}
+
+## Available actions
+{action_menu}
+
+Generate {k} candidate actions. For each, assign a probability reflecting how \
+likely that action is to improve the prompt given the feedback above. \
+Probabilities must sum to 1.0.
+
+Important: try to explore less obvious actions. Assign higher probability to \
+actions that specifically address the failure patterns in the feedback, even if \
+they seem unconventional.
+
+Format your response as:
+<response>
+<candidate>
+<action>action_name_here</action>
+<reasoning>why this action fits the current failure patterns</reasoning>
+<probability>0.XX</probability>
+</candidate>
+...repeat for {k} candidates...
+</response>
+"""
+
+
+@dataclass
+class ActionDistribution:
+    """A parsed distribution over actions from the verbalized selector."""
+
+    entries: list[tuple[PromptEditAction, float, str]]  # (action, probability, reasoning)
+
+    @property
+    def actions(self) -> list[PromptEditAction]:
+        return [a for a, _, _ in self.entries]
+
+    @property
+    def probabilities(self) -> list[float]:
+        return [p for _, p, _ in self.entries]
+
+
+def _sample_from_tails(
+    distribution: ActionDistribution,
+    n: int,
+    tau: float,
+    rng: random.Random,
+) -> list[PromptEditAction]:
+    """Sample n actions from the tail of the distribution (probability < tau).
+
+    If no entries fall below tau, sample from the full distribution.
+    """
+    entries = distribution.entries
+    tail = [(a, p, r) for a, p, r in entries if p < tau]
+
+    # Fall back to full distribution if no tail entries exist.
+    if not tail:
+        tail = entries
+
+    actions = [a for a, _, _ in tail]
+    weights = [p for _, p, _ in tail]
+
+    # Renormalize weights.
+    total = sum(weights)
+    if total <= 0:
+        weights = [1.0 / len(actions)] * len(actions)
+    else:
+        weights = [w / total for w in weights]
+
+    return rng.choices(actions, weights=weights, k=n)
+
+
+class VerbalizedActionSelector:
+    """Use the reflection LM to generate a probability distribution over actions, then sample.
+
+    Instead of picking actions uniformly at random, this selector asks the LM
+    which action(s) are most likely to help
+    given the current prompt state and feedback. It then samples from the tails
+    of the distribution (p < tau) to encourage diversity.
+
+    Call ``set_context()`` before ``select()`` to provide the current prompt and
+    feedback. If ``set_context()`` is not called, falls back to uniform random.
+    """
+
+    def __init__(
+        self,
+        actions: list[PromptEditAction],
+        lm: LanguageModel,
+        k: int = 5,
+        tau: float = 0.10,
+    ):
         assert len(actions) > 0
         self.actions = actions
+        self.lm = lm
+        self.k = k
+        self.tau = tau
+        self._context: dict[str, str] | None = None
+        self._action_by_name: dict[str, PromptEditAction] = {a.name: a for a in actions}
+
+    def set_context(self, candidate: str, feedback_summary: str) -> None:
+        """Provide current prompt state for the next select() call."""
+        self._context = {"candidate": candidate, "feedback_summary": feedback_summary}
 
     def select(self, n: int, rng: random.Random) -> list[PromptEditAction]:
-        return list(self.actions)
+        if self._context is None:
+            logger.warning("VerbalizedActionSelector.select() called without set_context(); falling back to uniform.")
+            return [rng.choice(self.actions) for _ in range(n)]
+
+        distribution = self._generate_distribution(rng)
+        result = _sample_from_tails(distribution, n, self.tau, rng)
+        # Clear context after use so stale context isn't reused.
+        self._context = None
+        return result
+
+    def _generate_distribution(self, rng: random.Random) -> ActionDistribution:
+        """Call the LM to produce a verbalized probability distribution over actions."""
+        assert self._context is not None
+        action_menu = "\n".join(
+            f"- **{a.name}**: {a.description}" for a in self.actions
+        )
+        prompt = VERBALIZED_ACTION_PROMPT.format(
+            current_prompt=self._context["candidate"],
+            feedback_summary=self._context["feedback_summary"],
+            action_menu=action_menu,
+            k=self.k,
+        )
+        raw_output = self.lm(prompt)
+        return self._parse_distribution(raw_output, rng)
+
+    def _parse_distribution(self, raw_output: str, rng: random.Random) -> ActionDistribution:
+        """Parse XML-formatted action distribution from LM output."""
+        # Strip think tags if present (reasoning models).
+        raw_output = re.sub(r"<think>.*?</think>", "", raw_output, flags=re.DOTALL)
+
+        entries: list[tuple[PromptEditAction, float, str]] = []
+        for candidate_match in re.finditer(r"<candidate>(.*?)</candidate>", raw_output, re.DOTALL):
+            block = candidate_match.group(1)
+            action_m = re.search(r"<action>(.*?)</action>", block, re.DOTALL)
+            prob_m = re.search(r"<probability>(.*?)</probability>", block, re.DOTALL)
+            reasoning_m = re.search(r"<reasoning>(.*?)</reasoning>", block, re.DOTALL)
+
+            if not action_m or not prob_m:
+                continue
+
+            action_name = action_m.group(1).strip()
+            reasoning = reasoning_m.group(1).strip() if reasoning_m else ""
+
+            try:
+                probability = float(prob_m.group(1).strip())
+            except ValueError:
+                continue
+
+            action = self._action_by_name.get(action_name)
+            if action is None:
+                # Fuzzy match: try case-insensitive lookup.
+                for name, act in self._action_by_name.items():
+                    if name.lower() == action_name.lower():
+                        action = act
+                        break
+            if action is not None:
+                entries.append((action, probability, reasoning))
+
+        if not entries:
+            logger.warning("Failed to parse verbalized action distribution; falling back to uniform.")
+            n_actions = len(self.actions)
+            entries = [(a, 1.0 / n_actions, "") for a in self.actions]
+
+        # Renormalize probabilities to sum to 1.
+        total = sum(p for _, p, _ in entries)
+        if total > 0:
+            entries = [(a, p / total, r) for a, p, r in entries]
+
+        return ActionDistribution(entries=entries)
 
 
 def format_action_suffix(action: PromptEditAction) -> str:
@@ -109,7 +276,7 @@ DEFAULT_ACTIONS: list[PromptEditAction] = [
             "Add a concrete, illustrative example within the instruction that demonstrates "
             "correct behavior on a specific pattern observed in the feedback. Use a 'For example, ...' "
             "or 'For instance, ...' construction. The example should help the assistant generalize "
-            "from the observed failure to similar future cases."
+            "from the failure patterns in the feedback to similar future cases."
         ),
     ),
     PromptEditAction(

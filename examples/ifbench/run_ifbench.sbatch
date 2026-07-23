@@ -43,6 +43,7 @@ MODEL="${MODEL:-Qwen3.5-9B}"
 GEN_PORT="${GEN_PORT:-8000}"
 MAX_METRIC_CALLS="${MAX_METRIC_CALLS:-3593}"
 CONDITION="${CONDITION:-all}"
+PROGRAM="${PROGRAM:-2stage}"
 TRAIN_LIMIT="${TRAIN_LIMIT:-}"
 VAL_LIMIT="${VAL_LIMIT:-}"
 TEST_LIMIT="${TEST_LIMIT:-}"
@@ -133,7 +134,7 @@ LIMIT_ARGS=()
 [[ -n "${VAL_LIMIT}" ]] && LIMIT_ARGS+=(--val-limit "${VAL_LIMIT}")
 [[ -n "${TEST_LIMIT}" ]] && LIMIT_ARGS+=(--test-limit "${TEST_LIMIT}")
 
-echo "==> running GEPA IFBench experiment: condition=${CONDITION} max_metric_calls=${MAX_METRIC_CALLS}"
+echo "==> running GEPA IFBench experiment: condition=${CONDITION} program=${PROGRAM} max_metric_calls=${MAX_METRIC_CALLS}"
 echo "==> limits: train=${TRAIN_LIMIT:-full} val=${VAL_LIMIT:-full} test=${TEST_LIMIT:-full}"
 echo "==> solver=${SOLVER_MODEL} reflection=${REFLECTION_MODEL} api_base=${API_BASE}"
 
@@ -143,4 +144,5 @@ echo "==> solver=${SOLVER_MODEL} reflection=${REFLECTION_MODEL} api_base=${API_B
     --api-base "${API_BASE}" \
     --max-metric-calls "${MAX_METRIC_CALLS}" \
     --condition "${CONDITION}" \
+    --program "${PROGRAM}" \
     "${LIMIT_ARGS[@]}"

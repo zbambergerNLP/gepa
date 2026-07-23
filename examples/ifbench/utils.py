@@ -36,6 +36,7 @@ def ensure_data_downloaded() -> None:
         urllib.request.urlretrieve(url, tmp_path)
         os.replace(tmp_path, path)
 
+
 FINAL_RESPONSE_MARKER = "Final Response:"
 
 # Appended to each stage's system prompt to emulate dspy.ChainOfThought:
@@ -105,14 +106,26 @@ def _call_lm(system: str, user: str, model: str, api_base: str | None) -> str:
         # Paper decoding config for Qwen3 (temp=0.6, top-p=0.95).
         "temperature": 0.6,
         "top_p": 0.95,
-        # 2048 keeps rollout latency manageable (thinking tokens + CoT + response);
-        # IFBench's leniency checks make truncated rambling harmless.
+        # 2048 keeps rollout latency manageable (CoT + response); IFBench's
+        # leniency checks make truncated rambling harmless.
         "max_tokens": 2048,
+        # Disable Qwen's hidden thinking mode: COT_FORMAT_INSTRUCTION already
+        # elicits visible reasoning (like dspy ChainOfThought), and hidden
+        # <think> blocks can consume the entire token budget, leaving
+        # message.content empty (vLLM's qwen3 reasoning parser routes them to
+        # reasoning_content).
+        "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
     }
     if api_base is not None:
         kwargs["api_base"] = api_base
     response = litellm.completion(**kwargs)
-    return response.choices[0].message.content or ""
+    message = response.choices[0].message
+    content = message.content or ""
+    if not content.strip():
+        # Fallback: if the model still spent the whole budget thinking, score
+        # the reasoning text rather than an empty string.
+        content = getattr(message, "reasoning_content", None) or ""
+    return content
 
 
 def run_two_stage(
@@ -137,6 +150,21 @@ def run_two_stage(
     final_response = _extract_final_response(stage2_out)
 
     return response, final_response
+
+
+def run_single_stage(
+    prompt: str,
+    query: str,
+    model: str = "hosted_vllm/Qwen3.5-9B",
+    api_base: str | None = None,
+) -> str:
+    """Run the 1-stage IFBench program: one optimized prompt, one LM call.
+
+    Ablation variant of run_two_stage (the paper protocol is 2-stage).
+    Returns the final response.
+    """
+    out = _call_lm(prompt + COT_FORMAT_INSTRUCTION, f"Query:\n{query}", model, api_base)
+    return _extract_final_response(out)
 
 
 def ifbench_metric(response: str, example: dict) -> tuple[float, str]:
@@ -184,9 +212,17 @@ def ifbench_metric(response: str, example: dict) -> tuple[float, str]:
 
         is_following = False
         for candidate_response in all_responses:
-            if candidate_response.strip() and instruction.check_following(candidate_response):
-                is_following = True
-                break
+            if not candidate_response.strip():
+                continue
+            # Some vendored checkers crash on degenerate outputs (e.g.
+            # punctuation-only sentences hit an IndexError in
+            # instructions.py:check_following). Treat a crash as "not followed".
+            try:
+                if instruction.check_following(candidate_response):
+                    is_following = True
+                    break
+            except Exception:
+                continue
 
         if not is_following:
             incorrect_feedbacks.append(ins_text)

@@ -31,6 +31,7 @@ set -a; source "${ENV_FILE}"; set +a
 MODEL="${MODEL:-Qwen3.5-9B}"
 MAX_METRIC_CALLS="${MAX_METRIC_CALLS:-3593}"
 CONDITION="${CONDITION:-all}"
+PROGRAM="${PROGRAM:-2stage}"
 TRAIN_LIMIT="${TRAIN_LIMIT:-}"
 VAL_LIMIT="${VAL_LIMIT:-}"
 TEST_LIMIT="${TEST_LIMIT:-}"
@@ -78,7 +79,7 @@ REMOTE_SETUP
 fi
 
 # Step 3: submit sbatch on della login node.
-echo "==> submitting job: model=${MODEL} max_metric_calls=${MAX_METRIC_CALLS} condition=${CONDITION}"
+echo "==> submitting job: model=${MODEL} max_metric_calls=${MAX_METRIC_CALLS} condition=${CONDITION} program=${PROGRAM}"
 echo "==> limits: train=${TRAIN_LIMIT:-full} val=${VAL_LIMIT:-full} test=${TEST_LIMIT:-full}"
 
 sshpass -p "${REMOTE_PASSWORD}" ssh -o StrictHostKeyChecking=no \
@@ -89,7 +90,7 @@ cd "${REMOTE_DIR}"
 sbatch \
     --partition="${GPU_PARTITION}" \
     --time="${TIME}" \
-    --export=ALL,MODEL=${MODEL},MAX_METRIC_CALLS=${MAX_METRIC_CALLS},CONDITION=${CONDITION},TRAIN_LIMIT=${TRAIN_LIMIT},VAL_LIMIT=${VAL_LIMIT},TEST_LIMIT=${TEST_LIMIT},MODEL_STORAGE=${MODEL_STORAGE},SCRATCH_BASE=${SCRATCH_BASE} \
+    --export=ALL,MODEL=${MODEL},MAX_METRIC_CALLS=${MAX_METRIC_CALLS},CONDITION=${CONDITION},PROGRAM=${PROGRAM},TRAIN_LIMIT=${TRAIN_LIMIT},VAL_LIMIT=${VAL_LIMIT},TEST_LIMIT=${TEST_LIMIT},MODEL_STORAGE=${MODEL_STORAGE},SCRATCH_BASE=${SCRATCH_BASE} \
     examples/ifbench/run_ifbench.sbatch
 
 echo "==> job submitted. Check status with: squeue -u ${REMOTE_USER}"

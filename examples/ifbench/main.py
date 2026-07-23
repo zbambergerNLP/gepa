@@ -23,7 +23,7 @@ import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 
-from examples.ifbench.utils import ifbench_metric, load_ifbench_dataset, run_two_stage
+from examples.ifbench.utils import ifbench_metric, load_ifbench_dataset, run_single_stage, run_two_stage
 from gepa.core.action_tracking import ActionDiversityCallback
 from gepa.lm import LM
 from gepa.optimize_anything import (
@@ -45,33 +45,53 @@ SEED_CANDIDATE = {
     ),
 }
 
-CONDITION_RUN_DIRS = {
-    "vanilla": "outputs/ifbench_vanilla",
-    "random": "outputs/ifbench_random_action",
-    "action": "outputs/ifbench_verbalized_action",
+# Ablation seed: the whole task as a single-turn program (one prompt component).
+SEED_CANDIDATE_1STAGE = {"respond": "Respond to the query"}
+
+_CONDITION_DIR_NAMES = {
+    "vanilla": "ifbench_vanilla",
+    "random": "ifbench_random_action",
+    "action": "ifbench_verbalized_action",
 }
 
 
-def make_evaluator(solver_model: str, api_base: str | None = None):
+def condition_run_dir(condition: str, program: str) -> str:
+    suffix = "_1stage" if program == "1stage" else ""
+    return f"outputs/{_CONDITION_DIR_NAMES[condition]}{suffix}"
+
+
+def seed_candidate(program: str) -> dict:
+    return dict(SEED_CANDIDATE_1STAGE if program == "1stage" else SEED_CANDIDATE)
+
+
+def run_program(candidate: dict, query: str, program: str, model: str, api_base: str | None) -> tuple[str | None, str]:
+    """Run the candidate program on a query, returning (stage1_response, final_response)."""
+    if program == "1stage":
+        return None, run_single_stage(candidate["respond"], query, model=model, api_base=api_base)
+    return run_two_stage(
+        candidate["generate_response"],
+        candidate["ensure_correct_response"],
+        query,
+        model=model,
+        api_base=api_base,
+    )
+
+
+def make_evaluator(solver_model: str, api_base: str | None = None, program: str = "2stage"):
     """Create an evaluator function closed over the solver model name."""
 
     def evaluate(candidate: dict, example: dict) -> tuple[float, SideInfo]:
-        response, final_response = run_two_stage(
-            candidate["generate_response"],
-            candidate["ensure_correct_response"],
-            example["prompt"],
-            model=solver_model,
-            api_base=api_base,
-        )
+        response, final_response = run_program(candidate, example["prompt"], program, solver_model, api_base)
         score, feedback = ifbench_metric(final_response, example)
 
         side_info: SideInfo = {
             "score": score,
             "query": example["prompt"],
-            "stage1_response": response,
             "output": final_response,
             "execution_feedback": feedback,
         }
+        if response is not None:
+            side_info["stage1_response"] = response
         return score, side_info
 
     return evaluate
@@ -83,17 +103,12 @@ def evaluate_on_set(
     solver_model: str,
     api_base: str | None = None,
     max_workers: int = 24,
+    program: str = "2stage",
 ) -> float:
     """Evaluate a candidate on a dataset, returning mean instruction accuracy."""
 
     def score_one(example: dict) -> float:
-        _, final_response = run_two_stage(
-            candidate["generate_response"],
-            candidate["ensure_correct_response"],
-            example["prompt"],
-            model=solver_model,
-            api_base=api_base,
-        )
+        _, final_response = run_program(candidate, example["prompt"], program, solver_model, api_base)
         score, _ = ifbench_metric(final_response, example)
         return score
 
@@ -145,6 +160,20 @@ def dump_candidates(result, run_dir: str) -> str:
     return path
 
 
+def dump_action_summary(tracker: ActionDiversityCallback, run_dir: str) -> str:
+    """Persist the action tracker's aggregate summary plus raw per-action data."""
+    payload = {
+        "summary": tracker.summary(),
+        "action_score_deltas": dict(tracker.action_score_deltas),
+        "action_texts": dict(tracker.action_texts),
+    }
+    os.makedirs(run_dir, exist_ok=True)
+    path = os.path.join(run_dir, "action_summary.json")
+    with open(path, "w") as f:
+        json.dump(payload, f, indent=2)
+    return path
+
+
 def build_config(condition: str, args, reflection_lm_kwargs: dict) -> GEPAConfig:
     """Build the GEPAConfig for one condition."""
     action_selector = None
@@ -158,7 +187,7 @@ def build_config(condition: str, args, reflection_lm_kwargs: dict) -> GEPAConfig
 
     return GEPAConfig(
         engine=EngineConfig(
-            run_dir=CONDITION_RUN_DIRS[condition],
+            run_dir=condition_run_dir(condition, args.program),
             max_metric_calls=args.max_metric_calls,
             parallel=True,
             max_workers=24,
@@ -174,6 +203,7 @@ def build_config(condition: str, args, reflection_lm_kwargs: dict) -> GEPAConfig
 
 def run_condition(
     name: str,
+    seed: dict,
     trainset: list[dict],
     valset: list[dict],
     config: GEPAConfig,
@@ -189,7 +219,7 @@ def run_condition(
         config.callbacks = callbacks
 
     result = optimize_anything(
-        seed_candidate=dict(SEED_CANDIDATE),
+        seed_candidate=seed,
         evaluator=evaluator,
         dataset=trainset,
         valset=valset,
@@ -220,6 +250,13 @@ def main():
     parser.add_argument("--val-limit", type=int, default=None, help="Limit val-set size (paper: 300)")
     parser.add_argument("--test-limit", type=int, default=None, help="Limit test-set size for final evaluation")
     parser.add_argument(
+        "--program",
+        type=str,
+        default="2stage",
+        choices=["2stage", "1stage"],
+        help="Program structure: 2stage (paper protocol) or 1stage (single-turn ablation)",
+    )
+    parser.add_argument(
         "--condition",
         type=str,
         default="all",
@@ -235,9 +272,9 @@ def main():
         valset = valset[: args.val_limit]
     if args.test_limit is not None:
         testset = testset[: args.test_limit]
-    print(f"Loaded {len(trainset)} train / {len(valset)} val / {len(testset)} test examples")
+    print(f"Loaded {len(trainset)} train / {len(valset)} val / {len(testset)} test examples ({args.program})")
 
-    evaluator = make_evaluator(args.solver_model, api_base=args.api_base)
+    evaluator = make_evaluator(args.solver_model, api_base=args.api_base, program=args.program)
 
     reflection_lm_kwargs = {}
     if args.api_base is not None:
@@ -254,10 +291,19 @@ def main():
             trackers[condition] = ActionDiversityCallback()
             callbacks = [trackers[condition]]
         results[condition] = run_condition(
-            f"{condition} GEPA", trainset, valset, config, evaluator, callbacks=callbacks
+            f"{condition} GEPA ({args.program})",
+            seed_candidate(args.program),
+            trainset,
+            valset,
+            config,
+            evaluator,
+            callbacks=callbacks,
         )
-        path = dump_candidates(results[condition], CONDITION_RUN_DIRS[condition])
+        path = dump_candidates(results[condition], condition_run_dir(condition, args.program))
         print(f"[{condition}] wrote {path}")
+        if condition in trackers:
+            path = dump_action_summary(trackers[condition], condition_run_dir(condition, args.program))
+            print(f"[{condition}] wrote {path}")
 
     # Report: best prompts (full text)
     print(f"\n{'=' * 60}")
@@ -273,11 +319,15 @@ def main():
     print("  Comparison")
     print(f"{'=' * 60}\n")
 
-    baseline_score = evaluate_on_set(dict(SEED_CANDIDATE), testset, args.solver_model, api_base=args.api_base)
+    baseline_score = evaluate_on_set(
+        seed_candidate(args.program), testset, args.solver_model, api_base=args.api_base, program=args.program
+    )
     print(f"Baseline (seed prompts) test instruction accuracy: {baseline_score:.2%} on {len(testset)} examples\n")
 
     for name, result in results.items():
-        test_score = evaluate_on_set(result.best_candidate, testset, args.solver_model, api_base=args.api_base)
+        test_score = evaluate_on_set(
+            result.best_candidate, testset, args.solver_model, api_base=args.api_base, program=args.program
+        )
         diversity = prompt_diversity(result.candidates)
         print(f"[{name}]")
         print(f"  candidates explored:      {len(result.candidates)}")

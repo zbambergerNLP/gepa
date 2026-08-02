@@ -103,12 +103,12 @@ def _call_lm(system: str, user: str, model: str, api_base: str | None) -> str:
     kwargs: dict = {
         "model": model,
         "messages": messages,
-        # Paper decoding config for Qwen3 (temp=0.6, top-p=0.95).
+        # Paper decoding config for Qwen3-8B (gepa-artifact experiment_configs.py:
+        # temp=0.6, top-p=0.95, top-k=20; max_tokens=16384 from run_experiments.py).
         "temperature": 0.6,
         "top_p": 0.95,
-        # 2048 keeps rollout latency manageable (CoT + response); IFBench's
-        # leniency checks make truncated rambling harmless.
-        "max_tokens": 2048,
+        "top_k": 20,
+        "max_tokens": 16384,
         # Disable Qwen's hidden thinking mode: COT_FORMAT_INSTRUCTION already
         # elicits visible reasoning (like dspy ChainOfThought), and hidden
         # <think> blocks can consume the entire token budget, leaving
@@ -118,7 +118,13 @@ def _call_lm(system: str, user: str, model: str, api_base: str | None) -> str:
     }
     if api_base is not None:
         kwargs["api_base"] = api_base
-    response = litellm.completion(**kwargs)
+    try:
+        response = litellm.completion(**kwargs)
+    except litellm.exceptions.ContextWindowExceededError:
+        # Long inputs (e.g. a rambling stage-1 response) can leave less than
+        # max_tokens of context headroom. Retry once with a smaller budget.
+        kwargs["max_tokens"] = 4096
+        response = litellm.completion(**kwargs)
     message = response.choices[0].message
     content = message.content or ""
     if not content.strip():
@@ -145,7 +151,10 @@ def run_two_stage(
     stage1_out = _call_lm(gen_prompt + COT_FORMAT_INSTRUCTION, f"Query:\n{query}", model, api_base)
     response = _extract_final_response(stage1_out)
 
-    stage2_user = f"Query:\n{query}\n\nResponse:\n{response}"
+    # Cap the stage-1 text fed into stage 2 so query + response + output budget
+    # always fits the model context (32k for Qwen3-8B). ~24k chars ≈ 6k tokens.
+    stage2_response = response if len(response) <= 24000 else response[:24000] + "\n[truncated]"
+    stage2_user = f"Query:\n{query}\n\nResponse:\n{stage2_response}"
     stage2_out = _call_lm(ensure_prompt + COT_FORMAT_INSTRUCTION, stage2_user, model, api_base)
     final_response = _extract_final_response(stage2_out)
 

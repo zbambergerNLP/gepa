@@ -15,10 +15,13 @@ from gepa.proposer.reflective_mutation.reflection_lm import (
 )
 from gepa.strategies.action_space import (
     DEFAULT_ACTIONS,
+    STRUCTURED_SECTIONS,
     ActionDistribution,
+    PromptEditAction,
     RandomActionSelector,
     VerbalizedActionSelector,
     _sample_from_tails,
+    build_structured_actions,
     format_action_suffix,
 )
 
@@ -611,3 +614,86 @@ class TestVerbalizedReflectionIntegration:
         assert "feedback-beta" in action_lm.calls[0]
         # Distinct parents are disclosed in the candidate context.
         assert "2 distinct parent candidates" in action_lm.calls[0]
+
+
+# ---------------------------------------------------------------------------
+# Structured (section-scoped) action space (Rev 2)
+# ---------------------------------------------------------------------------
+
+
+class TestStructuredActions:
+    def test_default_menu_shape(self):
+        actions = build_structured_actions()
+        # 3 operations per section + 1 global restructure.
+        assert len(actions) == 3 * len(STRUCTURED_SECTIONS) + 1
+        names = [a.name for a in actions]
+        assert len(set(names)) == len(names)
+        assert "restructure" in names
+        assert "rewrite_rules" in names
+        assert "append_output_format" in names
+        assert "condense_examples" in names
+
+    def test_section_actions_carry_target_section(self):
+        actions = build_structured_actions()
+        by_name = {a.name: a for a in actions}
+        assert by_name["rewrite_role"].target_section == "Role"
+        assert by_name["append_output_format"].target_section == "Output Format"
+        assert by_name["restructure"].target_section is None
+
+    def test_custom_sections(self):
+        actions = build_structured_actions(["Alpha", "Beta"])
+        names = {a.name for a in actions}
+        assert names == {
+            "rewrite_alpha",
+            "append_alpha",
+            "condense_alpha",
+            "rewrite_beta",
+            "append_beta",
+            "condense_beta",
+            "restructure",
+        }
+
+    def test_suffix_includes_section_scope(self):
+        action = build_structured_actions()[0]
+        assert action.target_section == "Role"
+        suffix = format_action_suffix(action)
+        assert "ONLY within the '## Role' section" in suffix
+        assert "Reproduce every other section verbatim" in suffix
+
+    def test_suffix_omits_scope_without_target_section(self):
+        action = PromptEditAction(name="x", description="d", instruction_suffix="s")
+        suffix = format_action_suffix(action)
+        assert "ONLY within" not in suffix
+
+    def test_selectors_work_over_structured_menu(self):
+        actions = build_structured_actions()
+        picks = RandomActionSelector(actions, rng=random.Random(0)).select(5)
+        assert len(picks) == 5
+        assert all(p in actions for p in picks)
+
+
+class TestVerbalizedHistory:
+    def test_history_records_distribution_and_samples(self):
+        lm = FakeLM(VALID_LM_OUTPUT)
+        selector = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=lm, rng=random.Random(0))
+        selector.set_context("prompt text", "feedback text")
+        picks = selector.select(3)
+
+        assert len(selector.history) == 1
+        record = selector.history[0]
+        assert record["fallback"] is False
+        assert record["sampled"] == [p.name for p in picks]
+        assert abs(sum(record["probs"].values()) - 1.0) < 1e-6
+
+    def test_history_marks_fallback_on_unparseable_output(self):
+        lm = FakeLM("no xml here")
+        selector = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=lm, rng=random.Random(0))
+        selector.set_context("prompt text", "feedback text")
+        selector.select(2)
+
+        assert selector.history[0]["fallback"] is True
+
+    def test_uniform_fallback_without_context_leaves_no_history(self):
+        selector = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=FakeLM(VALID_LM_OUTPUT), rng=random.Random(0))
+        selector.select(2)
+        assert selector.history == []

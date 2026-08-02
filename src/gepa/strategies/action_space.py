@@ -37,11 +37,15 @@ class PromptEditAction:
             POSIT-style ColBERT/CrossEncoder reranker).
         instruction_suffix: Directive appended to the reflection prompt to
             constrain the LM to this edit type.
+        target_section: Optional markdown section name (e.g. ``"Rules"``) this
+            action is scoped to. When set, the reflection LM is instructed to
+            edit only that section of a structured prompt.
     """
 
     name: str
     description: str
     instruction_suffix: str
+    target_section: str | None = None
 
 
 logger = logging.getLogger(__name__)
@@ -117,6 +121,7 @@ class ActionDistribution:
     """A parsed distribution over actions from the verbalized selector."""
 
     entries: list[tuple[PromptEditAction, float, str]]  # (action, probability, reasoning)
+    is_fallback: bool = False  # True when parsing failed and a uniform fallback was used
 
     @property
     def actions(self) -> list[PromptEditAction]:
@@ -186,6 +191,9 @@ class VerbalizedActionSelector:
         self.rng = rng if rng is not None else random.Random(0)
         self._context: dict[str, str] | None = None
         self._action_by_name: dict[str, PromptEditAction] = {a.name: a for a in actions}
+        # One record per select() call with context: the verbalized distribution
+        # and what was sampled from it. Observational only (for analysis dumps).
+        self.history: list[dict] = []
 
     def set_context(self, candidate: str, feedback_summary: str) -> None:
         """Provide current prompt state for the next select() call."""
@@ -199,6 +207,13 @@ class VerbalizedActionSelector:
 
         distribution = self._generate_distribution(rng)
         result = _sample_from_tails(distribution, n, self.tau, rng)
+        self.history.append(
+            {
+                "probs": {a.name: p for a, p, _ in distribution.entries},
+                "sampled": [a.name for a in result],
+                "fallback": distribution.is_fallback,
+            }
+        )
         # Clear context after use so stale context isn't reused.
         self._context = None
         return result
@@ -249,28 +264,101 @@ class VerbalizedActionSelector:
             if action is not None:
                 entries.append((action, probability, reasoning))
 
+        is_fallback = False
         if not entries:
             logger.warning("Failed to parse verbalized action distribution; falling back to uniform.")
             n_actions = len(self.actions)
             entries = [(a, 1.0 / n_actions, "") for a in self.actions]
+            is_fallback = True
 
         # Renormalize probabilities to sum to 1.
         total = sum(p for _, p, _ in entries)
         if total > 0:
             entries = [(a, p / total, r) for a, p, r in entries]
 
-        return ActionDistribution(entries=entries)
+        return ActionDistribution(entries=entries, is_fallback=is_fallback)
 
 
 def format_action_suffix(action: PromptEditAction) -> str:
     """Build the constraint text appended to the reflection prompt."""
+    section_scope = ""
+    if action.target_section is not None:
+        section_scope = (
+            f"\nApply this edit ONLY within the '## {action.target_section}' section of the prompt. "
+            "Reproduce every other section verbatim, including their headers.\n"
+        )
     return (
         "\n\n--- ACTION CONSTRAINT ---\n"
         f"You MUST make exactly one type of edit: {action.name}\n"
-        f"Description: {action.description}\n\n"
+        f"Description: {action.description}\n"
+        f"{section_scope}\n"
         f"{action.instruction_suffix}\n\n"
         "Do not make any other type of change. Focus exclusively on this edit action."
     )
+
+
+# Canonical section names for structured (markdown-skeleton) prompts.
+STRUCTURED_SECTIONS: list[str] = ["Role", "Task", "Rules", "Output Format", "Examples"]
+
+_SECTION_OPERATIONS: list[tuple[str, str, str]] = [
+    (
+        "rewrite",
+        "Replace the content of the '{section}' section.",
+        "Rewrite the '## {section}' section from scratch so it directly addresses the failure "
+        "patterns in the feedback. Replace its current content entirely; keep the section header.",
+    ),
+    (
+        "append",
+        "Add one targeted item (rule, detail, or example) to the '{section}' section.",
+        "Add exactly one new item to the '## {section}' section that directly addresses a failure "
+        "pattern observed in the feedback. Keep all existing content of the section unchanged; "
+        "the new item should be precise and actionable, not generic advice.",
+    ),
+    (
+        "condense",
+        "Remove redundant, conflicting, or harmful items from the '{section}' section.",
+        "Examine the '## {section}' section for items that are redundant, mutually conflicting, "
+        "overly narrow, or likely causing the failures in the feedback. Remove or merge them. "
+        "Do not add new content.",
+    ),
+]
+
+
+def _slugify_section(section: str) -> str:
+    return section.lower().replace(" ", "_")
+
+
+def build_structured_actions(sections: list[str] | None = None) -> list[PromptEditAction]:
+    """Build a section-scoped action space for structured (markdown) prompts.
+
+    For each section, three operations: rewrite, append, condense. Plus one
+    global restructure action. With the default five sections this yields a
+    16-action menu.
+    """
+    sections = sections if sections is not None else STRUCTURED_SECTIONS
+    actions: list[PromptEditAction] = []
+    for section in sections:
+        for op_name, op_desc, op_suffix in _SECTION_OPERATIONS:
+            actions.append(
+                PromptEditAction(
+                    name=f"{op_name}_{_slugify_section(section)}",
+                    description=op_desc.format(section=section),
+                    instruction_suffix=op_suffix.format(section=section),
+                    target_section=section,
+                )
+            )
+    actions.append(
+        PromptEditAction(
+            name="restructure",
+            description="Reorder or rebalance sections without adding or removing content.",
+            instruction_suffix=(
+                "Reorganize the prompt's sections: reorder them so the most critical information "
+                "appears first, move misplaced items to the section where they belong, or adjust "
+                "emphasis. Keep all existing content; do not add or remove information."
+            ),
+        )
+    )
+    return actions
 
 
 DEFAULT_ACTIONS: list[PromptEditAction] = [

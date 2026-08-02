@@ -40,10 +40,15 @@ cd "${SLURM_SUBMIT_DIR:-$PWD}" || exit 1
 # --- Knobs (override with sbatch --export=ALL,VAR=...) --------------------
 MODEL_STORAGE="${MODEL_STORAGE:-/projects/BSTEWART/model_storage}"
 MODEL="${MODEL:-Qwen3.5-9B}"
-GEN_PORT="${GEN_PORT:-8000}"
+# Unique per-job port: della nodes host 8 GPUs, so multiple single-GPU jobs can
+# share a node; a fixed port makes co-located jobs cross-talk and cross-kill.
+GEN_PORT="${GEN_PORT:-$((10000 + ${SLURM_JOB_ID:-0} % 5000))}"
 MAX_METRIC_CALLS="${MAX_METRIC_CALLS:-3593}"
 CONDITION="${CONDITION:-all}"
 PROGRAM="${PROGRAM:-2stage}"
+SEED_STYLE="${SEED_STYLE:-plain}"
+ACTIONS="${ACTIONS:-default}"
+TAG="${TAG:-}"
 TRAIN_LIMIT="${TRAIN_LIMIT:-}"
 VAL_LIMIT="${VAL_LIMIT:-}"
 TEST_LIMIT="${TEST_LIMIT:-}"
@@ -133,6 +138,7 @@ LIMIT_ARGS=()
 [[ -n "${TRAIN_LIMIT}" ]] && LIMIT_ARGS+=(--train-limit "${TRAIN_LIMIT}")
 [[ -n "${VAL_LIMIT}" ]] && LIMIT_ARGS+=(--val-limit "${VAL_LIMIT}")
 [[ -n "${TEST_LIMIT}" ]] && LIMIT_ARGS+=(--test-limit "${TEST_LIMIT}")
+[[ -n "${TAG}" ]] && LIMIT_ARGS+=(--tag "${TAG}")
 
 echo "==> running GEPA IFBench experiment: condition=${CONDITION} program=${PROGRAM} max_metric_calls=${MAX_METRIC_CALLS}"
 echo "==> limits: train=${TRAIN_LIMIT:-full} val=${VAL_LIMIT:-full} test=${TEST_LIMIT:-full}"
@@ -145,4 +151,6 @@ echo "==> solver=${SOLVER_MODEL} reflection=${REFLECTION_MODEL} api_base=${API_B
     --max-metric-calls "${MAX_METRIC_CALLS}" \
     --condition "${CONDITION}" \
     --program "${PROGRAM}" \
+    --seed-style "${SEED_STYLE}" \
+    --actions "${ACTIONS}" \
     "${LIMIT_ARGS[@]}"

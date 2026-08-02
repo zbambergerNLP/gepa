@@ -26,6 +26,7 @@ sshpass -p "${REMOTE_PASSWORD}" rsync -avz --delete \
     --exclude '.ruff_cache/' \
     --exclude '.git/' \
     --exclude 'outputs/' \
+    --exclude 'gepa-*.log' \
     --exclude '*.egg-info/' \
     --exclude 'scripts/della/.env' \
     "${REPO_ROOT}/" \

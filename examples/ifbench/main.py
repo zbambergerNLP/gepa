@@ -33,7 +33,12 @@ from gepa.optimize_anything import (
     SideInfo,
     optimize_anything,
 )
-from gepa.strategies.action_space import DEFAULT_ACTIONS, RandomActionSelector, VerbalizedActionSelector
+from gepa.strategies.action_space import (
+    DEFAULT_ACTIONS,
+    RandomActionSelector,
+    VerbalizedActionSelector,
+    build_structured_actions,
+)
 
 # Seed instructions: the exact signature docstrings from the artifact's
 # ifbench_program.py (GenerateResponse / EnsureCorrectResponse).
@@ -55,13 +60,32 @@ _CONDITION_DIR_NAMES = {
 }
 
 
-def condition_run_dir(condition: str, program: str) -> str:
+def _structured_seed(task_sentence: str) -> str:
+    """Wrap a seed sentence in a best-practice markdown skeleton.
+
+    The paper's seed sentence is preserved verbatim in the Task section; other
+    sections start as explicit placeholders for section-scoped actions to fill.
+    """
+    return (
+        "## Role\n(none yet)\n\n"
+        f"## Task\n{task_sentence}\n\n"
+        "## Rules\n(none yet)\n\n"
+        "## Output Format\n(none yet)\n\n"
+        "## Examples\n(none yet)"
+    )
+
+
+def condition_run_dir(condition: str, program: str, tag: str = "") -> str:
     suffix = "_1stage" if program == "1stage" else ""
-    return f"outputs/{_CONDITION_DIR_NAMES[condition]}{suffix}"
+    tag_suffix = f"_{tag}" if tag else ""
+    return f"outputs/{_CONDITION_DIR_NAMES[condition]}{suffix}{tag_suffix}"
 
 
-def seed_candidate(program: str) -> dict:
-    return dict(SEED_CANDIDATE_1STAGE if program == "1stage" else SEED_CANDIDATE)
+def seed_candidate(program: str, seed_style: str = "plain") -> dict:
+    seed = dict(SEED_CANDIDATE_1STAGE if program == "1stage" else SEED_CANDIDATE)
+    if seed_style == "structured":
+        seed = {component: _structured_seed(text) for component, text in seed.items()}
+    return seed
 
 
 def run_program(candidate: dict, query: str, program: str, model: str, api_base: str | None) -> tuple[str | None, str]:
@@ -160,13 +184,15 @@ def dump_candidates(result, run_dir: str) -> str:
     return path
 
 
-def dump_action_summary(tracker: ActionDiversityCallback, run_dir: str) -> str:
+def dump_action_summary(tracker: ActionDiversityCallback, run_dir: str, selector=None) -> str:
     """Persist the action tracker's aggregate summary plus raw per-action data."""
     payload = {
         "summary": tracker.summary(),
         "action_score_deltas": dict(tracker.action_score_deltas),
         "action_texts": dict(tracker.action_texts),
     }
+    if selector is not None and getattr(selector, "history", None):
+        payload["verbalized_history"] = selector.history
     os.makedirs(run_dir, exist_ok=True)
     path = os.path.join(run_dir, "action_summary.json")
     with open(path, "w") as f:
@@ -174,20 +200,21 @@ def dump_action_summary(tracker: ActionDiversityCallback, run_dir: str) -> str:
     return path
 
 
-def build_config(condition: str, args, reflection_lm_kwargs: dict) -> GEPAConfig:
-    """Build the GEPAConfig for one condition."""
+def build_config(condition: str, args, reflection_lm_kwargs: dict):
+    """Build the GEPAConfig for one condition. Returns (config, action_selector)."""
+    action_space = build_structured_actions() if args.actions == "structured" else DEFAULT_ACTIONS
     action_selector = None
     if condition == "random":
-        action_selector = RandomActionSelector(DEFAULT_ACTIONS)
+        action_selector = RandomActionSelector(action_space)
     elif condition == "action":
         action_selector = VerbalizedActionSelector(
-            DEFAULT_ACTIONS,
+            action_space,
             lm=LM(args.reflection_model, **reflection_lm_kwargs),
         )
 
-    return GEPAConfig(
+    config = GEPAConfig(
         engine=EngineConfig(
-            run_dir=condition_run_dir(condition, args.program),
+            run_dir=condition_run_dir(condition, args.program, args.tag),
             max_metric_calls=args.max_metric_calls,
             parallel=True,
             max_workers=24,
@@ -199,6 +226,7 @@ def build_config(condition: str, args, reflection_lm_kwargs: dict) -> GEPAConfig
             action_selector=action_selector,
         ),
     )
+    return config, action_selector
 
 
 def run_condition(
@@ -263,7 +291,26 @@ def main():
         choices=["vanilla", "random", "action", "all"],
         help="Which condition(s) to run",
     )
+    parser.add_argument(
+        "--seed-style",
+        type=str,
+        default="plain",
+        choices=["plain", "structured"],
+        help="Seed prompts: plain paper sentences or a markdown skeleton (Role/Task/Rules/Output Format/Examples)",
+    )
+    parser.add_argument(
+        "--actions",
+        type=str,
+        default="default",
+        choices=["default", "structured"],
+        help="Action space: DEFAULT_ACTIONS or section-scoped structured actions (implies --seed-style structured)",
+    )
+    parser.add_argument("--tag", type=str, default="", help="Suffix appended to run dirs (e.g. rev2, 15k)")
     args = parser.parse_args()
+
+    if args.actions == "structured" and args.seed_style != "structured":
+        print("--actions structured implies --seed-style structured; overriding seed style.")
+        args.seed_style = "structured"
 
     trainset, valset, testset = load_ifbench_dataset()
     if args.train_limit is not None:
@@ -285,24 +332,25 @@ def main():
     results = {}
     trackers: dict[str, ActionDiversityCallback] = {}
     for condition in conditions:
-        config = build_config(condition, args, reflection_lm_kwargs)
+        config, selector = build_config(condition, args, reflection_lm_kwargs)
         callbacks = None
         if condition in ("random", "action"):
             trackers[condition] = ActionDiversityCallback()
             callbacks = [trackers[condition]]
         results[condition] = run_condition(
-            f"{condition} GEPA ({args.program})",
-            seed_candidate(args.program),
+            f"{condition} GEPA ({args.program}, {args.seed_style} seeds)",
+            seed_candidate(args.program, args.seed_style),
             trainset,
             valset,
             config,
             evaluator,
             callbacks=callbacks,
         )
-        path = dump_candidates(results[condition], condition_run_dir(condition, args.program))
+        run_dir = condition_run_dir(condition, args.program, args.tag)
+        path = dump_candidates(results[condition], run_dir)
         print(f"[{condition}] wrote {path}")
         if condition in trackers:
-            path = dump_action_summary(trackers[condition], condition_run_dir(condition, args.program))
+            path = dump_action_summary(trackers[condition], run_dir, selector=selector)
             print(f"[{condition}] wrote {path}")
 
     # Report: best prompts (full text)
@@ -320,7 +368,11 @@ def main():
     print(f"{'=' * 60}\n")
 
     baseline_score = evaluate_on_set(
-        seed_candidate(args.program), testset, args.solver_model, api_base=args.api_base, program=args.program
+        seed_candidate(args.program, args.seed_style),
+        testset,
+        args.solver_model,
+        api_base=args.api_base,
+        program=args.program,
     )
     print(f"Baseline (seed prompts) test instruction accuracy: {baseline_score:.2%} on {len(testset)} examples\n")
 

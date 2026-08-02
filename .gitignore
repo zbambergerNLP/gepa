@@ -221,3 +221,6 @@ mlruns/
 
 # IFBench data (downloaded on first use; see examples/ifbench/utils.py)
 examples/ifbench/data/
+
+# Claude Code local settings (personal permissions)
+.claude/settings.local.json

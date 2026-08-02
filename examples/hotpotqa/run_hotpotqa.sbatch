@@ -30,7 +30,9 @@ cd "${SLURM_SUBMIT_DIR:-$PWD}" || exit 1
 # --- Knobs (override with sbatch --export=ALL,VAR=...) --------------------
 MODEL_STORAGE="${MODEL_STORAGE:-/projects/BSTEWART/model_storage}"
 MODEL="${MODEL:-Qwen3.5-9B}"
-GEN_PORT="${GEN_PORT:-8000}"
+# Unique per-job port: della nodes host 8 GPUs, so multiple single-GPU jobs can
+# share a node; a fixed port makes co-located jobs cross-talk and cross-kill.
+GEN_PORT="${GEN_PORT:-$((10000 + ${SLURM_JOB_ID:-0} % 5000))}"
 MAX_METRIC_CALLS="${MAX_METRIC_CALLS:-200}"
 CONDITION="${CONDITION:-both}"
 GEN_GMU="${GEN_GMU:-0.90}"

@@ -1,10 +1,10 @@
 # Handover: Action-Conditioned Reflection in GEPA
 
-*Last updated: August 1, 2026. Author: Till (ts0800), with Claude Code assistance. This file lives outside the mkdocs source tree and is not published to the docs site.*
+*Last updated: August 1, 2026. Author: Till, with Claude Code assistance. This file lives outside the mkdocs source tree and is not published to the docs site.*
 
 ## What this project is
 
-We are testing whether GEPA's reflective mutation step improves when each mutation is **conditioned on a typed edit action** instead of being free-form, and whether the action should be chosen by **verbalized sampling** (the reflection LM writes out a probability distribution over actions; we sample from its tails for diversity) rather than at random. Hypotheses: better proposal diversity, better credit assignment, and less validation overfitting.
+We are testing whether GEPA's reflective mutation step improves when each mutation is **conditioned on a typed edit action** instead of being free-form, and whether the action should be chosen by **verbalized sampling** (the reflection LM writes out a probability distribution over actions; we sample from its tails for diversity) rather than at random. Hypotheses: better proposal diversity, better credit assignment, and better final performance.
 
 Branch: `rev1_action-conditioned_reflection`.
 
@@ -44,10 +44,10 @@ Changes vs Rev 1, decided July 24: seed prompts get a best-practice markdown ske
 ## How to monitor / fetch / analyze
 
 ```bash
-# status (from a machine on the Princeton VPN)
-squeue -u ts0800                       # on della
+# status (from a machine on the Princeton VPN; <DELLA_USER> is your cluster username)
+squeue -u <DELLA_USER>                 # on della
 # fetch artifacts to laptop
-sshpass -p "$REMOTE_PASSWORD" rsync -az ts0800@della.princeton.edu:~/gepa/outputs/ outputs/fetched/
+sshpass -p "$REMOTE_PASSWORD" rsync -az <DELLA_USER>@della.princeton.edu:~/gepa/outputs/ outputs/fetched/
 # analyze
 uv run python examples/ifbench/analyze_actions.py outputs/fetched
 ```

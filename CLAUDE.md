@@ -14,17 +14,6 @@ We use **uv** for dependency management. All python executions must be done thro
 uv sync --extra dev
 ```
 
-## Build & Test
-
-```bash
-uv run pytest                        # run all tests
-uv run pytest tests/test_optimize.py # run a single test file
-uv run pytest -k "test_name"         # run a specific test by name
-uv run ruff check src/               # lint
-uv run ruff format src/              # format
-uv run pyright src/                  # type check
-```
-
 ## Code Style
 
 - Linter/formatter: ruff (line length 120, double quotes, space indent)
@@ -65,6 +54,3 @@ The evolutionary search flows through these layers:
 
 - **Callbacks** (`core/callbacks.py`): Event-driven instrumentation with 15+ event types. Integrates with experiment trackers (W&B, MLflow) via `ExperimentTracker`.
 
-### Adapters
-
-Built-in adapters in `src/gepa/adapters/` provide domain-specific integrations (DefaultAdapter, DSPy, LangChain, MCP, Generic RAG, ConfidenceAdapter, etc.). Each adapter implements the `GEPAAdapter` protocol.

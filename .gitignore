@@ -224,3 +224,4 @@ examples/ifbench/data/
 
 # Claude Code local settings (personal permissions)
 .claude/settings.local.json
+.claude/skills/

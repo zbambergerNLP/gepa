@@ -18,7 +18,12 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 from gepa.proposer.reflective_mutation.base import LanguageModel
-from gepa.strategies.action_space import ActionSelector, PromptEditAction, format_action_suffix
+from gepa.strategies.action_space import (
+    MAX_PROPOSAL_CHARS,
+    ActionSelector,
+    PromptEditAction,
+    format_action_suffix,
+)
 from gepa.strategies.instruction_proposal import InstructionProposalSignature
 
 # One reflection job = (candidate, reflective_dataset, components_to_update).
@@ -245,6 +250,16 @@ class StatelessReflectionLM:
         proposals = [ReflectionProposal(new_texts={}, prompts={}, raw_lm_outputs={}) for _ in jobs]
         for (job_idx, name, prompt, _messages), raw_output in zip(rendered, raw_outputs, strict=True):
             new_instruction = InstructionProposalSignature.output_extractor(raw_output.strip())["new_instruction"]
+            # Hard length cap (action-conditioned runs only): additive actions can
+            # otherwise accrete candidate prompts until they exhaust the model
+            # context. Dropping the component leaves the parent text unchanged,
+            # so the oversized proposal dies at the acceptance gate.
+            if actions[job_idx] is not None and len(new_instruction) > MAX_PROPOSAL_CHARS:
+                self._log(
+                    f"Proposed text for '{name}' is {len(new_instruction)} chars "
+                    f"(cap {MAX_PROPOSAL_CHARS}); dropping oversized proposal."
+                )
+                continue
             proposals[job_idx].new_texts[name] = new_instruction
             proposals[job_idx].prompts[name] = prompt
             proposals[job_idx].raw_lm_outputs[name] = raw_output

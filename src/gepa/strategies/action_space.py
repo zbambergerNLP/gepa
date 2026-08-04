@@ -50,6 +50,14 @@ class PromptEditAction:
 
 logger = logging.getLogger(__name__)
 
+# Length pressure for evolved prompts. Soft budget communicated to the
+# reflection LM in every action suffix; hard cap enforced at proposal time
+# (see StatelessReflectionLM). Without this, additive actions (append/
+# illustration) accrete text every acceptance until candidate prompts
+# exhaust the model context.
+SOFT_PROMPT_CHAR_BUDGET = 8000
+MAX_PROPOSAL_CHARS = 10000
+
 
 class ActionSelector(Protocol):
     """Picks which action(s) to apply to a batch of reflection jobs.
@@ -89,6 +97,7 @@ You are selecting which edit action(s) to apply to improve a prompt.
 ```
 {current_prompt}
 ```
+Current prompt length: {prompt_chars} characters (budget: ~{char_budget}).
 
 ## Recent feedback summary
 {feedback_summary}
@@ -102,7 +111,8 @@ Probabilities must sum to 1.0.
 
 Important: try to explore less obvious actions. Assign higher probability to \
 actions that specifically address the failure patterns in the feedback, even if \
-they seem unconventional.
+they seem unconventional. If the current prompt is near or over its length \
+budget, favor condensing, rewriting, or restructuring actions over additive ones.
 
 Format your response as:
 <response>
@@ -224,6 +234,8 @@ class VerbalizedActionSelector:
         action_menu = "\n".join(f"- **{a.name}**: {a.description}" for a in self.actions)
         prompt = VERBALIZED_ACTION_PROMPT.format(
             current_prompt=self._context["candidate"],
+            prompt_chars=len(self._context["candidate"]),
+            char_budget=SOFT_PROMPT_CHAR_BUDGET,
             feedback_summary=self._context["feedback_summary"],
             action_menu=action_menu,
             k=self.k,
@@ -293,6 +305,8 @@ def format_action_suffix(action: PromptEditAction) -> str:
         f"Description: {action.description}\n"
         f"{section_scope}\n"
         f"{action.instruction_suffix}\n\n"
+        f"Length budget: the complete revised prompt must stay under {SOFT_PROMPT_CHAR_BUDGET} characters. "
+        "If this edit would exceed the budget, merge with or replace existing content instead of adding.\n\n"
         "Do not make any other type of change. Focus exclusively on this edit action."
     )
 
@@ -311,8 +325,9 @@ _SECTION_OPERATIONS: list[tuple[str, str, str]] = [
         "append",
         "Add one targeted item (rule, detail, or example) to the '{section}' section.",
         "Add exactly one new item to the '## {section}' section that directly addresses a failure "
-        "pattern observed in the feedback. Keep all existing content of the section unchanged; "
-        "the new item should be precise and actionable, not generic advice.",
+        "pattern observed in the feedback. The new item should be precise and actionable, not "
+        "generic advice. Keep the section lean: if it already contains several items, replace or "
+        "merge the weakest existing item instead of growing the list.",
     ),
     (
         "condense",

@@ -697,3 +697,48 @@ class TestVerbalizedHistory:
         selector = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=FakeLM(VALID_LM_OUTPUT), rng=random.Random(0))
         selector.select(2)
         assert selector.history == []
+
+
+# ---------------------------------------------------------------------------
+# Length control (Rev 2.1): soft budget, length-aware selection, hard cap
+# ---------------------------------------------------------------------------
+
+
+class TestLengthControl:
+    def test_suffix_includes_length_budget(self):
+        from gepa.strategies.action_space import SOFT_PROMPT_CHAR_BUDGET
+
+        suffix = format_action_suffix(DEFAULT_ACTIONS[0])
+        assert f"under {SOFT_PROMPT_CHAR_BUDGET} characters" in suffix
+
+    def test_verbalized_prompt_includes_length_stats(self):
+        lm = FakeLM(VALID_LM_OUTPUT)
+        selector = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=lm, rng=random.Random(0))
+        selector.set_context("p" * 1234, "some feedback")
+        selector.select(1)
+        assert "Current prompt length: 1234 characters" in lm.calls[0]
+        assert "favor condensing" in lm.calls[0]
+
+    def test_oversized_action_proposal_dropped(self):
+        from gepa.strategies.action_space import MAX_PROPOSAL_CHARS
+
+        lm = RecordingLM(reply="x" * (MAX_PROPOSAL_CHARS + 1))
+        selector = RandomActionSelector(DEFAULT_ACTIONS, rng=random.Random(0))
+        reflection = StatelessReflectionLM(lm, action_selector=selector)
+        proposal, _ = reflection.reflect({"sp": "old"}, _reflective_dataset(["sp"]), ["sp"])
+        assert "sp" not in proposal.new_texts
+
+    def test_oversized_proposal_kept_without_action_selector(self):
+        from gepa.strategies.action_space import MAX_PROPOSAL_CHARS
+
+        lm = RecordingLM(reply="x" * (MAX_PROPOSAL_CHARS + 1))
+        reflection = StatelessReflectionLM(lm)
+        proposal, _ = reflection.reflect({"sp": "old"}, _reflective_dataset(["sp"]), ["sp"])
+        assert "sp" in proposal.new_texts
+
+    def test_normal_sized_action_proposal_kept(self):
+        lm = RecordingLM(reply="short improved instruction")
+        selector = RandomActionSelector(DEFAULT_ACTIONS, rng=random.Random(0))
+        reflection = StatelessReflectionLM(lm, action_selector=selector)
+        proposal, _ = reflection.reflect({"sp": "old"}, _reflective_dataset(["sp"]), ["sp"])
+        assert proposal.new_texts["sp"] == "short improved instruction"

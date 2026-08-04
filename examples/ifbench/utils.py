@@ -118,13 +118,22 @@ def _call_lm(system: str, user: str, model: str, api_base: str | None) -> str:
     }
     if api_base is not None:
         kwargs["api_base"] = api_base
-    try:
-        response = litellm.completion(**kwargs)
-    except litellm.exceptions.ContextWindowExceededError:
-        # Long inputs (e.g. a rambling stage-1 response) can leave less than
-        # max_tokens of context headroom. Retry once with a smaller budget.
-        kwargs["max_tokens"] = 4096
-        response = litellm.completion(**kwargs)
+    # Long inputs (e.g. a rambling stage-1 response, or a candidate prompt that
+    # grew huge over many accretive edits) can leave less than max_tokens of
+    # context headroom. Step the output budget down before giving up; if the
+    # input alone overflows the context, return "" so the rollout scores 0
+    # instead of killing the run.
+    response = None
+    for max_tokens in (kwargs["max_tokens"], 4096, 1024, 256):
+        kwargs["max_tokens"] = max_tokens
+        try:
+            response = litellm.completion(**kwargs)
+            break
+        except litellm.exceptions.ContextWindowExceededError:
+            continue
+    if response is None:
+        print(f"WARNING: input alone exceeds model context (prompt {len(system) + len(user)} chars); scoring 0.")
+        return ""
     message = response.choices[0].message
     content = message.content or ""
     if not content.strip():

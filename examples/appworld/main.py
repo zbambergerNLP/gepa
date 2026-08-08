@@ -1,13 +1,18 @@
-"""LiveBench-Math evaluation: vanilla GEPA vs random vs verbalized action selection.
+"""AppWorld evaluation: vanilla GEPA vs random vs verbalized action selection.
 
-Replicates the GEPA paper's LiveBench-Math setup (White et al. 2025,
-n=368 math, contamination-limited, AMC/AIME/symbolic algebra/olympiad)
-with a single-step CoT program (one optimized instruction, one LM call).
-The metric is exact-match accuracy after answer normalization. Splits
-are 122 train / 123 val / 123 test shuffled seed 0 (Terrarium split
-100/100/168 is available via --splits terrarium). Default budget
-1839 metric calls matches the paper's LiveBench-Math budget (like the
-GEPA release note), scaled Wave B uses 5000.
+Replicates the GEPA paper's AppWorld setup (Trivedi et al. 2024,
+https://appworld.dev — 9 everyday apps, 168 tool APIs, 750 tasks):
+a skill-based agent program whose prompt(s) are optimized on 60 train
+examples, with 75 val examples for Pareto selection and the remaining test
+tasks held out for final scoring. The metric is task success rate (all
+subtasks/evaluations pass, TGC). The default budget of 3000-5000 metric calls
+mirrors the paper's MIPRO-style budget (3000 for MIPRO-light, ~5000 for heavy;
+see GEPA paper Sec 4 / MIPROv2 ablations and AppWorld evaluation budget
+discussion). Use 4000 as the default like other mid-scale benchmarks.
+
+Programs:
+    1stage  - skill-based agent: one optimized system prompt
+    2stage  - plan-then-execute: plan prompt + execution prompt
 
 Conditions:
     vanilla  - stock GEPA reflective mutation
@@ -15,8 +20,10 @@ Conditions:
     action   - action-conditioned reflection with verbalized sampling
 
 Usage:
-    uv run python examples/livebench_math/main.py [--condition vanilla|random|action|all]
-        [--max-metric-calls N] [--train-limit N] [--val-limit N] [--test-limit N]
+    uv run python -m examples.appworld.main [--condition vanilla|random|action|all]
+        [--program 1stage|2stage] [--max-metric-calls N]
+        [--train-limit N] [--val-limit N] [--test-limit N]
+        [--data-path PATH]
 """
 
 import argparse
@@ -25,10 +32,11 @@ import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 
-from examples.livebench_math.utils import (
-    livebench_metric,
-    load_livebench_math_dataset,
-    run_livebench_single_stage,
+from examples.appworld.utils import (
+    appworld_metric,
+    load_appworld_dataset,
+    run_single_stage,
+    run_two_stage,
 )
 from gepa.core.action_tracking import ActionDiversityCallback
 from gepa.lm import LM
@@ -46,55 +54,102 @@ from gepa.strategies.action_space import (
     build_structured_actions,
 )
 
-SEED_CANDIDATE = {
-    "instruction": "Solve the math problem carefully. Show your reasoning step by step and give the final answer clearly after 'Final Answer:'."
+# Seed prompts: single system prompt (1stage) and plan/execute pair (2stage).
+# Tuned to describe the AppWorld tool-use task without assuming a specific
+# harness — the real AppWorld supervisor runs evaluation code; offline the
+# metric uses subtask string checks.
+SEED_CANDIDATE_1STAGE = {
+    "system_prompt": (
+        "You are an AI assistant that helps users complete everyday tasks "
+        "using a suite of apps (email, calendar, contacts, banking, shopping, "
+        "and more). You have access to 168 tool APIs. Read the task, think "
+        "step by step about which tools to call and in what order, then "
+        "produce the final answer or tool-call sequence that completes the task."
+    ),
+}
+
+SEED_CANDIDATE_2STAGE = {
+    "plan": (
+        "You are a planning assistant for the AppWorld environment (9 apps, "
+        "168 tool APIs). Given a task, produce a concise high-level plan: "
+        "list the subtasks, the apps/tools each subtask needs, and the order "
+        "to execute them. Do not yet produce the final answer — just the plan."
+    ),
+    "execute": (
+        "You are an execution assistant for the AppWorld environment. Given a "
+        "task and a plan, carry out the plan step by step using the available "
+        "tool APIs. Produce the final answer or action sequence that completes "
+        "the task. Ensure every subtask in the plan is addressed."
+    ),
 }
 
 _CONDITION_DIR_NAMES = {
-    "vanilla": "livebench_math_vanilla",
-    "random": "livebench_math_random_action",
-    "action": "livebench_math_verbalized_action",
+    "vanilla": "appworld_vanilla",
+    "random": "appworld_random_action",
+    "action": "appworld_verbalized_action",
 }
 
 
 def _structured_seed(text: str) -> str:
-    """Wrap seed sentence in a best-practice markdown skeleton."""
+    """Wrap a seed sentence in a best-practice markdown skeleton.
+
+    The paper's seed sentence is preserved verbatim in the Task section; other
+    sections start as explicit placeholders for section-scoped actions to fill.
+    """
     return (
-        "## Role\nYou are an expert competition mathematician.\n\n"
+        "## Role\n(none yet)\n\n"
         f"## Task\n{text}\n\n"
-        "## Rules\n- Be precise and rigorous\n- Show key steps before the final answer\n\n"
-        "## Output Format\nReasoning, then a line 'Final Answer:' followed by the answer.\n\n"
+        "## Rules\n(none yet)\n\n"
+        "## Output Format\n(none yet)\n\n"
         "## Examples\n(none yet)"
     )
 
 
-def condition_run_dir(condition: str, tag: str = "") -> str:
+def condition_run_dir(condition: str, program: str, tag: str = "") -> str:
+    suffix = "_1stage" if program == "1stage" else ""
     tag_suffix = f"_{tag}" if tag else ""
-    return f"outputs/{_CONDITION_DIR_NAMES[condition]}{tag_suffix}"
+    return f"outputs/{_CONDITION_DIR_NAMES[condition]}{suffix}{tag_suffix}"
 
 
-def seed_candidate(seed_style: str = "plain") -> dict:
-    seed = dict(SEED_CANDIDATE)
+def seed_candidate(program: str, seed_style: str = "plain") -> dict:
+    base = SEED_CANDIDATE_1STAGE if program == "1stage" else SEED_CANDIDATE_2STAGE
+    seed = dict(base)
     if seed_style == "structured":
-        seed = {k: _structured_seed(v) for k, v in seed.items()}
+        seed = {component: _structured_seed(text) for component, text in seed.items()}
     return seed
 
 
-def make_evaluator(solver_model: str, api_base: str | None = None):
-    """Create evaluator closed over solver model name."""
+def run_program(candidate: dict, task: str, program: str, model: str, api_base: str | None) -> tuple[str | None, str]:
+    """Run the candidate program on a task, returning (plan_or_None, final_response)."""
+    if program == "1stage":
+        return None, run_single_stage(candidate["system_prompt"], task, model=model, api_base=api_base)
+    plan, final = run_two_stage(
+        candidate["plan"],
+        candidate["execute"],
+        task,
+        model=model,
+        api_base=api_base,
+    )
+    return plan, final
+
+
+def make_evaluator(solver_model: str, api_base: str | None = None, program: str = "1stage"):
+    """Create an evaluator function closed over the solver model name."""
 
     def evaluate(candidate: dict, example: dict) -> tuple[float, SideInfo]:
-        prompt = candidate.get("instruction") or candidate.get("system_prompt") or next(iter(candidate.values()))
-        problem = example.get("prompt") or example.get("problem") or example.get("input", "")
-        raw_output = run_livebench_single_stage(prompt, problem, model=solver_model, api_base=api_base)
-        score, feedback = livebench_metric(raw_output, example)
+        response, final_response = run_program(candidate, example["prompt"], program, solver_model, api_base)
+        score, feedback = appworld_metric(final_response, example)
         side_info: SideInfo = {
             "score": score,
-            "problem": problem,
-            "output": raw_output,
+            "query": example["prompt"],
+            "output": final_response,
             "execution_feedback": feedback,
-            "answer": str(example.get("answer", "")),
         }
+        if response is not None:
+            side_info["stage1_response"] = response
+        # Preserve task id for analysis
+        if example.get("task_id"):
+            side_info["task_id"] = example["task_id"]
         return score, side_info
 
     return evaluate
@@ -105,15 +160,14 @@ def evaluate_on_set(
     dataset: list[dict],
     solver_model: str,
     api_base: str | None = None,
-    max_workers: int = 16,
+    max_workers: int = 24,
+    program: str = "1stage",
 ) -> float:
-    """Evaluate candidate on dataset, returning mean accuracy."""
-    prompt = candidate.get("instruction") or candidate.get("system_prompt") or next(iter(candidate.values()))
+    """Evaluate a candidate on a dataset, returning mean task success rate."""
 
     def score_one(example: dict) -> float:
-        problem = example.get("prompt") or example.get("problem") or example.get("input", "")
-        out = run_livebench_single_stage(prompt, problem, model=solver_model, api_base=api_base)
-        score, _ = livebench_metric(out, example)
+        _, final_response = run_program(candidate, example["prompt"], program, solver_model, api_base)
+        score, _ = appworld_metric(final_response, example)
         return score
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -122,7 +176,12 @@ def evaluate_on_set(
 
 
 def prompt_diversity(candidates: list[dict]) -> dict[str, dict[str, float]]:
-    """Textual diversity of explored candidates, per component."""
+    """Textual diversity of explored candidates, per component.
+
+    For each component, computes the mean pairwise Jaccard distance
+    (1 - |A intersect B| / |A union B| over lowercased token sets) across all
+    explored candidate texts, plus the number of unique texts.
+    """
     if not candidates:
         return {}
     diversity: dict[str, dict[str, float]] = {}
@@ -141,6 +200,7 @@ def prompt_diversity(candidates: list[dict]) -> dict[str, dict[str, float]]:
 
 
 def dump_candidates(result, run_dir: str) -> str:
+    """Write all explored candidates (with lineage and scores) to candidates.json."""
     payload = {
         "best_idx": result.best_idx,
         "total_metric_calls": result.total_metric_calls,
@@ -158,6 +218,7 @@ def dump_candidates(result, run_dir: str) -> str:
 
 
 def dump_action_summary(tracker: ActionDiversityCallback, run_dir: str, selector=None) -> str:
+    """Persist the action tracker's aggregate summary plus raw per-action data."""
     payload = {
         "summary": tracker.summary(),
         "action_score_deltas": dict(tracker.action_score_deltas),
@@ -173,14 +234,7 @@ def dump_action_summary(tracker: ActionDiversityCallback, run_dir: str, selector
 
 
 def build_config(condition: str, args, reflection_lm_kwargs: dict):
-    """Build the GEPAConfig for one condition. Returns (config, action_selector).
-
-    Supports both old GEPA (ReflectionConfig.action_selector) and new
-    engine-pluggable path (reflection_strategy with StatelessReflectionLM).
-    Mirrors examples/hotpotqa/main.py.
-    """
-    import inspect
-
+    """Build the GEPAConfig for one condition. Returns (config, action_selector)."""
     action_space = build_structured_actions() if args.actions == "structured" else DEFAULT_ACTIONS
     action_selector = None
     if condition == "random":
@@ -188,59 +242,21 @@ def build_config(condition: str, args, reflection_lm_kwargs: dict):
     elif condition == "action":
         action_selector = VerbalizedActionSelector(
             action_space,
-            lm=LM(args.reflection_model, **(reflection_lm_kwargs or {})),
+            lm=LM(args.reflection_model, **reflection_lm_kwargs),
         )
 
-    engine_cfg = EngineConfig(
-        run_dir=condition_run_dir(condition, args.tag),
-        max_metric_calls=args.max_metric_calls,
-        parallel=True,
-        max_workers=24,
-        cache_evaluation=True,
-    )
-
-    # Prefer the legacy ReflectionConfig.action_selector if the installed GEPA still has it
-    try:
-        sig = inspect.signature(ReflectionConfig)
-        if "action_selector" in sig.parameters:
-            config = GEPAConfig(
-                engine=engine_cfg,
-                reflection=ReflectionConfig(
-                    reflection_lm=args.reflection_model,
-                    reflection_lm_kwargs=reflection_lm_kwargs or None,
-                    action_selector=action_selector,
-                ),
-            )
-            return config, action_selector
-    except Exception:
-        pass
-
-    # New path: wrap the selector in a StatelessReflectionLM and pass as reflection_strategy
-    if action_selector is not None:
-        try:
-            sig2 = inspect.signature(ReflectionConfig)
-            if "reflection_strategy" in sig2.parameters:
-                from gepa.proposer.reflective_mutation.reflection_lm import StatelessReflectionLM
-
-                lm = LM(args.reflection_model, **(reflection_lm_kwargs or {}))
-                strategy = StatelessReflectionLM(lm=lm, action_selector=action_selector)
-                config = GEPAConfig(
-                    engine=engine_cfg,
-                    reflection=ReflectionConfig(
-                        reflection_lm=args.reflection_model,
-                        reflection_lm_kwargs=reflection_lm_kwargs or None,
-                        reflection_strategy=strategy,
-                    ),
-                )
-                return config, action_selector
-        except Exception as e:
-            print(f"WARNING: action_selector via reflection_strategy failed ({e}); falling back to vanilla reflection.")
-
     config = GEPAConfig(
-        engine=engine_cfg,
+        engine=EngineConfig(
+            run_dir=condition_run_dir(condition, args.program, args.tag),
+            max_metric_calls=args.max_metric_calls,
+            parallel=True,
+            max_workers=24,
+            cache_evaluation=True,
+        ),
         reflection=ReflectionConfig(
             reflection_lm=args.reflection_model,
             reflection_lm_kwargs=reflection_lm_kwargs or None,
+            action_selector=action_selector,
         ),
     )
     return config, action_selector
@@ -255,6 +271,7 @@ def run_condition(
     evaluator,
     callbacks: list | None = None,
 ):
+    """Run one optimization condition and return the result."""
     print(f"\n{'=' * 60}")
     print(f"  Running: {name}")
     print(f"{'=' * 60}\n")
@@ -269,29 +286,43 @@ def run_condition(
         valset=valset,
         config=config,
     )
+
     return result
 
 
 def main():
-    parser = argparse.ArgumentParser(description="LiveBench-Math evaluation for action-conditioned reflection")
+    parser = argparse.ArgumentParser(description="AppWorld evaluation for action-conditioned reflection")
     parser.add_argument(
         "--max-metric-calls",
         type=int,
-        default=1839,
-        help="Budget per condition (paper LiveBench-Math: 1839, scaled Terrarium 5000, Wave B 15000)",
+        default=4000,
+        help="Budget per condition (paper MIPRO-style: 3000 light / 5000 heavy; AppWorld default 4000)",
     )
     parser.add_argument(
-        "--solver-model", type=str, default="hosted_vllm/Qwen3.5-9B", help="Solver LM model (litellm format)"
+        "--solver-model", type=str, default="hosted_vllm/Qwen3-8B", help="Solver LM model (litellm format)"
     )
     parser.add_argument(
-        "--reflection-model", type=str, default="hosted_vllm/Qwen3.5-9B", help="Reflection LM model (litellm format)"
+        "--reflection-model", type=str, default="hosted_vllm/Qwen3-8B", help="Reflection LM model (litellm format)"
     )
     parser.add_argument(
         "--api-base", type=str, default=None, help="Base URL for vLLM server (e.g. http://localhost:8000/v1)"
     )
-    parser.add_argument("--train-limit", type=int, default=None, help="Limit train-set size (paper: 122)")
-    parser.add_argument("--val-limit", type=int, default=None, help="Limit val-set size (paper: 123)")
-    parser.add_argument("--test-limit", type=int, default=None, help="Limit test-set size for final evaluation (paper: 123)")
+    parser.add_argument(
+        "--data-path",
+        type=str,
+        default=None,
+        help="Path to AppWorld data file or directory (JSONL/JSON); else tries HF appworld/appworld then data/*.jsonl",
+    )
+    parser.add_argument("--train-limit", type=int, default=None, help="Limit train-set size (default: 60)")
+    parser.add_argument("--val-limit", type=int, default=None, help="Limit val-set size (default: 75)")
+    parser.add_argument("--test-limit", type=int, default=None, help="Limit test-set size for final evaluation")
+    parser.add_argument(
+        "--program",
+        type=str,
+        default="1stage",
+        choices=["1stage", "2stage"],
+        help="Program structure: 1stage (skill-based agent) or 2stage (plan then execute)",
+    )
     parser.add_argument(
         "--condition",
         type=str,
@@ -304,7 +335,7 @@ def main():
         type=str,
         default="plain",
         choices=["plain", "structured"],
-        help="Seed prompts: plain paper sentence or markdown skeleton (Role/Task/Rules/Output Format/Examples)",
+        help="Seed prompts: plain sentences or a markdown skeleton (Role/Task/Rules/Output Format/Examples)",
     )
     parser.add_argument(
         "--actions",
@@ -313,32 +344,23 @@ def main():
         choices=["default", "structured"],
         help="Action space: DEFAULT_ACTIONS or section-scoped structured actions (implies --seed-style structured)",
     )
-    parser.add_argument("--tag", type=str, default="", help="Suffix appended to run dirs (e.g. livebench_rev1)")
-    parser.add_argument(
-        "--splits",
-        type=str,
-        default="paper",
-        choices=["paper", "terrarium"],
-        help="Splits: paper 122/123/123 or terrarium 100/100/168 (from GEPA parallel-proposals release)",
-    )
+    parser.add_argument("--tag", type=str, default="", help="Suffix appended to run dirs (e.g. rev1, 4k)")
     args = parser.parse_args()
 
     if args.actions == "structured" and args.seed_style != "structured":
         print("--actions structured implies --seed-style structured; overriding seed style.")
         args.seed_style = "structured"
 
-    splits = (100, 100, 168) if args.splits == "terrarium" else None
-    trainset, valset, testset = load_livebench_math_dataset(splits=splits)
-
+    trainset, valset, testset = load_appworld_dataset(data_path=args.data_path)
     if args.train_limit is not None:
         trainset = trainset[: args.train_limit]
     if args.val_limit is not None:
         valset = valset[: args.val_limit]
     if args.test_limit is not None:
         testset = testset[: args.test_limit]
-    print(f"Loaded {len(trainset)} train / {len(valset)} val / {len(testset)} test examples (LiveBench-Math {args.splits})")
+    print(f"Loaded {len(trainset)} train / {len(valset)} val / {len(testset)} test examples ({args.program})")
 
-    evaluator = make_evaluator(args.solver_model, api_base=args.api_base)
+    evaluator = make_evaluator(args.solver_model, api_base=args.api_base, program=args.program)
 
     reflection_lm_kwargs = {}
     if args.api_base is not None:
@@ -355,22 +377,22 @@ def main():
             trackers[condition] = ActionDiversityCallback()
             callbacks = [trackers[condition]]
         results[condition] = run_condition(
-            f"{condition} GEPA (LiveBench-Math {args.seed_style} seeds)",
-            seed_candidate(args.seed_style),
+            f"{condition} GEPA ({args.program}, {args.seed_style} seeds)",
+            seed_candidate(args.program, args.seed_style),
             trainset,
             valset,
             config,
             evaluator,
             callbacks=callbacks,
         )
-        run_dir = condition_run_dir(condition, args.tag)
+        run_dir = condition_run_dir(condition, args.program, args.tag)
         path = dump_candidates(results[condition], run_dir)
         print(f"[{condition}] wrote {path}")
         if condition in trackers:
             path = dump_action_summary(trackers[condition], run_dir, selector=selector)
             print(f"[{condition}] wrote {path}")
 
-    # Report: best prompts
+    # Report: best prompts (full text)
     print(f"\n{'=' * 60}")
     print("  Best prompts")
     print(f"{'=' * 60}")
@@ -379,28 +401,29 @@ def main():
         for component, text in result.best_candidate.items():
             print(f"\n[{name}] {component}:\n{text}")
 
-    # Report: test accuracy + diversity
+    # Report: test success rate + diversity
     print(f"\n{'=' * 60}")
     print("  Comparison")
     print(f"{'=' * 60}\n")
 
     baseline_score = evaluate_on_set(
-        seed_candidate(args.seed_style),
+        seed_candidate(args.program, args.seed_style),
         testset,
         args.solver_model,
         api_base=args.api_base,
+        program=args.program,
     )
-    print(f"Baseline (seed prompts) test accuracy: {baseline_score:.2%} on {len(testset)} examples\n")
+    print(f"Baseline (seed prompts) test task success rate: {baseline_score:.2%} on {len(testset)} examples\n")
 
     for name, result in results.items():
         test_score = evaluate_on_set(
-            result.best_candidate, testset, args.solver_model, api_base=args.api_base
+            result.best_candidate, testset, args.solver_model, api_base=args.api_base, program=args.program
         )
         diversity = prompt_diversity(result.candidates)
         print(f"[{name}]")
         print(f"  candidates explored:      {len(result.candidates)}")
         print(f"  best val score:           {result.val_aggregate_scores[result.best_idx]:.4f}")
-        print(f"  test accuracy:            {test_score:.2%}")
+        print(f"  test task success rate:   {test_score:.2%}")
         for component, stats in diversity.items():
             print(
                 f"  diversity[{component}]: jaccard_dist={stats['mean_pairwise_jaccard_distance']:.3f} "
@@ -408,7 +431,7 @@ def main():
             )
         print()
 
-    # Action diversity metrics
+    # Action diversity metrics (random / action conditions)
     for name, tracker in trackers.items():
         print(f"{'=' * 60}")
         print(f"  Action Diversity Metrics [{name}]")

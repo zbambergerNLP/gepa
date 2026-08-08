@@ -1,11 +1,20 @@
-"""AIME Math evaluation: vanilla GEPA vs random vs verbalized action selection.
+"""FrontierBench evaluation: vanilla GEPA vs random vs verbalized action selection.
 
-Replicates the AIME 2022-2024 -> 2025 protocol (AI-MO/aimo-validation-aime
-shuffled seed 0 -> 45 train / 45 val, MathArena/aime_2025 30 problems
-expanded 5x -> 150 test items to reduce decoding variance). The metric is
-exact integer-match accuracy. Program is single-step CoT (one optimized
-instruction, one LM call). Default budget 500 metric calls matches the
-legacy AIME example; scale to 15000 for Wave B diversity study like IFBench.
+Replicates the Frontier-Bench setup (https://github.com/laude-institute/frontier-bench):
+harder agentic research tasks from the Terminal-Bench authors. Each task is an
+end-to-end research assignment scored by an LLM judge / test harness pass.
+
+The program is either 1-stage (single execution) or 2-stage (research plan ->
+execution), mirroring the auto-research / Terminal-Bench agentic pattern. The
+metric is task success (mean pass rate over success criteria, 0-1) with
+per-criterion feedback via LLM judge, with a heuristic fallback.
+
+Dataset: HF ``laude/frontier-bench`` (harder agentic research tasks, Terminal-Bench
+lineage) or a local ``data/frontierbench.jsonl`` fallback. Splits are 30/30/30
+(train/val/test) via seed-0 shuffle; use --train-limit / --val-limit /
+--test-limit and --data-path to override. Budget default is 4000 metric calls
+(within the 3000-5000 stretch range). Like IFBench/PUPA, the 2-stage program
+has two prompts optimized jointly.
 
 Conditions:
     vanilla  - stock GEPA reflective mutation
@@ -13,9 +22,13 @@ Conditions:
     action   - action-conditioned reflection with verbalized sampling
 
 Usage:
-    uv run python examples/aime_math/main.py [--condition vanilla|random|action|all]
-        [--max-metric-calls N] [--train-limit N] [--val-limit N] [--test-limit N]
+    uv run python examples/frontierbench/main.py [--condition vanilla|random|action|all]
+        [--program 2stage|1stage] [--max-metric-calls N]
+        [--train-limit N] [--val-limit N] [--test-limit N]
+        [--data-path path/to/frontierbench.jsonl]
 """
+
+from __future__ import annotations
 
 import argparse
 import itertools
@@ -23,7 +36,7 @@ import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 
-from examples.aime_math.utils import load_math_dataset, math_metric, run_math_single_stage
+from examples.frontierbench.utils import frontierbench_metric, load_frontierbench_dataset, run_single_stage, run_two_stage
 from gepa.core.action_tracking import ActionDiversityCallback
 from gepa.lm import LM
 from gepa.optimize_anything import (
@@ -40,60 +53,97 @@ from gepa.strategies.action_space import (
     build_structured_actions,
 )
 
+# Seed instructions: 2-stage = plan then execution
 SEED_CANDIDATE = {
-    "instruction": "Solve the math problem carefully. Break down the steps and provide the final answer as a single number."
+    "research_plan": (
+        "Create a detailed research plan for the given task. Outline the methodology, "
+        "required tools and data, step-by-step execution, validation checks, and how "
+        "you will handle failure modes."
+    ),
+    "execute_task": (
+        "Execute the research task following the research plan. Provide a complete "
+        "output including methodology, concrete results or code, analysis, and "
+        "discussion of limitations. Validate your claims."
+    ),
+}
+
+SEED_CANDIDATE_1STAGE = {
+    "execute_task": (
+        "Execute the research task end-to-end. Provide a complete output including "
+        "methodology, concrete results or code, analysis, and discussion of "
+        "limitations. Validate your claims."
+    ),
 }
 
 _CONDITION_DIR_NAMES = {
-    "vanilla": "aime_vanilla",
-    "random": "aime_random_action",
-    "action": "aime_verbalized_action",
+    "vanilla": "frontierbench_vanilla",
+    "random": "frontierbench_random_action",
+    "action": "frontierbench_verbalized_action",
 }
 
 
-def _structured_seed(text: str) -> str:
-    """Wrap seed sentence in a best-practice markdown skeleton.
-
-    The paper seed sentence is preserved verbatim in the Task section; other
-    sections start as explicit placeholders for section-scoped actions to fill.
-    """
+def _structured_seed(task_sentence: str) -> str:
+    """Wrap a seed sentence in a best-practice markdown skeleton."""
     return (
-        "## Role\nYou are an expert competition mathematician.\n\n"
-        f"## Task\n{text}\n\n"
+        "## Role\nYou are an expert agentic researcher.\n\n"
+        f"## Task\n{task_sentence}\n\n"
         "## Rules\n(none yet)\n\n"
         "## Output Format\n(none yet)\n\n"
         "## Examples\n(none yet)"
     )
 
 
-def condition_run_dir(condition: str, tag: str = "") -> str:
+def condition_run_dir(condition: str, program: str, tag: str = "") -> str:
+    suffix = "_1stage" if program == "1stage" else ""
     tag_suffix = f"_{tag}" if tag else ""
-    return f"outputs/{_CONDITION_DIR_NAMES[condition]}{tag_suffix}"
+    return f"outputs/{_CONDITION_DIR_NAMES[condition]}{suffix}{tag_suffix}"
 
 
-def seed_candidate(seed_style: str = "plain") -> dict:
-    seed = dict(SEED_CANDIDATE)
+def seed_candidate(program: str, seed_style: str = "plain") -> dict:
+    seed = dict(SEED_CANDIDATE_1STAGE if program == "1stage" else SEED_CANDIDATE)
     if seed_style == "structured":
-        seed = {k: _structured_seed(v) for k, v in seed.items()}
+        seed = {component: _structured_seed(text) for component, text in seed.items()}
     return seed
 
 
-def make_evaluator(solver_model: str, api_base: str | None = None):
-    """Create evaluator closed over solver model name."""
+def run_program(candidate: dict, task: str, program: str, model: str, api_base: str | None) -> tuple[str | None, str]:
+    """Run the candidate program on a task, returning (stage1, final)."""
+    if program == "1stage":
+        prompt = candidate.get("execute_task") or next(iter(candidate.values()))
+        return None, run_single_stage(prompt, task, model=model, api_base=api_base)
+    plan_p = candidate.get("research_plan", "")
+    exec_p = candidate.get("execute_task", "")
+    if not plan_p and not exec_p:
+        vals = list(candidate.values())
+        if len(vals) >= 2:
+            plan_p, exec_p = vals[0], vals[1]
+        elif len(vals) == 1:
+            plan_p, exec_p = vals[0], vals[0]
+    return run_two_stage(plan_p, exec_p, task, model=model, api_base=api_base)
+
+
+def make_evaluator(
+    solver_model: str,
+    api_base: str | None = None,
+    judge_model: str | None = None,
+    judge_api_base: str | None = None,
+    program: str = "2stage",
+):
+    """Create an evaluator function closed over the solver/judge models."""
 
     def evaluate(candidate: dict, example: dict) -> tuple[float, SideInfo]:
-        # candidate is dict like {"instruction": "..."}
-        prompt = candidate.get("instruction") or candidate.get("system_prompt") or next(iter(candidate.values()))
-        problem = example.get("prompt") or example.get("problem") or example.get("input", "")
-        raw_output = run_math_single_stage(prompt, problem, model=solver_model, api_base=api_base)
-        # Math metric expects raw output string
-        score, feedback = math_metric(example, raw_output)
+        task = example.get("prompt") or example.get("task") or example.get("instruction") or ""
+        _, final = run_program(candidate, task, program, solver_model, api_base)
+        j_model = judge_model or solver_model
+        j_base = judge_api_base if judge_model is not None else api_base
+        score, feedback = frontierbench_metric(final, example, judge_model=j_model, judge_api_base=j_base)
         side_info: SideInfo = {
             "score": score,
-            "problem": problem,
-            "output": raw_output,
+            "task": task,
+            "output": final,
             "execution_feedback": feedback,
-            "answer": str(example.get("answer", "")),
+            "category": example.get("category", ""),
+            "difficulty": example.get("difficulty", ""),
         }
         return score, side_info
 
@@ -105,16 +155,19 @@ def evaluate_on_set(
     dataset: list[dict],
     solver_model: str,
     api_base: str | None = None,
-    max_workers: int = 16,
+    judge_model: str | None = None,
+    judge_api_base: str | None = None,
+    max_workers: int = 12,
+    program: str = "2stage",
 ) -> float:
-    """Evaluate candidate on dataset, returning mean accuracy."""
-
-    prompt = candidate.get("instruction") or candidate.get("system_prompt") or next(iter(candidate.values()))
+    """Evaluate a candidate on a dataset, returning mean task-success."""
 
     def score_one(example: dict) -> float:
-        problem = example.get("prompt") or example.get("problem") or example.get("input", "")
-        out = run_math_single_stage(prompt, problem, model=solver_model, api_base=api_base)
-        score, _ = math_metric(example, out)
+        task = example.get("prompt") or example.get("task") or example.get("instruction") or ""
+        _, final = run_program(candidate, task, program, solver_model, api_base)
+        j_model = judge_model or solver_model
+        j_base = judge_api_base if judge_model is not None else api_base
+        score, _ = frontierbench_metric(final, example, judge_model=j_model, judge_api_base=j_base)
         return score
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -176,14 +229,7 @@ def dump_action_summary(tracker: ActionDiversityCallback, run_dir: str, selector
 
 
 def build_config(condition: str, args, reflection_lm_kwargs: dict):
-    """Build the GEPAConfig for one condition. Returns (config, action_selector).
-
-    Supports both old GEPA (ReflectionConfig.action_selector) and new
-    engine-pluggable path (reflection_strategy with StatelessReflectionLM).
-    Mirrors examples/hotpotqa/main.py.
-    """
-    import inspect
-
+    """Build the GEPAConfig for one condition. Returns (config, action_selector)."""
     action_space = build_structured_actions() if args.actions == "structured" else DEFAULT_ACTIONS
     action_selector = None
     if condition == "random":
@@ -191,59 +237,21 @@ def build_config(condition: str, args, reflection_lm_kwargs: dict):
     elif condition == "action":
         action_selector = VerbalizedActionSelector(
             action_space,
-            lm=LM(args.reflection_model, **(reflection_lm_kwargs or {})),
+            lm=LM(args.reflection_model, **reflection_lm_kwargs),
         )
 
-    engine_cfg = EngineConfig(
-        run_dir=condition_run_dir(condition, args.tag),
-        max_metric_calls=args.max_metric_calls,
-        parallel=True,
-        max_workers=24,
-        cache_evaluation=True,
-    )
-
-    # Prefer the legacy ReflectionConfig.action_selector if the installed GEPA still has it
-    try:
-        sig = inspect.signature(ReflectionConfig)
-        if "action_selector" in sig.parameters:
-            config = GEPAConfig(
-                engine=engine_cfg,
-                reflection=ReflectionConfig(
-                    reflection_lm=args.reflection_model,
-                    reflection_lm_kwargs=reflection_lm_kwargs or None,
-                    action_selector=action_selector,
-                ),
-            )
-            return config, action_selector
-    except Exception:
-        pass
-
-    # New path: wrap the selector in a StatelessReflectionLM and pass as reflection_strategy
-    if action_selector is not None:
-        try:
-            sig2 = inspect.signature(ReflectionConfig)
-            if "reflection_strategy" in sig2.parameters:
-                from gepa.proposer.reflective_mutation.reflection_lm import StatelessReflectionLM
-
-                lm = LM(args.reflection_model, **(reflection_lm_kwargs or {}))
-                strategy = StatelessReflectionLM(lm=lm, action_selector=action_selector)
-                config = GEPAConfig(
-                    engine=engine_cfg,
-                    reflection=ReflectionConfig(
-                        reflection_lm=args.reflection_model,
-                        reflection_lm_kwargs=reflection_lm_kwargs or None,
-                        reflection_strategy=strategy,
-                    ),
-                )
-                return config, action_selector
-        except Exception as e:
-            print(f"WARNING: action_selector via reflection_strategy failed ({e}); falling back to vanilla reflection.")
-
     config = GEPAConfig(
-        engine=engine_cfg,
+        engine=EngineConfig(
+            run_dir=condition_run_dir(condition, args.program, args.tag),
+            max_metric_calls=args.max_metric_calls,
+            parallel=True,
+            max_workers=12,
+            cache_evaluation=True,
+        ),
         reflection=ReflectionConfig(
             reflection_lm=args.reflection_model,
             reflection_lm_kwargs=reflection_lm_kwargs or None,
+            action_selector=action_selector,
         ),
     )
     return config, action_selector
@@ -278,12 +286,18 @@ def run_condition(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="AIME Math evaluation for action-conditioned reflection")
+    parser = argparse.ArgumentParser(description="FrontierBench evaluation for action-conditioned reflection")
+    parser.add_argument(
+        "--data-path",
+        type=str,
+        default=None,
+        help="Path to FrontierBench JSONL (one task per line). If omitted, tries HF laude/frontier-bench then synthetic fallback.",
+    )
     parser.add_argument(
         "--max-metric-calls",
         type=int,
-        default=500,
-        help="Budget per condition (legacy AIME default 500; paper IFBench 3593 scaled to 15000 for Wave B diversity study)",
+        default=4000,
+        help="Budget per condition (stretch 3000-5000; default 4000, scaled Wave B: 15000)",
     )
     parser.add_argument(
         "--solver-model", type=str, default="hosted_vllm/Qwen3.5-9B", help="Solver LM model (litellm format)"
@@ -291,12 +305,19 @@ def main():
     parser.add_argument(
         "--reflection-model", type=str, default="hosted_vllm/Qwen3.5-9B", help="Reflection LM model (litellm format)"
     )
+    parser.add_argument("--judge-model", type=str, default=None, help="Judge LM for task success (default: solver_model)")
+    parser.add_argument("--api-base", type=str, default=None, help="Base URL for vLLM server (e.g. http://localhost:8000/v1)")
+    parser.add_argument("--train-limit", type=int, default=None, help="Limit train-set size (paper: 30)")
+    parser.add_argument("--val-limit", type=int, default=None, help="Limit val-set size (paper: 30)")
+    parser.add_argument("--test-limit", type=int, default=None, help="Limit test-set size for final evaluation (paper: 30)")
+    parser.add_argument("--seed", type=int, default=0, help="Dataset shuffle seed")
     parser.add_argument(
-        "--api-base", type=str, default=None, help="Base URL for vLLM server (e.g. http://localhost:8000/v1)"
+        "--program",
+        type=str,
+        default="2stage",
+        choices=["2stage", "1stage"],
+        help="Program structure: 2stage (plan-then-execute) or 1stage (single execution)",
     )
-    parser.add_argument("--train-limit", type=int, default=None, help="Limit train-set size (paper: 45)")
-    parser.add_argument("--val-limit", type=int, default=None, help="Limit val-set size (paper: 45)")
-    parser.add_argument("--test-limit", type=int, default=None, help="Limit test-set size for final evaluation (paper: 150 = 30x5)")
     parser.add_argument(
         "--condition",
         type=str,
@@ -309,7 +330,7 @@ def main():
         type=str,
         default="plain",
         choices=["plain", "structured"],
-        help="Seed prompts: plain paper sentence or markdown skeleton (Role/Task/Rules/Output Format/Examples)",
+        help="Seed prompts: plain sentences or a markdown skeleton (Role/Task/Rules/Output Format/Examples)",
     )
     parser.add_argument(
         "--actions",
@@ -318,23 +339,25 @@ def main():
         choices=["default", "structured"],
         help="Action space: DEFAULT_ACTIONS or section-scoped structured actions (implies --seed-style structured)",
     )
-    parser.add_argument("--tag", type=str, default="", help="Suffix appended to run dirs (e.g. aime_rev2)")
+    parser.add_argument("--tag", type=str, default="", help="Suffix appended to run dirs (e.g. rev1)")
     args = parser.parse_args()
 
     if args.actions == "structured" and args.seed_style != "structured":
         print("--actions structured implies --seed-style structured; overriding seed style.")
         args.seed_style = "structured"
 
-    trainset, valset, testset = load_math_dataset()
-    if args.train_limit is not None:
-        trainset = trainset[: args.train_limit]
-    if args.val_limit is not None:
-        valset = valset[: args.val_limit]
-    if args.test_limit is not None:
-        testset = testset[: args.test_limit]
-    print(f"Loaded {len(trainset)} train / {len(valset)} val / {len(testset)} test examples (AIME 2022-24 -> 2025, 30x5={len(testset)})")
+    trainset, valset, testset = load_frontierbench_dataset(
+        data_path=args.data_path, seed=args.seed, train_limit=args.train_limit, val_limit=args.val_limit, test_limit=args.test_limit
+    )
+    print(f"Loaded {len(trainset)} train / {len(valset)} val / {len(testset)} test examples (FrontierBench {args.program}, {args.seed_style})")
+    if args.data_path:
+        print(f"  (from {args.data_path})")
+    else:
+        print("  (from laude/frontier-bench via datasets; Terminal-Bench lineage, sliced 30/30/30)")
 
-    evaluator = make_evaluator(args.solver_model, api_base=args.api_base)
+    evaluator = make_evaluator(
+        args.solver_model, api_base=args.api_base, judge_model=args.judge_model, judge_api_base=args.api_base, program=args.program
+    )
 
     reflection_lm_kwargs = {}
     if args.api_base is not None:
@@ -351,15 +374,15 @@ def main():
             trackers[condition] = ActionDiversityCallback()
             callbacks = [trackers[condition]]
         results[condition] = run_condition(
-            f"{condition} GEPA (AIME {args.seed_style} seeds)",
-            seed_candidate(args.seed_style),
+            f"{condition} GEPA (FrontierBench {args.program}, {args.seed_style} seeds)",
+            seed_candidate(args.program, args.seed_style),
             trainset,
             valset,
             config,
             evaluator,
             callbacks=callbacks,
         )
-        run_dir = condition_run_dir(condition, args.tag)
+        run_dir = condition_run_dir(condition, args.program, args.tag)
         path = dump_candidates(results[condition], run_dir)
         print(f"[{condition}] wrote {path}")
         if condition in trackers:
@@ -375,28 +398,31 @@ def main():
         for component, text in result.best_candidate.items():
             print(f"\n[{name}] {component}:\n{text}")
 
-    # Report: test accuracy + diversity
+    # Report: test success + diversity
     print(f"\n{'=' * 60}")
     print("  Comparison")
     print(f"{'=' * 60}\n")
 
     baseline_score = evaluate_on_set(
-        seed_candidate(args.seed_style),
+        seed_candidate(args.program, args.seed_style),
         testset,
         args.solver_model,
         api_base=args.api_base,
+        judge_model=args.judge_model,
+        judge_api_base=args.api_base,
+        program=args.program,
     )
-    print(f"Baseline (seed prompts) test accuracy: {baseline_score:.2%} on {len(testset)} examples (30 unique x5)\n")
+    print(f"Baseline (seed prompts) test task success: {baseline_score:.3f} on {len(testset)} examples\n")
 
     for name, result in results.items():
         test_score = evaluate_on_set(
-            result.best_candidate, testset, args.solver_model, api_base=args.api_base
+            result.best_candidate, testset, args.solver_model, api_base=args.api_base, judge_model=args.judge_model, judge_api_base=args.api_base, program=args.program
         )
         diversity = prompt_diversity(result.candidates)
         print(f"[{name}]")
         print(f"  candidates explored:      {len(result.candidates)}")
         print(f"  best val score:           {result.val_aggregate_scores[result.best_idx]:.4f}")
-        print(f"  test accuracy:            {test_score:.2%}")
+        print(f"  test task success:        {test_score:.3f}")
         for component, stats in diversity.items():
             print(
                 f"  diversity[{component}]: jaccard_dist={stats['mean_pairwise_jaccard_distance']:.3f} "
@@ -404,7 +430,7 @@ def main():
             )
         print()
 
-    # Action diversity metrics (random / action conditions)
+    # Action diversity metrics
     for name, tracker in trackers.items():
         print(f"{'=' * 60}")
         print(f"  Action Diversity Metrics [{name}]")

@@ -115,7 +115,8 @@ def _normalize_answer(text: str) -> str:
 
     - strips <think> blocks, whitespace, trailing period
     - extracts \\boxed{...} if present (common in math datasets)
-    - lowercases, removes commas, collapses whitespace
+    - lowercases, keeps commas (list answers like 1,6,7) but normalizes
+      spacing around them, collapses whitespace
     - removes surrounding $ and LaTeX wrappers
     """
     text = _strip_think(text)
@@ -123,16 +124,19 @@ def _normalize_answer(text: str) -> str:
     m = re.search(r"\\boxed\{([^}]+)\}", text)
     if m:
         text = m.group(1)
-    # Also handle \fbox, $...$
     text = text.strip()
-    # Remove leading "Answer:" etc
+    # Remove leading "Answer:" etc (also handle "Answer: 1,2,3" with marker)
     text = re.sub(r"^(answer|final answer)\s*[:\-]\s*", "", text, flags=re.IGNORECASE)
-    # Collapse whitespace, remove commas
-    text = text.replace(",", "").strip()
-    text = re.sub(r"\s+", " ", text)
+    # Normalize commas: ensure single comma, no spaces before, one space after is optional -> normalized to comma with no spaces for list comparison
+    # Keep commas; handle thousand separator later in numeric branch
+    # Collapse whitespace first, then tidy commas
+    text = re.sub(r"\s+", " ", text).strip()
+    # Remove spaces before/after commas, keep comma
+    text = re.sub(r"\s*,\s*", ",", text)
     # Strip surrounding dollars
     if text.startswith("$") and text.endswith("$") and len(text) > 1:
         text = text[1:-1].strip()
+        text = re.sub(r"\s*,\s*", ",", text)
     # Remove trailing period
     if text.endswith(".") and len(text) > 1:
         text = text.rstrip(".").strip()
@@ -140,40 +144,86 @@ def _normalize_answer(text: str) -> str:
 
 
 def _answers_match(pred: str, gold: str) -> bool:
-    """Check if normalized prediction matches gold, with numeric tolerance."""
+    """Check if normalized prediction matches gold, with numeric tolerance.
+
+    Handles comma-separated lists (LiveBench missing-formulae answers like
+    1,6,7,2,3,4,5) by comparing token lists after normalization.
+    """
     p = _normalize_answer(pred)
     g = _normalize_answer(gold)
     if p == g:
         return True
-    # Numeric tolerance: if both parse as floats, allow small epsilon
-    try:
-        pf = float(p.replace(" ", ""))
-        gf = float(g.replace(" ", ""))
-        # exact for integers, tolerance for floats
-        if abs(pf - gf) < 1e-6:
+    # List answers: comma-separated integers (e.g. LiveBench). Compare as sets/lists
+    # Normalize each token via _normalize_answer without commas.
+    if "," in g or "," in p:
+        # Split on commas, compare token-wise (ignore spaces, case)
+        # For thousand-separator ambiguity (e.g. 1,234 vs 1234), we treat
+        # comma as list separator only when both sides contain commas or
+        # when the token counts differ after removal.
+        # We compare both interpretations and accept either.
+        p_tokens = [t.strip() for t in p.split(",") if t.strip() != ""]
+        g_tokens = [t.strip() for t in g.split(",") if t.strip() != ""]
+        # Direct token match (handles 1,6,7 vs 1, 6, 7)
+        if p_tokens == g_tokens:
             return True
-        # also handle fractions like "1/2" vs "0.5"
-        # try eval fraction
-        if "/" in g:
+        # Also compare after removing commas (thousand separator) – covers 1,234 vs 1234
+        if p.replace(",", "") == g.replace(",", ""):
+            return True
+        # Try numeric list equality (e.g. "1, 2.0" vs "1,2")
+        try:
             import fractions
 
-            try:
-                gf_frac = float(fractions.Fraction(g))
-                if abs(pf - gf_frac) < 1e-6:
-                    return True
-            except Exception:
-                pass
-        if "/" in p:
-            import fractions
+            def _tok_to_float(t: str) -> float | None:
+                t = t.strip()
+                # remove thousand commas inside token (should not happen after split)
+                t = t.replace(",", "")
+                try:
+                    return float(t)
+                except (ValueError, TypeError):
+                    pass
+                if "/" in t:
+                    try:
+                        return float(fractions.Fraction(t))
+                    except Exception:
+                        pass
+                return None
 
+            if len(p_tokens) == len(g_tokens):
+                p_floats = [_tok_to_float(t) for t in p_tokens]
+                g_floats = [_tok_to_float(t) for t in g_tokens]
+                if None not in p_floats and None not in g_floats:
+                    if all(abs(a - b) < 1e-6 for a, b in zip(p_floats, g_floats)):
+                        return True
+        except Exception:
+            pass
+        # Fall through to numeric single-value check
+    # Single-value numeric tolerance for floats/fractions (e.g. 0.5 vs 1/2)
+    import fractions
+
+    def _to_float(s: str) -> float | None:
+        # For single numeric values, strip commas that are thousand separators
+        s = s.replace(",", "").replace(" ", "")
+        try:
+            return float(s)
+        except (ValueError, TypeError):
+            pass
+        if "/" in s:
             try:
-                pf_frac = float(fractions.Fraction(p))
-                if abs(pf_frac - gf) < 1e-6:
-                    return True
+                return float(fractions.Fraction(s))
             except Exception:
                 pass
-    except (ValueError, TypeError):
-        pass
+        return None
+
+    pf = _to_float(p)
+    gf = _to_float(g)
+    if pf is not None and gf is not None and abs(pf - gf) < 1e-6:
+        return True
+    # Substring fallback: gold appears inside pred (e.g. pred = "The answer is 42." vs gold 42)
+    # Only for non-list golds
+    if "," not in g and g and g in p:
+        # Ensure it's a distinct token (word boundary) to avoid 2 matching 12
+        if re.search(rf"\b{re.escape(g)}\b", p):
+            return True
     return False
 
 
@@ -243,19 +293,29 @@ def _try_load_hf_math() -> list[dict] | None:
         all_items: list[dict] = []
         for item in ds:
             # LiveBench items vary: look for question/prompt/problem and answer/ground_truth
+            # Handle turns as list[str] (livebench/math) or list[dict] (other formats)
             question = (
                 item.get("question")
                 or item.get("prompt")
                 or item.get("problem")
                 or item.get("input")
-                or item.get("turns", [{}])[0].get("content") if isinstance(item.get("turns"), list) else None
                 or ""
             )
-            # Some LiveBench formats store turns as list of dicts with role/content
-            if not question and isinstance(item.get("turns"), list):
-                # concatenate user turns
-                parts = [t.get("content", "") for t in item["turns"] if t.get("role") == "user"]
-                question = "\n".join(parts)
+            if not question and isinstance(item.get("turns"), list) and item["turns"]:
+                turns = item["turns"]
+                first = turns[0]
+                if isinstance(first, str):
+                    question = first
+                elif isinstance(first, dict):
+                    question = first.get("content", "") or first.get("text", "") or ""
+                    # fallback: concatenate user turns if still empty
+                    if not question:
+                        parts = [t.get("content", "") for t in turns if isinstance(t, dict) and t.get("role") == "user"]
+                        question = "\n".join(parts)
+                        if not question:
+                            # join all dict contents
+                            parts = [t.get("content", "") for t in turns if isinstance(t, dict)]
+                            question = "\n".join(parts)
             question = str(question).strip()
             # Answer fields
             answer = (

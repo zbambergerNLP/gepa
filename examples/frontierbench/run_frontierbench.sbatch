@@ -1,35 +1,37 @@
 #!/bin/bash
-# Run the GEPA LiveBench-Math evaluation on della.
+# Run the GEPA FrontierBench evaluation on della.
 #
 # Serves a generator model via vLLM (from the POSIT venv, which has vLLM
-# installed), then runs the GEPA optimization experiment against it.
-# Mirrors examples/ifbench/run_ifbench.sbatch but for LiveBench-Math
-# (White et al. 2025, n=368 math, contamination-limited).
+# installed), then runs the GEPA FrontierBench optimization experiment against it.
+# Mirrors examples/frontiercs/run_frontiercs.sbatch and
+# examples/ifbench/run_ifbench.sbatch but for FrontierBench,
+# the harder agentic research benchmark from the Terminal-Bench authors
+# (https://github.com/laude-institute/frontier-bench, HF laude/frontier-bench).
 #
 # Prerequisites: same as ifbench (POSIT repo, GEPA venv, HF cache on scratch).
-# LiveBench-Math dataset is pulled via HuggingFace datasets on first use
-# (livebench/livebench filtered to math, 368 problems) or from local
-# artifact examples/livebench_math/data/livebench_math.jsonl.
+# FrontierBench dataset is pulled via HuggingFace datasets on first use
+# (laude/frontier-bench, harder agentic research tasks) or from a local
+# data/frontierbench.jsonl fallback.
 #
-# Usage (full paper-scale run, all three conditions):
-#   sbatch examples/livebench_math/run_livebench_math.sbatch
+# Usage (full stretch run, all three conditions, 30/30/30 splits):
+#   sbatch examples/frontierbench/run_frontierbench.sbatch
 #
-# Mini test run (20/20/20, small budget):
-#   sbatch --export=ALL,TRAIN_LIMIT=20,VAL_LIMIT=20,TEST_LIMIT=20,MAX_METRIC_CALLS=32 \
-#       --time=01:00:00 examples/livebench_math/run_livebench_math.sbatch
+# Mini test run (15/15/15, small budget):
+#   sbatch --export=ALL,TRAIN_LIMIT=15,VAL_LIMIT=15,TEST_LIMIT=15,MAX_METRIC_CALLS=150 \
+#       --time=02:00:00 examples/frontierbench/run_frontierbench.sbatch
 #
 # Override defaults:
-#   sbatch --export=ALL,MODEL=Qwen3.5-9B,CONDITION=action,SPLITS=terrarium \
-#       examples/livebench_math/run_livebench_math.sbatch
+#   sbatch --export=ALL,MODEL=Qwen3.5-9B,CONDITION=action,PROGRAM=1stage \
+#       examples/frontierbench/run_frontierbench.sbatch
 
-#SBATCH --job-name=gepa-livebench-math
+#SBATCH --job-name=gepa-frontierbench
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=24:00:00
-#SBATCH --output=gepa-livebench-math-%j.log
+#SBATCH --time=48:00:00
+#SBATCH --output=gepa-frontierbench-%j.log
 
 set -uo pipefail
 cd "${SLURM_SUBMIT_DIR:-$PWD}" || exit 1
@@ -38,11 +40,12 @@ cd "${SLURM_SUBMIT_DIR:-$PWD}" || exit 1
 MODEL_STORAGE="${MODEL_STORAGE:-/projects/BSTEWART/model_storage}"
 MODEL="${MODEL:-Qwen3.5-9B}"
 GEN_PORT="${GEN_PORT:-$((10000 + ${SLURM_JOB_ID:-0} % 5000))}"
-MAX_METRIC_CALLS="${MAX_METRIC_CALLS:-1839}"
+MAX_METRIC_CALLS="${MAX_METRIC_CALLS:-4000}"
 CONDITION="${CONDITION:-all}"
+PROGRAM="${PROGRAM:-2stage}"
 SEED_STYLE="${SEED_STYLE:-plain}"
 ACTIONS="${ACTIONS:-default}"
-SPLITS="${SPLITS:-paper}"
+DATA_PATH="${DATA_PATH:-}"
 TAG="${TAG:-}"
 TRAIN_LIMIT="${TRAIN_LIMIT:-}"
 VAL_LIMIT="${VAL_LIMIT:-}"
@@ -128,18 +131,20 @@ LIMIT_ARGS=()
 [[ -n "${VAL_LIMIT}" ]] && LIMIT_ARGS+=(--val-limit "${VAL_LIMIT}")
 [[ -n "${TEST_LIMIT}" ]] && LIMIT_ARGS+=(--test-limit "${TEST_LIMIT}")
 [[ -n "${TAG}" ]] && LIMIT_ARGS+=(--tag "${TAG}")
+[[ -n "${DATA_PATH}" ]] && LIMIT_ARGS+=(--data-path "${DATA_PATH}")
 
-echo "==> running GEPA LiveBench-Math experiment: condition=${CONDITION} splits=${SPLITS} max_metric_calls=${MAX_METRIC_CALLS}"
-echo "==> limits: train=${TRAIN_LIMIT:-full} val=${VAL_LIMIT:-full} test=${TEST_LIMIT:-full}"
+echo "==> running GEPA FrontierBench experiment: condition=${CONDITION} program=${PROGRAM} max_metric_calls=${MAX_METRIC_CALLS}"
+echo "==> limits: train=${TRAIN_LIMIT:-30} val=${VAL_LIMIT:-30} test=${TEST_LIMIT:-30}"
 echo "==> solver=${SOLVER_MODEL} reflection=${REFLECTION_MODEL} api_base=${API_BASE}"
+echo "==> data_path=${DATA_PATH:-HF laude/frontier-bench}"
 
-"${PY}" -m examples.livebench_math.main \
+"${PY}" -m examples.frontierbench.main \
     --solver-model "${SOLVER_MODEL}" \
     --reflection-model "${REFLECTION_MODEL}" \
     --api-base "${API_BASE}" \
     --max-metric-calls "${MAX_METRIC_CALLS}" \
     --condition "${CONDITION}" \
+    --program "${PROGRAM}" \
     --seed-style "${SEED_STYLE}" \
     --actions "${ACTIONS}" \
-    --splits "${SPLITS}" \
     "${LIMIT_ARGS[@]}"

@@ -1,55 +1,66 @@
 #!/bin/bash
-# Run the GEPA LiveBench-Math evaluation on della.
+# Run the GEPA TerminalBench evaluation on della.
 #
 # Serves a generator model via vLLM (from the POSIT venv, which has vLLM
-# installed), then runs the GEPA optimization experiment against it.
-# Mirrors examples/ifbench/run_ifbench.sbatch but for LiveBench-Math
-# (White et al. 2025, n=368 math, contamination-limited).
+# installed), then runs the GEPA TerminalBench optimization experiment against
+# it. Mirrors examples/ifbench/run_ifbench.sbatch for the TerminalBench
+# benchmark (T-Bench, https://terminal-bench.github.io, 50+ tasks, Docker-based).
 #
-# Prerequisites: same as ifbench (POSIT repo, GEPA venv, HF cache on scratch).
-# LiveBench-Math dataset is pulled via HuggingFace datasets on first use
-# (livebench/livebench filtered to math, 368 problems) or from local
-# artifact examples/livebench_math/data/livebench_math.jsonl.
+# Prerequisites:
+#   1. POSIT repo built on della at /home/${USER}/posit (with vLLM in its venv)
+#   2. GEPA repo synced and venv built via scripts/della/build_env.sh
+#      (uv sync --extra dev; datasets + litellm already in full)
+#   3. HF cache on scratch for first-time T-Bench fetch (laude/terminal-bench)
+#      — run once on a login node with internet, or pre-seed
+#        data/terminalbench.jsonl fallback.
 #
-# Usage (full paper-scale run, all three conditions):
-#   sbatch examples/livebench_math/run_livebench_math.sbatch
+# Usage (full run, all three conditions, 50 tasks 20/15/15):
+#   sbatch examples/terminalbench/run_terminalbench.sbatch
 #
-# Mini test run (20/20/20, small budget):
-#   sbatch --export=ALL,TRAIN_LIMIT=20,VAL_LIMIT=20,TEST_LIMIT=20,MAX_METRIC_CALLS=32 \
-#       --time=01:00:00 examples/livebench_math/run_livebench_math.sbatch
+# Mini test run (10 train / 5 val / 5 test, small budget):
+#   sbatch --export=ALL,TRAIN_LIMIT=10,VAL_LIMIT=5,TEST_LIMIT=5,MAX_METRIC_CALLS=150 \
+#       --time=02:00:00 examples/terminalbench/run_terminalbench.sbatch
 #
 # Override defaults:
-#   sbatch --export=ALL,MODEL=Qwen3.5-9B,CONDITION=action,SPLITS=terrarium \
-#       examples/livebench_math/run_livebench_math.sbatch
+#   sbatch --export=ALL,MODEL=Qwen3-8B,CONDITION=action,PROGRAM=1stage \
+#       examples/terminalbench/run_terminalbench.sbatch
+#
+# With local data:
+#   sbatch --export=ALL,DATA_PATH=/path/to/terminalbench.jsonl \
+#       examples/terminalbench/run_terminalbench.sbatch
 
-#SBATCH --job-name=gepa-livebench-math
+#SBATCH --job-name=gepa-terminalbench
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=24:00:00
-#SBATCH --output=gepa-livebench-math-%j.log
+#SBATCH --time=48:00:00
+#SBATCH --output=gepa-terminalbench-%j.log
 
 set -uo pipefail
 cd "${SLURM_SUBMIT_DIR:-$PWD}" || exit 1
 
 # --- Knobs (override with sbatch --export=ALL,VAR=...) --------------------
 MODEL_STORAGE="${MODEL_STORAGE:-/projects/BSTEWART/model_storage}"
-MODEL="${MODEL:-Qwen3.5-9B}"
+MODEL="${MODEL:-Qwen3-8B}"
+# Unique per-job port: della nodes host 8 GPUs, so multiple single-GPU jobs can
+# share a node; a fixed port makes co-located jobs cross-talk and cross-kill.
 GEN_PORT="${GEN_PORT:-$((10000 + ${SLURM_JOB_ID:-0} % 5000))}"
-MAX_METRIC_CALLS="${MAX_METRIC_CALLS:-1839}"
+MAX_METRIC_CALLS="${MAX_METRIC_CALLS:-3000}"
 CONDITION="${CONDITION:-all}"
+PROGRAM="${PROGRAM:-2stage}"
 SEED_STYLE="${SEED_STYLE:-plain}"
 ACTIONS="${ACTIONS:-default}"
-SPLITS="${SPLITS:-paper}"
 TAG="${TAG:-}"
+DATA_PATH="${DATA_PATH:-}"
 TRAIN_LIMIT="${TRAIN_LIMIT:-}"
 VAL_LIMIT="${VAL_LIMIT:-}"
 TEST_LIMIT="${TEST_LIMIT:-}"
 GEN_GMU="${GEN_GMU:-0.90}"
 GEN_MAX_LEN="${GEN_MAX_LEN:-32768}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-1800}"
+# POSIT repo location (for its vLLM install).
 POSIT_DIR="${POSIT_DIR:-/home/${USER}/posit}"
 
 # --- Keep all large I/O on scratch ----------------------------------------
@@ -77,6 +88,7 @@ VLLM_BIN="${POSIT_DIR}/src/.venv/bin/vllm"
 GEN_LOG="${LOG_DIR}/gen-${SLURM_JOB_ID:-local}.log"
 echo "==> serving generator ${MODEL} on :${GEN_PORT} (GPU 0, util ${GEN_GMU}); log: ${GEN_LOG}"
 
+# Load CUDA toolkit for JIT compilation (needed by some models).
 export PATH="${POSIT_DIR}/src/.venv/bin:${PATH}"
 CUDA_TAG="$(${POSIT_DIR}/src/.venv/bin/python -c 'import torch; print(torch.version.cuda)' 2>/dev/null || echo 13.0)"
 source /usr/share/Modules/init/bash 2>/dev/null || true
@@ -117,7 +129,10 @@ done
 echo "==> generator up on :${GEN_PORT}"
 
 # --- Run the GEPA experiment (using GEPA's own venv) ---------------------
+# litellm talks to vLLM via the hosted_vllm/ prefix + api_base.
+# Set OPENAI_API_KEY=EMPTY so litellm doesn't reject the request.
 export OPENAI_API_KEY="EMPTY"
+# Flush python output line-by-line so the SLURM log shows live progress.
 export PYTHONUNBUFFERED=1
 SOLVER_MODEL="hosted_vllm/${MODEL}"
 REFLECTION_MODEL="hosted_vllm/${MODEL}"
@@ -128,18 +143,19 @@ LIMIT_ARGS=()
 [[ -n "${VAL_LIMIT}" ]] && LIMIT_ARGS+=(--val-limit "${VAL_LIMIT}")
 [[ -n "${TEST_LIMIT}" ]] && LIMIT_ARGS+=(--test-limit "${TEST_LIMIT}")
 [[ -n "${TAG}" ]] && LIMIT_ARGS+=(--tag "${TAG}")
+[[ -n "${DATA_PATH}" ]] && LIMIT_ARGS+=(--data-path "${DATA_PATH}")
 
-echo "==> running GEPA LiveBench-Math experiment: condition=${CONDITION} splits=${SPLITS} max_metric_calls=${MAX_METRIC_CALLS}"
-echo "==> limits: train=${TRAIN_LIMIT:-full} val=${VAL_LIMIT:-full} test=${TEST_LIMIT:-full}"
+echo "==> running GEPA TerminalBench experiment: condition=${CONDITION} program=${PROGRAM} max_metric_calls=${MAX_METRIC_CALLS}"
+echo "==> limits: train=${TRAIN_LIMIT:-full} val=${VAL_LIMIT:-full} test=${TEST_LIMIT:-full} data_path=${DATA_PATH:-HF/local}"
 echo "==> solver=${SOLVER_MODEL} reflection=${REFLECTION_MODEL} api_base=${API_BASE}"
 
-"${PY}" -m examples.livebench_math.main \
+"${PY}" -m examples.terminalbench.main \
     --solver-model "${SOLVER_MODEL}" \
     --reflection-model "${REFLECTION_MODEL}" \
     --api-base "${API_BASE}" \
     --max-metric-calls "${MAX_METRIC_CALLS}" \
     --condition "${CONDITION}" \
+    --program "${PROGRAM}" \
     --seed-style "${SEED_STYLE}" \
     --actions "${ACTIONS}" \
-    --splits "${SPLITS}" \
     "${LIMIT_ARGS[@]}"

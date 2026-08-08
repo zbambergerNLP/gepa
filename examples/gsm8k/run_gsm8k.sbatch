@@ -1,35 +1,38 @@
 #!/bin/bash
-# Run the GEPA LiveBench-Math evaluation on della.
+# Run the GEPA GSM8K evaluation on della.
 #
 # Serves a generator model via vLLM (from the POSIT venv, which has vLLM
-# installed), then runs the GEPA optimization experiment against it.
-# Mirrors examples/ifbench/run_ifbench.sbatch but for LiveBench-Math
-# (White et al. 2025, n=368 math, contamination-limited).
+# installed), then runs the GEPA GSM8K optimization experiment against it.
+# Mirrors examples/ifbench/run_ifbench.sbatch and examples/pupa/run_pupa.sbatch
+# but for GSM8K (Cobbe et al. 2021, HF gsm8k / openai/gsm8k main config).
 #
-# Prerequisites: same as ifbench (POSIT repo, GEPA venv, HF cache on scratch).
-# LiveBench-Math dataset is pulled via HuggingFace datasets on first use
-# (livebench/livebench filtered to math, 368 problems) or from local
-# artifact examples/livebench_math/data/livebench_math.jsonl.
+# Prerequisites: same as ifbench/pupa (POSIT repo, GEPA venv).
+# GSM8K dataset is pulled via HuggingFace datasets on first use
+# (gsm8k / openai/gsm8k, main config, ~8.5K examples, 7.5K train / 1K test).
 #
-# Usage (full paper-scale run, all three conditions):
-#   sbatch examples/livebench_math/run_livebench_math.sbatch
+# Usage (full run, all three conditions):
+#   sbatch examples/gsm8k/run_gsm8k.sbatch
 #
-# Mini test run (20/20/20, small budget):
-#   sbatch --export=ALL,TRAIN_LIMIT=20,VAL_LIMIT=20,TEST_LIMIT=20,MAX_METRIC_CALLS=32 \
-#       --time=01:00:00 examples/livebench_math/run_livebench_math.sbatch
+# Mini test run (20/30/30, small budget):
+#   sbatch --export=ALL,TRAIN_LIMIT=20,VAL_LIMIT=30,TEST_LIMIT=30,MAX_METRIC_CALLS=100 \
+#       --time=02:00:00 examples/gsm8k/run_gsm8k.sbatch
 #
 # Override defaults:
-#   sbatch --export=ALL,MODEL=Qwen3.5-9B,CONDITION=action,SPLITS=terrarium \
-#       examples/livebench_math/run_livebench_math.sbatch
+#   sbatch --export=ALL,MODEL=Qwen3-8B,CONDITION=action,SEED_STYLE=structured \
+#       examples/gsm8k/run_gsm8k.sbatch
+#
+# Defective-seed (VISTA recovery) run:
+#   sbatch --export=ALL,DEFECTIVE_SEED=1,CONDITION=action \
+#       examples/gsm8k/run_gsm8k.sbatch
 
-#SBATCH --job-name=gepa-livebench-math
+#SBATCH --job-name=gepa-gsm8k
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=24:00:00
-#SBATCH --output=gepa-livebench-math-%j.log
+#SBATCH --time=48:00:00
+#SBATCH --output=gepa-gsm8k-%j.log
 
 set -uo pipefail
 cd "${SLURM_SUBMIT_DIR:-$PWD}" || exit 1
@@ -38,15 +41,17 @@ cd "${SLURM_SUBMIT_DIR:-$PWD}" || exit 1
 MODEL_STORAGE="${MODEL_STORAGE:-/projects/BSTEWART/model_storage}"
 MODEL="${MODEL:-Qwen3.5-9B}"
 GEN_PORT="${GEN_PORT:-$((10000 + ${SLURM_JOB_ID:-0} % 5000))}"
-MAX_METRIC_CALLS="${MAX_METRIC_CALLS:-1839}"
+MAX_METRIC_CALLS="${MAX_METRIC_CALLS:-5000}"
 CONDITION="${CONDITION:-all}"
 SEED_STYLE="${SEED_STYLE:-plain}"
 ACTIONS="${ACTIONS:-default}"
-SPLITS="${SPLITS:-paper}"
 TAG="${TAG:-}"
 TRAIN_LIMIT="${TRAIN_LIMIT:-}"
 VAL_LIMIT="${VAL_LIMIT:-}"
 TEST_LIMIT="${TEST_LIMIT:-}"
+DATA_PATH="${DATA_PATH:-}"
+DEFECTIVE_SEED="${DEFECTIVE_SEED:-0}"
+DEFECTIVE_VARIANT="${DEFECTIVE_VARIANT:-default}"
 GEN_GMU="${GEN_GMU:-0.90}"
 GEN_MAX_LEN="${GEN_MAX_LEN:-32768}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-1800}"
@@ -127,13 +132,17 @@ LIMIT_ARGS=()
 [[ -n "${TRAIN_LIMIT}" ]] && LIMIT_ARGS+=(--train-limit "${TRAIN_LIMIT}")
 [[ -n "${VAL_LIMIT}" ]] && LIMIT_ARGS+=(--val-limit "${VAL_LIMIT}")
 [[ -n "${TEST_LIMIT}" ]] && LIMIT_ARGS+=(--test-limit "${TEST_LIMIT}")
+[[ -n "${DATA_PATH}" ]] && LIMIT_ARGS+=(--data-path "${DATA_PATH}")
 [[ -n "${TAG}" ]] && LIMIT_ARGS+=(--tag "${TAG}")
+if [[ "${DEFECTIVE_SEED}" == "1" ]]; then
+    LIMIT_ARGS+=(--defective-seed --defective-variant "${DEFECTIVE_VARIANT}")
+fi
 
-echo "==> running GEPA LiveBench-Math experiment: condition=${CONDITION} splits=${SPLITS} max_metric_calls=${MAX_METRIC_CALLS}"
-echo "==> limits: train=${TRAIN_LIMIT:-full} val=${VAL_LIMIT:-full} test=${TEST_LIMIT:-full}"
+echo "==> running GEPA GSM8K experiment: condition=${CONDITION} seed_style=${SEED_STYLE} actions=${ACTIONS} max_metric_calls=${MAX_METRIC_CALLS} defective=${DEFECTIVE_SEED}"
+echo "==> limits: train=${TRAIN_LIMIT:-full} val=${VAL_LIMIT:-full} test=${TEST_LIMIT:-full} data_path=${DATA_PATH:-HF}"
 echo "==> solver=${SOLVER_MODEL} reflection=${REFLECTION_MODEL} api_base=${API_BASE}"
 
-"${PY}" -m examples.livebench_math.main \
+"${PY}" -m examples.gsm8k.main \
     --solver-model "${SOLVER_MODEL}" \
     --reflection-model "${REFLECTION_MODEL}" \
     --api-base "${API_BASE}" \
@@ -141,5 +150,4 @@ echo "==> solver=${SOLVER_MODEL} reflection=${REFLECTION_MODEL} api_base=${API_B
     --condition "${CONDITION}" \
     --seed-style "${SEED_STYLE}" \
     --actions "${ACTIONS}" \
-    --splits "${SPLITS}" \
     "${LIMIT_ARGS[@]}"

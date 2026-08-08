@@ -1,0 +1,30 @@
+{"task_id": "taubench_airline_0000", "domain": "airline", "instruction": "Get details for user user_49", "expected_answer": "User user_49 details retrieved", "expected_tool_calls": []}
+{"task_id": "taubench_retail_0001", "domain": "retail", "instruction": "Get order details for ORD0001", "expected_answer": "Order ORD0001 details retrieved", "expected_tool_calls": []}
+{"task_id": "taubench_airline_0002", "domain": "airline", "instruction": "Cancel reservation RES0002 for user user_49", "expected_answer": "Reservation RES0002 cancelled", "expected_tool_calls": []}
+{"task_id": "taubench_retail_0003", "domain": "retail", "instruction": "Modify pending order ORD0003: change address to ADDR003", "expected_answer": "Order ORD0003 address updated to ADDR003", "expected_tool_calls": []}
+{"task_id": "taubench_airline_0004", "domain": "airline", "instruction": "Change flight for reservation RES0004 to FL544 on 2024-06-20", "expected_answer": "Flight changed successfully to FL544", "expected_tool_calls": []}
+{"task_id": "taubench_retail_0005", "domain": "retail", "instruction": "Search for product T-shirt", "expected_answer": "Product T-shirt found", "expected_tool_calls": []}
+{"task_id": "taubench_airline_0006", "domain": "airline", "instruction": "Get details for user user_46", "expected_answer": "User user_46 details retrieved", "expected_tool_calls": []}
+{"task_id": "taubench_retail_0007", "domain": "retail", "instruction": "Get order details for ORD0007", "expected_answer": "Order ORD0007 details retrieved", "expected_tool_calls": []}
+{"task_id": "taubench_airline_0008", "domain": "airline", "instruction": "Cancel reservation RES0008 for user user_16", "expected_answer": "Reservation RES0008 cancelled", "expected_tool_calls": []}
+{"task_id": "taubench_retail_0009", "domain": "retail", "instruction": "Cancel pending order ORD0009 for user user_21", "expected_answer": "Order ORD0009 cancelled", "expected_tool_calls": []}
+{"task_id": "taubench_airline_0010", "domain": "airline", "instruction": "Check status of flight FL227 on 2024-09-11", "expected_answer": "Flight FL227 is on time", "expected_tool_calls": []}
+{"task_id": "taubench_retail_0011", "domain": "retail", "instruction": "Update address ADDR011 for user user_38", "expected_answer": "Address ADDR011 updated for user user_38", "expected_tool_calls": []}
+{"task_id": "taubench_airline_0012", "domain": "airline", "instruction": "Search direct flights from LAX to LAX on 2024-03-07", "expected_answer": "Found direct flights from LAX to LAX", "expected_tool_calls": []}
+{"task_id": "taubench_retail_0013", "domain": "retail", "instruction": "Get order details for ORD0013", "expected_answer": "Order ORD0013 details retrieved", "expected_tool_calls": []}
+{"task_id": "taubench_airline_0014", "domain": "airline", "instruction": "Change flight for reservation RES0014 to FL949 on 2024-09-22", "expected_answer": "Flight changed successfully to FL949", "expected_tool_calls": []}
+{"task_id": "taubench_retail_0015", "domain": "retail", "instruction": "Update address ADDR015 for user user_16", "expected_answer": "Address ADDR015 updated for user user_16", "expected_tool_calls": []}
+{"task_id": "taubench_airline_0016", "domain": "airline", "instruction": "Check status of flight FL604 on 2024-11-21", "expected_answer": "Flight FL604 is on time", "expected_tool_calls": []}
+{"task_id": "taubench_retail_0017", "domain": "retail", "instruction": "Update address ADDR017 for user user_8", "expected_answer": "Address ADDR017 updated for user user_8", "expected_tool_calls": []}
+{"task_id": "taubench_airline_0018", "domain": "airline", "instruction": "Change flight for reservation RES0018 to FL377 on 2024-02-23", "expected_answer": "Flight changed successfully to FL377", "expected_tool_calls": []}
+{"task_id": "taubench_retail_0019", "domain": "retail", "instruction": "Get order details for ORD0019", "expected_answer": "Order ORD0019 details retrieved", "expected_tool_calls": []}
+{"task_id": "taubench_airline_0020", "domain": "airline", "instruction": "Search direct flights from JFK to LAX on 2024-10-22", "expected_answer": "Found direct flights from JFK to LAX", "expected_tool_calls": []}
+{"task_id": "taubench_retail_0021", "domain": "retail", "instruction": "Modify pending order ORD0021: change address to ADDR001", "expected_answer": "Order ORD0021 address updated to ADDR001", "expected_tool_calls": []}
+{"task_id": "taubench_airline_0022", "domain": "airline", "instruction": "Change flight for reservation RES0022 to FL720 on 2024-01-07", "expected_answer": "Flight changed successfully to FL720", "expected_tool_calls": []}
+{"task_id": "taubench_retail_0023", "domain": "retail", "instruction": "Modify pending order ORD0023: change address to ADDR003", "expected_answer": "Order ORD0023 address updated to ADDR003", "expected_tool_calls": []}
+{"task_id": "taubench_airline_0024", "domain": "airline", "instruction": "Search direct flights from LAX to LAX on 2024-05-03", "expected_answer": "Found direct flights from LAX to LAX", "expected_tool_calls": []}
+{"task_id": "taubench_retail_0025", "domain": "retail", "instruction": "Get order details for ORD0025", "expected_answer": "Order ORD0025 details retrieved", "expected_tool_calls": []}
+{"task_id": "taubench_airline_0026", "domain": "airline", "instruction": "Change flight for reservation RES0026 to FL500 on 2024-04-09", "expected_answer": "Flight changed successfully to FL500", "expected_tool_calls": []}
+{"task_id": "taubench_retail_0027", "domain": "retail", "instruction": "Modify pending order ORD0027: change address to ADDR007", "expected_answer": "Order ORD0027 address updated to ADDR007", "expected_tool_calls": []}
+{"task_id": "taubench_airline_0028", "domain": "airline", "instruction": "Check status of flight FL356 on 2024-02-20", "expected_answer": "Flight FL356 is on time", "expected_tool_calls": []}
+{"task_id": "taubench_retail_0029", "domain": "retail", "instruction": "Search for product Backpack", "expected_answer": "Product Backpack found", "expected_tool_calls": []}

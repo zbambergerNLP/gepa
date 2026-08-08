@@ -251,6 +251,8 @@ def dump_action_summary(tracker: ActionDiversityCallback, run_dir: str, selector
 
 def build_config(condition: str, args, reflection_lm_kwargs: dict):
     """Build the GEPAConfig for one condition. Returns (config, action_selector)."""
+    import inspect
+
     action_space = build_structured_actions() if args.actions == "structured" else DEFAULT_ACTIONS
     action_selector = None
     if condition == "random":
@@ -261,18 +263,58 @@ def build_config(condition: str, args, reflection_lm_kwargs: dict):
             lm=LM(args.reflection_model, **(reflection_lm_kwargs or {})),
         )
 
+    # Support both old GEPAConfig (with ReflectionConfig.action_selector) and new
+    # engine-pluggable path where action_selector lives on the reflection strategy.
+    engine_cfg = EngineConfig(
+        run_dir=condition_run_dir(condition, args.program, args.tag),
+        max_metric_calls=args.max_metric_calls,
+        parallel=True,
+        max_workers=24,
+        cache_evaluation=True,
+    )
+
+    # Prefer the legacy ReflectionConfig.action_selector if the installed GEPA still has it
+    try:
+        sig = inspect.signature(ReflectionConfig)
+        if "action_selector" in sig.parameters:
+            config = GEPAConfig(
+                engine=engine_cfg,
+                reflection=ReflectionConfig(
+                    reflection_lm=args.reflection_model,
+                    reflection_lm_kwargs=reflection_lm_kwargs or None,
+                    action_selector=action_selector,
+                ),
+            )
+            return config, action_selector
+    except Exception:
+        pass
+
+    # New path: wrap the selector in a StatelessReflectionLM and pass as reflection_strategy
+    if action_selector is not None:
+        try:
+            sig2 = inspect.signature(ReflectionConfig)
+            if "reflection_strategy" in sig2.parameters:
+                from gepa.proposer.reflective_mutation.reflection_lm import StatelessReflectionLM
+
+                lm = LM(args.reflection_model, **(reflection_lm_kwargs or {}))
+                strategy = StatelessReflectionLM(lm=lm, action_selector=action_selector)
+                config = GEPAConfig(
+                    engine=engine_cfg,
+                    reflection=ReflectionConfig(
+                        reflection_lm=args.reflection_model,
+                        reflection_lm_kwargs=reflection_lm_kwargs or None,
+                        reflection_strategy=strategy,
+                    ),
+                )
+                return config, action_selector
+        except Exception as e:
+            print(f"WARNING: action_selector via reflection_strategy failed ({e}); falling back to vanilla reflection.")
+
     config = GEPAConfig(
-        engine=EngineConfig(
-            run_dir=condition_run_dir(condition, args.program, args.tag),
-            max_metric_calls=args.max_metric_calls,
-            parallel=True,
-            max_workers=24,
-            cache_evaluation=True,
-        ),
+        engine=engine_cfg,
         reflection=ReflectionConfig(
             reflection_lm=args.reflection_model,
             reflection_lm_kwargs=reflection_lm_kwargs or None,
-            action_selector=action_selector,
         ),
     )
     return config, action_selector

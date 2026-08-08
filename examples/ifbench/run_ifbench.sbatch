@@ -31,7 +31,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=24:00:00
+#SBATCH --time=48:00:00
 #SBATCH --output=gepa-ifbench-%j.log
 
 set -uo pipefail
@@ -43,7 +43,7 @@ MODEL="${MODEL:-Qwen3.5-9B}"
 # Unique per-job port: della nodes host 8 GPUs, so multiple single-GPU jobs can
 # share a node; a fixed port makes co-located jobs cross-talk and cross-kill.
 GEN_PORT="${GEN_PORT:-$((10000 + ${SLURM_JOB_ID:-0} % 5000))}"
-MAX_METRIC_CALLS="${MAX_METRIC_CALLS:-3593}"
+MAX_METRIC_CALLS="${MAX_METRIC_CALLS:-15000}"
 CONDITION="${CONDITION:-all}"
 PROGRAM="${PROGRAM:-2stage}"
 SEED_STYLE="${SEED_STYLE:-plain}"

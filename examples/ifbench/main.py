@@ -262,8 +262,8 @@ def main():
     parser.add_argument(
         "--max-metric-calls",
         type=int,
-        default=3593,
-        help="Budget per condition (paper: 3593, matched to MIPROv2-Heavy)",
+        default=15000,
+        help="Budget per condition (paper: 3593, scaled to 15000 for diversity study — Wave B,  ~50 candidates)",
     )
     parser.add_argument(
         "--solver-model", type=str, default="hosted_vllm/Qwen3.5-9B", help="Solver LM model (litellm format)"

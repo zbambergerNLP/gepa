@@ -218,6 +218,7 @@ outputs/
 gepa_terminus/
 mlflow.db
 mlruns/
+archive/
 
 # IFBench data (downloaded on first use; see examples/ifbench/utils.py)
 examples/ifbench/data/

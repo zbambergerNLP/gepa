@@ -17,6 +17,7 @@ probabilities, then samples from the distribution tails for diversity.
 from __future__ import annotations
 
 import logging
+import math
 import random
 import re
 from dataclasses import dataclass
@@ -51,9 +52,9 @@ class PromptEditAction:
 logger = logging.getLogger(__name__)
 
 # Length pressure for evolved prompts. Soft budget communicated to the
-# reflection LM in every action suffix; hard cap enforced at proposal time
-# (see StatelessReflectionLM). Without this, additive actions (append/
-# illustration) accrete text every acceptance until candidate prompts
+# reflection LM in every action suffix; hard cap is the default
+# ThreeRoleReflectionLM.max_chars in the 3-role path. Without this, additive actions
+# (append/illustration) accrete text every acceptance until candidate prompts
 # exhaust the model context.
 SOFT_PROMPT_CHAR_BUDGET = 8000
 MAX_PROPOSAL_CHARS = 10000
@@ -142,21 +143,67 @@ class ActionDistribution:
         return [p for _, p, _ in self.entries]
 
 
+@dataclass(frozen=True)
+class TailSampleStats:
+    """Diagnostics for one ``_sample_from_tails`` call, recorded in selector history.
+
+    Lets analysis quantify how far tail sampling diverged from the LM's
+    verbalized distribution without re-deriving parser state from the
+    name-keyed ``probs`` map (which collapses duplicate action names).
+
+    Attributes:
+        n_parsed_entries: Number of distribution entries, counting duplicates.
+        tail_mass: Probability mass the LM placed strictly below ``tau``.
+        used_full_fallback: True when the tail was empty and the full
+            distribution was sampled instead.
+        entropy_bits: Shannon entropy (bits) of the parsed distribution.
+    """
+
+    n_parsed_entries: int
+    tail_mass: float
+    used_full_fallback: bool
+    entropy_bits: float
+
+
 def _sample_from_tails(
     distribution: ActionDistribution,
     n: int,
     tau: float,
     rng: random.Random,
-) -> list[PromptEditAction]:
-    """Sample n actions from the tail of the distribution (probability < tau).
+) -> tuple[list[PromptEditAction], TailSampleStats]:
+    """Sample ``n`` actions from the tail of the distribution (probability < ``tau``).
 
-    If no entries fall below tau, sample from the full distribution.
+    Tail sampling favors options the LM rated as unlikely-but-plausible, which
+    keeps successive proposals diverse instead of repeating the LM's top pick.
+    Weights are renormalized over the tail; if the LM assigned zero mass to
+    every tail entry the draw is uniform over the tail.
+
+    Args:
+        distribution: The parsed verbalized distribution to sample from.
+        n: Number of actions to draw (with replacement).
+        tau: Threshold below which an entry counts as tail.
+        rng: RNG used for the weighted draw.
+
+    Returns:
+        A ``(actions, stats)`` pair: the ``n`` sampled actions in draw order, and
+        a :class:`TailSampleStats` describing the draw. When no entry falls below
+        ``tau`` the full distribution is sampled instead and
+        ``stats.used_full_fallback`` is ``True``.
     """
     entries = distribution.entries
     tail = [(a, p, r) for a, p, r in entries if p < tau]
+    used_full_fallback = not tail
+
+    stats = TailSampleStats(
+        n_parsed_entries=len(entries),
+        tail_mass=sum(p for _, p, _ in tail),
+        used_full_fallback=used_full_fallback,
+        # Shannon entropy in bits, H = -Σ p·log2(p); zero-probability entries contribute nothing.
+        entropy_bits=-sum(p * math.log2(p) for _, p, _ in entries if p > 0),
+    )
 
     # Fall back to full distribution if no tail entries exist.
-    if not tail:
+    if used_full_fallback:
         tail = entries
 
     actions = [a for a, _, _ in tail]
@@ -169,7 +216,7 @@ def _sample_from_tails(
     else:
         weights = [w / total for w in weights]
 
-    return rng.choices(actions, weights=weights, k=n)
+    return rng.choices(actions, weights=weights, k=n), stats
 
 
 class VerbalizedActionSelector:
@@ -182,6 +229,17 @@ class VerbalizedActionSelector:
 
     Call ``set_context()`` before ``select()`` to provide the current prompt and
     feedback. If ``set_context()`` is not called, falls back to uniform random.
+
+    Args:
+        actions: The menu the LM chooses from; must be non-empty.
+        lm: Language model asked to verbalize a distribution over ``actions``.
+        k: Number of candidate actions the LM is asked to assign probabilities to.
+        tau: Tail-sampling threshold (actions with ``p < tau`` form the tail);
+            ``None`` defaults to ``1 / k`` so the threshold scales with ``k``.
+        rng: RNG for tail sampling; ``random.Random(0)`` when ``None``.
+
+    Raises:
+        ValueError: ``actions`` is empty.
     """
 
     def __init__(
@@ -189,15 +247,21 @@ class VerbalizedActionSelector:
         actions: list[PromptEditAction],
         lm: LanguageModel,
         k: int = 5,
-        tau: float = 0.10,
+        tau: float | None = None,
         rng: random.Random | None = None,
     ):
+        """Store the menu, LM, and sampling parameters; no LM call is made here."""
         if not actions:
             raise ValueError("VerbalizedActionSelector requires a non-empty actions list")
         self.actions = actions
         self.lm = lm
         self.k = k
-        self.tau = tau
+        # Default the tail threshold to 1/k so it scales with the number of
+        # verbalized candidates: with the default k=5 a uniform draw has no
+        # tail (correct), while a peaked distribution's low-probability actions
+        # still fall below it. A fixed tau=0.10 collapsed to full-distribution
+        # fallback for both uniform and mildly-peaked distributions.
+        self.tau = tau if tau is not None else 1.0 / k
         self.rng = rng if rng is not None else random.Random(0)
         self._context: dict[str, str] | None = None
         self._action_by_name: dict[str, PromptEditAction] = {a.name: a for a in actions}
@@ -210,18 +274,38 @@ class VerbalizedActionSelector:
         self._context = {"candidate": candidate, "feedback_summary": feedback_summary}
 
     def select(self, n: int, rng: random.Random | None = None) -> list[PromptEditAction]:
+        """Draw ``n`` actions for the context set by the last :meth:`set_context` call.
+
+        Makes one LM call to verbalize a distribution over the menu, tail-samples
+        from it, and appends one record (the distribution, the picks, and the
+        :class:`TailSampleStats`) to :attr:`history`. The stored context is
+        cleared afterwards so a stale prompt state is never reused.
+
+        Args:
+            n: Number of actions to draw (with replacement, one per job).
+            rng: RNG override for this call; the instance RNG is used when ``None``.
+
+        Returns:
+            The sampled actions in draw order. Without a prior
+            :meth:`set_context` call the draw is uniform over the menu, no LM
+            call is made, and nothing is recorded in :attr:`history`.
+        """
         rng = rng if rng is not None else self.rng
         if self._context is None:
             logger.warning("VerbalizedActionSelector.select() called without set_context(); falling back to uniform.")
             return [rng.choice(self.actions) for _ in range(n)]
 
         distribution = self._generate_distribution(rng)
-        result = _sample_from_tails(distribution, n, self.tau, rng)
+        result, stats = _sample_from_tails(distribution, n, self.tau, rng)
         self.history.append(
             {
                 "probs": {a.name: p for a, p, _ in distribution.entries},
                 "sampled": [a.name for a in result],
                 "fallback": distribution.is_fallback,
+                "n_parsed_entries": stats.n_parsed_entries,
+                "tail_mass": stats.tail_mass,
+                "used_full_fallback": stats.used_full_fallback,
+                "entropy_bits": stats.entropy_bits,
             }
         )
         # Clear context after use so stale context isn't reused.
@@ -311,8 +395,11 @@ def format_action_suffix(action: PromptEditAction) -> str:
     )
 
 
-# Canonical section names for structured (markdown-skeleton) prompts.
-STRUCTURED_SECTIONS: list[str] = ["Role", "Task", "Rules", "Output Format", "Examples"]
+# Canonical section names for structured (markdown-skeleton) prompts. Grounded in
+# the convergent prompt-component taxonomies of PromptPrism, The Prompt Report, and
+# "From Prompts to Templates", plus the Google/OpenAI/Anthropic prompting guides:
+# persona, directive, context, constraints, reasoning, exemplars, output format.
+STRUCTURED_SECTIONS: list[str] = ["Role", "Task", "Context", "Rules", "Reasoning", "Examples", "Output Format"]
 
 _SECTION_OPERATIONS: list[tuple[str, str, str]] = [
     (
@@ -347,8 +434,16 @@ def build_structured_actions(sections: list[str] | None = None) -> list[PromptEd
     """Build a section-scoped action space for structured (markdown) prompts.
 
     For each section, three operations: rewrite, append, condense. Plus one
-    global restructure action. With the default five sections this yields a
-    16-action menu.
+    global restructure action. With the default seven sections this yields a
+    22-action menu.
+
+    Args:
+        sections: Section names to build operations for; ``None`` uses
+            :data:`STRUCTURED_SECTIONS`.
+
+    Returns:
+        The per-section actions in section order (rewrite, append, condense
+        for each), followed by the global ``restructure`` action.
     """
     sections = sections if sections is not None else STRUCTURED_SECTIONS
     actions: list[PromptEditAction] = []

@@ -543,7 +543,7 @@ class TestSampleFromTails:
         )
         rng = random.Random(42)
         # With tau=0.10, only the third entry (p=0.05) is in the tail.
-        results = _sample_from_tails(dist, 10, tau=0.10, rng=rng)
+        results, _ = _sample_from_tails(dist, 10, tau=0.10, rng=rng)
         assert all(a.name == actions[2].name for a in results)
 
     def test_falls_back_when_no_tail(self):
@@ -556,7 +556,7 @@ class TestSampleFromTails:
         )
         rng = random.Random(42)
         # tau=0.10, but both entries are above 0.10.
-        results = _sample_from_tails(dist, 20, tau=0.10, rng=rng)
+        results, _ = _sample_from_tails(dist, 20, tau=0.10, rng=rng)
         assert len(results) == 20
         # Should sample from both (full distribution fallback).
         names = {a.name for a in results}
@@ -571,7 +571,7 @@ class TestSampleFromTails:
             ]
         )
         rng = random.Random(42)
-        results = _sample_from_tails(dist, 1000, tau=0.10, rng=rng)
+        results, _ = _sample_from_tails(dist, 1000, tau=0.10, rng=rng)
         count_0 = sum(1 for a in results if a.name == actions[0].name)
         count_1 = sum(1 for a in results if a.name == actions[1].name)
         # Actions[1] has 9x the weight, so it should be sampled much more often.
@@ -722,15 +722,6 @@ class TestLengthControl:
         selector.select(1)
         assert "Current prompt length: 1234 characters" in lm.calls[0]
         assert "favor condensing" in lm.calls[0]
-
-    def test_oversized_action_proposal_dropped(self):
-        from gepa.strategies.action_space import MAX_PROPOSAL_CHARS
-
-        lm = RecordingLM(reply="x" * (MAX_PROPOSAL_CHARS + 1))
-        selector = RandomActionSelector(DEFAULT_ACTIONS, rng=random.Random(0))
-        reflection = StatelessReflectionLM(lm, action_selector=selector)
-        proposal, _ = reflection.reflect({"sp": "old"}, _reflective_dataset(["sp"]), ["sp"])
-        assert "sp" not in proposal.new_texts
 
     def test_oversized_proposal_kept_without_action_selector(self):
         from gepa.strategies.action_space import MAX_PROPOSAL_CHARS

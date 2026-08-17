@@ -61,6 +61,25 @@ PROGRAM="${PROGRAM:-2stage}"
 SEED_STYLE="${SEED_STYLE:-plain}"
 ACTIONS="${ACTIONS:-default}"
 TAG="${TAG:-}"
+SEED="${SEED:-0}"
+NUM_SEEDS="${NUM_SEEDS:-1}"
+HOLDOUT_RATIO="${HOLDOUT_RATIO:-0.0}"
+TAU="${TAU:-}"
+K="${K:-5}"
+COMPUTE_VENDI="${COMPUTE_VENDI:-0}"
+COMPUTE_BEHAVIORAL="${COMPUTE_BEHAVIORAL:-0}"
+# --- OpenRouter (Pareto models) -------------------------------------------
+# When MODEL is openrouter/* (e.g. openrouter/moonshotai/kimi-k3,
+# openrouter/openai/gpt-5.6-sol), the job bypasses local vLLM and calls
+# OpenRouter directly via LiteLLM. Requires OPENROUTER_API_KEY.
+# For hosted_vllm/* models, the local vLLM server is still used.
+SOLVER_MODEL="${SOLVER_MODEL:-}"
+REFLECTION_MODEL="${REFLECTION_MODEL:-}"
+OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-}"
+OPENROUTER_REFERER="${OPENROUTER_REFERER:-https://github.com/gepa-ai/gepa}"
+OPENROUTER_TITLE="${OPENROUTER_TITLE:-FOREST-GEPA}"
+OPENROUTER_PREFIX="openrouter/"
+HOSTED_VLLM_PREFIX="hosted_vllm/"
 DATA_PATH="${DATA_PATH:-}"
 TRAIN_LIMIT="${TRAIN_LIMIT:-}"
 VAL_LIMIT="${VAL_LIMIT:-}"
@@ -92,6 +111,44 @@ VLLM_BIN="${POSIT_DIR}/src/.venv/bin/vllm"
 [[ -x "${PY}" ]] || { echo "ERROR: missing ${PY} -- run scripts/della/build_env.sh" >&2; exit 1; }
 [[ -x "${VLLM_BIN}" ]] || { echo "ERROR: missing ${VLLM_BIN} -- build the POSIT venv first" >&2; exit 1; }
 
+
+# --- Model routing: openrouter/* via OpenRouter API, hosted_vllm/* via local vLLM ---
+if [[ "${MODEL}" == ${OPENROUTER_PREFIX}* ]]; then
+    SOLVER_MODEL="${MODEL}"
+    REFLECTION_MODEL="${MODEL}"
+    echo "[openrouter] Using OpenRouter models: solver=${SOLVER_MODEL} reflection=${REFLECTION_MODEL}"
+    if [[ -z "${OPENROUTER_API_KEY}" ]]; then
+        for keyfile in "${HOME}/.config/openrouter/key" "${HOME}/.openrouter_key" "./.openrouter_key"; do
+            if [[ -f "${keyfile}" ]]; then
+                export OPENROUTER_API_KEY="$(cat "${keyfile}" | tr -d ' \n')"
+                echo "[openrouter] Loaded API key from ${keyfile}"
+                break
+            fi
+        done
+    fi
+    if [[ -z "${OPENROUTER_API_KEY}" ]]; then
+        echo "ERROR: OPENROUTER_API_KEY not set for openrouter/* model ${MODEL}. Set via: export OPENROUTER_API_KEY=sk-or-v1-... (see docs/OPENROUTER_SETUP.md)" >&2
+        exit 1
+    fi
+    export OPENROUTER_API_KEY OPENROUTER_REFERER OPENROUTER_TITLE
+    USE_OPENROUTER=1
+    API_BASE=""  # not used for OpenRouter
+    GEN_PORT=""
+else
+    # hosted_vllm path: will start local vLLM server below
+    SOLVER_MODEL="${HOSTED_VLLM_PREFIX}${MODEL}"
+    REFLECTION_MODEL="${HOSTED_VLLM_PREFIX}${MODEL}"
+    # Allow explicit override if SOLVER_MODEL already set to openrouter/*
+    if [[ "${SOLVER_MODEL}" == ${OPENROUTER_PREFIX}* ]]; then
+        USE_OPENROUTER=1
+        API_BASE=""
+    else
+        USE_OPENROUTER=0
+        API_BASE="http://localhost:${GEN_PORT}/v1"
+    fi
+fi
+
+if [[ "${USE_OPENROUTER:-0}" != "1" ]]; then
 # --- Serve the generator (using POSIT's vLLM) -----------------------------
 GEN_LOG="${LOG_DIR}/gen-${SLURM_JOB_ID:-local}.log"
 echo "==> serving generator ${MODEL} on :${GEN_PORT} (GPU 0, util ${GEN_GMU}); log: ${GEN_LOG}"
@@ -136,14 +193,16 @@ until curl -sf "http://localhost:${GEN_PORT}/v1/models" >/dev/null 2>&1; do
 done
 echo "==> generator up on :${GEN_PORT}"
 
+fi  # end USE_OPENROUTER check (skip vLLM when using OpenRouter)
+
 # --- Run the GEPA experiment (using GEPA's own venv) ---------------------
 # litellm talks to vLLM via the hosted_vllm/ prefix + api_base.
 # Set OPENAI_API_KEY=EMPTY so litellm doesn't reject the request.
 export OPENAI_API_KEY="EMPTY"
 # Flush python output line-by-line so the SLURM log shows live progress.
 export PYTHONUNBUFFERED=1
-SOLVER_MODEL="hosted_vllm/${MODEL}"
-REFLECTION_MODEL="hosted_vllm/${MODEL}"
+SOLVER_MODEL="${HOSTED_VLLM_PREFIX}${MODEL}"
+REFLECTION_MODEL="${HOSTED_VLLM_PREFIX}${MODEL}"
 API_BASE="http://localhost:${GEN_PORT}/v1"
 
 LIMIT_ARGS=()
@@ -151,7 +210,24 @@ LIMIT_ARGS=()
 [[ -n "${VAL_LIMIT}" ]] && LIMIT_ARGS+=(--val-limit "${VAL_LIMIT}")
 [[ -n "${TEST_LIMIT}" ]] && LIMIT_ARGS+=(--test-limit "${TEST_LIMIT}")
 [[ -n "${TAG}" ]] && LIMIT_ARGS+=(--tag "${TAG}")
+
+COMMON_ARGS=()
+[[ -n "${SEED}" ]] && COMMON_ARGS+=(--seed "${SEED}")
+[[ "${NUM_SEEDS}" != "1" ]] && COMMON_ARGS+=(--num-seeds "${NUM_SEEDS}")
+[[ "${HOLDOUT_RATIO}" != "0.0" ]] && COMMON_ARGS+=(--holdout-ratio "${HOLDOUT_RATIO}")
+[[ -n "${TAU}" ]] && COMMON_ARGS+=(--tau "${TAU}")
+[[ "${K}" != "5" ]] && COMMON_ARGS+=(--k "${K}")
+[[ "${COMPUTE_VENDI}" == "1" ]] && COMMON_ARGS+=(--compute-vendi)
+[[ "${COMPUTE_BEHAVIORAL}" == "1" ]] && COMMON_ARGS+=(--compute-behavioral)
 [[ -n "${DATA_PATH}" ]] && LIMIT_ARGS+=(--data-path "${DATA_PATH}")
+
+if [[ "${USE_OPENROUTER:-0}" == "1" ]]; then
+    API_BASE_ARGS=()
+    echo "[openrouter] Running via OpenRouter API (no local api_base)"
+else
+    API_BASE_ARGS=(--api-base "${API_BASE}")
+    echo "[vllm] Running via local vLLM at ${API_BASE}"
+fi
 
 echo "==> running GEPA SWE-Bench experiment: condition=${CONDITION} program=${PROGRAM} max_metric_calls=${MAX_METRIC_CALLS}"
 echo "==> limits: train=${TRAIN_LIMIT:-full} val=${VAL_LIMIT:-full} test=${TEST_LIMIT:-full} data_path=${DATA_PATH:-HF/local}"
@@ -160,10 +236,11 @@ echo "==> solver=${SOLVER_MODEL} reflection=${REFLECTION_MODEL} api_base=${API_B
 "${PY}" -m examples.swebench.main \
     --solver-model "${SOLVER_MODEL}" \
     --reflection-model "${REFLECTION_MODEL}" \
-    --api-base "${API_BASE}" \
+    "${API_BASE_ARGS[@]}" \
     --max-metric-calls "${MAX_METRIC_CALLS}" \
     --condition "${CONDITION}" \
     --program "${PROGRAM}" \
     --seed-style "${SEED_STYLE}" \
     --actions "${ACTIONS}" \
-    "${LIMIT_ARGS[@]}"
+    "${LIMIT_ARGS[@]}" \
+    "${COMMON_ARGS[@]}"

@@ -145,6 +145,7 @@ from gepa.proposer.reflective_mutation.base import CandidateSelector, LanguageMo
 from gepa.proposer.reflective_mutation.reflection_lm import ReflectionLM
 from gepa.proposer.reflective_mutation.reflective_mutation import ReflectiveMutationProposer
 from gepa.strategies.acceptance import AcceptanceCriterion, ImprovementOrEqualAcceptance, StrictImprovementAcceptance
+from gepa.strategies.action_space import ActionSelector
 from gepa.strategies.batch_sampler import BatchSampler, EpochShuffledBatchSampler
 from gepa.strategies.candidate_selector import (
     CurrentBestCandidateSelector,
@@ -761,6 +762,9 @@ class ReflectionConfig:
     Ignored when ``reflection_lm`` is already a callable."""
     reflection_prompt_template: str | dict[str, str] | None = optimize_anything_reflection_prompt_template
     custom_candidate_proposer: ProposalFn | None = None
+    # Action-conditioned reflection (Rev 1): constrain each mutation to a
+    # specific edit type for improved diversity and credit assignment.
+    action_selector: "ActionSelector | None" = None
 
 
 @dataclass
@@ -1695,6 +1699,7 @@ def optimize_anything(
         callbacks=resolved_callbacks,
         sampling_strategy=config.engine.sampling_strategy,
         reflection_strategy=config.reflection.reflection_strategy,
+        action_selector=config.reflection.action_selector,
     )
 
     # Define evaluator function for merge proposer

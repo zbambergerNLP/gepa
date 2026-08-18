@@ -3,16 +3,20 @@
 
 """Tests for action-conditioned reflection (Rev 1)."""
 
+import inspect
 import random
 
 import pytest
 
 from gepa.core.action_tracking import ActionDiversityCallback
+from gepa.gepa_launcher import GEPAConfig, ReflectionConfig
+from gepa.optimize_anything import _from_legacy_config
 from gepa.proposer.reflective_mutation.reflection_lm import (
     ReflectionLM,
     ReflectionProposal,
     StatelessReflectionLM,
 )
+from gepa.proposer.reflective_mutation.reflective_mutation import ReflectiveMutationProposer
 from gepa.strategies.action_space import (
     DEFAULT_ACTIONS,
     STRUCTURED_SECTIONS,
@@ -742,3 +746,29 @@ class TestLengthControl:
         reflection = StatelessReflectionLM(lm, action_selector=selector)
         proposal, _ = reflection.reflect({"sp": "old"}, _reflective_dataset(["sp"]), ["sp"])
         assert proposal.new_texts["sp"] == "short improved instruction"
+
+
+class TestConfigWiring:
+    """Guard the optimize_anything config contract for action_selector.
+
+    The upstream sync that made optimize_anything engine-pluggable (#346)
+    silently dropped the field from ReflectionConfig, breaking every benchmark
+    harness at build_config time. These tests pin the full chain the harnesses
+    rely on: ReflectionConfig field -> legacy-config conversion ->
+    GepaEngine's GEPAConfig(**engine_config) -> ReflectiveMutationProposer.
+    """
+
+    def test_reflection_config_accepts_action_selector(self):
+        selector = RandomActionSelector(DEFAULT_ACTIONS, rng=random.Random(0))
+        config = ReflectionConfig(reflection_lm="m", action_selector=selector)
+        assert config.action_selector is selector
+        assert ReflectionConfig(reflection_lm="m").action_selector is None
+
+    def test_action_selector_survives_legacy_config_conversion(self):
+        selector = RandomActionSelector(DEFAULT_ACTIONS, rng=random.Random(0))
+        legacy = GEPAConfig(reflection=ReflectionConfig(reflection_lm="m", action_selector=selector))
+        rebuilt = GEPAConfig(**_from_legacy_config(legacy).engine_config)
+        assert rebuilt.reflection.action_selector is selector
+
+    def test_reflective_mutation_proposer_accepts_action_selector(self):
+        assert "action_selector" in inspect.signature(ReflectiveMutationProposer.__init__).parameters

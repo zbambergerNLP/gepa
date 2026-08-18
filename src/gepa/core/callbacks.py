@@ -165,7 +165,9 @@ class _ProposalEndEventOptional(TypedDict, total=False):
     """
 
     metadata: dict[str, Any]
-    """Strategy diagnostics, including ComBEE map/reduce details when available."""
+    """Proposal metadata: ``proposal_id``, ``action`` (when action-conditioned),
+    ``prompt:<comp>``/``raw_lm_output:<comp>`` diagnostics, and ComBEE map/reduce
+    details when available."""
 
 
 class ProposalEndEvent(_ProposalEndEventOptional):
@@ -177,9 +179,6 @@ class ProposalEndEvent(_ProposalEndEventOptional):
     """Per-component prompts sent to the reflection LM (component name → rendered prompt)."""
     raw_lm_outputs: dict[str, str]
     """Per-component raw LM outputs before extraction (component name → raw text)."""
-    metadata: dict[str, Any]
-    """Proposal metadata: ``proposal_id``, ``action`` (when action-conditioned),
-    ``prompt:<comp>``/``raw_lm_output:<comp>`` diagnostics."""
 
 
 class CandidateAcceptedEvent(TypedDict):

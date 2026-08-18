@@ -577,18 +577,6 @@ class ReflectiveMutationProposer:
                 else:
                     _lm_metadata[meta_key] = meta_val
 
-            notify_callbacks(
-                self.callbacks,
-                "on_proposal_end",
-                ProposalEndEvent(
-                    iteration=i,
-                    new_instructions=new_texts,
-                    prompts=prompts,
-                    raw_lm_outputs=raw_outputs,
-                    metadata=_lm_metadata,
-                ),
-            )
-
             for pname, text in new_texts.items():
                 self.logger.log(f"Iteration {i}: Proposed new text for {pname}: {text}")
 

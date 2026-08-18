@@ -313,6 +313,7 @@ def main():
         default=None,
         help="Path to AppWorld data file or directory (JSONL/JSON); else tries HF appworld/appworld then data/*.jsonl",
     )
+    parser.add_argument("--seed", type=int, default=0, help="Shuffle seed for splits")
     parser.add_argument("--train-limit", type=int, default=None, help="Limit train-set size (default: 60)")
     parser.add_argument("--val-limit", type=int, default=None, help="Limit val-set size (default: 75)")
     parser.add_argument("--test-limit", type=int, default=None, help="Limit test-set size for final evaluation")
@@ -351,7 +352,7 @@ def main():
         print("--actions structured implies --seed-style structured; overriding seed style.")
         args.seed_style = "structured"
 
-    trainset, valset, testset = load_appworld_dataset(data_path=args.data_path)
+    trainset, valset, testset = load_appworld_dataset(data_path=args.data_path, split_seed=args.seed)
     if args.train_limit is not None:
         trainset = trainset[: args.train_limit]
     if args.val_limit is not None:

@@ -34,12 +34,6 @@ MODEL="${MODEL:-Qwen3.5-9B}"
 # share a node; a fixed port makes co-located jobs cross-talk and cross-kill.
 GEN_PORT="${GEN_PORT:-$((10000 + ${SLURM_JOB_ID:-0} % 5000))}"
 SEED="${SEED:-0}"
-NUM_SEEDS="${NUM_SEEDS:-1}"
-HOLDOUT_RATIO="${HOLDOUT_RATIO:-0.0}"
-TAU="${TAU:-}"
-K="${K:-5}"
-COMPUTE_VENDI="${COMPUTE_VENDI:-0}"
-COMPUTE_BEHAVIORAL="${COMPUTE_BEHAVIORAL:-0}"
 MAX_METRIC_CALLS="${MAX_METRIC_CALLS:-200}"
 CONDITION="${CONDITION:-both}"
 GEN_GMU="${GEN_GMU:-0.90}"
@@ -165,6 +159,9 @@ API_BASE="http://localhost:${GEN_PORT}/v1"
 DATA_PATH_ARG=()
 [[ -n "${DATA_PATH}" ]] && DATA_PATH_ARG=(--data-path "${DATA_PATH}")
 
+COMMON_ARGS=()
+[[ -n "${SEED}" ]] && COMMON_ARGS+=(--seed "${SEED}")
+
 if [[ "${USE_OPENROUTER:-0}" == "1" ]]; then
     API_BASE_ARGS=()
     echo "[openrouter] Running via OpenRouter API (no local api_base)"
@@ -182,4 +179,5 @@ echo "==> solver=${SOLVER_MODEL} reflection=${REFLECTION_MODEL} api_base=${API_B
     "${API_BASE_ARGS[@]}" \
     --max-metric-calls "${MAX_METRIC_CALLS}" \
     --condition "${CONDITION}" \
-    "${DATA_PATH_ARG[@]}"
+    "${DATA_PATH_ARG[@]}" \
+    "${COMMON_ARGS[@]}"

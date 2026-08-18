@@ -53,12 +53,6 @@ SEED_STYLE="${SEED_STYLE:-plain}"
 ACTIONS="${ACTIONS:-default}"
 TAG="${TAG:-}"
 SEED="${SEED:-0}"
-NUM_SEEDS="${NUM_SEEDS:-1}"
-HOLDOUT_RATIO="${HOLDOUT_RATIO:-0.0}"
-TAU="${TAU:-}"
-K="${K:-5}"
-COMPUTE_VENDI="${COMPUTE_VENDI:-0}"
-COMPUTE_BEHAVIORAL="${COMPUTE_BEHAVIORAL:-0}"
 # --- OpenRouter (Pareto models) -------------------------------------------
 # When MODEL is openrouter/* (e.g. openrouter/moonshotai/kimi-k3,
 # openrouter/openai/gpt-5.6-sol), the job bypasses local vLLM and calls
@@ -204,12 +198,6 @@ LIMIT_ARGS=()
 
 COMMON_ARGS=()
 [[ -n "${SEED}" ]] && COMMON_ARGS+=(--seed "${SEED}")
-[[ "${NUM_SEEDS}" != "1" ]] && COMMON_ARGS+=(--num-seeds "${NUM_SEEDS}")
-[[ "${HOLDOUT_RATIO}" != "0.0" ]] && COMMON_ARGS+=(--holdout-ratio "${HOLDOUT_RATIO}")
-[[ -n "${TAU}" ]] && COMMON_ARGS+=(--tau "${TAU}")
-[[ "${K}" != "5" ]] && COMMON_ARGS+=(--k "${K}")
-[[ "${COMPUTE_VENDI}" == "1" ]] && COMMON_ARGS+=(--compute-vendi)
-[[ "${COMPUTE_BEHAVIORAL}" == "1" ]] && COMMON_ARGS+=(--compute-behavioral)
 [[ -n "${DATA_PATH}" ]] && LIMIT_ARGS+=(--data-path "${DATA_PATH}")
 
 if [[ "${USE_OPENROUTER:-0}" == "1" ]]; then

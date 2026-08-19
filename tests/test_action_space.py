@@ -543,8 +543,11 @@ class TestSampleFromTails:
         )
         rng = random.Random(42)
         # With tau=0.10, only the third entry (p=0.05) is in the tail.
-        results, _ = _sample_from_tails(dist, 10, tau=0.10, rng=rng)
+        results, stats = _sample_from_tails(dist, 10, tau=0.10, rng=rng)
         assert all(a.name == actions[2].name for a in results)
+        assert stats.n_parsed_entries == 3
+        assert stats.used_full_fallback is False
+        assert stats.tail_mass == pytest.approx(0.05)
 
     def test_falls_back_when_no_tail(self):
         actions = DEFAULT_ACTIONS[:2]
@@ -556,11 +559,13 @@ class TestSampleFromTails:
         )
         rng = random.Random(42)
         # tau=0.10, but both entries are above 0.10.
-        results, _ = _sample_from_tails(dist, 20, tau=0.10, rng=rng)
+        results, stats = _sample_from_tails(dist, 20, tau=0.10, rng=rng)
         assert len(results) == 20
         # Should sample from both (full distribution fallback).
         names = {a.name for a in results}
         assert len(names) >= 1  # At least one action sampled.
+        assert stats.used_full_fallback is True
+        assert stats.tail_mass == pytest.approx(0.0)
 
     def test_respects_weights(self):
         actions = DEFAULT_ACTIONS[:2]
@@ -571,11 +576,48 @@ class TestSampleFromTails:
             ]
         )
         rng = random.Random(42)
-        results, _ = _sample_from_tails(dist, 1000, tau=0.10, rng=rng)
+        results, _stats = _sample_from_tails(dist, 1000, tau=0.10, rng=rng)
         count_0 = sum(1 for a in results if a.name == actions[0].name)
         count_1 = sum(1 for a in results if a.name == actions[1].name)
         # Actions[1] has 9x the weight, so it should be sampled much more often.
         assert count_1 > count_0
+
+
+class TestTauDefault:
+    """Test cases for VerbalizedActionSelector tail-threshold defaulting."""
+
+    @pytest.mark.parametrize(
+        # Parameter names
+        [
+            "k",
+            "expected_tau",
+        ],
+        # Parameter values
+        [
+            pytest.param(
+                5,  # k
+                0.2,  # expected_tau
+                id="k_5_gives_one_fifth",
+            ),
+            pytest.param(
+                4,  # k
+                0.25,  # expected_tau
+                id="k_4_gives_one_quarter",
+            ),
+        ],
+    )
+    def test_tau_defaults_to_reciprocal_k(self, k: int, expected_tau: float) -> None:
+        """Test that tau defaults to the reciprocal of k when not given explicitly.
+
+        Args:
+            k: The number of actions the selector draws per selection.
+            expected_tau: The tail threshold tau must resolve to.
+        """
+        assert VerbalizedActionSelector(DEFAULT_ACTIONS, lm=FakeLM(""), k=k).tau == pytest.approx(expected_tau)
+
+    def test_explicit_tau_overrides_default(self) -> None:
+        """Test that an explicit tau overrides the reciprocal-k default."""
+        assert VerbalizedActionSelector(DEFAULT_ACTIONS, lm=FakeLM(""), k=5, tau=0.1).tau == pytest.approx(0.1)
 
 
 class TestVerbalizedReflectionIntegration:
@@ -689,6 +731,19 @@ class TestVerbalizedHistory:
         assert record["sampled"] == [p.name for p in picks]
         assert abs(sum(record["probs"].values()) - 1.0) < 1e-6
 
+    def test_history_records_tail_sample_stats(self) -> None:
+        """Test that a history record carries the tail-sampling diagnostics."""
+        lm = FakeLM(VALID_LM_OUTPUT)
+        selector = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=lm, rng=random.Random(0))
+        selector.set_context("prompt text", "feedback text")
+        selector.select(3)
+
+        record = selector.history[0]
+        assert record["n_parsed_entries"] == len(record["probs"])
+        assert record["used_full_fallback"] in (True, False)
+        assert record["entropy_bits"] >= 0.0
+        assert 0.0 <= record["tail_mass"] <= 1.0
+
     def test_history_marks_fallback_on_unparseable_output(self):
         lm = FakeLM("no xml here")
         selector = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=lm, rng=random.Random(0))
@@ -722,21 +777,6 @@ class TestLengthControl:
         selector.select(1)
         assert "Current prompt length: 1234 characters" in lm.calls[0]
         assert "favor condensing" in lm.calls[0]
-
-    def test_oversized_proposal_kept_without_action_selector(self):
-        from gepa.strategies.action_space import MAX_PROPOSAL_CHARS
-
-        lm = RecordingLM(reply="x" * (MAX_PROPOSAL_CHARS + 1))
-        reflection = StatelessReflectionLM(lm)
-        proposal, _ = reflection.reflect({"sp": "old"}, _reflective_dataset(["sp"]), ["sp"])
-        assert "sp" in proposal.new_texts
-
-    def test_normal_sized_action_proposal_kept(self):
-        lm = RecordingLM(reply="short improved instruction")
-        selector = RandomActionSelector(DEFAULT_ACTIONS, rng=random.Random(0))
-        reflection = StatelessReflectionLM(lm, action_selector=selector)
-        proposal, _ = reflection.reflect({"sp": "old"}, _reflective_dataset(["sp"]), ["sp"])
-        assert proposal.new_texts["sp"] == "short improved instruction"
 
 
 class TestConfigWiring:

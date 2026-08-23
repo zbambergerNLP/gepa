@@ -208,6 +208,13 @@ def _assert_invariants(result, adapter, by, run_dir, expect_tasks, topk):
     if isinstance(adapter, BatchedSyntheticAdapter) and expect_tasks > 1:
         assert any(n > 1 for n in adapter.grouped_calls)
 
+    # I7: proposal metadata is the order-independent correlation key used by
+    # ActionDiversityCallback.
+    for e in by["on_proposal_end"]:
+        assert "metadata" in e and "proposal_id" in e["metadata"]
+    for e in accepted + rejected:
+        assert "metadata" in e
+
 
 CONFIGS = [
     ("single-all-plain", SingleMutationSampling, AllImprovements, SyntheticAdapter, False, 1, None),

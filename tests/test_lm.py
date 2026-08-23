@@ -3,9 +3,7 @@
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-from gepa.lm import LM
+from gepa.lm import LM, NativeToolCall, ToolCompletion, TrackingLM
 
 
 class TestLMInit:
@@ -90,6 +88,65 @@ class TestLMCall:
 
         assert result == "truncated"
         assert "truncated" in caplog.text.lower()
+
+
+class TestLMNativeTools:
+    """Test the provider-native function-tool completion path."""
+
+    @patch("litellm.completion")
+    def test_complete_with_tools_uses_auto_choice_and_normalizes_calls(self, mock_completion):
+        response = MagicMock()
+        response.choices = [MagicMock()]
+        response.choices[0].finish_reason = "tool_calls"
+        response.choices[0].message.content = None
+        native_call = MagicMock()
+        native_call.id = "call-1"
+        native_call.function.name = "REPLACE_TEXT"
+        native_call.function.arguments = '{"target":"old","text":"new"}'
+        response.choices[0].message.tool_calls = [native_call]
+        mock_completion.return_value = response
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "REPLACE_TEXT",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ]
+        messages = [{"role": "user", "content": "edit"}]
+
+        lm = LM("openai/gpt-4.1", temperature=0.5)
+        result = lm.complete_with_tools(messages, tools)
+
+        assert result == ToolCompletion(
+            content="",
+            tool_calls=(NativeToolCall("call-1", "REPLACE_TEXT", '{"target":"old","text":"new"}'),),
+        )
+        mock_completion.assert_called_once_with(
+            model="openai/gpt-4.1",
+            messages=messages,
+            tools=tools,
+            tool_choice="auto",
+            num_retries=3,
+            drop_params=True,
+            temperature=0.5,
+        )
+
+    def test_tracking_wrapper_conditionally_preserves_native_tool_interface(self):
+        class NativeCallable:
+            def __call__(self, prompt):
+                return "unused"
+
+            def complete_with_tools(self, messages, tools, *, tool_choice="auto"):
+                return ToolCompletion("", (NativeToolCall("call-1", "DELETE_TEXT", "{}"),))
+
+        wrapped_native = TrackingLM(NativeCallable())
+        result = wrapped_native.complete_with_tools([], [], tool_choice="auto")
+
+        assert result.tool_calls[0].name == "DELETE_TEXT"
+        assert hasattr(wrapped_native, "complete_with_tools")
+        assert not hasattr(TrackingLM(lambda prompt: "fallback"), "complete_with_tools")
 
 
 class TestLMBatchComplete:
@@ -177,4 +234,3 @@ class TestLMConformsToProtocol:
     def test_callable(self):
         lm = LM("openai/gpt-4.1")
         assert callable(lm)
-        assert hasattr(lm, "__call__")

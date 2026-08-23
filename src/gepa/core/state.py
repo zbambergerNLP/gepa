@@ -7,7 +7,8 @@ import os
 import re
 import uuid
 from collections import defaultdict
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Generic, Literal, TypeAlias
 
@@ -225,12 +226,13 @@ class GEPAState(Generic[RolloutOutput, DataId]):
     returned by :func:`~gepa.optimize_anything.optimize_anything`.
     """
 
-    _VALIDATION_SCHEMA_VERSION: ClassVar[int] = 7
+    _VALIDATION_SCHEMA_VERSION: ClassVar[int] = 8
     # Attributes that are runtime-only and should not be serialized (e.g., callback hooks, caches)
     _EXCLUDED_FROM_SERIALIZATION: ClassVar[frozenset[str]] = frozenset({"_budget_hooks"})
 
     program_candidates: list[dict[str, str]]
     parent_program_for_candidate: list[list[ProgramIdx | None]]
+    revision_history_by_candidate: list[list[dict[str, str]]]
     prog_candidate_val_subscores: list[dict[DataId, float]]
     prog_candidate_objective_scores: list[ObjectiveScores]
     # On-disk iteration id for each candidate (indexed by candidate idx).
@@ -288,6 +290,7 @@ class GEPAState(Generic[RolloutOutput, DataId]):
         self.prog_candidate_objective_scores = [base_objective_aggregates]
 
         self.parent_program_for_candidate = [[None]]
+        self.revision_history_by_candidate = [[]]
 
         self.frontier_type: FrontierType = frontier_type
         self.pareto_front_valset = dict(base_evaluation.scores_by_val_id)
@@ -340,11 +343,14 @@ class GEPAState(Generic[RolloutOutput, DataId]):
 
     def is_consistent(self) -> bool:
         assert len(self.program_candidates) == len(self.parent_program_for_candidate)
+        assert len(self.program_candidates) == len(self.revision_history_by_candidate)
         assert len(self.program_candidates) == len(self.named_predictor_id_to_update_next_for_program_candidate)
         assert len(self.program_candidates) == len(self.prog_candidate_val_subscores)
         assert len(self.program_candidates) == len(self.prog_candidate_objective_scores)
         assert len(self.program_candidates) == len(self.num_metric_calls_by_discovery)
         assert len(self.program_candidates) == len(self.iteration_ids_by_candidate_idx)
+        for history in self.revision_history_by_candidate:
+            self._validated_chat_history(history, context="persisted branch history")
 
         assert len(self.pareto_front_valset) == len(self.program_at_pareto_front_valset)
         assert set(self.pareto_front_valset.keys()) == set(self.program_at_pareto_front_valset.keys())
@@ -637,6 +643,12 @@ class GEPAState(Generic[RolloutOutput, DataId]):
                     val_subscores = self.prog_candidate_val_subscores[candidate_idx]
 
                 write(base, meta, components, val_subscores)
+                if candidate_idx is not None and candidate_idx < len(self.revision_history_by_candidate):
+                    self._atomic_write_json(
+                        run_dir,
+                        f"{base}/revision_history.json",
+                        self.revision_history_by_candidate[candidate_idx],
+                    )
 
     def _save_components_dir(self, run_dir: str, base: str, components: dict[str, str]) -> None:
         """Write ``<base>/components/<stem>.txt`` plus ``_index.json``."""
@@ -772,6 +784,7 @@ class GEPAState(Generic[RolloutOutput, DataId]):
         assert len(state.program_candidates) == len(state.prog_candidate_objective_scores)
         assert len(state.program_candidates) == len(state.num_metric_calls_by_discovery)
         assert len(state.program_candidates) == len(state.parent_program_for_candidate)
+        assert len(state.program_candidates) == len(state.revision_history_by_candidate)
         assert len(state.program_candidates) == len(state.named_predictor_id_to_update_next_for_program_candidate)
         assert len(state.program_candidates) == len(state.iteration_ids_by_candidate_idx)
         assert len(state.pareto_front_valset) == len(state.program_at_pareto_front_valset)
@@ -805,6 +818,7 @@ class GEPAState(Generic[RolloutOutput, DataId]):
 
     @staticmethod
     def _upgrade_state_dict(d: dict[str, Any]) -> None:
+        previous_version = int(d.get("validation_schema_version") or 0)
         num_candidates = len(d.get("program_candidates", []))
         if "prog_candidate_objective_scores" not in d:
             d["prog_candidate_objective_scores"] = [{} for _ in range(num_candidates)]
@@ -822,6 +836,36 @@ class GEPAState(Generic[RolloutOutput, DataId]):
             d["evaluation_cache"] = None
         if "adapter_state" not in d:
             d["adapter_state"] = {}
+        if "revision_history_by_candidate" not in d:
+            d["revision_history_by_candidate"] = [[] for _ in range(num_candidates)]
+        elif previous_version < 8:
+            migrated_histories: list[list[dict[str, str]]] = []
+            for history in d["revision_history_by_candidate"]:
+                try:
+                    migrated_histories.append(
+                        GEPAState._validated_chat_history(history, context="persisted branch history")
+                    )
+                    continue
+                except (TypeError, ValueError):
+                    pass
+                messages: list[dict[str, str]] = []
+                for record in history:
+                    if not isinstance(record, Mapping):
+                        raise TypeError("legacy branch-history entries must be mappings")
+                    outcome = record.get("outcome", "accepted")
+                    if outcome not in {"accepted", "rejected", "dropped"}:
+                        outcome = "accepted"
+                    messages.extend(
+                        GEPAState._attempt_records_to_chat(
+                            [record],
+                            outcome,
+                            score_before=record.get("subsample_score_before"),
+                            score_after=record.get("subsample_score_after"),
+                            reason=record.get("outcome_reason"),
+                        )
+                    )
+                migrated_histories.append(messages)
+            d["revision_history_by_candidate"] = migrated_histories
         if "iteration_ids_by_candidate_idx" not in d:
             # Populate the field for states that predate it so the load-time
             # length assertion passes: seed -> SEED_ITERATION_ID, accepted
@@ -960,6 +1004,235 @@ class GEPAState(Generic[RolloutOutput, DataId]):
             front = self.program_at_pareto_front_cartesian.setdefault((val_id, objective), set())
             front.add(program_idx)
 
+    def revision_history_for_candidate(self, candidate_idx: ProgramIdx) -> list[dict[str, str]]:
+        """Return an isolated copy of one candidate's branch-local chat history.
+
+        Args:
+            candidate_idx: Candidate whose branch-local history is requested.
+
+        Returns:
+            Deep copy of user/assistant messages describing accepted, rejected,
+            and dropped attempts visible on this branch from seed to candidate.
+
+        Raises:
+            IndexError: ``candidate_idx`` is outside the candidate pool.
+        """
+        return deepcopy(self.revision_history_by_candidate[candidate_idx])
+
+    @staticmethod
+    def _shared_revision_prefix(histories: Sequence[Sequence[dict[str, str]]]) -> list[dict[str, str]]:
+        """Find the common chat history of one or more parent branches.
+
+        A single-parent mutation inherits the entire branch. A merge inherits
+        only the exact prefix shared by all parents, preventing either sibling's
+        private attempts from becoming global history.
+
+        Args:
+            histories: Parent histories.
+
+        Returns:
+            Deep-copied common prefix.
+        """
+        if not histories:
+            return []
+        prefix: list[dict[str, Any]] = []
+        for records_at_depth in zip(*histories, strict=False):
+            first = records_at_depth[0]
+            if any(record != first for record in records_at_depth[1:]):
+                break
+            prefix.append(deepcopy(first))
+        return prefix
+
+    @staticmethod
+    def _validated_chat_history(
+        history: Any,
+        *,
+        context: str,
+    ) -> list[dict[str, str]]:
+        """Validate and copy a user/assistant-only chat transcript."""
+        if not isinstance(history, Sequence) or isinstance(history, str | bytes):
+            raise TypeError(f"{context} must be a sequence of chat messages")
+        messages: list[dict[str, str]] = []
+        for message in history:
+            if not isinstance(message, Mapping):
+                raise TypeError(f"each {context} entry must be a mapping")
+            if set(message) != {"role", "content"}:
+                raise ValueError(f"each {context} entry must contain only 'role' and 'content'")
+            role = message["role"]
+            content = message["content"]
+            if role not in {"user", "assistant"}:
+                raise ValueError(f"each {context} role must be 'user' or 'assistant'")
+            if not isinstance(content, str):
+                raise TypeError(f"each {context} content must be a string")
+            messages.append({"role": role, "content": content})
+        return messages
+
+    @staticmethod
+    def _proposal_attempt_records(metadata: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+        """Validate current attempt records carried by a proposal.
+
+        ``attempt_records`` is the current key. ``revision_records`` remains a
+        compatibility fallback for reflection strategies that only report
+        completed edits.
+
+        Args:
+            metadata: Candidate proposal metadata.
+
+        Returns:
+            Deep-copied attempt records, or an empty list.
+
+        Raises:
+            TypeError: The reserved metadata value is not a sequence of mappings.
+        """
+        if metadata is None:
+            return []
+        key = "attempt_records" if "attempt_records" in metadata else "revision_records"
+        value = metadata.get(key, [])
+        if not isinstance(value, Sequence) or isinstance(value, str | bytes):
+            raise TypeError(f"proposal metadata {key!r} must be a sequence of mappings")
+        records: list[dict[str, Any]] = []
+        for record in value:
+            if not isinstance(record, Mapping):
+                record_name = "attempt record" if key == "attempt_records" else "revision record"
+                raise TypeError(f"each proposal {record_name} must be a mapping")
+            records.append(deepcopy(dict(record)))
+        return records
+
+    @staticmethod
+    def _attempt_record_chat_messages(record: Mapping[str, Any]) -> list[dict[str, str]]:
+        """Extract actual assistant attempts and user observations from one record."""
+        supplied = record.get("chat_messages")
+        if supplied is not None:
+            return GEPAState._validated_chat_history(supplied, context="attempt chat_messages")
+
+        messages: list[dict[str, str]] = []
+        steps = record.get("react_steps")
+        if isinstance(steps, Sequence) and not isinstance(steps, str | bytes):
+            for step in steps:
+                if not isinstance(step, Mapping):
+                    raise TypeError("each react_steps entry must be a mapping")
+                assistant = step.get("assistant")
+                if assistant is not None and str(assistant):
+                    messages.append({"role": "assistant", "content": str(assistant)})
+                observation = step.get("observation")
+                if observation is None:
+                    observation = step.get("error")
+                if observation is not None and str(observation):
+                    messages.append({"role": "user", "content": str(observation)})
+        else:
+            assistant = record.get("assistant")
+            if assistant is not None and str(assistant):
+                messages.append({"role": "assistant", "content": str(assistant)})
+            observation = record.get("observation")
+            if observation is None:
+                observation = record.get("error")
+            if observation is not None and str(observation):
+                messages.append({"role": "user", "content": str(observation)})
+
+        manifestor_error = record.get("manifestor_error")
+        if manifestor_error and not messages:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": f"Manifestor error: {manifestor_error}",
+                }
+            )
+        return messages
+
+    @staticmethod
+    def _attempt_records_to_chat(
+        records: Sequence[Mapping[str, Any]],
+        outcome: Literal["accepted", "rejected", "dropped"],
+        *,
+        score_before: float | None = None,
+        score_after: float | None = None,
+        reason: str | None = None,
+    ) -> list[dict[str, str]]:
+        """Convert isolated attempt records into a branch-local chat transcript."""
+        messages: list[dict[str, str]] = []
+        for source in records:
+            record = deepcopy(dict(source))
+            record_outcome = "dropped" if record.get("attempt_status") == "dropped" else outcome
+            messages.extend(GEPAState._attempt_record_chat_messages(record))
+            include_outer_result = record_outcome != "dropped" or outcome == "dropped"
+            outcome_feedback = {
+                "accepted": (
+                    "Optimizer feedback: ACCEPTED. This edit passed the acceptance criterion and is retained "
+                    "on this branch."
+                ),
+                "rejected": (
+                    "Optimizer feedback: REJECTED. This edit did not pass the acceptance criterion; the branch "
+                    "document is unchanged."
+                ),
+                "dropped": (
+                    "Optimizer feedback: DROPPED. This attempt produced no completed candidate; the branch "
+                    "document is unchanged."
+                ),
+            }
+            feedback = [outcome_feedback[record_outcome]]
+            component = record.get("component")
+            if component is not None:
+                feedback.append(f"Component: {component}.")
+            if score_before is not None and include_outer_result:
+                feedback.append(f"Score before: {score_before}.")
+            if score_after is not None and include_outer_result:
+                feedback.append(f"Score after: {score_after}.")
+            outcome_reason = reason if include_outer_result else record.get("dropped_reason")
+            if outcome_reason:
+                feedback.append(f"Reason: {outcome_reason}")
+            messages.append(
+                {
+                    "role": "user",
+                    "content": " ".join(feedback),
+                }
+            )
+        return messages
+
+    def record_proposal_attempts(
+        self,
+        candidate_idx: ProgramIdx,
+        proposal_metadata: Mapping[str, Any] | None,
+        *,
+        outcome: Literal["rejected", "dropped"],
+        score_before: float | None = None,
+        score_after: float | None = None,
+        reason: str | None = None,
+    ) -> None:
+        """Append rejected or dropped attempts only to the selected branch."""
+        records = self._proposal_attempt_records(proposal_metadata)
+        messages = self._attempt_records_to_chat(
+            records,
+            outcome,
+            score_before=score_before,
+            score_after=score_after,
+            reason=reason,
+        )
+        self.revision_history_by_candidate[candidate_idx].extend(messages)
+
+    def _proposal_parent_history(
+        self,
+        parent_idx: ProgramIdx,
+        proposal_metadata: Mapping[str, Any] | None,
+    ) -> Sequence[dict[str, str]]:
+        """Return the parent history snapshot visible when a proposal was made."""
+        history = self.revision_history_by_candidate[parent_idx]
+        if proposal_metadata is None or "parent_branch_history_lengths" not in proposal_metadata:
+            return history
+        lengths = proposal_metadata["parent_branch_history_lengths"]
+        if not isinstance(lengths, Mapping):
+            raise TypeError("proposal metadata 'parent_branch_history_lengths' must be a mapping")
+        missing = object()
+        length = lengths.get(str(parent_idx), lengths.get(parent_idx, missing))
+        if length is missing:
+            return history
+        if not isinstance(length, int) or isinstance(length, bool) or length < 0:
+            raise TypeError("parent branch history snapshot lengths must be non-negative integers")
+        if length > len(history):
+            raise ValueError(
+                f"parent {parent_idx} history snapshot length {length} exceeds current length {len(history)}"
+            )
+        return history[:length]
+
     def update_state_with_new_program(
         self,
         parent_program_idx: list[ProgramIdx],
@@ -968,15 +1241,41 @@ class GEPAState(Generic[RolloutOutput, DataId]):
         run_dir: str | None,
         num_metric_calls_by_discovery_of_new_program: int,
         iteration_id: str | None = None,
+        proposal_metadata: Mapping[str, Any] | None = None,
     ) -> ProgramIdx:
+        """Add an accepted candidate and persist its branch-local chat transcript.
+
+        Args:
+            parent_program_idx: Parent candidates.
+            new_program: Accepted component mapping.
+            valset_evaluation: Candidate validation results.
+            run_dir: Optional run directory.
+            num_metric_calls_by_discovery_of_new_program: Discovery budget snapshot.
+            iteration_id: On-disk proposal anchor.
+            proposal_metadata: Metadata containing current ``attempt_records``
+                (or legacy ``revision_records``) and an optional parent-history
+                snapshot length.
+
+        Returns:
+            New candidate index.
+        """
         # ``iteration_id`` is the on-disk iteration id for the proposal that
         # produced this candidate — the random anchor stamped on its trace
         # entry at slot creation. Falls back to the current slot's id when the
         # caller hasn't plumbed it (e.g. the merge path).
         if iteration_id is None:
             iteration_id = self.current_iteration_id()
+        parent_histories = [
+            self._proposal_parent_history(parent_idx, proposal_metadata)
+            for parent_idx in parent_program_idx
+            if parent_idx is not None
+        ]
+        revision_history = self._shared_revision_prefix(parent_histories)
+        proposal_attempts = self._proposal_attempt_records(proposal_metadata)
+        revision_history.extend(self._attempt_records_to_chat(proposal_attempts, "accepted"))
         new_program_idx = len(self.program_candidates)
         self.program_candidates.append(dict(new_program))
+        self.revision_history_by_candidate.append(revision_history)
         self.iteration_ids_by_candidate_idx.append(iteration_id)
         self.num_metric_calls_by_discovery.append(num_metric_calls_by_discovery_of_new_program)
 

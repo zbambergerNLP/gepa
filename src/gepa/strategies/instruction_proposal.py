@@ -7,6 +7,7 @@ from typing import Any, ClassVar
 
 from gepa.image import Image
 from gepa.proposer.reflective_mutation.base import Signature
+from gepa.utils.text import strip_think_tags
 
 
 class InstructionProposalSignature(Signature):
@@ -123,6 +124,9 @@ Provide the new instructions within ``` blocks."""
 
     @classmethod
     def output_extractor(cls, lm_out: str) -> dict[str, str]:
+        # Strip reasoning model tokens (e.g. <think>...</think>) before parsing.
+        lm_out = strip_think_tags(lm_out).strip()
+
         def extract_instruction_text() -> str:
             # Find the first and last backtick positions (if any)
             start = lm_out.find("```") + 3

@@ -4,7 +4,7 @@
 import json
 import os
 import traceback
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, Generic
 
 from gepa.core.adapter import (
@@ -50,6 +50,7 @@ from gepa.logging.logger import LoggerProtocol
 from gepa.logging.utils import log_detailed_metrics_after_discovering_new_program
 from gepa.proposer.base import CandidateProposal
 from gepa.proposer.merge import MergeProposer
+from gepa.proposer.reflective_mutation.react_v2_proposer import ReActV2ContextError
 from gepa.proposer.reflective_mutation.reflective_mutation import ReflectiveMutationProposer
 from gepa.strategies.acceptance import AcceptanceCriterion, ImprovementOrEqualAcceptance, StrictImprovementAcceptance
 from gepa.strategies.eval_policy import EvaluationPolicy, FullEvaluationPolicy
@@ -121,6 +122,14 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
     rollouts. Callers should pass the same loader instance they gave the proposer when the two
     id spaces are genuinely the same; wrapping the same list twice produces two loaders and
     isolates the cache (extra evals, never a wrongly shared one).
+
+    Each iteration of :meth:`run` saves the state, optionally attempts a merge
+    when one is due, asks the reflective proposer for a batch of mutations,
+    gates and full-evaluates them (see :meth:`_run_reflective_batch`), updates
+    the Pareto frontier and fires the corresponding callbacks. Acceptance events
+    carry both the pre- and post-proposal subsample scores so downstream
+    trackers (e.g. per-action score deltas) see the full outcome of every
+    accepted proposal, not only of rejected ones.
     """
 
     def __init__(
@@ -376,10 +385,17 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
         state: GEPAState[RolloutOutput, DataId],
         parent_program_idx: list[int],
         iteration_id: str | None = None,
+        proposal_metadata: Mapping[str, Any] | None = None,
     ) -> tuple[int, int]:
         valset_evaluation, num_actual_evals = self._evaluate_programs_on_valset([new_program], state)[0]
         return self._add_evaluated_program(
-            new_program, state, parent_program_idx, valset_evaluation, num_actual_evals, iteration_id=iteration_id
+            new_program,
+            state,
+            parent_program_idx,
+            valset_evaluation,
+            num_actual_evals,
+            iteration_id=iteration_id,
+            proposal_metadata=proposal_metadata,
         )
 
     def _add_evaluated_program(
@@ -390,6 +406,7 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
         valset_evaluation: ValsetEvaluation[RolloutOutput, DataId],
         num_actual_evals: int,
         iteration_id: str | None = None,
+        proposal_metadata: Mapping[str, Any] | None = None,
     ) -> tuple[int, int]:
         """Add an already-evaluated candidate to the pool. Must run sequentially.
 
@@ -422,6 +439,7 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
             run_dir=self.run_dir,
             num_metric_calls_by_discovery_of_new_program=num_metric_calls_by_discovery,
             iteration_id=iteration_id,
+            proposal_metadata=proposal_metadata,
         )
 
         # ``iteration_id`` is the on-disk anchor (the same one
@@ -555,6 +573,15 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
         else:
             reject_msg = f"Iteration {iteration}: Candidate rejected by acceptance criterion (old_sum={old_sum}, new_sum={new_sum}), skipping"
             reject_reason = f"Candidate rejected by acceptance criterion (old_sum={old_sum}, new_sum={new_sum})"
+        for parent_idx in dict.fromkeys(proposal.parent_program_ids):
+            state.record_proposal_attempts(
+                parent_idx,
+                proposal.metadata,
+                outcome="rejected",
+                score_before=old_sum,
+                score_after=new_sum,
+                reason=reject_reason,
+            )
         self.logger.log(reject_msg)
         self._log_proposal_lm_calls(iteration, proposal, candidate_idx=-1)
         notify_callbacks(
@@ -565,6 +592,7 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
                 old_score=old_sum,
                 new_score=new_sum,
                 reason=reject_reason,
+                metadata=proposal.metadata or {},
             ),
         )
 
@@ -584,7 +612,16 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
         dropped by Best/TopK selection, which previously vanished without an
         event. Selected proposals are batch-evaluated on the valset (one
         :meth:`_evaluate_programs_on_valset` call) and added to the pool in
-        order. Returns True if any proposal was accepted.
+        order. Each ``on_candidate_accepted`` event carries the parent's
+        subsample score as ``old_score`` next to the new one.
+
+        Args:
+            proposals: The proposals the reflective proposer produced this
+                iteration, each already evaluated on its minibatch.
+            state: The live optimization state the accepted candidates join.
+
+        Returns:
+            True if at least one proposal was accepted into the pool.
         """
         iteration = state.i + 1
 
@@ -684,6 +721,7 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
                 valset_evaluation=valset_evaluation,
                 num_actual_evals=num_actual_evals,
                 iteration_id=candidate_iteration_id,
+                proposal_metadata=proposal.metadata,
             )
             self._log_proposal_lm_calls(iteration, proposal, candidate_idx=new_idx)
             notify_callbacks(
@@ -692,8 +730,10 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
                 CandidateAcceptedEvent(
                     iteration=iteration,
                     new_candidate_idx=new_idx,
+                    old_score=sum(proposal.subsample_scores_before or []),
                     new_score=new_sum,
                     parent_ids=proposal.parent_program_ids,
+                    metadata=proposal.metadata or {},
                 ),
             )
             any_accepted = True
@@ -712,6 +752,25 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
     # ------------------------------------------------------------------
 
     def run(self) -> GEPAState[RolloutOutput, DataId]:
+        """Run the optimization loop until a stop condition fires.
+
+        Initializes (or resumes from ``run_dir``) the :class:`GEPAState`,
+        evaluates the seed on the valset, then iterates: save state, attempt a
+        merge if one is due, propose and gate a reflective batch, and notify the
+        iteration callbacks. Per-iteration exceptions are reported through
+        ``on_error`` and re-raised only when ``raise_on_exception`` is set.
+        ReAct V2 context overflows are always explicit failures because retrying
+        without changing the branch history cannot recover.
+
+        Returns:
+            The final optimization state, after the closing save and the
+            ``on_optimization_end`` notification.
+
+        Raises:
+            ImportError: If the progress bar is enabled but ``tqdm`` is missing.
+            ReActV2ContextError: Branch-local ReAct history exceeds its budget.
+            ValueError: If no valset was provided.
+        """
         # Check tqdm availability if progress bar is enabled
         progress_bar = None
         if self.display_progress_bar:
@@ -1004,6 +1063,7 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
                                     new_program=proposal.candidate,
                                     state=state,
                                     parent_program_idx=proposal.parent_program_ids,
+                                    proposal_metadata=proposal.metadata,
                                 )
                                 self.merge_proposer.merges_due -= 1
                                 self.merge_proposer.total_merges_tested += 1
@@ -1035,8 +1095,10 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
                                     CandidateAcceptedEvent(
                                         iteration=state.i + 1,
                                         new_candidate_idx=new_idx,
+                                        old_score=max(parent_sums),
                                         new_score=new_sum,
                                         parent_ids=proposal.parent_program_ids,
+                                        metadata=proposal.metadata or {},
                                     ),
                                 )
                                 continue  # skip reflective this iteration
@@ -1071,6 +1133,7 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
                 proposal_accepted = self._run_reflective_batch(proposals, state)
 
             except Exception as e:
+                fatal_context_error = isinstance(e, ReActV2ContextError)
                 self.logger.log(f"Iteration {state.i + 1}: Exception during optimization: {e}")
                 self.logger.log(traceback.format_exc())
                 made_progress = state.total_num_evals > evals_before_iteration
@@ -1081,13 +1144,14 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
                     ErrorEvent(
                         iteration=state.i + 1,
                         exception=e,
-                        will_continue=not self.raise_on_exception and made_progress,
+                        will_continue=(
+                            not self.raise_on_exception and made_progress and not fatal_context_error
+                        ),
                     ),
                 )
-                if self.raise_on_exception or not made_progress:
-                    raise e
-                else:
-                    continue
+                if self.raise_on_exception or fatal_context_error or not made_progress:
+                    raise
+                continue
             finally:
                 # Notify iteration end only if the iteration actually started
                 # (i.e., on_iteration_start was called successfully)

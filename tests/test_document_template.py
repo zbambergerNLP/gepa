@@ -4,7 +4,8 @@
 """Tests for document templates (:mod:`gepa.strategies.document_template`).
 
 Covers EditTarget naming, DocumentTemplate render/parse round-tripping and its
-rejection of malformed documents, the TEMPLATES registry, and migrate_document's
+rejection of malformed documents, the TEMPLATES registry, the provider template
+families (TEMPLATE_FAMILIES and infer_template_family), and migrate_document's
 skip/restructure/retry/give-up paths. The migration LM is a scripted in-memory fake.
 
 Expected usage:
@@ -18,10 +19,12 @@ import pytest
 
 # Local imports
 from gepa.strategies.document_template import (
+    TEMPLATE_FAMILIES,
     TEMPLATES,
     DocumentTemplate,
     EditTarget,
     MalformedDocumentError,
+    infer_template_family,
     migrate_document,
 )
 
@@ -189,6 +192,229 @@ class TestDocumentTemplate:
         """Test that an ad-hoc DocumentTemplate round-trips its own bodies."""
         template = DocumentTemplate("note", {"Body": "the text"})
         assert template.parse(template.render({"Body": "hi"})) == {"Body": "hi"}
+
+
+class TestTemplateFamilies:
+    """Test cases for the TEMPLATE_FAMILIES registry."""
+
+    def test_registry_covers_the_known_families(self) -> None:
+        """Test that the registry holds the provider families and that generic is the TEMPLATES object itself."""
+        assert set(TEMPLATE_FAMILIES) == {"generic", "openai", "openai-gpt-5.6", "anthropic", "google", "alibaba"}
+        assert TEMPLATE_FAMILIES["generic"] is TEMPLATES
+
+    def test_skill_kind_is_provider_invariant(self) -> None:
+        """Test that every family shares the one skill template object (the skill shape has no provider guide)."""
+        assert all(kinds["skill"] is TEMPLATES["skill"] for kinds in TEMPLATE_FAMILIES.values())
+
+    @pytest.mark.parametrize(
+        # Parameter names
+        [
+            "family",
+            "expected_sections",
+        ],
+        # Parameter values
+        [
+            pytest.param(
+                "generic",  # family
+                ["Role", "Task", "Context", "Rules", "Reasoning", "Examples", "Output Format"],  # expected_sections
+                id="generic_papers_grounded_taxonomy",
+            ),
+            pytest.param(
+                "openai",  # family
+                [  # expected_sections (the prompt-engineering guide's skeleton: identity first, context last)
+                    "Identity",
+                    "Instructions",
+                    "Examples",
+                    "Context",
+                ],
+                id="openai_identity_first_context_last",
+            ),
+            pytest.param(
+                "openai-gpt-5.6",  # family
+                [  # expected_sections (the GPT-5.6 family guide's suggested prompt structure)
+                    "Role",
+                    "Personality",
+                    "Goal",
+                    "Success Criteria",
+                    "Constraints",
+                    "Tools",
+                    "Output",
+                    "Stop Rules",
+                ],
+                id="gpt56_role_first_stop_rules_last",
+            ),
+            pytest.param(
+                "anthropic",  # family
+                [  # expected_sections (Claude best practices: longform data first, instructions last)
+                    "Role",
+                    "Context",
+                    "Examples",
+                    "Reasoning",
+                    "Output Format",
+                    "Instructions",
+                ],
+                id="anthropic_data_first_instructions_last",
+            ),
+            pytest.param(
+                "google",  # family
+                [  # expected_sections (the Gemini best-practices template: role first, closing reminder last)
+                    "Role",
+                    "Instructions",
+                    "Constraints",
+                    "Output Format",
+                    "Context",
+                    "Task",
+                    "Final Instruction",
+                ],
+                id="google_role_first_final_instruction_last",
+            ),
+            pytest.param(
+                "alibaba",  # family
+                [  # expected_sections (Model Studio's six-part framework, known as CO-STAR: context first, response last)
+                    "Context",
+                    "Objective",
+                    "Style",
+                    "Tone",
+                    "Audience",
+                    "Response",
+                ],
+                id="alibaba_costar_framework",
+            ),
+        ],
+    )
+    def test_prompt_sections_follow_the_provider_guide(
+        self,
+        family: str,
+        expected_sections: list[str],
+    ) -> None:
+        """Test that each family's prompt template has its guide's sections, in order, and round-trips.
+
+        Args:
+            family: The TEMPLATE_FAMILIES key under test.
+            expected_sections: The exact ordered section names the family's prompt template must define.
+        """
+        template = TEMPLATE_FAMILIES[family]["prompt"]
+        assert template.kind == "prompt"
+        assert list(template.sections) == expected_sections
+        bodies = {section: f"text for {section}" for section in expected_sections}
+        assert template.parse(template.render(bodies)) == bodies
+
+
+class TestInferTemplateFamily:
+    """Test cases for infer_template_family."""
+
+    @pytest.mark.parametrize(
+        # Parameter names
+        [
+            "model",
+            "expected_family",
+        ],
+        # Parameter values
+        [
+            pytest.param(
+                "anthropic/claude-opus-4",  # model
+                "anthropic",  # expected_family
+                id="claude_maps_to_anthropic",
+            ),
+            pytest.param(
+                "gemini/gemini-2.5-pro",  # model
+                "google",  # expected_family
+                id="gemini_maps_to_google",
+            ),
+            pytest.param(
+                "gemma-3-27b-it",  # model
+                "google",  # expected_family
+                id="gemma_maps_to_google",
+            ),
+            pytest.param(
+                "gpt-4.1-mini",  # model
+                "openai",  # expected_family
+                id="gpt_maps_to_openai",
+            ),
+            pytest.param(
+                "openai/gpt-5.6-sol",  # model
+                "openai-gpt-5.6",  # expected_family (the model-specific family wins over the provider one)
+                id="gpt56_maps_to_its_model_specific_family",
+            ),
+            pytest.param(
+                "gpt-5.6",  # model
+                "openai-gpt-5.6",  # expected_family
+                id="bare_gpt56_maps_to_its_model_specific_family",
+            ),
+            pytest.param(
+                "openai/o3",  # model
+                "openai",  # expected_family
+                id="o_series_with_provider_prefix_maps_to_openai",
+            ),
+            pytest.param(
+                "o4-mini",  # model
+                "openai",  # expected_family
+                id="bare_o_series_maps_to_openai",
+            ),
+            pytest.param(
+                "azure/o1-preview",  # model
+                "openai",  # expected_family
+                id="o_series_behind_other_provider_maps_to_openai",
+            ),
+            pytest.param(
+                "openai/some-future-model",  # model
+                "openai",  # expected_family
+                id="openai_prefix_alone_maps_to_openai",
+            ),
+            pytest.param(
+                "dashscope/qwen-max",  # model
+                "alibaba",  # expected_family
+                id="qwen_maps_to_alibaba",
+            ),
+            pytest.param(
+                "qwq-32b",  # model
+                "alibaba",  # expected_family
+                id="qwq_maps_to_alibaba",
+            ),
+            pytest.param(
+                "groq/llama-3.3-70b",  # model
+                "generic",  # expected_family (Meta prescribes no prompt structure)
+                id="llama_maps_to_generic",
+            ),
+            pytest.param(
+                "meta/muse-spark-1.2",  # model
+                "generic",  # expected_family (Meta prescribes no prompt structure)
+                id="muse_maps_to_generic",
+            ),
+            pytest.param(
+                "mistral/mistral-large",  # model
+                "generic",  # expected_family
+                id="unknown_provider_maps_to_generic",
+            ),
+            pytest.param(
+                "solo",  # model
+                "generic",  # expected_family (no false positive on the o-series pattern)
+                id="lone_o_without_digits_maps_to_generic",
+            ),
+            pytest.param(
+                None,  # model
+                "generic",  # expected_family
+                id="none_maps_to_generic",
+            ),
+            pytest.param(
+                "",  # model
+                "generic",  # expected_family
+                id="empty_string_maps_to_generic",
+            ),
+        ],
+    )
+    def test_model_name_maps_to_its_provider_family(
+        self,
+        model: str | None,
+        expected_family: str,
+    ) -> None:
+        """Test that infer_template_family maps a model identifier to its provider's template family.
+
+        Args:
+            model: The (LiteLLM-style) model identifier, or None when no task model name is available.
+            expected_family: The TEMPLATE_FAMILIES key the identifier must map to.
+        """
+        assert infer_template_family(model) == expected_family
 
 
 class TestMigrateDocument:

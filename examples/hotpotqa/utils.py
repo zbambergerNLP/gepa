@@ -101,10 +101,10 @@ def _extract_final_response(output: str) -> str:
 
 def _call_lm(system: str, user: str, model: str, api_base: str | None) -> str:
     """Call the LM with the GEPA experiment's decoding settings."""
-    messages = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user},
-    ]
+    messages = []
+    if system.strip():
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": user})
     kwargs: dict = {
         "model": model,
         "messages": messages,

@@ -1,20 +1,21 @@
-"""HoVer evaluation: vanilla GEPA vs random vs verbalized action selection.
+"""HoVer evaluation: vanilla GEPA vs Controller/Manifestor/ReAct V2.
 
-Replicates a HoVer-style experiment (Jiang et al. 2020, many-hop fact
-extraction & claim verification, up to 3 hops): a 2-stage program
-(query_writer -> doc_summarizer) whose two prompts are optimized on 150 train
+Replicates the GEPA artifact's HoVer experiment over official v1.1 claims with
+exactly three supporting documents. The program performs three live Wikipedia
+retrieval hops and optimizes two summarizers and two query generators on 150 train
 examples, with 300 val examples for Pareto selection and 300 test examples
-held out for final scoring. The metric is gold-doc retrieval F1/recall
-(precision/recall/F1 over supporting Wikipedia titles). The default budget
+held out for final scoring. The primary metric is complete gold-document
+retrieval, with supporting-document recall reported separately. The default budget
 of 7051 metric calls matches the paper.
 
 Conditions:
     vanilla  - stock GEPA reflective mutation
+    react_v2 - section/action Controller, provider-routed Manifestor, ReAct V2 proposer
     random   - action-conditioned reflection, actions picked uniformly at random
     action   - action-conditioned reflection with verbalized sampling
 
 Usage:
-    uv run python examples/hover/main.py [--condition vanilla|random|action|all]
+    uv run python -m examples.hover.main [--condition vanilla|react_v2|both]
         [--max-metric-calls N] [--train-limit N] [--val-limit N] [--test-limit N]
 """
 
@@ -23,8 +24,27 @@ import itertools
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
-from examples.hover.utils import hover_metric, hover_recall, load_hover_dataset, run_single_stage, run_two_stage
+from examples.common.react_v2 import (
+    benchmark_data_identity,
+    build_react_v2_strategy,
+    ensure_wikipedia_run_contract,
+    experiment_run_key,
+    file_sha256,
+    resolve_template_family,
+    structured_prompt,
+)
+from examples.common.wikipedia import DEFAULT_WIKIPEDIA_ENDPOINT, WikipediaClient, WikipediaPassage, WikipediaRetriever
+from examples.hover.utils import (
+    DATA_DIR,
+    HOVER_TRAIN_FILE,
+    hover_metric,
+    hover_recall,
+    load_hover_dataset,
+    run_single_stage,
+    run_two_stage,
+)
 from gepa.core.action_tracking import ActionDiversityCallback
 from gepa.lm import LM
 from gepa.optimize_anything import (
@@ -40,79 +60,161 @@ from gepa.strategies.action_space import (
     VerbalizedActionSelector,
     build_structured_actions,
 )
+from gepa.strategies.document_template import TEMPLATE_FAMILIES
 
-# Seed instructions: 2-stage query-writer + doc-summarizer for HoVer claim verification
+# GEPA artifact components: summarize1 -> create_query_hop2 -> summarize2 -> create_query_hop3.
 SEED_CANDIDATE = {
-    "query_writer": "Write search queries to retrieve Wikipedia pages needed to verify the claim.",
-    "doc_summarizer": (
-        "Given the claim and the queries, list the Wikipedia page titles that provide "
-        "supporting evidence to verify the claim. Return only the titles."
-    ),
+    "summarize1": "Summarize the first-hop Wikipedia passages and preserve clues needed for further retrieval.",
+    "create_query_hop2": "Generate a focused second-hop Wikipedia query from the claim and first-hop summary.",
+    "summarize2": "Synthesize the first-hop summary with second-hop passages to expose missing evidence links.",
+    "create_query_hop3": "Generate a final Wikipedia query from the claim and both retrieval-hop summaries.",
 }
 
-# Ablation seed: single-turn program (one prompt component)
-SEED_CANDIDATE_1STAGE = {"retrieve": "Given the claim, list the Wikipedia page titles that support verification of the claim."}
+# Ablation seed: generate one query, then score the pages that query retrieves.
+SEED_CANDIDATE_1STAGE = {
+    "retrieve": "Write one focused Wikipedia search query for the evidence needed to verify the claim."
+}
 
 _CONDITION_DIR_NAMES = {
     "vanilla": "hover_vanilla",
+    "react_v2": "hover_react_v2",
     "random": "hover_random_action",
     "action": "hover_verbalized_action",
 }
 
 
-def _structured_seed(task_sentence: str) -> str:
-    """Wrap a seed sentence in a best-practice markdown skeleton.
+def condition_run_dir(condition: str, program: str, tag: str = "", run_key: str = "") -> str:
+    suffix = "_1stage" if program == "1stage" else ""
+    tag_suffix = f"_{tag}" if tag else ""
+    key_suffix = f"_{run_key}" if run_key else ""
+    return f"outputs/{_CONDITION_DIR_NAMES[condition]}{suffix}{key_suffix}{tag_suffix}"
 
-    The seed sentence is preserved verbatim in the Task section; other
-    sections start as explicit placeholders for section-scoped actions to fill.
-    """
-    return (
-        "## Role\nYou are a retrieval assistant for fact verification.\n\n"
-        f"## Task\n{task_sentence}\n\n"
-        "## Rules\n(none yet)\n\n"
-        "## Output Format\n(none yet)\n\n"
-        "## Examples\n(none yet)"
+
+def build_run_contract(condition: str, args) -> dict:
+    """Build the complete persisted configuration for one condition."""
+    family = resolve_template_family(args.template_family, args.solver_model)
+    solver_api_base = args.solver_api_base if args.solver_api_base is not None else args.api_base
+    reflection_api_base = args.reflection_api_base if args.reflection_api_base is not None else args.api_base
+    reflection_level = args.reflection_level if condition == "react_v2" else 0
+    edit_tool_set = args.edit_tool_set if condition == "react_v2" else None
+    legacy_actions = args.actions if condition in ("random", "action") else None
+    return {
+        "schema_version": 1,
+        "benchmark": "hover-wikipedia",
+        "condition": condition,
+        "models": {
+            "solver": args.solver_model,
+            "solver_api_base": solver_api_base,
+            "reflection": args.reflection_model,
+            "reflection_api_base": reflection_api_base,
+        },
+        "optimizer": {
+            "max_metric_calls": args.max_metric_calls,
+            "seed": args.seed,
+            "seed_style": args.seed_style,
+            "template_family": family,
+            "reflection_level": reflection_level,
+            "edit_tool_set": edit_tool_set,
+            "legacy_actions": legacy_actions,
+        },
+        "program": {
+            "name": args.program,
+            "retrieval_k": args.retrieval_k,
+            "final_retrieval_k": args.final_retrieval_k,
+            "parallel_workers": 24,
+            "cache_evaluation": True,
+        },
+        "retrieval": {
+            "endpoint": args.wikipedia_endpoint,
+            "cache_path": args.wikipedia_cache,
+            "timeout_sec": args.wikipedia_timeout,
+        },
+        "data": args.data_identity,
+        "tag": args.tag,
+    }
+
+
+def _run_key(condition: str, args) -> str:
+    family = resolve_template_family(args.template_family, args.solver_model)
+    contract = build_run_contract(condition, args)
+    return experiment_run_key(
+        condition=condition,
+        template_family=family,
+        reflection_level=contract["optimizer"]["reflection_level"],
+        edit_tool_set=contract["optimizer"]["edit_tool_set"] or "none",
+        settings=contract,
     )
 
 
-def condition_run_dir(condition: str, program: str, tag: str = "") -> str:
-    suffix = "_1stage" if program == "1stage" else ""
-    tag_suffix = f"_{tag}" if tag else ""
-    return f"outputs/{_CONDITION_DIR_NAMES[condition]}{suffix}{tag_suffix}"
-
-
-def seed_candidate(program: str, seed_style: str = "plain") -> dict:
+def seed_candidate(program: str, seed_style: str = "plain", template_family: str = "generic") -> dict:
     seed = dict(SEED_CANDIDATE_1STAGE if program == "1stage" else SEED_CANDIDATE)
     if seed_style == "structured":
-        seed = {component: _structured_seed(text) for component, text in seed.items()}
+        seed = {component: structured_prompt(text, template_family) for component, text in seed.items()}
     return seed
 
 
-def run_program(candidate: dict, claim: str, program: str, model: str, api_base: str | None) -> tuple[str | None, str]:
-    """Run the candidate program on a claim, returning (stage1_queries, final_titles)."""
+def run_program(
+    candidate: dict,
+    claim: str,
+    program: str,
+    model: str,
+    api_base: str | None,
+    retriever: WikipediaRetriever,
+    retrieval_k: int,
+    final_retrieval_k: int,
+) -> tuple[str | None, list[WikipediaPassage]]:
+    """Run a candidate and return generated queries plus retrieved pages."""
     if program == "1stage":
-        return None, run_single_stage(candidate["retrieve"], claim, model=model, api_base=api_base)
+        return None, run_single_stage(
+            candidate["retrieve"],
+            claim,
+            retriever,
+            model=model,
+            api_base=api_base,
+            retrieval_k=final_retrieval_k,
+        )
     return run_two_stage(
-        candidate["query_writer"],
-        candidate["doc_summarizer"],
+        candidate["summarize1"],
+        candidate["create_query_hop2"],
+        candidate["summarize2"],
+        candidate["create_query_hop3"],
         claim,
+        retriever,
         model=model,
         api_base=api_base,
+        retrieval_k=retrieval_k,
+        final_retrieval_k=final_retrieval_k,
     )
 
 
-def make_evaluator(solver_model: str, api_base: str | None = None, program: str = "2stage"):
+def make_evaluator(
+    solver_model: str,
+    retriever: WikipediaRetriever,
+    api_base: str | None = None,
+    program: str = "2stage",
+    retrieval_k: int = 7,
+    final_retrieval_k: int = 10,
+):
     """Create an evaluator function closed over the solver model name."""
 
     def evaluate(candidate: dict, example: dict) -> tuple[float, SideInfo]:
-        response, final_response = run_program(candidate, example["prompt"], program, solver_model, api_base)
-        score, feedback = hover_metric(final_response, example)
-        recall = hover_recall(final_response, example)
+        response, retrieved_docs = run_program(
+            candidate,
+            example["prompt"],
+            program,
+            solver_model,
+            api_base,
+            retriever,
+            retrieval_k,
+            final_retrieval_k,
+        )
+        score, feedback = hover_metric(retrieved_docs, example)
+        recall = hover_recall(retrieved_docs, example)
 
         side_info: SideInfo = {
             "score": score,
             "claim": example["prompt"],
-            "output": final_response,
+            "output": [passage.title for passage in retrieved_docs],
             "execution_feedback": feedback,
             "recall": recall,
         }
@@ -127,25 +229,37 @@ def evaluate_on_set(
     candidate: dict,
     dataset: list[dict],
     solver_model: str,
+    retriever: WikipediaRetriever,
     api_base: str | None = None,
     max_workers: int = 24,
     program: str = "2stage",
+    retrieval_k: int = 7,
+    final_retrieval_k: int = 10,
 ) -> dict[str, float]:
-    """Evaluate a candidate on a dataset, returning mean F1 and recall."""
+    """Evaluate a candidate, returning complete-retrieval rate and recall."""
 
     def score_one(example: dict) -> tuple[float, float]:
-        _, final_response = run_program(candidate, example["prompt"], program, solver_model, api_base)
-        score, _ = hover_metric(final_response, example)
-        rec = hover_recall(final_response, example)
+        _, retrieved_docs = run_program(
+            candidate,
+            example["prompt"],
+            program,
+            solver_model,
+            api_base,
+            retriever,
+            retrieval_k,
+            final_retrieval_k,
+        )
+        score, _ = hover_metric(retrieved_docs, example)
+        rec = hover_recall(retrieved_docs, example)
         return score, rec
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         scores = list(pool.map(score_one, dataset))
     if not scores:
-        return {"f1": 0.0, "recall": 0.0}
+        return {"complete": 0.0, "recall": 0.0}
     f1s = [s for s, _ in scores]
     recs = [r for _, r in scores]
-    return {"f1": sum(f1s) / len(f1s), "recall": sum(recs) / len(recs)}
+    return {"complete": sum(f1s) / len(f1s), "recall": sum(recs) / len(recs)}
 
 
 def prompt_diversity(candidates: list[dict]) -> dict[str, dict[str, float]]:
@@ -173,9 +287,10 @@ def prompt_diversity(candidates: list[dict]) -> dict[str, dict[str, float]]:
     return diversity
 
 
-def dump_candidates(result, run_dir: str) -> str:
+def dump_candidates(result, run_dir: str, run_contract: dict) -> str:
     """Write all explored candidates (with lineage and scores) to candidates.json."""
     payload = {
+        "run_contract": run_contract,
         "best_idx": result.best_idx,
         "total_metric_calls": result.total_metric_calls,
         "num_full_val_evals": result.num_full_val_evals,
@@ -207,9 +322,14 @@ def dump_action_summary(tracker: ActionDiversityCallback, run_dir: str, selector
     return path
 
 
-def build_config(condition: str, args, reflection_lm_kwargs: dict):
+def build_config(condition: str, args, reflection_lm_kwargs: dict, run_dir: str | None = None):
     """Build the GEPAConfig for one condition. Returns (config, action_selector)."""
-    action_space = build_structured_actions() if args.actions == "structured" else DEFAULT_ACTIONS
+    resolved_family = resolve_template_family(args.template_family, args.solver_model)
+    action_space = (
+        build_structured_actions(list(TEMPLATE_FAMILIES[resolved_family]["prompt"].sections))
+        if args.actions == "structured"
+        else DEFAULT_ACTIONS
+    )
     action_selector = None
     if condition == "random":
         action_selector = RandomActionSelector(action_space)
@@ -219,9 +339,20 @@ def build_config(condition: str, args, reflection_lm_kwargs: dict):
             lm=LM(args.reflection_model, **reflection_lm_kwargs),
         )
 
+    reflection_strategy = None
+    if condition == "react_v2":
+        reflection_strategy, _ = build_react_v2_strategy(
+            reflection_model=args.reflection_model,
+            task_model=args.solver_model,
+            lm_kwargs=reflection_lm_kwargs,
+            level=args.reflection_level,
+            edit_tool_set=args.edit_tool_set,
+            template_family=args.template_family,
+        )
+
     config = GEPAConfig(
         engine=EngineConfig(
-            run_dir=condition_run_dir(condition, args.program, args.tag),
+            run_dir=run_dir or condition_run_dir(condition, args.program, args.tag, _run_key(condition, args)),
             max_metric_calls=args.max_metric_calls,
             parallel=True,
             max_workers=24,
@@ -230,6 +361,7 @@ def build_config(condition: str, args, reflection_lm_kwargs: dict):
         reflection=ReflectionConfig(
             reflection_lm=args.reflection_model,
             reflection_lm_kwargs=reflection_lm_kwargs or None,
+            reflection_strategy=reflection_strategy,
             action_selector=action_selector,
         ),
     )
@@ -281,6 +413,23 @@ def main():
     parser.add_argument(
         "--api-base", type=str, default=None, help="Base URL for vLLM server (e.g. http://localhost:8000/v1)"
     )
+    parser.add_argument("--solver-api-base", type=str, default=None, help="Base URL used only by the student/solver LM")
+    parser.add_argument(
+        "--reflection-api-base", type=str, default=None, help="Base URL used only by the reflection/proposer LM"
+    )
+    parser.add_argument("--data-dir", type=str, default=None, help="Directory containing official HoVer v1.1 JSON")
+    parser.add_argument("--smoke", action="store_true", help="Use the explicit three-record smoke dataset")
+    parser.add_argument("--seed", type=int, default=0, help="Dataset shuffle seed")
+    parser.add_argument(
+        "--wikipedia-endpoint",
+        type=str,
+        default=DEFAULT_WIKIPEDIA_ENDPOINT,
+        help="MediaWiki API endpoint used for live retrieval",
+    )
+    parser.add_argument("--wikipedia-cache", type=str, default=None, help="SQLite retrieval cache path")
+    parser.add_argument("--wikipedia-timeout", type=float, default=20.0, help="MediaWiki request timeout in seconds")
+    parser.add_argument("--retrieval-k", type=int, default=7, help="Pages retrieved in hops one and two (artifact: 7)")
+    parser.add_argument("--final-retrieval-k", type=int, default=10, help="Pages retrieved in hop three (artifact: 10)")
     parser.add_argument("--train-limit", type=int, default=None, help="Limit train-set size (paper: 150)")
     parser.add_argument("--val-limit", type=int, default=None, help="Limit val-set size (paper: 300)")
     parser.add_argument("--test-limit", type=int, default=None, help="Limit test-set size (paper: 300)")
@@ -289,21 +438,21 @@ def main():
         type=str,
         default="2stage",
         choices=["2stage", "1stage"],
-        help="Program structure: 2stage (paper protocol: query_writer -> doc_summarizer) or 1stage (single-turn ablation)",
+        help="Program structure: 2stage (two generated queries across three retrieval hops) or 1stage ablation",
     )
     parser.add_argument(
         "--condition",
         type=str,
-        default="all",
-        choices=["vanilla", "random", "action", "all"],
+        default="both",
+        choices=["vanilla", "react_v2", "random", "action", "all", "both"],
         help="Which condition(s) to run",
     )
     parser.add_argument(
         "--seed-style",
         type=str,
-        default="plain",
+        default="structured",
         choices=["plain", "structured"],
-        help="Seed prompts: plain paper sentences or a markdown skeleton (Role/Task/Rules/Output Format/Examples)",
+        help="Seed prompts: plain paper sentences or the provider-specific canonical section template",
     )
     parser.add_argument(
         "--actions",
@@ -312,6 +461,25 @@ def main():
         choices=["default", "structured"],
         help="Action space: DEFAULT_ACTIONS or section-scoped structured actions (implies --seed-style structured)",
     )
+    parser.add_argument(
+        "--reflection-level",
+        type=int,
+        default=2,
+        choices=[1, 2],
+        help="ReAct V2 ablation rung: 1 selects a section; 2 also selects and manifests a semantic action",
+    )
+    parser.add_argument(
+        "--edit-tool-set",
+        choices=["minimal", "broad"],
+        default="broad",
+        help="ReAct V2 tool basis: insert/delete only, or insert/delete/replace/move",
+    )
+    parser.add_argument(
+        "--template-family",
+        choices=["auto", "generic", "openai", "openai-gpt-5.6", "anthropic", "google", "alibaba"],
+        default="auto",
+        help="Canonical prompt sections; auto infers them from the student/solver model",
+    )
     parser.add_argument("--tag", type=str, default="", help="Suffix appended to run dirs (e.g. rev2, 48h)")
     args = parser.parse_args()
 
@@ -319,42 +487,88 @@ def main():
         print("--actions structured implies --seed-style structured; overriding seed style.")
         args.seed_style = "structured"
 
-    trainset, valset, testset = load_hover_dataset()
+    dataset_kwargs = {"seed": args.seed, "smoke": args.smoke}
+    if args.data_dir is not None:
+        dataset_kwargs["data_dir"] = args.data_dir
+    trainset, valset, testset = load_hover_dataset(**dataset_kwargs)
     if args.train_limit is not None:
         trainset = trainset[: args.train_limit]
     if args.val_limit is not None:
         valset = valset[: args.val_limit]
     if args.test_limit is not None:
         testset = testset[: args.test_limit]
+    if args.smoke:
+        data_source = {"type": "built-in-smoke", "name": "hover-three-record-v1"}
+    else:
+        data_dir = Path(args.data_dir).expanduser().resolve() if args.data_dir is not None else DATA_DIR.resolve()
+        data_path = data_dir / HOVER_TRAIN_FILE
+        data_source = {"type": "json", "path": str(data_path), "sha256": file_sha256(data_path)}
+    args.data_identity = benchmark_data_identity(
+        source=data_source,
+        trainset=trainset,
+        valset=valset,
+        testset=testset,
+    )
     print(f"Loaded {len(trainset)} train / {len(valset)} val / {len(testset)} test examples ({args.program})")
+    print(
+        "  (official HoVer v1.1, exactly three unique gold documents)" if not args.smoke else "  (explicit smoke data)"
+    )
 
-    evaluator = make_evaluator(args.solver_model, api_base=args.api_base, program=args.program)
+    retriever = WikipediaClient(
+        endpoint=args.wikipedia_endpoint,
+        cache_path=args.wikipedia_cache,
+        timeout=args.wikipedia_timeout,
+    )
+    args.wikipedia_cache = (
+        str(retriever.cache_path.expanduser().resolve()) if retriever.cache_path is not None else None
+    )
+    solver_api_base = args.solver_api_base if args.solver_api_base is not None else args.api_base
+    reflection_api_base = args.reflection_api_base if args.reflection_api_base is not None else args.api_base
+    evaluator = make_evaluator(
+        args.solver_model,
+        retriever,
+        api_base=solver_api_base,
+        program=args.program,
+        retrieval_k=args.retrieval_k,
+        final_retrieval_k=args.final_retrieval_k,
+    )
 
     reflection_lm_kwargs = {}
-    if args.api_base is not None:
-        reflection_lm_kwargs["api_base"] = args.api_base
+    if reflection_api_base is not None:
+        reflection_lm_kwargs["api_base"] = reflection_api_base
 
-    conditions = ["vanilla", "random", "action"] if args.condition == "all" else [args.condition]
+    if args.condition == "all":
+        conditions = ["vanilla", "react_v2", "random", "action"]
+    elif args.condition == "both":
+        conditions = ["vanilla", "react_v2"]
+    else:
+        conditions = [args.condition]
+
+    resolved_family = resolve_template_family(args.template_family, args.solver_model)
+    if "react_v2" in conditions and args.seed_style != "structured":
+        parser.error("--condition react_v2 requires --seed-style structured")
 
     results = {}
     trackers: dict[str, ActionDiversityCallback] = {}
     for condition in conditions:
-        config, selector = build_config(condition, args, reflection_lm_kwargs)
+        run_contract = build_run_contract(condition, args)
+        run_dir = condition_run_dir(condition, args.program, args.tag, _run_key(condition, args))
+        ensure_wikipedia_run_contract(run_dir, run_contract)
+        config, selector = build_config(condition, args, reflection_lm_kwargs, run_dir=run_dir)
         callbacks = None
-        if condition in ("random", "action"):
+        if condition in ("react_v2", "random", "action"):
             trackers[condition] = ActionDiversityCallback()
             callbacks = [trackers[condition]]
         results[condition] = run_condition(
             f"{condition} GEPA ({args.program}, {args.seed_style} seeds)",
-            seed_candidate(args.program, args.seed_style),
+            seed_candidate(args.program, args.seed_style, resolved_family),
             trainset,
             valset,
             config,
             evaluator,
             callbacks=callbacks,
         )
-        run_dir = condition_run_dir(condition, args.program, args.tag)
-        path = dump_candidates(results[condition], run_dir)
+        path = dump_candidates(results[condition], run_dir, run_contract)
         print(f"[{condition}] wrote {path}")
         if condition in trackers:
             path = dump_action_summary(trackers[condition], run_dir, selector=selector)
@@ -369,29 +583,42 @@ def main():
         for component, text in result.best_candidate.items():
             print(f"\n[{name}] {component}:\n{text}")
 
-    # Report: test F1 + recall + diversity
+    # Report: complete-retrieval rate + recall + diversity
     print(f"\n{'=' * 60}")
     print("  Comparison")
     print(f"{'=' * 60}\n")
 
     baseline_scores = evaluate_on_set(
-        seed_candidate(args.program, args.seed_style),
+        seed_candidate(args.program, args.seed_style, resolved_family),
         testset,
         args.solver_model,
-        api_base=args.api_base,
+        retriever,
+        api_base=solver_api_base,
         program=args.program,
+        retrieval_k=args.retrieval_k,
+        final_retrieval_k=args.final_retrieval_k,
     )
-    print(f"Baseline (seed prompts) test: F1={baseline_scores['f1']:.3f} recall={baseline_scores['recall']:.3f} on {len(testset)} examples\n")
+    print(
+        f"Baseline (seed prompts) test: complete={baseline_scores['complete']:.3f} "
+        f"recall={baseline_scores['recall']:.3f} on {len(testset)} examples\n"
+    )
 
     for name, result in results.items():
         test_scores = evaluate_on_set(
-            result.best_candidate, testset, args.solver_model, api_base=args.api_base, program=args.program
+            result.best_candidate,
+            testset,
+            args.solver_model,
+            retriever,
+            api_base=solver_api_base,
+            program=args.program,
+            retrieval_k=args.retrieval_k,
+            final_retrieval_k=args.final_retrieval_k,
         )
         diversity = prompt_diversity(result.candidates)
         print(f"[{name}]")
         print(f"  candidates explored:      {len(result.candidates)}")
         print(f"  best val score:           {result.val_aggregate_scores[result.best_idx]:.4f}")
-        print(f"  test F1:                  {test_scores['f1']:.3f}")
+        print(f"  complete retrieval:       {test_scores['complete']:.3f}")
         print(f"  test recall:              {test_scores['recall']:.3f}")
         for component, stats in diversity.items():
             print(

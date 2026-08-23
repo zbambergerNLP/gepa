@@ -1,11 +1,10 @@
-"""HotpotQA utilities: dataset loading, 2-stage query-generation program, and metric.
+"""HotpotQA data, Wikipedia-backed multi-hop program, and official metrics.
 
-Replicates the GEPA paper's HotpotQA setup (hotpot_qa distractor, 113K):
-exact splits (150 train / 300 val / 300 test like paper Table 1), 2-stage
-query-generation program, and the official token-F1 / EM metrics with feedback.
-See ATTRIBUTION.md.
-
-Keeps the original 20-example smoke sample as an offline fallback.
+The production path mirrors the GEPA artifact: load ``hotpot_qa/fullwiki``,
+retrieve twice from Wikipedia, and optimize the two summarizers, second-hop
+query generator, and final answer component. Bundled dataset contexts are never
+passed to the solver. The committed sample is available only when explicitly
+selected for smoke runs.
 """
 
 import json
@@ -16,6 +15,8 @@ import string
 from collections import Counter
 
 import litellm
+
+from examples.common.wikipedia import WikipediaPassage, WikipediaRetriever
 
 DEFAULT_DATA_PATH = os.path.join(
     os.path.dirname(__file__),
@@ -36,51 +37,17 @@ _HOTPOTQA_DECODING = {
 }
 
 
-def format_passages(passages, max_chars: int = 12000) -> str:
-    """Format passages into a single context string.
-
-    Accepts:
-    - list[dict] with {title, text}  (bundled smoke sample)
-    - list[dict] with {title, sentences} (alternative list form)
-    - dict with {title: [...], sentences: [[...], ...]} (HF hotpot_qa distractor)
-    Truncates to max_chars.
-    """
-    # HF dict form: {"title": [...], "sentences": [[...], ...]}
-    if isinstance(passages, dict) and "title" in passages and "sentences" in passages:
-        titles = passages["title"]
-        sentences_list = passages["sentences"]
-        parts = []
-        total = 0
-        for i, (title, sents) in enumerate(zip(titles, sentences_list), 1):
-            text = " ".join(sents)
-            part = f"[{i}] {title}: {text}"
-            if total + len(part) > max_chars:
-                break
-            parts.append(part)
-            total += len(part)
-        return "\n\n".join(parts)
-
-    # List form
-    parts = []
+def _render_passages(passages: list[WikipediaPassage], max_chars: int = 12000) -> str:
+    """Render retrieved passages without exceeding the solver input budget."""
+    rendered: list[str] = []
     total = 0
-    for i, p in enumerate(passages, 1):
-        if not isinstance(p, dict):
-            continue
-        title = p.get("title", f"Passage {i}")
-        text = p.get("text")
-        if text is None:
-            # alternative: sentences list
-            sents = p.get("sentences") or p.get("sentences_list") or []
-            if isinstance(sents, list):
-                text = " ".join(sents) if sents and isinstance(sents[0], str) else " ".join(" ".join(s) for s in sents)
-            else:
-                text = str(sents)
-        part = f"[{i}] {title}: {text}"
-        if total + len(part) > max_chars:
+    for passage in passages:
+        text = passage.render()
+        if total + len(text) > max_chars:
             break
-        parts.append(part)
-        total += len(part)
-    return "\n\n".join(parts)
+        rendered.append(text)
+        total += len(text)
+    return "\n\n".join(rendered)
 
 
 def normalize_answer(text: str) -> str:
@@ -169,65 +136,60 @@ def _call_lm(system: str, user: str, model: str, api_base: str | None) -> str:
 
 def run_llm(
     prompt: str,
-    context: str,
     question: str,
+    retriever: WikipediaRetriever,
     model: str = "hosted_vllm/Qwen3.5-9B",
     api_base: str | None = None,
+    retrieval_k: int = 7,
 ) -> str:
-    """Run the solver LM on a single HotpotQA example (single-stage, legacy wrapper).
-
-    Preserved for smoke / backward compatibility. New code should use
-    run_single_stage or run_two_stage via _call_lm.
-    """
-    return run_single_stage(prompt, context, question, model=model, api_base=api_base)
+    """Run the single-stage retrieval ablation."""
+    return run_single_stage(prompt, question, retriever, model=model, api_base=api_base, retrieval_k=retrieval_k)
 
 
 def run_single_stage(
     prompt: str,
-    context: str,
     question: str,
+    retriever: WikipediaRetriever,
     model: str = "hosted_vllm/Qwen3.5-9B",
     api_base: str | None = None,
+    retrieval_k: int = 7,
 ) -> str:
-    """Run 1-stage HotpotQA program: single prompt, one LM call."""
-    user = f"Context:\n{context}\n\nQuestion: {question}\n\nAnswer:"
+    """Retrieve once and answer with one optimized prompt."""
+    passages = _render_passages(retriever.search(question, retrieval_k))
+    user = f"Question:\n{question}\n\nRetrieved passages:\n{passages}\n\nAnswer:"
     out = _call_lm(prompt, user, model, api_base)
     return _extract_final_response(out)
 
 
 def run_two_stage(
+    summarize1_prompt: str,
     query_prompt: str,
+    summarize2_prompt: str,
     answer_prompt: str,
-    context: str,
     question: str,
+    retriever: WikipediaRetriever,
     model: str = "hosted_vllm/Qwen3.5-9B",
     api_base: str | None = None,
+    retrieval_k: int = 7,
 ) -> tuple[str, str]:
-    """Run the 2-stage HotpotQA query-generation program.
+    """Run the GEPA artifact's two-retrieval-hop HotpotQA program."""
+    hop1_passages = _render_passages(retriever.search(question, retrieval_k))
+    summary1_user = f"Question:\n{question}\n\nPassages:\n{hop1_passages}\n\nSummary:"
+    summary_1 = _extract_final_response(_call_lm(summarize1_prompt, summary1_user, model, api_base))
 
-    Stage 1 (query generation): generate a search query / sub-question that
-    captures the missing information for the multi-hop question.
-    Stage 2 (answer generation): answer the original question using the context
-    plus the generated query as an intermediate hint.
-
-    Returns (generated_query, final_answer).
-    """
-    # Stage 1: query generation from question (and truncated context titles for grounding)
-    # Keep stage-1 input short so it fits context; use question primarily.
-    q_user = f"Question: {question}\n\nGenerate a concise search query for the second hop."
+    q_user = f"Question:\n{question}\n\nFirst-hop summary:\n{summary_1}\n\nSecond-hop query:"
     q_out = _call_lm(query_prompt, q_user, model, api_base)
     query = _extract_final_response(q_out)
-    # Cap query length fed into stage 2
     if len(query) > 2000:
         query = query[:2000] + " [truncated]"
 
-    # Stage 2: answer with context + original question + generated query
-    # Cap context to leave headroom for query + output
-    a_user = f"Context:\n{context}\n\nQuestion: {question}\n\nSearch query: {query}\n\nAnswer:"
-    # Truncate user if extremely long (context already capped by format_passages, but query may add)
-    if len(a_user) > 24000:
-        # truncate context portion
-        a_user = a_user[:24000] + "\n[truncated]"
+    hop2_passages = _render_passages(retriever.search(query, retrieval_k))
+    summary2_user = (
+        f"Question:\n{question}\n\nFirst-hop summary:\n{summary_1}\n\nSecond-hop passages:\n{hop2_passages}\n\nSummary:"
+    )
+    summary_2 = _extract_final_response(_call_lm(summarize2_prompt, summary2_user, model, api_base))
+
+    a_user = f"Question:\n{question}\n\nFirst-hop summary:\n{summary_1}\n\nSecond-hop summary:\n{summary_2}\n\nAnswer:"
     a_out = _call_lm(answer_prompt, a_user, model, api_base)
     answer = _extract_final_response(a_out)
     return query, answer
@@ -238,14 +200,11 @@ run_hotpotqa_two_stage = run_two_stage
 
 
 def hotpotqa_metric(prediction: str, gold: str) -> tuple[float, str]:
-    """Compute F1 (primary) and EM with feedback for a single HotpotQA prediction.
-
-    Primary score is token-F1 (official). Feedback includes both F1 and EM.
-    """
+    """Compute exact match as the primary score and include token-F1 feedback."""
     f1 = f1_score(prediction, gold)
     em = em_score(prediction, gold)
 
-    if f1 >= 1.0:
+    if em >= 1.0:
         feedback = f"Correct! Your answer '{prediction}' matches the gold answer '{gold}'. F1=1.0 EM=1.0"
     elif f1 > 0.0:
         feedback = (
@@ -258,7 +217,7 @@ def hotpotqa_metric(prediction: str, gold: str) -> tuple[float, str]:
             f"(F1={f1:.2f} EM={em:.0f}). Re-read the context passages and chain reasoning across multiple passages."
         )
 
-    return f1, feedback
+    return em, feedback
 
 
 def _load_from_jsonl(path: str) -> list[dict]:
@@ -272,21 +231,13 @@ def _load_from_jsonl(path: str) -> list[dict]:
 
 
 def _jsonl_to_examples(records: list[dict]) -> list[dict]:
+    """Convert explicit smoke records without exposing their bundled passages."""
     examples = []
     for record in records:
-        # passages may be list or already formatted; handle both
-        passages = record.get("passages") or record.get("context") or []
-        if isinstance(passages, str):
-            context_str = passages
-        elif isinstance(passages, dict):
-            context_str = format_passages(passages)
-        else:
-            context_str = format_passages(passages)
         examples.append(
             {
                 "question": record["question"],
                 "answer": record["answer"],
-                "context": context_str,
                 "id": record["id"],
                 "type": record.get("type", ""),
                 "level": record.get("level", ""),
@@ -303,10 +254,10 @@ def load_hotpotqa_dataset(
     test_limit: int | None = None,
     seed: int = 0,
 ) -> tuple[list[dict], list[dict], list[dict]]:
-    """Load HotpotQA distractor with GEPA paper splits (150 train / 300 val / 300 test).
+    """Load HotpotQA fullwiki with deterministic 150/300/300 splits.
 
-    Default (data_path is None): loads via HuggingFace `datasets` (`hotpot_qa`,
-    `distractor`) — 90,447 train / 7,405 validation (113K raw with fullwiki).
+    Default (data_path is None): loads the GEPA artifact dataset via HuggingFace
+    ``hotpot_qa/fullwiki``. Dataset contexts are intentionally discarded.
     Splits are deterministic (seed 0): shuffle train with `seed`, then
     train = train[:150], val = train[150:450], test = validation[:300]
     (paper Table 1: 150/300/300). This mirrors IFBench's deterministic slicing
@@ -316,10 +267,6 @@ def load_hotpotqa_dataset(
     the 20-example sample, returns a 14/3/3 split (14 train / 3 val / 3 test)
     so the smoke still exercises the 3-way pipeline; the 14 train / 6 val
     legacy is preserved in the counts when val+test are combined.
-
-    If HF loading fails (offline / missing `datasets`), falls back to the
-    bundled smoke sample and expands it by cycling to reach the requested
-    sizes so that `len(train)==150` checks can pass offline.
 
     Returns (trainset, valset, testset).
     """
@@ -367,11 +314,11 @@ def load_hotpotqa_dataset(
             testset = testset[:test_limit]
         return trainset, valset, testset
 
-    # HF mode (paper-faithful)
+    # Production mode: use fullwiki exactly as the artifact does.
     try:
         from datasets import load_dataset
 
-        ds = load_dataset("hotpot_qa", "distractor")
+        ds = load_dataset("hotpot_qa", "fullwiki", trust_remote_code=True)
         train_raw = list(ds["train"])
         val_raw = list(ds["validation"]) if "validation" in ds else []
 
@@ -391,31 +338,23 @@ def load_hotpotqa_dataset(
                 test_slice = test_slice + val_raw[:need]
 
         def _convert_hf(rec: dict) -> dict:
-            ctx = rec.get("context")
-            if isinstance(ctx, dict):
-                context_str = format_passages(ctx)
-            elif isinstance(ctx, list):
-                context_str = format_passages(ctx)
-            else:
-                context_str = str(ctx) if ctx is not None else ""
             return {
                 "question": rec.get("question", ""),
                 "answer": rec.get("answer", ""),
-                "context": context_str,
                 "id": rec.get("id", ""),
                 "type": rec.get("type", ""),
                 "level": rec.get("level", ""),
-                "supporting_titles": rec.get("supporting_facts", {}).get("title", []) if isinstance(rec.get("supporting_facts"), dict) else [],
+                "supporting_titles": rec.get("supporting_facts", {}).get("title", [])
+                if isinstance(rec.get("supporting_facts"), dict)
+                else [],
             }
 
         trainset = [_convert_hf(r) for r in train_slice]
         valset = [_convert_hf(r) for r in val_slice]
         testset = [_convert_hf(r) for r in test_slice]
 
-        # Expand smoke fallback if slicing somehow short (should not happen)
         if len(trainset) < 150 or len(valset) < 300 or len(testset) < 300:
-            # fallback to bundled cycling (offline safety)
-            raise ValueError("Insufficient HF split sizes, falling back")
+            raise ValueError("HotpotQA fullwiki did not contain enough records for 150/300/300 splits")
 
         if train_limit is not None:
             trainset = trainset[:train_limit]
@@ -425,38 +364,8 @@ def load_hotpotqa_dataset(
             testset = testset[:test_limit]
         return trainset, valset, testset
 
-    except Exception as e:
-        # Offline / missing datasets fallback: load bundled and cycle to required sizes
-        # This ensures py_compile + smoke + len-check tests pass without network.
-        fallback_path = DEFAULT_DATA_PATH
-        if os.path.exists(fallback_path):
-            records = _load_from_jsonl(fallback_path)
-            examples = _jsonl_to_examples(records)
-            # Cycle to reach paper sizes
-            def _cycle(exs: list[dict], n: int) -> list[dict]:
-                if not exs:
-                    return []
-                out = []
-                for i in range(n):
-                    base = exs[i % len(exs)].copy()
-                    # make ids unique
-                    base["id"] = f"{base['id']}_cycle{i}"
-                    out.append(base)
-                return out
-
-            trainset = _cycle(examples, 150)
-            valset = _cycle(examples, 300)
-            testset = _cycle(examples, 300)
-
-            if train_limit is not None:
-                trainset = trainset[:train_limit]
-            if val_limit is not None:
-                valset = valset[:val_limit]
-            if test_limit is not None:
-                testset = testset[:test_limit]
-            print(f"WARNING: HF hotpot_qa load failed ({e}); using cycled smoke fallback 150/300/300.")
-            return trainset, valset, testset
-        raise FileNotFoundError(
-            f"HotpotQA data not found and HF load failed ({e}). "
-            f"Expected the bundled sample at {fallback_path}"
-        )
+    except Exception as exc:
+        raise RuntimeError(
+            "Could not load hotpot_qa/fullwiki. For an explicit smoke run, pass "
+            f"--data-path {DEFAULT_DATA_PATH}. Original error: {exc}"
+        ) from exc

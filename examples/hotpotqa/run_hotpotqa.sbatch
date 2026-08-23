@@ -9,11 +9,13 @@
 #   2. GEPA repo synced and venv built via scripts/della/build_env.sh
 #
 # Usage:
-#   sbatch examples/hotpotqa/run_hotpotqa.sbatch
-#
-# Override defaults:
-#   sbatch --export=ALL,MODEL=Qwen3.6-35B-A3B,MAX_METRIC_CALLS=100 \
+#   sbatch --export=ALL,MODEL=<local-solver-dir>,REFLECTION_MODEL=<provider/model> \
 #       examples/hotpotqa/run_hotpotqa.sbatch
+#
+# Separate solver/proposer roles:
+#   sbatch --export=ALL,MODEL=<local-solver-dir>,REFLECTION_MODEL=<provider/model>,MAX_METRIC_CALLS=100 \
+#       examples/hotpotqa/run_hotpotqa.sbatch
+# Same-model smoke mode must be requested explicitly with SAME_MODEL=1.
 
 #SBATCH --job-name=gepa-hotpotqa
 #SBATCH --nodes=1
@@ -29,7 +31,13 @@ cd "${SLURM_SUBMIT_DIR:-$PWD}" || exit 1
 
 # --- Knobs (override with sbatch --export=ALL,VAR=...) --------------------
 MODEL_STORAGE="${MODEL_STORAGE:-/projects/BSTEWART/model_storage}"
-MODEL="${MODEL:-Qwen3.5-9B}"
+MODEL="${MODEL:-}"
+SOLVER_MODEL_PATH="${SOLVER_MODEL_PATH:-}"
+SOLVER_SERVED_NAME="${SOLVER_SERVED_NAME:-${MODEL}}"
+SOLVER_MODEL="${SOLVER_MODEL:-}"
+REFLECTION_MODEL="${REFLECTION_MODEL:-}"
+REFLECTION_API_BASE="${REFLECTION_API_BASE:-}"
+SAME_MODEL="${SAME_MODEL:-0}"
 # Unique per-job port: della nodes host 8 GPUs, so multiple single-GPU jobs can
 # share a node; a fixed port makes co-located jobs cross-talk and cross-kill.
 GEN_PORT="${GEN_PORT:-$((10000 + ${SLURM_JOB_ID:-0} % 5000))}"
@@ -41,15 +49,46 @@ HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-1800}"
 # POSIT repo location (for its vLLM install).
 POSIT_DIR="${POSIT_DIR:-/home/${USER}/posit}"
 DATA_PATH="${DATA_PATH:-}"
+WIKIPEDIA_ENDPOINT="${WIKIPEDIA_ENDPOINT:-https://en.wikipedia.org/w/api.php}"
+RETRIEVAL_K="${RETRIEVAL_K:-7}"
+
+if [[ -z "${SOLVER_MODEL_PATH}" ]]; then
+    [[ -n "${MODEL}" ]] || {
+        echo "ERROR: set MODEL (under MODEL_STORAGE) or an absolute SOLVER_MODEL_PATH" >&2
+        exit 1
+    }
+    SOLVER_MODEL_PATH="${MODEL_STORAGE}/${MODEL}"
+fi
+[[ -n "${SOLVER_SERVED_NAME}" ]] || {
+    echo "ERROR: set SOLVER_SERVED_NAME when SOLVER_MODEL_PATH is used without MODEL" >&2
+    exit 1
+}
+SOLVER_MODEL="${SOLVER_MODEL:-hosted_vllm/${SOLVER_SERVED_NAME}}"
+SOLVER_API_BASE="${SOLVER_API_BASE:-http://localhost:${GEN_PORT}/v1}"
+if [[ "${SAME_MODEL}" == "1" ]]; then
+    [[ -z "${REFLECTION_MODEL}" || "${REFLECTION_MODEL}" == "${SOLVER_MODEL}" ]] || {
+        echo "ERROR: SAME_MODEL=1 conflicts with REFLECTION_MODEL=${REFLECTION_MODEL}" >&2
+        exit 1
+    }
+    REFLECTION_MODEL="${SOLVER_MODEL}"
+    REFLECTION_API_BASE="${SOLVER_API_BASE}"
+elif [[ -z "${REFLECTION_MODEL}" ]]; then
+    echo "ERROR: set REFLECTION_MODEL for the proposer, or opt into SAME_MODEL=1" >&2
+    exit 1
+fi
 
 # --- Keep all large I/O on scratch ----------------------------------------
 SCRATCH_BASE="${SCRATCH_BASE:-/scratch/gpfs/BSTEWART/${USER}/gepa}"
+WIKIPEDIA_CACHE="${WIKIPEDIA_CACHE:-${SCRATCH_BASE}/.cache/gepa/wikipedia.sqlite3}"
 export XDG_CACHE_HOME="${SCRATCH_BASE}/.cache"
 export HF_HOME="${SCRATCH_BASE}/.cache/huggingface"
 export VLLM_CACHE_ROOT="${SCRATCH_BASE}/.cache/vllm"
 export TORCHINDUCTOR_CACHE_DIR="${SCRATCH_BASE}/.cache/torchinductor"
 export TRITON_CACHE_DIR="${SCRATCH_BASE}/.cache/triton"
-export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+# Fullwiki must be downloadable on the first production run; callers with a
+# warm cache can still opt into offline mode through the environment.
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-0}"
+export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
 export VLLM_LOGGING_LEVEL=WARNING
 export VLLM_USE_FLASHINFER_SAMPLER=0
 
@@ -65,7 +104,7 @@ VLLM_BIN="${POSIT_DIR}/src/.venv/bin/vllm"
 
 # --- Serve the generator (using POSIT's vLLM) -----------------------------
 GEN_LOG="${LOG_DIR}/gen-${SLURM_JOB_ID:-local}.log"
-echo "==> serving generator ${MODEL} on :${GEN_PORT} (GPU 0, util ${GEN_GMU}); log: ${GEN_LOG}"
+echo "==> serving solver ${SOLVER_MODEL_PATH} as ${SOLVER_SERVED_NAME} on :${GEN_PORT} (GPU 0, util ${GEN_GMU}); log: ${GEN_LOG}"
 
 # Load CUDA toolkit for JIT compilation (needed by some models).
 export PATH="${POSIT_DIR}/src/.venv/bin:${PATH}"
@@ -74,8 +113,8 @@ source /usr/share/Modules/init/bash 2>/dev/null || true
 module load "cudatoolkit/${CUDA_TAG}" 2>/dev/null \
     || module load cudatoolkit/13.0 2>/dev/null || true
 
-env CUDA_VISIBLE_DEVICES=0 "${VLLM_BIN}" serve "${MODEL_STORAGE}/${MODEL}" \
-    --served-model-name "${MODEL}" \
+env CUDA_VISIBLE_DEVICES=0 "${VLLM_BIN}" serve "${SOLVER_MODEL_PATH}" \
+    --served-model-name "${SOLVER_SERVED_NAME}" \
     --reasoning-parser qwen3 \
     --host 0.0.0.0 \
     --port "${GEN_PORT}" \
@@ -108,23 +147,25 @@ done
 echo "==> generator up on :${GEN_PORT}"
 
 # --- Run the GEPA experiment (using GEPA's own venv) ---------------------
-# litellm talks to vLLM via the openai/ prefix + api_base.
-# Set OPENAI_API_KEY=EMPTY so litellm doesn't reject the request.
-export OPENAI_API_KEY="EMPTY"
-SOLVER_MODEL="hosted_vllm/${MODEL}"
-REFLECTION_MODEL="hosted_vllm/${MODEL}"
-API_BASE="http://localhost:${GEN_PORT}/v1"
-
+# Preserve remote-provider credentials; EMPTY is sufficient for local vLLM.
+export OPENAI_API_KEY="${OPENAI_API_KEY:-EMPTY}"
 DATA_PATH_ARG=()
 [[ -n "${DATA_PATH}" ]] && DATA_PATH_ARG=(--data-path "${DATA_PATH}")
+REFLECTION_API_ARG=()
+[[ -n "${REFLECTION_API_BASE}" ]] && REFLECTION_API_ARG=(--reflection-api-base "${REFLECTION_API_BASE}")
 
 echo "==> running GEPA experiment: condition=${CONDITION} max_metric_calls=${MAX_METRIC_CALLS}"
-echo "==> solver=${SOLVER_MODEL} reflection=${REFLECTION_MODEL} api_base=${API_BASE}"
+echo "==> solver=${SOLVER_MODEL} solver_api_base=${SOLVER_API_BASE}"
+echo "==> reflection=${REFLECTION_MODEL} reflection_api_base=${REFLECTION_API_BASE:-provider-default}"
 
 "${PY}" -m examples.hotpotqa.main \
     --solver-model "${SOLVER_MODEL}" \
     --reflection-model "${REFLECTION_MODEL}" \
-    --api-base "${API_BASE}" \
+    --solver-api-base "${SOLVER_API_BASE}" \
+    "${REFLECTION_API_ARG[@]}" \
     --max-metric-calls "${MAX_METRIC_CALLS}" \
     --condition "${CONDITION}" \
+    --wikipedia-endpoint "${WIKIPEDIA_ENDPOINT}" \
+    --wikipedia-cache "${WIKIPEDIA_CACHE}" \
+    --retrieval-k "${RETRIEVAL_K}" \
     "${DATA_PATH_ARG[@]}"

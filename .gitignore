@@ -223,6 +223,9 @@ archive/
 # IFBench data (downloaded on first use; see examples/ifbench/utils.py)
 examples/ifbench/data/
 
+# HoVer v1.1 data (downloaded on first production use)
+examples/hover/data/
+
 # Claude Code local settings (personal permissions)
 .claude/settings.local.json
 .claude/skills/

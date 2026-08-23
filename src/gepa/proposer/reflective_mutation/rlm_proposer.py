@@ -474,6 +474,12 @@ class RLMProposer:
                 continue
 
             steps.append(RLMStep(iteration, "edit"))
+            chat_messages.append(
+                {
+                    "role": "user",
+                    "content": f"OK: {edit_tool.value} applied.\nExecuted edit:\n" + "\n".join(ops),
+                }
+            )
             return self._result(
                 new_component,
                 new_component != component_text,

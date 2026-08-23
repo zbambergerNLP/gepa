@@ -3,11 +3,11 @@
 
 """Semantic actions and verbalized Controller for three-role reflection.
 
-The Controller selects a document region and, at reflection level 2, one
-semantic revision action. An action expresses editorial intent and owns exactly
-one direct text operator. ReAct V2 uses that operator directly when the broad
-tool set exposes it; the minimal insert/delete basis faithfully lowers replace
-and move into their two atomic calls.
+The Controller makes one joint document-region/semantic-action decision at
+reflection level 2. An action expresses editorial intent and owns exactly one
+direct text operator. ReAct V2 uses that operator directly when the broad tool
+set exposes it; the minimal insert/delete basis faithfully lowers replace and
+move into their two atomic calls.
 """
 
 from __future__ import annotations
@@ -46,8 +46,8 @@ class InterventionSpec:
             for a cross-section edit.
         instruction: Instruction the Manifestor realizes against run evidence.
         fixed_text: Literal steering text that bypasses the Manifestor LM.
-        inject_as: Default injection site. The three-role strategy overrides
-            this with provider routing for built-in execution.
+        inject_as: Default injection site. Built-in actions use the portable
+            user-message route selected for three-role execution.
 
     Raises:
         TypeError: ``edit_tool`` is not one :class:`EditTool` value.
@@ -62,7 +62,7 @@ class InterventionSpec:
     allow_whole_document: bool = False
     instruction: str | None = None
     fixed_text: str | None = None
-    inject_as: InjectionSite = "assistant_reasoning"
+    inject_as: InjectionSite = "user"
 
     def __post_init__(self) -> None:
         """Validate the direct-tool and manifestation contracts."""
@@ -84,7 +84,7 @@ class Intervention:
     """
 
     text: str
-    inject_as: InjectionSite = "assistant_reasoning"
+    inject_as: InjectionSite = "user"
 
 
 @dataclass(frozen=True)
@@ -94,13 +94,10 @@ class ControllerAction:
     Args:
         edit_target: Independently selectable document section or whole document.
         intervention_spec: Semantic action, or ``None`` at level 1.
-        semantic_options: Actions disclosed while the first Controller stage
-            chooses a region. Empty after a semantic action is selected.
     """
 
     edit_target: EditTarget
     intervention_spec: InterventionSpec | None
-    semantic_options: tuple[InterventionSpec, ...] = ()
 
     @property
     def edit_tool(self) -> EditTool | None:
@@ -131,14 +128,11 @@ class ControllerAction:
         if self.intervention_spec is not None:
             assert self.edit_tool is not None
             return f"{self.intervention_spec.description} (region '{region}', direct tool {self.edit_tool.value})"
-        if self.semantic_options:
-            options = ", ".join(f"{spec.name}/{spec.edit_tool.value}" for spec in self.semantic_options)
-            return f"Revise region '{region}'. Compatible semantic actions: {options}."
         return f"Revise region '{region}' using the available edit-tool basis."
 
 
 SEMANTIC_ACTION_CATALOG_VERSION = 1
-CONTROLLER_POLICY_VERSION = 1
+CONTROLLER_POLICY_VERSION = 2
 
 SEMANTIC_ACTIONS: tuple[InterventionSpec, ...] = (
     InterventionSpec(
@@ -341,10 +335,9 @@ def controller_policy_contract() -> dict[str, Any]:
     """Return the level-2 semantic Controller's reproducibility contract."""
     return {
         "version": CONTROLLER_POLICY_VERSION,
-        "factorization": "P(region) * P(action | region)",
-        "region_candidates": "all regions with at least one applicable action",
-        "action_candidates": "all actions applicable to the sampled region",
-        "verbalized_candidates_per_stage": "all",
+        "factorization": "P(region, action)",
+        "candidates": "all applicable region/action pairs",
+        "verbalized_candidates": "all",
         "sampling": "verbalized distribution mixed with uniform exploration",
         "exploration_epsilon": FULL_SUPPORT_EXPLORATION_EPSILON,
         "max_menu": None,
@@ -360,12 +353,12 @@ def build_controller_menu(
     rng: random.Random,
     max_menu: int | None = None,
 ) -> list[ControllerAction]:
-    """Build the Controller's region-selection menu.
+    """Build the Controller's region/action menu.
 
-    Each independently addressable region appears once. At level 2, regions
-    without an applicable semantic action are omitted; a second conditional
-    menu is built with :func:`build_semantic_action_menu` after a region is
-    sampled. No region/action Cartesian menu is materialized.
+    At level 1, each independently addressable region appears once. At level 2,
+    every applicable region/action pair appears once so one verbalized-sampling
+    call makes the complete semantic decision. The action's direct operator is
+    derived from its :class:`InterventionSpec`; it is never a separate choice.
 
     Args:
         template: Document template whose sections become targets.
@@ -375,7 +368,7 @@ def build_controller_menu(
         level: Reflection level.
         rng: Seeded RNG for optional deterministic menu subsampling.
         max_menu: Optional level-1 region bound. At level 2 it may be set only
-            high enough to retain every applicable region.
+            high enough to retain every applicable region/action pair.
 
     Returns:
         Non-empty Controller menu.
@@ -391,8 +384,11 @@ def build_controller_menu(
 
     targets = template.edit_targets(component_name)
     if level >= 2:
-        options_by_target = [(target, tuple(intervention_specs(template.kind, target.section))) for target in targets]
-        menu = [ControllerAction(target, None, options) for target, options in options_by_target if options]
+        menu = [
+            action
+            for target in targets
+            for action in build_semantic_action_menu(template, target)
+        ]
     else:
         menu = [ControllerAction(target, None) for target in targets]
 
@@ -405,7 +401,8 @@ def build_controller_menu(
     if max_menu is not None and len(menu) > max_menu:
         if level >= 2:
             raise ValueError(
-                f"max_menu={max_menu} would remove semantic Controller regions; level 2 requires all {len(menu)}."
+                f"max_menu={max_menu} would remove semantic Controller choices; level 2 requires all "
+                f"{len(menu)} region/action pairs."
             )
         logger.info(
             "Controller menu for '%s' has %d options; sampling %d and dropping %d.",

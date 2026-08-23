@@ -50,8 +50,6 @@ def _sanitize_component_name(name: str) -> str:
 # a monotonic ``state.i`` counter is neither unique nor necessarily available
 # (e.g. agent-swarm engines that propose candidates without a shared clock).
 SEED_ITERATION_ID = "seed"
-MAX_ATTEMPT_OUTCOME_REASON_CHARS = 2000
-MAX_BRANCH_CHAT_MESSAGE_CHARS = 2048
 
 
 def new_iteration_id() -> str:
@@ -988,21 +986,6 @@ class GEPAState(Generic[RolloutOutput, DataId]):
         return prefix
 
     @staticmethod
-    def _bounded_chat_content(value: Any) -> str:
-        """Render one persistent chat message within the per-message bound."""
-        content = str(value)
-        if len(content) <= MAX_BRANCH_CHAT_MESSAGE_CHARS:
-            return content
-        omitted = len(content) - MAX_BRANCH_CHAT_MESSAGE_CHARS
-        while True:
-            suffix = f"...(+{omitted} chars)"
-            prefix_length = max(0, MAX_BRANCH_CHAT_MESSAGE_CHARS - len(suffix))
-            actual_omitted = len(content) - prefix_length
-            if actual_omitted == omitted:
-                return content[:prefix_length] + suffix
-            omitted = actual_omitted
-
-    @staticmethod
     def _validated_chat_history(
         history: Any,
         *,
@@ -1023,7 +1006,7 @@ class GEPAState(Generic[RolloutOutput, DataId]):
                 raise ValueError(f"each {context} role must be 'user' or 'assistant'")
             if not isinstance(content, str):
                 raise TypeError(f"each {context} content must be a string")
-            messages.append({"role": role, "content": GEPAState._bounded_chat_content(content)})
+            messages.append({"role": role, "content": content})
         return messages
 
     @staticmethod
@@ -1072,28 +1055,28 @@ class GEPAState(Generic[RolloutOutput, DataId]):
                     raise TypeError("each react_steps entry must be a mapping")
                 assistant = step.get("assistant")
                 if assistant is not None and str(assistant):
-                    messages.append({"role": "assistant", "content": GEPAState._bounded_chat_content(assistant)})
+                    messages.append({"role": "assistant", "content": str(assistant)})
                 observation = step.get("observation")
                 if observation is None:
                     observation = step.get("error")
                 if observation is not None and str(observation):
-                    messages.append({"role": "user", "content": GEPAState._bounded_chat_content(observation)})
+                    messages.append({"role": "user", "content": str(observation)})
         else:
             assistant = record.get("assistant")
             if assistant is not None and str(assistant):
-                messages.append({"role": "assistant", "content": GEPAState._bounded_chat_content(assistant)})
+                messages.append({"role": "assistant", "content": str(assistant)})
             observation = record.get("observation")
             if observation is None:
                 observation = record.get("error")
             if observation is not None and str(observation):
-                messages.append({"role": "user", "content": GEPAState._bounded_chat_content(observation)})
+                messages.append({"role": "user", "content": str(observation)})
 
         manifestor_error = record.get("manifestor_error")
         if manifestor_error and not messages:
             messages.append(
                 {
                     "role": "user",
-                    "content": GEPAState._bounded_chat_content(f"Manifestor error: {manifestor_error}"),
+                    "content": f"Manifestor error: {manifestor_error}",
                 }
             )
         return messages
@@ -1138,14 +1121,11 @@ class GEPAState(Generic[RolloutOutput, DataId]):
                 feedback.append(f"Score after: {score_after}.")
             outcome_reason = reason if include_outer_result else record.get("dropped_reason")
             if outcome_reason:
-                bounded_reason = str(outcome_reason)[:MAX_ATTEMPT_OUTCOME_REASON_CHARS]
-                if len(str(outcome_reason)) > MAX_ATTEMPT_OUTCOME_REASON_CHARS:
-                    bounded_reason += f"...(+{len(str(outcome_reason)) - MAX_ATTEMPT_OUTCOME_REASON_CHARS} chars)"
-                feedback.append(f"Reason: {bounded_reason}")
+                feedback.append(f"Reason: {outcome_reason}")
             messages.append(
                 {
                     "role": "user",
-                    "content": GEPAState._bounded_chat_content(" ".join(feedback)),
+                    "content": " ".join(feedback),
                 }
             )
         return messages

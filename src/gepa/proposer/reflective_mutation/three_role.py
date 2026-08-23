@@ -43,7 +43,6 @@ from gepa.strategies.intervention import (
     ControllerAction,
     InjectionSite,
     build_controller_menu,
-    build_semantic_action_menu,
     controller_policy_contract,
     semantic_action_catalog,
     summarize_feedback,
@@ -174,9 +173,9 @@ def _bounded_history_edits(values: Sequence[Any]) -> list[str]:
 def _react_chat_messages(steps: Sequence[Any]) -> list[dict[str, str]]:
     """Convert actual ReAct turns into persistent assistant/user messages."""
     messages: list[dict[str, str]] = []
-    for step in steps[:MAX_HISTORY_STEPS]:
-        assistant = _bounded_history_text(step.assistant)
-        observation = _bounded_history_text(step.observation)
+    for step in steps:
+        assistant = str(step.assistant) if step.assistant is not None else None
+        observation = str(step.observation) if step.observation is not None else None
         if assistant:
             messages.append({"role": "assistant", "content": assistant})
         if observation and step.action != "FINISH":
@@ -184,16 +183,16 @@ def _react_chat_messages(steps: Sequence[Any]) -> list[dict[str, str]]:
     return messages
 
 
-def _bounded_chat_messages(messages: Sequence[Mapping[str, Any]]) -> list[dict[str, str]]:
-    """Bound a proposer's actual user/assistant messages for branch history."""
-    bounded: list[dict[str, str]] = []
-    for message in list(messages)[: 2 * MAX_HISTORY_STEPS]:
+def _validated_chat_messages(messages: Sequence[Mapping[str, Any]]) -> list[dict[str, str]]:
+    """Validate a proposer's actual user/assistant messages for branch history."""
+    validated: list[dict[str, str]] = []
+    for message in messages:
         role = message.get("role")
         content = message.get("content")
         if role not in {"user", "assistant"} or not isinstance(content, str):
             raise ValueError("Proposer chat messages must contain string user/assistant role and content fields.")
-        bounded.append({"role": role, "content": _bounded_history_text(content) or ""})
-    return bounded
+        validated.append({"role": role, "content": content})
+    return validated
 
 
 def _controller_sampling_record(history: Mapping[str, Any]) -> dict[str, Any]:
@@ -217,22 +216,13 @@ def _controller_sampling_record(history: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _factored_controller_sampling_record(
-    region_history: Mapping[str, Any],
-    action_history: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Persist both conditional Controller stages and their sampled propensity."""
-    region = _controller_sampling_record(region_history)
-    action = _controller_sampling_record(action_history)
-    region_probability = region["sampled_probabilities"][0]
-    action_probability = action["sampled_probabilities"][0]
+def _joint_controller_sampling_record(history: Mapping[str, Any]) -> dict[str, Any]:
+    """Persist one joint region/action decision and its sampled propensity."""
+    record = _controller_sampling_record(history)
     return {
-        **action,
-        "policy": "region_then_action_v1",
-        "fallback": region["fallback"] or action["fallback"],
-        "region": region,
-        "action": action,
-        "joint_sampling_probability": region_probability * action_probability,
+        **record,
+        "policy": "joint_region_action_v2",
+        "joint_sampling_probability": record["sampled_probabilities"][0],
     }
 
 
@@ -316,13 +306,13 @@ class ThreeRoleReflectionLM:
         template_family: Canonical provider template family.
         templates: Optional per-kind template overrides.
         k: Verbalized-sampling distribution size at level 1. Level 2 scores
-            every option in each factored Controller stage.
+            every joint region/action option in one Controller call.
         tau: Tail-sampling threshold.
         rng: Seeded random stream.
         logger: Optional run logger shared by all roles.
         reflection_prompt_template: Vanilla level-0 prompt template.
         max_menu: Optional level-1 region bound. Level 2 requires it to retain
-            every applicable region; semantic actions are never subsampled.
+            every applicable region/action pair; semantic choices are never subsampled.
         max_chars: Maximum completed component size.
         manifestor_lm: Deterministic LM used to manifest level-2 actions.
         base_lm_run_identity: Optional stable, non-secret configuration identity
@@ -330,8 +320,9 @@ class ThreeRoleReflectionLM:
         manifestor_lm_run_identity: Optional stable, non-secret configuration
             identity for a custom Manifestor callable.
         manifestor_traces_chars: Trace budget for the Manifestor.
-        proposer_model: Provider/model identifier used to route Manifestor
-            steering. When omitted, ``base_lm.model`` is inspected.
+        proposer_model: Provider/model identifier recorded in the run contract.
+            When omitted, ``base_lm.model`` is inspected. Manifestor steering is
+            delivered as a portable user message for every ReAct provider.
         proposer_backend: ``"react_v2"`` (the primary workflow) or ``"rlm"``
             for the explicit recursive-language-model ablation. RLM currently
             requires level 2 and the broad edit basis so every semantic action
@@ -503,7 +494,7 @@ class ThreeRoleReflectionLM:
             "max_chars": self.max_chars,
             "manifestor_traces_chars": self.manifestor_traces_chars,
             "manifestor_delivery": (
-                "provider_chat_role" if self.proposer_backend == "react_v2" else "rlm_prompt_guidance"
+                "user_message" if self.proposer_backend == "react_v2" else "rlm_prompt_guidance"
             ),
             "manifestor_injection_site": (
                 self.manifestor_injection_site if self.proposer_backend == "react_v2" else None
@@ -701,7 +692,7 @@ class ThreeRoleReflectionLM:
                 rng=self.rng,
                 max_menu=self.max_menu,
             )
-            region_controller = Controller(
+            controller = Controller(
                 menu,
                 self.base_lm,
                 k=len(menu) if self.level >= 2 else self.k,
@@ -709,32 +700,12 @@ class ThreeRoleReflectionLM:
                 rng=self.rng,
                 require_full_support=self.level >= 2,
             )
-            region_controller.set_context(text, feedback)
-            action = region_controller.select_controller(1, self.rng)[0]
-            controller_sampling = _controller_sampling_record(region_controller.history[-1])
-
+            controller.set_context(text, feedback)
+            action = controller.select_controller(1, self.rng)[0]
             if self.level >= 2:
-                semantic_menu = build_semantic_action_menu(template, action.edit_target)
-                if semantic_menu:
-                    selected_section = action.edit_target.section
-                    selected_region = text if selected_section is None else template.parse(text)[selected_section]
-                    semantic_controller = Controller(
-                        semantic_menu,
-                        self.base_lm,
-                        k=len(semantic_menu),
-                        tau=self.tau,
-                        rng=self.rng,
-                        require_full_support=True,
-                    )
-                    semantic_controller.set_context(
-                        text,
-                        f"Selected region: {action.edit_target.name}\nCurrent region text:\n{selected_region}\n\n{feedback}",
-                    )
-                    action = semantic_controller.select_controller(1, self.rng)[0]
-                    controller_sampling = _factored_controller_sampling_record(
-                        region_controller.history[-1],
-                        semantic_controller.history[-1],
-                    )
+                controller_sampling = _joint_controller_sampling_record(controller.history[-1])
+            else:
+                controller_sampling = _controller_sampling_record(controller.history[-1])
             preferred_edit_tool = action.edit_tool.value if action.edit_tool is not None else None
             intervention_spec = action.intervention_spec.name if action.intervention_spec else None
 
@@ -777,7 +748,7 @@ class ThreeRoleReflectionLM:
                             "intervention_spec": intervention_spec,
                             "manifested_intervention": "",
                             "manifestor_delivery": (
-                                "provider_chat_role" if self.proposer_backend == "react_v2" else "rlm_prompt_guidance"
+                                "user_message" if self.proposer_backend == "react_v2" else "rlm_prompt_guidance"
                             ),
                             "inject_as": None,
                             "feedback": _bounded_history_text(feedback),
@@ -787,7 +758,7 @@ class ThreeRoleReflectionLM:
                             "chat_messages": [
                                 {
                                     "role": "user",
-                                    "content": _bounded_history_text(f"Manifestor error: {exc}") or "",
+                                    "content": f"Manifestor error: {exc}",
                                 }
                             ],
                             "dropped_reason": error,
@@ -868,7 +839,7 @@ class ThreeRoleReflectionLM:
                         for step in result.steps[:MAX_HISTORY_STEPS]
                     ],
                     "rlm_steps_truncated": max(0, len(result.steps) - MAX_HISTORY_STEPS),
-                    "chat_messages": _bounded_chat_messages(result.chat_messages),
+                    "chat_messages": _validated_chat_messages(result.chat_messages),
                 }
 
             record = {
@@ -879,7 +850,7 @@ class ThreeRoleReflectionLM:
                 "intervention_spec": intervention_spec,
                 "manifested_intervention": _bounded_history_text(intervention.text) if intervention is not None else "",
                 "manifestor_delivery": (
-                    "provider_chat_role" if self.proposer_backend == "react_v2" else "rlm_prompt_guidance"
+                    "user_message" if self.proposer_backend == "react_v2" else "rlm_prompt_guidance"
                 ),
                 "inject_as": (
                     intervention.inject_as if intervention is not None and self.proposer_backend == "react_v2" else None

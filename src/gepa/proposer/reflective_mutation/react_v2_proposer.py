@@ -5,7 +5,7 @@
 
 The proposer runs a bounded assistant/tool/observation conversation. The
 Controller has already selected a document region and, at reflection level 2,
-a semantic action. The Manifestor supplies a provider-routed steering message.
+a semantic action. The Manifestor supplies a user-message steering intervention.
 The proposer then applies literal text tools, returning every observation to
 the model before the next turn.
 
@@ -746,7 +746,7 @@ class ReActV2Proposer:
             edit_target: Controller-selected section or whole document.
             preferred_tool: Direct tool coupled to the semantic action. ``None``
                 means the proposer is operating directly over the configured basis.
-            intervention: Manifestor steering, routed through its real chat role.
+            intervention: Manifestor steering, normally delivered as a user message.
             feedback_summary: Minibatch failure feedback.
             traces_text: Execution traces grounding the revision.
             branch_history: User/assistant messages from this parent candidate's lineage only.

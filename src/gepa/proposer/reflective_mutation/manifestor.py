@@ -10,7 +10,7 @@ the reflection state, and *manifests* the spec into a concrete
 manifestation step. A spec with ``fixed_text`` is used verbatim with no model
 call. A spec with an ``instruction`` is realized by at most two LM calls that write the
 steering text the instruction calls for, in the voice the spec's ``inject_as``
-site requires (by default the Editor's own first-person opening thought),
+site requires (by default a portable user message),
 grounded in the current candidate and its failures. The Manifestor deliberately
 does **not** write the edit itself: it steers, and ReAct V2 performs the edit.
 
@@ -116,23 +116,19 @@ class ManifestationError(ValueError):
     """Raised when a semantic action cannot produce visible steering text."""
 
 
-def infer_manifestor_injection_site(model: str | None) -> InjectionSite:
-    """Choose the provider-specific chat role used to steer the proposer.
+def infer_manifestor_injection_site(_model: str | None) -> InjectionSite:
+    """Choose the portable user-message role used to steer the proposer.
 
-    OpenAI proposers receive a developer message. Claude proposers receive a
-    user message, and user is the portable fallback for other providers.
+    The Manifestor emits a user turn for every provider. This avoids assistant
+    prefills, which are not portable across closed-model APIs, while preserving
+    the same steering semantics for OpenAI, Anthropic, and other providers.
 
     Args:
-        model: Provider/model identifier, or ``None`` for a custom callable.
+        _model: Provider/model identifier retained for API compatibility.
 
     Returns:
-        ``"developer"`` for OpenAI identifiers and ``"user"`` otherwise.
+        Always ``"user"``.
     """
-    if model is None:
-        return "user"
-    lowered = model.lower()
-    if lowered.startswith("openai/") or "gpt" in lowered or re.search(r"(?:^|/)o\d+(?:$|[-.])", lowered):
-        return "developer"
     return "user"
 
 
@@ -143,7 +139,7 @@ class Manifestor:
     Manifestor -> ReAct V2) and runs only at reflection level 2. Given the
     Controller's chosen ``(EditTarget, EditTool, InterventionSpec)`` and the
     reflection state, it produces the steering text the Editor will receive at
-    the provider-routed ``inject_as`` site. It steers but never edits: ReAct V2
+    the configured ``inject_as`` site. It steers but never edits: ReAct V2
     is the only role that changes the candidate.
 
     One instance is cheap and stateless between calls, so
@@ -163,8 +159,8 @@ class Manifestor:
             always shown whole; traces are the one unbounded input, so they are
             head-truncated with a ``(+N chars)`` marker past this many
             characters. ``None`` shows them whole too.
-        inject_as: Provider-resolved chat role. When supplied it overrides the
-            spec's default injection site.
+        inject_as: Configured chat role. When supplied it overrides the spec's
+            default user-message injection site.
     """
 
     def __init__(
@@ -174,7 +170,7 @@ class Manifestor:
         max_traces_chars: int | None = MAX_TRACES_CHARS,
         inject_as: InjectionSite | None = None,
     ):
-        """Store the LM, logger, traces bound, and provider-routed injection site."""
+        """Store the LM, logger, traces bound, and configured injection site."""
         self.lm = lm
         self.logger = logger
         self.max_traces_chars = max_traces_chars

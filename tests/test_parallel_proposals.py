@@ -40,6 +40,7 @@ def mock_state():
 
     # Add a second candidate
     state.program_candidates.append({"system_prompt": "test1"})
+    state.revision_history_by_candidate.append([])
     state.prog_candidate_val_subscores.append({0: 0.7, 1: 0.7})
     state.prog_candidate_objective_scores.append({})
     state.parent_program_for_candidate.append([0])

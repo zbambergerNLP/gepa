@@ -28,6 +28,7 @@ def mock_state():
     # Add two more candidates with different scores
     state.program_candidates.append({"system_prompt": "test2"})
     state.program_candidates.append({"system_prompt": "test3"})
+    state.revision_history_by_candidate.extend([[], []])
 
     # prog_candidate_val_subscores should be dicts, not lists
     state.prog_candidate_val_subscores.append({0: 0.6, 1: 0.6, 2: 0.6})

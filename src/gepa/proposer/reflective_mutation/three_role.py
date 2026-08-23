@@ -12,6 +12,8 @@ the Manifestor to steer ReAct V2 through a provider-appropriate chat role.
 
 from __future__ import annotations
 
+import json
+import os
 import random
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -37,12 +39,116 @@ from gepa.strategies.intervention import (
     ControllerAction,
     InjectionSite,
     build_controller_menu,
+    build_semantic_action_menu,
+    controller_policy_contract,
+    semantic_action_catalog,
     summarize_feedback,
 )
 
 MAX_HISTORY_TEXT_CHARS = 2000
 MAX_HISTORY_STEPS = 16
 MAX_HISTORY_EDIT_ENTRIES = 32
+REFLECTION_RUN_CONTRACT_FILENAME = "reflection-run-contract.json"
+_SENSITIVE_CONFIG_KEYS = {
+    "access_token",
+    "api_key",
+    "apikey",
+    "api_token",
+    "authorization",
+    "auth_token",
+    "azure_ad_token",
+    "bearer_token",
+    "credential",
+    "credentials",
+    "password",
+    "private_key",
+    "secret",
+    "secret_key",
+    "token",
+}
+
+
+def _is_sensitive_config_key(key: str) -> bool:
+    """Return whether a configuration key names authentication material."""
+    lowered = key.lower()
+    return lowered in _SENSITIVE_CONFIG_KEYS or any(lowered.endswith(f"_{suffix}") for suffix in _SENSITIVE_CONFIG_KEYS)
+
+
+def _public_run_identity_value(value: Any) -> Any:
+    """Convert configuration to stable JSON data while redacting credentials."""
+    if isinstance(value, Mapping):
+        public: dict[str, Any] = {}
+        for raw_key, item in value.items():
+            key = str(raw_key)
+            public[key] = "<redacted>" if _is_sensitive_config_key(key) else _public_run_identity_value(item)
+        return public
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes):
+        return [_public_run_identity_value(item) for item in value]
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    value_type = type(value)
+    return f"<{value_type.__module__}.{value_type.__qualname__}>"
+
+
+def _language_model_run_identity(lm: LanguageModel, explicit: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Describe one role LM without persisting credentials or runtime counters."""
+    lm_type = type(lm)
+    identity: dict[str, Any] = {"type": f"{lm_type.__module__}.{lm_type.__qualname__}"}
+    if explicit is not None:
+        identity["configuration"] = _public_run_identity_value(explicit)
+        identity["configuration_source"] = "explicit"
+        return identity
+
+    model = getattr(lm, "model", None)
+    if isinstance(model, str):
+        identity["model"] = model
+    completion_kwargs = getattr(lm, "completion_kwargs", None)
+    if isinstance(completion_kwargs, Mapping):
+        identity["completion_kwargs"] = _public_run_identity_value(completion_kwargs)
+    num_retries = getattr(lm, "num_retries", None)
+    if isinstance(num_retries, int) and not isinstance(num_retries, bool):
+        identity["num_retries"] = num_retries
+    if isinstance(model, str) and isinstance(completion_kwargs, Mapping):
+        identity["configuration_source"] = "inferred"
+    elif len(identity) > 1:
+        identity["configuration_source"] = "partial"
+    else:
+        identity["configuration_source"] = "opaque"
+    return identity
+
+
+def ensure_reflection_run_contract(run_dir: str, contract: Mapping[str, Any]) -> str:
+    """Persist a reflection contract and reject incompatible resume state.
+
+    Args:
+        run_dir: GEPA state directory.
+        contract: JSON-serializable reflection strategy identity.
+
+    Returns:
+        Path to the validated contract file.
+
+    Raises:
+        ValueError: The directory contains a different contract or legacy state
+            without a reflection contract.
+    """
+    os.makedirs(run_dir, exist_ok=True)
+    path = os.path.join(run_dir, REFLECTION_RUN_CONTRACT_FILENAME)
+    normalized = json.loads(json.dumps(dict(contract), sort_keys=True, default=str))
+    if os.path.exists(path):
+        with open(path) as file:
+            existing = json.load(file)
+        if existing != normalized:
+            raise ValueError(f"Run directory {run_dir} contains a different reflection strategy contract.")
+        return path
+    if os.path.exists(os.path.join(run_dir, "gepa_state.bin")):
+        raise ValueError(
+            f"Run directory {run_dir} has GEPA state but no {REFLECTION_RUN_CONTRACT_FILENAME}; "
+            "choose a clean directory."
+        )
+    with open(path, "w") as file:
+        json.dump(normalized, file, indent=2, sort_keys=True)
+        file.write("\n")
+    return path
 
 
 def _bounded_history_text(value: Any) -> str | None:
@@ -76,15 +182,40 @@ def _react_chat_messages(steps: Sequence[Any]) -> list[dict[str, str]]:
 def _controller_sampling_record(history: Mapping[str, Any]) -> dict[str, Any]:
     """Copy Controller distribution and fallback provenance as JSON primitives."""
     probabilities = history.get("probs", {})
+    sampling_probabilities = history.get("sampling_probs", {})
     sampled = history.get("sampled", [])
     return {
         "probs": {str(name): float(probability) for name, probability in dict(probabilities).items()},
+        "sampling_probs": {str(name): float(probability) for name, probability in dict(sampling_probabilities).items()},
         "sampled": [str(name) for name in sampled],
+        "sampled_probabilities": [float(value) for value in history.get("sampled_probabilities", [])],
         "fallback": bool(history.get("fallback", False)),
         "n_parsed_entries": int(history.get("n_parsed_entries", 0)),
         "tail_mass": float(history.get("tail_mass", 0.0)),
+        "tau": float(history.get("tau", 0.0)),
+        "sampling_policy": str(history.get("sampling_policy", "tail")),
+        "exploration_epsilon": float(history.get("exploration_epsilon", 0.0)),
         "used_full_fallback": bool(history.get("used_full_fallback", False)),
         "entropy_bits": float(history.get("entropy_bits", 0.0)),
+    }
+
+
+def _factored_controller_sampling_record(
+    region_history: Mapping[str, Any],
+    action_history: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Persist both conditional Controller stages and their sampled propensity."""
+    region = _controller_sampling_record(region_history)
+    action = _controller_sampling_record(action_history)
+    region_probability = region["sampled_probabilities"][0]
+    action_probability = action["sampled_probabilities"][0]
+    return {
+        **action,
+        "policy": "region_then_action_v1",
+        "fallback": region["fallback"] or action["fallback"],
+        "region": region,
+        "action": action,
+        "joint_sampling_probability": region_probability * action_probability,
     }
 
 
@@ -167,15 +298,20 @@ class ThreeRoleReflectionLM:
         component_kinds: Component-to-kind mapping. Unlisted components are prompts.
         template_family: Canonical provider template family.
         templates: Optional per-kind template overrides.
-        k: Verbalized-sampling distribution size.
+        k: Verbalized-sampling distribution size at level 1. Level 2 scores
+            every option in each factored Controller stage.
         tau: Tail-sampling threshold.
         rng: Seeded random stream.
         logger: Optional run logger shared by all roles.
         reflection_prompt_template: Vanilla level-0 prompt template.
-        max_menu: Optional maximum Controller options. The default keeps every
-            target/action option.
+        max_menu: Optional level-1 region bound. Level 2 requires it to retain
+            every applicable region; semantic actions are never subsampled.
         max_chars: Maximum completed component size.
         manifestor_lm: Deterministic LM used to manifest level-2 actions.
+        base_lm_run_identity: Optional stable, non-secret configuration identity
+            for a custom Controller/ReAct callable.
+        manifestor_lm_run_identity: Optional stable, non-secret configuration
+            identity for a custom Manifestor callable.
         manifestor_traces_chars: Trace budget for the Manifestor.
         proposer_model: Provider/model identifier used to route Manifestor
             steering. When omitted, ``base_lm.model`` is inspected.
@@ -203,6 +339,8 @@ class ThreeRoleReflectionLM:
         max_menu: int | None = None,
         max_chars: int = MAX_PROPOSAL_CHARS,
         manifestor_lm: LanguageModel | None = None,
+        base_lm_run_identity: Mapping[str, Any] | None = None,
+        manifestor_lm_run_identity: Mapping[str, Any] | None = None,
         manifestor_traces_chars: int | None = MAX_TRACES_CHARS,
         proposer_model: str | None = None,
         react_max_iterations: int = 8,
@@ -222,8 +360,10 @@ class ThreeRoleReflectionLM:
 
         self.base_lm = base_lm
         self.level = level
+        self.edit_tool_set = edit_tool_set
         self.edit_tools = EDIT_TOOL_SETS[edit_tool_set]
         self.component_kinds = component_kinds or {}
+        self.template_family = template_family
         self.k = k
         self.tau = tau
         self.rng = rng if rng is not None else random.Random(0)
@@ -232,6 +372,12 @@ class ThreeRoleReflectionLM:
         self.max_menu = max_menu
         self.max_chars = max_chars
         self.manifestor_lm = manifestor_lm if manifestor_lm is not None else base_lm
+        self.base_lm_run_identity = base_lm_run_identity
+        self.manifestor_lm_run_identity = (
+            base_lm_run_identity
+            if manifestor_lm is None and manifestor_lm_run_identity is None
+            else manifestor_lm_run_identity
+        )
         self.manifestor_traces_chars = manifestor_traces_chars
         inferred_model = proposer_model
         if inferred_model is None:
@@ -245,6 +391,87 @@ class ThreeRoleReflectionLM:
             StatelessReflectionLM(base_lm, reflection_prompt_template, logger) if level == 0 else None
         )
 
+    def run_contract(self, candidate: Mapping[str, str]) -> dict[str, Any]:
+        """Return the complete JSON-serializable three-role strategy identity.
+
+        Args:
+            candidate: Seed component mapping used to resolve default document
+                kinds alongside explicit ``component_kinds``.
+
+        Returns:
+            Contract whose drift must prevent state resumption.
+        """
+        self.validate_candidate(dict(candidate))
+        component_kinds = {name: self.component_kinds.get(name, "prompt") for name in candidate}
+        active_kinds = sorted(set(component_kinds.values()))
+        templates = {
+            kind: {
+                "document_kind": self.templates[kind].kind,
+                "sections": list(self.templates[kind].sections.items()),
+            }
+            for kind in active_kinds
+        }
+        controller: dict[str, Any]
+        if self.level >= 2:
+            controller = {
+                **controller_policy_contract(),
+                "tau": self.tau,
+                "max_menu": self.max_menu,
+            }
+        else:
+            controller = {
+                "version": 1,
+                "factorization": "region_only",
+                "k": self.k,
+                "tau": self.tau,
+                "max_menu": self.max_menu,
+            }
+        controller_lm_identity = _language_model_run_identity(self.base_lm, self.base_lm_run_identity)
+        manifestor_lm_identity = (
+            _language_model_run_identity(self.manifestor_lm, self.manifestor_lm_run_identity)
+            if self.level >= 2
+            else None
+        )
+        unstable_roles = [
+            role
+            for role, identity in (
+                ("Controller/ReAct", controller_lm_identity),
+                ("Manifestor", manifestor_lm_identity),
+            )
+            if identity is not None and identity["configuration_source"] in {"opaque", "partial"}
+        ]
+        if unstable_roles:
+            roles = " and ".join(unstable_roles)
+            raise ValueError(
+                f"A stable run identity is required for the {roles} LM. Pass base_lm_run_identity and/or "
+                "manifestor_lm_run_identity when constructing ThreeRoleReflectionLM with custom callables."
+            )
+        return {
+            "schema_version": 1,
+            "strategy": "three_role_reflection",
+            "reflection_level": self.level,
+            "edit_tool_set": self.edit_tool_set,
+            "edit_tools": [tool.value for tool in self.edit_tools],
+            "component_kinds": component_kinds,
+            "template_family": self.template_family,
+            "templates": templates,
+            "reflection_prompt_template": self.reflection_prompt_template,
+            "controller": controller,
+            "semantic_action_spaces": (
+                {kind: semantic_action_catalog(self.templates[kind].kind) for kind in active_kinds}
+                if self.level >= 2
+                else None
+            ),
+            "max_chars": self.max_chars,
+            "manifestor_traces_chars": self.manifestor_traces_chars,
+            "manifestor_injection_site": self.manifestor_injection_site,
+            "proposer_model": self.proposer_model,
+            "controller_react_lm": controller_lm_identity,
+            "manifestor_lm": manifestor_lm_identity,
+            "react_max_iterations": self.react_max_iterations,
+            "react_max_tool_calls": self.react_max_tool_calls,
+        }
+
     def validate_candidate(self, candidate: dict[str, str]) -> None:
         """Validate every component against its declared document template.
 
@@ -253,9 +480,14 @@ class ThreeRoleReflectionLM:
 
         Raises:
             MalformedDocumentError: A component is not in canonical section format.
+            ValueError: Level 2 has no semantic catalog for a component kind.
         """
         for name, text in candidate.items():
             template = self.templates[self.component_kinds.get(name, "prompt")]
+            if self.level >= 2 and not semantic_action_catalog(template.kind)["actions"]:
+                raise ValueError(
+                    f"Component {name!r} uses document kind {template.kind!r}, which has no level-2 semantic catalog."
+                )
             try:
                 template.parse(text)
             except MalformedDocumentError as exc:
@@ -414,10 +646,40 @@ class ThreeRoleReflectionLM:
                 rng=self.rng,
                 max_menu=self.max_menu,
             )
-            controller = Controller(menu, self.base_lm, k=self.k, tau=self.tau, rng=self.rng)
-            controller.set_context(text, feedback)
-            action = controller.select_controller(1, self.rng)[0]
-            controller_sampling = _controller_sampling_record(controller.history[-1])
+            region_controller = Controller(
+                menu,
+                self.base_lm,
+                k=len(menu) if self.level >= 2 else self.k,
+                tau=self.tau,
+                rng=self.rng,
+                require_full_support=self.level >= 2,
+            )
+            region_controller.set_context(text, feedback)
+            action = region_controller.select_controller(1, self.rng)[0]
+            controller_sampling = _controller_sampling_record(region_controller.history[-1])
+
+            if self.level >= 2:
+                semantic_menu = build_semantic_action_menu(template, action.edit_target)
+                if semantic_menu:
+                    selected_section = action.edit_target.section
+                    selected_region = text if selected_section is None else template.parse(text)[selected_section]
+                    semantic_controller = Controller(
+                        semantic_menu,
+                        self.base_lm,
+                        k=len(semantic_menu),
+                        tau=self.tau,
+                        rng=self.rng,
+                        require_full_support=True,
+                    )
+                    semantic_controller.set_context(
+                        text,
+                        f"Selected region: {action.edit_target.name}\nCurrent region text:\n{selected_region}\n\n{feedback}",
+                    )
+                    action = semantic_controller.select_controller(1, self.rng)[0]
+                    controller_sampling = _factored_controller_sampling_record(
+                        region_controller.history[-1],
+                        semantic_controller.history[-1],
+                    )
             preferred_edit_tool = action.edit_tool.value if action.edit_tool is not None else None
             intervention_spec = action.intervention_spec.name if action.intervention_spec else None
 

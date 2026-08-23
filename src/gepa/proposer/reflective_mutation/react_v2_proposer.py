@@ -11,9 +11,10 @@ the model before the next turn.
 
 Semantic actions are coupled to one direct tool. When that tool is present in
 the configured broad tool set, one valid call completes the proposal. When the
-run exposes only the ``INSERT_TEXT``/``DELETE_TEXT`` basis, ReAct V2 may compose
-several calls and must explicitly finish. This is the action-depth distinction
-used by the planned atomic-versus-semantic ablation.
+run exposes only the ``INSERT_TEXT``/``DELETE_TEXT`` basis, ReAct V2 faithfully
+lowers ``REPLACE_TEXT`` and ``MOVE_TEXT`` into one delete followed by one insert,
+then must explicitly finish. This is the action-depth distinction used by the
+planned atomic-versus-semantic ablation.
 """
 
 from __future__ import annotations
@@ -260,6 +261,17 @@ def _native_tool_schemas(tools: Sequence[EditTool]) -> list[dict[str, Any]]:
         }
         for tool in tools
     ]
+
+
+def _lowered_semantic_tool(preferred_tool: EditTool | None, allowed_tools: Sequence[EditTool]) -> EditTool | None:
+    """Return the hidden direct tool that the minimal basis must lower faithfully."""
+    if preferred_tool not in {EditTool.REPLACE_TEXT, EditTool.MOVE_TEXT}:
+        return None
+    available = set(allowed_tools)
+    if preferred_tool in available:
+        return None
+    required_basis = {EditTool.INSERT_TEXT, EditTool.DELETE_TEXT}
+    return preferred_tool if required_basis.issubset(available) else None
 
 
 def _extract_field(block: str, tag: str, *, strip: bool = True) -> str | None:
@@ -559,10 +571,23 @@ class ReActV2Proposer:
         parsed = self.template.parse(component_text)
         region_text = component_text if edit_target.section is None else parsed[edit_target.section]
         direct_tool = preferred_tool if preferred_tool is not None and preferred_tool in self.allowed_tools else None
+        lowered_tool = _lowered_semantic_tool(preferred_tool, self.allowed_tools)
         if direct_tool is not None:
             completion_rule = (
                 f"This semantic action is coupled to {direct_tool.value}. Make exactly one valid "
                 f"{direct_tool.value} call; that call completes the proposal automatically."
+            )
+        elif lowered_tool is EditTool.REPLACE_TEXT:
+            completion_rule = (
+                "This semantic action is coupled to REPLACE_TEXT, which is hidden by the atomic basis. "
+                "Lower it faithfully with exactly one DELETE_TEXT call followed by one INSERT_TEXT call at the "
+                "deleted target's original location, then emit <finish>."
+            )
+        elif lowered_tool is EditTool.MOVE_TEXT:
+            completion_rule = (
+                "This semantic action is coupled to MOVE_TEXT, which is hidden by the atomic basis. "
+                "Lower it faithfully with exactly one DELETE_TEXT call followed by one INSERT_TEXT call that "
+                "reinserts the exact deleted bytes at a distinct valid anchor, then emit <finish>."
             )
         elif preferred_tool is not None:
             completion_rule = (
@@ -733,6 +758,14 @@ class ReActV2Proposer:
         native_complete = getattr(self.lm, "complete_with_tools", None)
         use_native_tools = callable(native_complete)
         provider_tools = _native_tool_schemas(self.allowed_tools) if use_native_tools else []
+        direct_tool = preferred_tool if preferred_tool is not None and preferred_tool in self.allowed_tools else None
+        lowered_tool = _lowered_semantic_tool(preferred_tool, self.allowed_tools)
+        if preferred_tool is not None and direct_tool is None and lowered_tool is None:
+            available = ", ".join(tool.value for tool in self.allowed_tools)
+            raise ValueError(
+                f"Semantic operator {preferred_tool.value} is not directly available and cannot be lowered through "
+                f"the configured tool basis: {available}."
+            )
         messages = self._initial_messages(
             component_text,
             edit_target,
@@ -747,7 +780,8 @@ class ReActV2Proposer:
         executed_all: list[str] = []
         steps: list[ReActV2Step] = []
         valid_calls = 0
-        direct_tool = preferred_tool if preferred_tool is not None and preferred_tool in self.allowed_tools else None
+        lowered_delete: DeleteTextArgs | None = None
+        lowering_complete = False
         last_output = ""
 
         for turn in range(1, self.max_iterations + 1):
@@ -822,6 +856,25 @@ class ReActV2Proposer:
                     )
                     self._append_observation(messages, observation, None)
                     continue
+                if lowered_tool is not None and not lowering_complete:
+                    required = EditTool.DELETE_TEXT if lowered_delete is None else EditTool.INSERT_TEXT
+                    error = (
+                        f"The {lowered_tool.value} lowering is incomplete; make the required "
+                        f"{required.value} call before finishing."
+                    )
+                    observation = f"ERROR: {error}"
+                    steps.append(
+                        ReActV2Step(
+                            turn,
+                            assistant_history_content,
+                            "INVALID",
+                            observation,
+                            error,
+                            component_text=current,
+                        )
+                    )
+                    self._append_observation(messages, observation, None)
+                    continue
                 if valid_calls == 0 or current == component_text:
                     error = "Cannot finish before at least one valid tool call changes the selected region."
                     observation = f"ERROR: {error}"
@@ -870,11 +923,58 @@ class ReActV2Proposer:
                     raise ReActV2ProtocolError(
                         f"This semantic action is coupled to {direct_tool.value}; {tool.value} is not valid here."
                     )
+                expected_component: str | None = None
+                if lowered_tool is not None:
+                    if lowering_complete:
+                        raise ReActV2ProtocolError(
+                            f"The faithful {lowered_tool.value} lowering is complete; emit <finish> without "
+                            "another tool call."
+                        )
+                    expected_atomic_tool = EditTool.DELETE_TEXT if lowered_delete is None else EditTool.INSERT_TEXT
+                    if tool is not expected_atomic_tool:
+                        raise ReActV2ProtocolError(
+                            f"The {lowered_tool.value} lowering requires {expected_atomic_tool.value} next; "
+                            f"{tool.value} is not valid at this step."
+                        )
+                    if lowered_delete is not None:
+                        assert isinstance(args, InsertTextArgs)
+                        if lowered_tool is EditTool.REPLACE_TEXT:
+                            direct_args: EditArgs = ReplaceTextArgs(
+                                target=lowered_delete.target,
+                                text=args.text,
+                            )
+                        else:
+                            if args.text != lowered_delete.target:
+                                raise ReActV2ProtocolError(
+                                    "The MOVE_TEXT lowering must reinsert exactly the bytes removed by DELETE_TEXT."
+                                )
+                            direct_args = MoveTextArgs(
+                                target=lowered_delete.target,
+                                anchor=args.anchor,
+                                where=args.where,
+                            )
+                        expected_component, _, _ = self._apply_to_component(
+                            component_text,
+                            edit_target,
+                            direct_args,
+                        )
+                        if expected_component == component_text:
+                            raise ReActV2ProtocolError(
+                                f"The {lowered_tool.value} lowering must change the original component; "
+                                "choose a distinct replacement or MOVE_TEXT destination."
+                            )
                 if valid_calls >= self.max_tool_calls:
                     raise ReActV2ProtocolError(
                         f"Tool-call budget exhausted after {self.max_tool_calls} valid calls; emit <finish>."
                     )
                 new_component, new_region, executed = self._apply_to_component(current, edit_target, args)
+                if expected_component is not None and new_component != expected_component:
+                    assert lowered_tool is not None
+                    raise ReActV2ProtocolError(
+                        f"The INSERT_TEXT call does not faithfully reproduce one {lowered_tool.value} operation "
+                        "on the original selected region. Use the exact deleted location for REPLACE_TEXT, or the "
+                        "same destination anchor and placement as MOVE_TEXT."
+                    )
                 if new_component == current:
                     raise EditApplicationError(f"{tool.value} produced no text change.")
                 if max_chars is not None and len(new_component) > max_chars:
@@ -901,6 +1001,12 @@ class ReActV2Proposer:
 
             current = new_component
             valid_calls += 1
+            if lowered_tool is not None:
+                if lowered_delete is None:
+                    assert isinstance(args, DeleteTextArgs)
+                    lowered_delete = args
+                else:
+                    lowering_complete = True
             executed_all.extend(executed)
             observation = f"OK: {tool.value} applied.\nLatest selected region:\n{new_region}"
             steps.append(
@@ -931,6 +1037,7 @@ class ReActV2Proposer:
         return ReActV2Result(
             new_text=component_text,
             changed=False,
+            executed_edit=executed_all,
             iterations=self.max_iterations,
             tool_calls=valid_calls,
             dropped_reason=reason,

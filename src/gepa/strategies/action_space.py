@@ -58,6 +58,7 @@ logger = logging.getLogger(__name__)
 # exhaust the model context.
 SOFT_PROMPT_CHAR_BUDGET = 8000
 MAX_PROPOSAL_CHARS = 10000
+FULL_SUPPORT_EXPLORATION_EPSILON = 0.1
 
 
 class ActionSelector(Protocol):
@@ -92,13 +93,13 @@ class RandomActionSelector:
 
 
 VERBALIZED_ACTION_PROMPT = """\
-You are selecting which edit action(s) to apply to improve a prompt.
+You are selecting which edit action(s) to apply to improve a document component.
 
-## Current prompt
+## Current document component
 ```
 {current_prompt}
 ```
-Current prompt length: {prompt_chars} characters (budget: ~{char_budget}).
+Current component length: {prompt_chars} characters (budget: ~{char_budget}).
 
 ## Recent feedback summary
 {feedback_summary}
@@ -107,12 +108,13 @@ Current prompt length: {prompt_chars} characters (budget: ~{char_budget}).
 {action_menu}
 
 Generate {k} candidate actions. For each, assign a probability reflecting how \
-likely that action is to improve the prompt given the feedback above. \
+likely that action is to improve the document component given the feedback above. \
 Probabilities must sum to 1.0.
+{support_rule}
 
 Important: try to explore less obvious actions. Assign higher probability to \
 actions that specifically address the failure patterns in the feedback, even if \
-they seem unconventional. If the current prompt is near or over its length \
+they seem unconventional. If the current component is near or over its length \
 budget, favor condensing, rewriting, or restructuring actions over additive ones.
 
 Format your response as:
@@ -237,6 +239,10 @@ class VerbalizedActionSelector:
         tau: Tail-sampling threshold (actions with ``p < tau`` form the tail);
             ``None`` defaults to ``1 / k`` so the threshold scales with ``k``.
         rng: RNG for tail sampling; ``random.Random(0)`` when ``None``.
+        require_full_support: Whether the LM must score every configured action
+            exactly once and sampling must retain nonzero support for all of
+            them through a uniform-exploration mixture. Invalid output falls
+            back to the uniform full menu.
 
     Raises:
         ValueError: ``actions`` is empty.
@@ -249,6 +255,7 @@ class VerbalizedActionSelector:
         k: int = 5,
         tau: float | None = None,
         rng: random.Random | None = None,
+        require_full_support: bool = False,
     ):
         """Store the menu, LM, and sampling parameters; no LM call is made here."""
         if not actions:
@@ -263,6 +270,7 @@ class VerbalizedActionSelector:
         # fallback for both uniform and mildly-peaked distributions.
         self.tau = tau if tau is not None else 1.0 / k
         self.rng = rng if rng is not None else random.Random(0)
+        self.require_full_support = require_full_support
         self._context: dict[str, str] | None = None
         self._action_by_name: dict[str, PromptEditAction] = {a.name: a for a in actions}
         # One record per select() call with context: the verbalized distribution
@@ -296,14 +304,64 @@ class VerbalizedActionSelector:
             return [rng.choice(self.actions) for _ in range(n)]
 
         distribution = self._generate_distribution(rng)
-        result, stats = _sample_from_tails(distribution, n, self.tau, rng)
+        if self.require_full_support:
+            epsilon = FULL_SUPPORT_EXPLORATION_EPSILON
+            actions = [action for action, _, _ in distribution.entries]
+            probabilities = [probability for _, probability, _ in distribution.entries]
+            mixed_probabilities = [
+                (1.0 - epsilon) * probability + epsilon / len(actions) for probability in probabilities
+            ]
+            result = rng.choices(actions, weights=mixed_probabilities, k=n)
+            sampled_probability_by_name = {
+                action.name: probability for action, probability in zip(actions, mixed_probabilities, strict=True)
+            }
+            tail_mass = sum(probability for probability in probabilities if probability < self.tau)
+            stats = TailSampleStats(
+                n_parsed_entries=len(distribution.entries),
+                tail_mass=tail_mass,
+                used_full_fallback=False,
+                entropy_bits=-sum(
+                    probability * math.log2(probability) for probability in probabilities if probability > 0
+                ),
+            )
+            sampling_policy = "full_distribution_uniform_mixture"
+        else:
+            epsilon = 0.0
+            result, stats = _sample_from_tails(distribution, n, self.tau, rng)
+            eligible = (
+                distribution.entries
+                if stats.used_full_fallback
+                else [
+                    (action, probability, reasoning)
+                    for action, probability, reasoning in distribution.entries
+                    if probability < self.tau
+                ]
+            )
+            eligible_total = sum(probability for _, probability, _ in eligible)
+            if eligible_total > 0:
+                sampled_probability_by_name = {
+                    name: sum(probability for action, probability, _ in eligible if action.name == name)
+                    / eligible_total
+                    for name in {action.name for action, _, _ in eligible}
+                }
+            else:
+                eligible_names = [action.name for action, _, _ in eligible]
+                sampled_probability_by_name = {
+                    name: eligible_names.count(name) / len(eligible_names) for name in set(eligible_names)
+                }
+            sampling_policy = "tail"
         self.history.append(
             {
                 "probs": {a.name: p for a, p, _ in distribution.entries},
+                "sampling_probs": sampled_probability_by_name,
                 "sampled": [a.name for a in result],
+                "sampled_probabilities": [sampled_probability_by_name[a.name] for a in result],
                 "fallback": distribution.is_fallback,
                 "n_parsed_entries": stats.n_parsed_entries,
                 "tail_mass": stats.tail_mass,
+                "tau": self.tau,
+                "sampling_policy": sampling_policy,
+                "exploration_epsilon": epsilon,
                 "used_full_fallback": stats.used_full_fallback,
                 "entropy_bits": stats.entropy_bits,
             }
@@ -323,6 +381,13 @@ class VerbalizedActionSelector:
             feedback_summary=self._context["feedback_summary"],
             action_menu=action_menu,
             k=self.k,
+            support_rule=(
+                "Score every available action exactly once; do not omit or repeat an action. Assign probability 0 "
+                "when an action's stated precondition is not supported by the region and feedback; the sampler "
+                "reserves a small uniform exploration probability."
+                if self.require_full_support
+                else ""
+            ),
         )
         raw_output = self.lm(prompt)
         return self._parse_distribution(raw_output, rng)
@@ -333,6 +398,8 @@ class VerbalizedActionSelector:
         raw_output = strip_think_tags(raw_output)
 
         entries: list[tuple[PromptEditAction, float, str]] = []
+        invalid_candidate = False
+        invalid_probability = False
         for candidate_match in re.finditer(r"<candidate>(.*?)</candidate>", raw_output, re.DOTALL):
             block = candidate_match.group(1)
             action_m = re.search(r"<action>(.*?)</action>", block, re.DOTALL)
@@ -340,6 +407,7 @@ class VerbalizedActionSelector:
             reasoning_m = re.search(r"<reasoning>(.*?)</reasoning>", block, re.DOTALL)
 
             if not action_m or not prob_m:
+                invalid_candidate = True
                 continue
 
             action_name = action_m.group(1).strip()
@@ -348,6 +416,12 @@ class VerbalizedActionSelector:
             try:
                 probability = float(prob_m.group(1).strip())
             except ValueError:
+                invalid_candidate = True
+                invalid_probability = True
+                continue
+            if not math.isfinite(probability) or probability < 0:
+                invalid_candidate = True
+                invalid_probability = True
                 continue
 
             action = self._action_by_name.get(action_name)
@@ -359,18 +433,27 @@ class VerbalizedActionSelector:
                         break
             if action is not None:
                 entries.append((action, probability, reasoning))
+            else:
+                invalid_candidate = True
 
+        parsed_names = [action.name for action, _, _ in entries]
+        full_support_invalid = self.require_full_support and (
+            invalid_candidate
+            or len(parsed_names) != len(self.actions)
+            or set(parsed_names) != set(self._action_by_name)
+        )
+        total = sum(probability for _, probability, _ in entries)
         is_fallback = False
-        if not entries:
-            logger.warning("Failed to parse verbalized action distribution; falling back to uniform.")
+        if not entries or full_support_invalid or invalid_probability or total <= 0:
+            reason = "incomplete" if full_support_invalid else "invalid"
+            logger.warning("Received %s verbalized action distribution; falling back to uniform.", reason)
             n_actions = len(self.actions)
             entries = [(a, 1.0 / n_actions, "") for a in self.actions]
             is_fallback = True
+            total = 1.0
 
         # Renormalize probabilities to sum to 1.
-        total = sum(p for _, p, _ in entries)
-        if total > 0:
-            entries = [(a, p / total, r) for a, p, r in entries]
+        entries = [(a, p / total, r) for a, p, r in entries]
 
         return ActionDistribution(entries=entries, is_fallback=is_fallback)
 

@@ -144,7 +144,7 @@ from gepa.proposer.merge import MergeProposer
 from gepa.proposer.reflective_mutation.base import CandidateSelector, LanguageModel, ReflectionComponentSelector
 from gepa.proposer.reflective_mutation.reflection_lm import ReflectionLM
 from gepa.proposer.reflective_mutation.reflective_mutation import ReflectiveMutationProposer
-from gepa.proposer.reflective_mutation.three_role import ThreeRoleReflectionLM
+from gepa.proposer.reflective_mutation.three_role import ThreeRoleReflectionLM, ensure_reflection_run_contract
 from gepa.strategies.acceptance import AcceptanceCriterion, ImprovementOrEqualAcceptance, StrictImprovementAcceptance
 from gepa.strategies.action_space import ActionSelector
 from gepa.strategies.batch_sampler import BatchSampler, EpochShuffledBatchSampler
@@ -1733,6 +1733,9 @@ def optimize_anything(
             raise
 
     if config.reflection.reflection_strategy is not None:
+        _validate_candidate = getattr(config.reflection.reflection_strategy, "validate_candidate", None)
+        if callable(_validate_candidate):
+            _validate_candidate(seed_candidate)
         _bind_rng = getattr(config.reflection.reflection_strategy, "bind_rng", None)
         if callable(_bind_rng):
             # Match gepa.optimize() and #307: strategy randomness shares the
@@ -1745,6 +1748,12 @@ def optimize_anything(
         _bind_lm_kwargs = getattr(config.reflection.reflection_strategy, "bind_lm_kwargs", None)
         if callable(_bind_lm_kwargs):
             _bind_lm_kwargs(config.reflection.reflection_lm_kwargs)
+        _run_contract = getattr(config.reflection.reflection_strategy, "run_contract", None)
+        if config.engine.run_dir is not None and callable(_run_contract):
+            ensure_reflection_run_contract(
+                config.engine.run_dir,
+                cast(dict[str, Any], _run_contract(seed_candidate)),
+            )
 
     reflective_proposer = ReflectiveMutationProposer(
         logger=config.tracking.logger,

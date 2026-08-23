@@ -26,6 +26,7 @@ from gepa.adapters.terminal_bench_adapter import (
     TerminalBenchTask,
     load_terminalbench_manifest,
 )
+from gepa.strategies.intervention import controller_policy_contract, semantic_action_catalog
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MANIFEST = Path(__file__).with_name("terminalbench-v3-manifest.json")
@@ -109,6 +110,7 @@ def build_run_contract(
     resolved_family: str,
 ) -> dict[str, Any]:
     """Record every material axis needed for safe resume and comparison."""
+    reflection_level = args.reflection_level if condition == "react_v2" else 0
     return {
         "condition": condition,
         "dataset": manifest.dataset,
@@ -119,8 +121,10 @@ def build_run_contract(
         "n_concurrent": args.n_concurrent,
         "proposer_api_base": args.proposer_api_base,
         "proposer_model": args.proposer_model,
-        "reflection_level": args.reflection_level if condition == "react_v2" else 0,
+        "reflection_level": reflection_level,
         "reflection_minibatch_size": args.reflection_minibatch_size,
+        "semantic_action_space": semantic_action_catalog("prompt") if reflection_level == 2 else None,
+        "semantic_controller_policy": controller_policy_contract() if reflection_level == 2 else None,
         "seed": args.seed,
         "student_api_base": args.student_api_base,
         "student_model": args.student_model,

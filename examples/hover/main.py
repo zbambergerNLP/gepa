@@ -61,6 +61,7 @@ from gepa.strategies.action_space import (
     build_structured_actions,
 )
 from gepa.strategies.document_template import TEMPLATE_FAMILIES
+from gepa.strategies.intervention import controller_policy_contract, semantic_action_catalog
 
 # GEPA artifact components: summarize1 -> create_query_hop2 -> summarize2 -> create_query_hop3.
 SEED_CANDIDATE = {
@@ -115,6 +116,8 @@ def build_run_contract(condition: str, args) -> dict:
             "template_family": family,
             "reflection_level": reflection_level,
             "edit_tool_set": edit_tool_set,
+            "semantic_action_space": semantic_action_catalog("prompt") if reflection_level == 2 else None,
+            "semantic_controller_policy": controller_policy_contract() if reflection_level == 2 else None,
             "legacy_actions": legacy_actions,
         },
         "program": {

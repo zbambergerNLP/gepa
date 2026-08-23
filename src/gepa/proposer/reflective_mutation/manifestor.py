@@ -74,6 +74,8 @@ Where your text goes:
 {site}
 
 Hard requirements:
+- First verify that the selected action's stated precondition is evidenced in the selected region and failures. If it
+  is not, output exactly <not_applicable>brief grounded reason</not_applicable> and nothing else.
 - Carry out the instruction precisely; do not add, skip, or anticipate steps it does not ask for.
 - Ground every claim, failure, and piece of text you name in the state below.
 - Do not write the edited text yourself and do not emit an <edit> or <python> block.
@@ -234,7 +236,7 @@ class Manifestor:
         Raises:
             ManifestationError: A fixed intervention is blank or both
                 instruction-manifestation attempts are empty after hidden
-                thoughts are removed.
+                thoughts are removed, or the action precondition is not met.
         """
         spec = action.intervention_spec
         if spec is None:
@@ -265,6 +267,10 @@ class Manifestor:
         for attempt in range(MAX_MANIFESTATION_ATTEMPTS):
             raw = strip_think_tags(self.lm(prompt)).strip()
             if raw:
+                inapplicable = re.fullmatch(r"<not_applicable>(.*?)</not_applicable>", raw, re.DOTALL)
+                if inapplicable is not None:
+                    reason = inapplicable.group(1).strip() or "the selected action's precondition is not met"
+                    raise ManifestationError(f"Semantic action {spec.name!r} is not applicable: {reason}")
                 if len(raw) > MAX_INTERVENTION_CHARS:
                     raw = raw[:MAX_INTERVENTION_CHARS] + "..."
                 return Intervention(raw, inject_as)

@@ -25,6 +25,7 @@ from examples.hover.main import build_run_contract as build_hover_run_contract
 from examples.hover.main import dump_candidates as dump_hover_candidates
 from examples.hover.main import seed_candidate as hover_seed_candidate
 from gepa.strategies.document_template import TEMPLATE_FAMILIES
+from gepa.strategies.intervention import controller_policy_contract, semantic_action_catalog
 
 
 def test_student_model_selects_provider_specific_template() -> None:
@@ -148,7 +149,13 @@ def test_complete_run_keys_cover_budget_seed_retrieval_and_data_identity() -> No
 
     assert base not in changed
     assert len(changed) == 8
-    assert build_hotpotqa_run_contract("vanilla", _hotpot_args())["optimizer"]["reflection_level"] == 0
+    vanilla_contract = build_hotpotqa_run_contract("vanilla", _hotpot_args())
+    assert vanilla_contract["optimizer"]["reflection_level"] == 0
+    assert vanilla_contract["optimizer"]["semantic_action_space"] is None
+    assert vanilla_contract["optimizer"]["semantic_controller_policy"] is None
+    level_one_contract = build_hotpotqa_run_contract("react_v2", _hotpot_args(reflection_level=1))
+    assert level_one_contract["optimizer"]["semantic_action_space"] is None
+    assert level_one_contract["optimizer"]["semantic_controller_policy"] is None
 
 
 def test_hotpot_and_hover_contracts_record_exact_model_roles() -> None:
@@ -165,6 +172,8 @@ def test_hotpot_and_hover_contracts_record_exact_model_roles() -> None:
         }
         assert contract["optimizer"]["max_metric_calls"] == 100
         assert contract["optimizer"]["seed_style"] == "structured"
+        assert contract["optimizer"]["semantic_action_space"] == semantic_action_catalog("prompt")
+        assert contract["optimizer"]["semantic_controller_policy"] == controller_policy_contract()
         assert contract["retrieval"]["endpoint"] == "https://en.wikipedia.org/w/api.php"
 
     assert hover_run_key("react_v2", hover_args) != hover_run_key("react_v2", _hotpot_args(final_retrieval_k=11))

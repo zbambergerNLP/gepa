@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).parents[1]))
 from examples.terminalbench.main import build_parser, build_run_contract, ensure_run_contract, seed_candidate
 from gepa.adapters.terminal_bench_adapter import load_terminalbench_manifest
 from gepa.strategies.document_template import TEMPLATE_FAMILIES
+from gepa.strategies.intervention import controller_policy_contract, semantic_action_catalog
 
 
 def test_qwen_student_uses_alibaba_system_prompt_template() -> None:
@@ -71,6 +72,8 @@ def test_generated_run_contract_records_metric_call_budget(tmp_path: Path) -> No
     )
 
     assert contract["max_metric_calls"] == 400
+    assert contract["semantic_action_space"] == semantic_action_catalog("prompt")
+    assert contract["semantic_controller_policy"] == controller_policy_contract()
 
 
 def test_legacy_state_without_contract_is_not_resumed(tmp_path: Path) -> None:

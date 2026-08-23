@@ -11,12 +11,16 @@ from gepa.strategies.document_template import TEMPLATE_FAMILIES, TEMPLATES, Docu
 from gepa.strategies.edit_tools import EDIT_TOOL_SETS, EditTool
 from gepa.strategies.intervention import (
     INJECTION_SITES,
+    SEMANTIC_ACTIONS,
     Controller,
     ControllerAction,
     Intervention,
     InterventionSpec,
     build_controller_menu,
+    build_semantic_action_menu,
+    controller_policy_contract,
     intervention_specs,
+    semantic_action_catalog,
     summarize_feedback,
 )
 
@@ -47,19 +51,52 @@ class VotingLM:
         )
 
 
-def test_builtin_catalog_is_exactly_three_direct_bound_semantic_actions() -> None:
-    """Expose rephrase, summarize, and expand with one direct tool each."""
+def test_builtin_catalog_is_the_curated_operator_coupled_action_space() -> None:
+    """Expose the curated semantic intents with one structural operator each."""
     expected = {
         "rephrase": EditTool.REPLACE_TEXT,
         "summarize": EditTool.REPLACE_TEXT,
+        "reformat": EditTool.REPLACE_TEXT,
+        "correct": EditTool.REPLACE_TEXT,
+        "specialize": EditTool.REPLACE_TEXT,
+        "generalize": EditTool.REPLACE_TEXT,
+        "strengthen_requirement": EditTool.REPLACE_TEXT,
+        "relax_requirement": EditTool.REPLACE_TEXT,
         "expand": EditTool.INSERT_TEXT,
+        "add_constraint": EditTool.INSERT_TEXT,
+        "remove_redundancy": EditTool.DELETE_TEXT,
+        "remove_harmful_content": EditTool.DELETE_TEXT,
+        "relocate": EditTool.MOVE_TEXT,
     }
+    assert {spec.name: spec.edit_tool for spec in SEMANTIC_ACTIONS} == expected
+    descriptions = {spec.name: spec.description for spec in SEMANTIC_ACTIONS}
+    assert "use specialize or generalize" in descriptions["correct"]
+    assert "use rephrase" in descriptions["specialize"]
+    assert "otherwise valid rule" in descriptions["add_constraint"]
+    assert "use add_constraint" in descriptions["expand"]
     for kind in ("prompt", "skill"):
-        for section in (*TEMPLATES[kind].sections, None):
+        for section in TEMPLATES[kind].sections:
             specs = intervention_specs(kind, section)
             assert {spec.name: spec.edit_tool for spec in specs} == expected
-            assert all(len(spec.compatible_tools) == 1 for spec in specs)
             assert all(spec.instruction and spec.fixed_text is None for spec in specs)
+        assert [spec.name for spec in intervention_specs(kind, None)] == ["relocate"]
+
+
+def test_semantic_action_catalog_persists_the_full_ordered_contract() -> None:
+    """Make action-space changes part of benchmark identity and safe resume."""
+    catalog = semantic_action_catalog("prompt")
+    assert catalog["version"] == 1
+    assert catalog["kind"] == "prompt"
+    assert [(action["name"], action["operator"]) for action in catalog["actions"]] == [
+        (spec.name, spec.edit_tool.value) for spec in SEMANTIC_ACTIONS
+    ]
+    assert all(action["description"] and action["instruction"] for action in catalog["actions"])
+    assert all(action["fixed_text"] is None for action in catalog["actions"])
+    assert all(action["inject_as"] == "assistant_reasoning" for action in catalog["actions"])
+    assert [action["name"] for action in catalog["actions"] if action["allow_whole_document"]] == ["relocate"]
+    assert semantic_action_catalog("skill")["actions"] == catalog["actions"]
+    assert controller_policy_contract()["factorization"] == "P(region) * P(action | region)"
+    assert controller_policy_contract()["exploration_epsilon"] == pytest.approx(0.1)
 
 
 def test_unknown_document_kind_has_no_semantic_catalog() -> None:
@@ -73,7 +110,7 @@ def test_intervention_spec_accepts_every_supported_injection_site(site: str) -> 
     spec = InterventionSpec(
         "custom",
         "Custom action.",
-        (EditTool.INSERT_TEXT,),
+        EditTool.INSERT_TEXT,
         instruction="Manifest this action.",
         inject_as=site,
     )
@@ -83,15 +120,14 @@ def test_intervention_spec_accepts_every_supported_injection_site(site: str) -> 
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
-        pytest.param({}, "at least one direct edit tool", id="missing_direct_tool"),
         pytest.param(
-            {"compatible_tools": (EditTool.INSERT_TEXT,)},
+            {"edit_tool": EditTool.INSERT_TEXT},
             "exactly one of instruction or fixed_text",
             id="missing_manifestation_source",
         ),
         pytest.param(
             {
-                "compatible_tools": (EditTool.INSERT_TEXT,),
+                "edit_tool": EditTool.INSERT_TEXT,
                 "instruction": "instruction",
                 "fixed_text": "fixed",
             },
@@ -100,21 +136,24 @@ def test_intervention_spec_accepts_every_supported_injection_site(site: str) -> 
         ),
         pytest.param(
             {
-                "compatible_tools": (EditTool.INSERT_TEXT,),
+                "edit_tool": EditTool.INSERT_TEXT,
                 "instruction": "instruction",
                 "inject_as": "tool",
             },
             "inject_as must be one of",
             id="unknown_injection_site",
         ),
+        pytest.param(
+            {"edit_tool": (EditTool.INSERT_TEXT,), "instruction": "instruction"},
+            "must be one EditTool value",
+            id="plural_operator",
+        ),
     ],
 )
 def test_intervention_spec_rejects_invalid_contracts(kwargs: dict[str, object], message: str) -> None:
     """Reject specs that cannot be executed or manifested unambiguously."""
-    construction = dict(kwargs)
-    compatible_tools = construction.pop("compatible_tools", ())
-    with pytest.raises(ValueError, match=message):
-        InterventionSpec("custom", "Custom action.", compatible_tools, **construction)
+    with pytest.raises((TypeError, ValueError), match=message):
+        InterventionSpec("custom", "Custom action.", **kwargs)
 
 
 def test_intervention_remains_a_text_and_role_value_object() -> None:
@@ -160,9 +199,9 @@ def test_level1_menu_is_independent_of_atomic_basis_size() -> None:
     assert [action.menu_id for action in minimal] == [action.menu_id for action in broad]
 
 
-def test_level2_menu_couples_each_semantic_action_directly_to_one_tool() -> None:
-    """Avoid a second independent tool choice or a semantic/tool cross-product."""
-    menu = build_controller_menu(
+def test_level2_factors_region_then_operator_coupled_semantic_action() -> None:
+    """Expose each region and conditional action once instead of their product."""
+    region_menu = build_controller_menu(
         PROMPT_TEMPLATE,
         "sys",
         EDIT_TOOL_SETS["broad"],
@@ -170,17 +209,29 @@ def test_level2_menu_couples_each_semantic_action_directly_to_one_tool() -> None
         rng=random.Random(0),
         max_menu=999,
     )
-    expected_count = len(PROMPT_TEMPLATE.edit_targets("sys")) * 3
-    assert len(menu) == expected_count
-    for action in menu:
+    assert len(region_menu) == len(PROMPT_TEMPLATE.edit_targets("sys"))
+    assert all(action.intervention_spec is None for action in region_menu)
+    local = next(action for action in region_menu if action.edit_target.section == "Rules")
+    whole = next(action for action in region_menu if action.edit_target.section is None)
+    assert len(local.semantic_options) == len(SEMANTIC_ACTIONS)
+    assert [spec.name for spec in whole.semantic_options] == ["relocate"]
+    assert "relocate/MOVE_TEXT" in whole.menu_description
+    assert "rephrase/REPLACE_TEXT" not in whole.menu_description
+
+    action_menu = build_semantic_action_menu(PROMPT_TEMPLATE, EditTarget("sys", "Rules"))
+    assert len(action_menu) == len(SEMANTIC_ACTIONS)
+    for action in action_menu:
         assert action.intervention_spec is not None
         assert action.edit_tool is action.intervention_spec.edit_tool
         assert action.menu_id.endswith(f"/{action.edit_tool.value}")
         assert "direct tool" in action.menu_description
 
+    whole_menu = build_semantic_action_menu(PROMPT_TEMPLATE, EditTarget("sys", None))
+    assert [action.intervention_spec.name for action in whole_menu if action.intervention_spec] == ["relocate"]
 
-def test_default_menu_keeps_every_gpt56_region_action_pair() -> None:
-    """Do not silently discard supported built-in Controller choices."""
+
+def test_default_gpt56_controller_avoids_the_cartesian_menu() -> None:
+    """Keep all nine regions while scoring actions only after region sampling."""
     template = TEMPLATE_FAMILIES["openai-gpt-5.6"]["prompt"]
     menu = build_controller_menu(
         template,
@@ -190,8 +241,9 @@ def test_default_menu_keeps_every_gpt56_region_action_pair() -> None:
         rng=random.Random(0),
     )
 
-    assert len(menu) == (len(template.sections) + 1) * 3 == 27
-    assert len({action.menu_id for action in menu}) == 27
+    expected_count = len(template.sections) + 1
+    assert len(menu) == expected_count == 9
+    assert len({action.menu_id for action in menu}) == expected_count
 
 
 def test_level2_semantic_menu_does_not_disappear_under_minimal_basis() -> None:
@@ -213,31 +265,28 @@ def test_level2_semantic_menu_does_not_disappear_under_minimal_basis() -> None:
         max_menu=999,
     )
     assert [action.menu_id for action in minimal] == [action.menu_id for action in broad]
-
-
-def test_unknown_kind_level2_falls_back_to_one_whole_document_atomic_action() -> None:
-    """Keep a custom template editable without inventing semantic actions."""
-    template = DocumentTemplate("memo", {"Body": "memo body"})
-    menu = build_controller_menu(
-        template,
-        "memo",
-        EDIT_TOOL_SETS["minimal"],
-        2,
-        rng=random.Random(0),
+    target = EditTarget("sys", "Rules")
+    assert any(
+        action.edit_tool is EditTool.REPLACE_TEXT for action in build_semantic_action_menu(PROMPT_TEMPLATE, target)
     )
-    assert menu == [ControllerAction(EditTarget("memo", None), None, None)]
+
+
+def test_unknown_kind_level2_fails_before_manifestation() -> None:
+    """Reject uncataloged document kinds instead of inventing semantic actions."""
+    template = DocumentTemplate("memo", {"Body": "memo body"})
+    with pytest.raises(ValueError, match="Document kind 'memo' has no semantic actions"):
+        build_controller_menu(
+            template,
+            "memo",
+            EDIT_TOOL_SETS["minimal"],
+            2,
+            rng=random.Random(0),
+        )
 
 
 def test_controller_maps_verbalized_pick_back_to_semantic_action() -> None:
     """Return the rich action selected through the stand-in action menu."""
-    menu = build_controller_menu(
-        PROMPT_TEMPLATE,
-        "sys",
-        EDIT_TOOL_SETS["broad"],
-        2,
-        rng=random.Random(0),
-        max_menu=999,
-    )
+    menu = build_semantic_action_menu(PROMPT_TEMPLATE, EditTarget("sys", "Rules"))
     lm = VotingLM("summarize@Rules/")
     controller = Controller(menu, lm, rng=random.Random(0))
     controller.set_context(PROMPT, "The answer repeats itself.")
@@ -251,7 +300,7 @@ def test_controller_maps_verbalized_pick_back_to_semantic_action() -> None:
 
 
 def test_controller_menu_bounds_are_validated_and_deterministic() -> None:
-    """Bound large menus through the supplied seeded random stream."""
+    """Allow level-1 bounds but never remove level-2 semantic regions."""
     with pytest.raises(ValueError, match="at least 1"):
         build_controller_menu(
             PROMPT_TEMPLATE,
@@ -261,11 +310,20 @@ def test_controller_menu_bounds_are_validated_and_deterministic() -> None:
             rng=random.Random(0),
             max_menu=0,
         )
+    with pytest.raises(ValueError, match="requires all"):
+        build_controller_menu(
+            PROMPT_TEMPLATE,
+            "sys",
+            EDIT_TOOL_SETS["broad"],
+            2,
+            rng=random.Random(7),
+            max_menu=5,
+        )
     first = build_controller_menu(
         PROMPT_TEMPLATE,
         "sys",
         EDIT_TOOL_SETS["broad"],
-        2,
+        1,
         rng=random.Random(7),
         max_menu=5,
     )
@@ -273,7 +331,7 @@ def test_controller_menu_bounds_are_validated_and_deterministic() -> None:
         PROMPT_TEMPLATE,
         "sys",
         EDIT_TOOL_SETS["broad"],
-        2,
+        1,
         rng=random.Random(7),
         max_menu=5,
     )

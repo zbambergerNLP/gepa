@@ -95,8 +95,16 @@ def test_auto_template_family_reads_adapter_consumer_model(monkeypatch: pytest.M
 
 
 def test_explicit_reflection_strategy_takes_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Never replace or validate through the convenience path when a strategy is supplied."""
-    explicit_strategy = object()
+    """Keep an explicit strategy while honoring its own seed validator."""
+
+    class ExplicitStrategy:
+        def __init__(self) -> None:
+            self.validated: list[dict[str, str]] = []
+
+        def validate_candidate(self, candidate: dict[str, str]) -> None:
+            self.validated.append(candidate)
+
+    explicit_strategy = ExplicitStrategy()
 
     def reject_auto_strategy(**_kwargs: Any) -> None:
         raise AssertionError("automatic ThreeRole construction must not run")
@@ -122,6 +130,8 @@ def test_explicit_reflection_strategy_takes_precedence(monkeypatch: pytest.Monke
                 ),
             ),
         )
+
+    assert explicit_strategy.validated == [{"system_prompt": "free-form seed owned by the explicit strategy"}]
 
 
 def test_auto_strategy_validates_structured_seed_before_evaluation() -> None:

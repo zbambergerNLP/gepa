@@ -475,6 +475,44 @@ class TestVerbalizedActionSelector:
         assert len(dist.entries) == 1
         assert dist.entries[0][0].name == "add_constraint"
 
+    def test_required_full_support_falls_back_on_an_incomplete_distribution(self) -> None:
+        """Never treat a shortlist as a distribution over the declared menu."""
+        selector = VerbalizedActionSelector(
+            DEFAULT_ACTIONS,
+            lm=FakeLM(VALID_LM_OUTPUT),
+            require_full_support=True,
+        )
+        dist = selector._parse_distribution(VALID_LM_OUTPUT, random.Random(42))
+        assert dist.is_fallback is True
+        assert len(dist.entries) == len(DEFAULT_ACTIONS)
+        assert len({action.name for action, _, _ in dist.entries}) == len(DEFAULT_ACTIONS)
+
+    @pytest.mark.parametrize("probability", ["nan", "inf", "-0.1"])
+    def test_invalid_numeric_probability_falls_back_uniformly(self, probability: str) -> None:
+        """Reject non-finite and negative weights before sampling or logging."""
+        output = (
+            "<response><candidate><action>add_constraint</action><reasoning>x</reasoning>"
+            f"<probability>{probability}</probability></candidate>"
+            "<candidate><action>restructure</action><reasoning>y</reasoning>"
+            "<probability>1.0</probability></candidate></response>"
+        )
+        selector = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=FakeLM(output))
+        dist = selector._parse_distribution(output, random.Random(42))
+        assert dist.is_fallback is True
+        assert dist.probabilities == pytest.approx([1.0 / len(DEFAULT_ACTIONS)] * len(DEFAULT_ACTIONS))
+
+    def test_zero_mass_distribution_falls_back_uniformly(self) -> None:
+        """Never pass a zero-total verbalized distribution to the sampler."""
+        output = """
+<response>
+<candidate><action>add_constraint</action><probability>0</probability></candidate>
+<candidate><action>restructure</action><probability>0</probability></candidate>
+</response>
+"""
+        selector = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=FakeLM(output))
+        dist = selector._parse_distribution(output, random.Random(42))
+        assert dist.is_fallback is True
+
     def test_parse_unknown_action_ignored(self):
         bad_action_output = """
 <response>
@@ -805,7 +843,45 @@ class TestVerbalizedHistory:
         record = selector.history[0]
         assert record["fallback"] is False
         assert record["sampled"] == [p.name for p in picks]
+        assert len(record["sampled_probabilities"]) == len(picks)
+        assert all(0.0 <= probability <= 1.0 for probability in record["sampled_probabilities"])
         assert abs(sum(record["probs"].values()) - 1.0) < 1e-6
+        assert record["sampling_policy"] == "tail"
+        assert record["exploration_epsilon"] == 0.0
+
+    def test_full_support_policy_mixes_verbalized_and_uniform_probabilities(self) -> None:
+        """Give every declared action a logged nonzero sampling propensity."""
+        actions = DEFAULT_ACTIONS[:3]
+        output = (
+            "<response>"
+            + "".join(
+                "<candidate>"
+                f"<action>{action.name}</action><reasoning>x</reasoning><probability>{probability}</probability>"
+                "</candidate>"
+                for action, probability in zip(actions, [1.0, 0.0, 0.0], strict=True)
+            )
+            + "</response>"
+        )
+        selector = VerbalizedActionSelector(
+            actions,
+            lm=FakeLM(output),
+            rng=random.Random(0),
+            require_full_support=True,
+        )
+        selector.set_context("component", "feedback")
+        selector.select(1)
+
+        record = selector.history[0]
+        assert record["sampling_policy"] == "full_distribution_uniform_mixture"
+        assert record["exploration_epsilon"] == pytest.approx(0.1)
+        assert record["sampling_probs"] == pytest.approx(
+            {
+                actions[0].name: 0.9 + 0.1 / 3,
+                actions[1].name: 0.1 / 3,
+                actions[2].name: 0.1 / 3,
+            }
+        )
+        assert sum(record["sampling_probs"].values()) == pytest.approx(1.0)
 
     def test_history_records_tail_sample_stats(self) -> None:
         """Test that a history record carries the tail-sampling diagnostics."""
@@ -819,6 +895,7 @@ class TestVerbalizedHistory:
         assert record["used_full_fallback"] in (True, False)
         assert record["entropy_bits"] >= 0.0
         assert 0.0 <= record["tail_mass"] <= 1.0
+        assert record["tau"] == pytest.approx(selector.tau)
 
     def test_history_marks_fallback_on_unparseable_output(self):
         lm = FakeLM("no xml here")
@@ -851,7 +928,7 @@ class TestLengthControl:
         selector = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=lm, rng=random.Random(0))
         selector.set_context("p" * 1234, "some feedback")
         selector.select(1)
-        assert "Current prompt length: 1234 characters" in lm.calls[0]
+        assert "Current component length: 1234 characters" in lm.calls[0]
         assert "favor condensing" in lm.calls[0]
 
 

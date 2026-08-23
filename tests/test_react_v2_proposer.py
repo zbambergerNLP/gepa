@@ -29,6 +29,7 @@ from gepa.strategies.intervention import Intervention
 
 TEMPLATE = TEMPLATES["prompt"]
 PROMPT = TEMPLATE.render({"Role": "helper", "Rules": "- be nice\n- be brief"})
+LOWERING_PROMPT = TEMPLATE.render({"Role": "helper", "Rules": "old|anchor|tail"})
 RULES = EditTarget("sys", "Rules")
 
 
@@ -314,16 +315,17 @@ def test_direct_semantic_action_rejects_a_different_available_tool() -> None:
 
 
 def test_minimal_basis_composes_delete_and_insert_then_finishes() -> None:
-    """Require a deeper trajectory when REPLACE is hidden from the atomic basis."""
+    """Faithfully lower hidden REPLACE into delete, same-location insert, and finish."""
     lm = ScriptedLM(
         [
-            tool_call(EditTool.DELETE_TEXT, target="- be nice\n"),
-            tool_call(EditTool.INSERT_TEXT, anchor="- be brief", where="before", text="- be kind\n"),
+            tool_call(EditTool.DELETE_TEXT, target="old|"),
+            tool_call(EditTool.INSERT_TEXT, anchor="anchor", where="before", text="new|"),
             "<finish>The rephrase is complete.</finish>",
         ]
     )
     result = run(
         lm,
+        component_text=LOWERING_PROMPT,
         allowed_tools=EDIT_TOOL_SETS["minimal"],
         preferred_tool=EditTool.REPLACE_TEXT,
     )
@@ -331,9 +333,289 @@ def test_minimal_basis_composes_delete_and_insert_then_finishes() -> None:
     assert result.iterations == 3
     assert result.tool_calls == 2
     assert [step.action for step in result.steps] == ["DELETE_TEXT", "INSERT_TEXT", "FINISH"]
-    assert result.executed_edit == ["DELETE '- be nice'", "INSERT '- be kind\\n' before '- be brief'"]
-    assert "be kind" in result.new_text
-    assert "be nice" not in result.new_text
+    assert result.executed_edit == ["DELETE 'old|'", "INSERT 'new|' before 'anchor'"]
+    assert "new|anchor|tail" in result.new_text
+    assert "old|" not in result.new_text
+    assert "exactly one DELETE_TEXT call followed by one INSERT_TEXT call" in lm.calls[0][0]["content"]
+
+
+def test_minimal_replace_rejects_insert_before_delete_without_advancing_state() -> None:
+    """Return a wrong-order observation while retaining the untouched parent."""
+    lm = ScriptedLM(
+        [
+            tool_call(EditTool.INSERT_TEXT, anchor="old", where="after", text="wrong"),
+            tool_call(EditTool.DELETE_TEXT, target="old|"),
+            tool_call(EditTool.INSERT_TEXT, anchor="anchor", where="before", text="new|"),
+            "<finish>Done.</finish>",
+        ]
+    )
+
+    result = run(
+        lm,
+        component_text=LOWERING_PROMPT,
+        allowed_tools=EDIT_TOOL_SETS["minimal"],
+        preferred_tool=EditTool.REPLACE_TEXT,
+    )
+
+    assert [step.action for step in result.steps] == ["INVALID", "DELETE_TEXT", "INSERT_TEXT", "FINISH"]
+    assert "requires DELETE_TEXT next" in result.steps[0].observation
+    assert result.steps[0].component_text == LOWERING_PROMPT
+    assert "wrong" not in result.new_text
+
+
+def test_hidden_replace_uses_atomic_lowering_even_with_extra_available_tools() -> None:
+    """Do not let a custom basis bypass the selected high-level operator."""
+    lm = ScriptedLM(
+        [
+            tool_call(EditTool.MOVE_TEXT, target="old|", anchor="tail", where="after"),
+            tool_call(EditTool.DELETE_TEXT, target="old|"),
+            tool_call(EditTool.INSERT_TEXT, anchor="anchor", where="before", text="new|"),
+            "<finish>Done.</finish>",
+        ]
+    )
+    result = run(
+        lm,
+        component_text=LOWERING_PROMPT,
+        allowed_tools=[EditTool.INSERT_TEXT, EditTool.DELETE_TEXT, EditTool.MOVE_TEXT],
+        preferred_tool=EditTool.REPLACE_TEXT,
+    )
+
+    assert [step.action for step in result.steps] == ["INVALID", "DELETE_TEXT", "INSERT_TEXT", "FINISH"]
+    assert "requires DELETE_TEXT next" in result.steps[0].observation
+    assert "new|anchor|tail" in result.new_text
+
+
+def test_hidden_semantic_operator_requires_a_direct_or_lowerable_basis() -> None:
+    """Fail before calling the model when a coupled operator cannot be realized."""
+    lm = ScriptedLM([])
+    with pytest.raises(ValueError, match="cannot be lowered"):
+        run(
+            lm,
+            allowed_tools=[EditTool.INSERT_TEXT],
+            preferred_tool=EditTool.REPLACE_TEXT,
+        )
+    assert lm.calls == []
+
+
+def test_minimal_replace_rejects_wrong_insertion_location_and_allows_retry() -> None:
+    """Accept only the final state produced by one broad replacement at the deleted span."""
+    lm = ScriptedLM(
+        [
+            tool_call(EditTool.DELETE_TEXT, target="old|"),
+            tool_call(EditTool.INSERT_TEXT, anchor="tail", where="after", text="new|"),
+            tool_call(EditTool.INSERT_TEXT, anchor="anchor", where="before", text="new|"),
+            "<finish>Done.</finish>",
+        ]
+    )
+
+    result = run(
+        lm,
+        component_text=LOWERING_PROMPT,
+        allowed_tools=EDIT_TOOL_SETS["minimal"],
+        preferred_tool=EditTool.REPLACE_TEXT,
+    )
+
+    assert [step.action for step in result.steps] == ["DELETE_TEXT", "INVALID", "INSERT_TEXT", "FINISH"]
+    assert "does not faithfully reproduce one REPLACE_TEXT" in result.steps[1].observation
+    assert "new|" not in result.steps[1].component_text
+    broad = run(
+        ScriptedLM([tool_call(EditTool.REPLACE_TEXT, target="old|", text="new|")]),
+        component_text=LOWERING_PROMPT,
+        preferred_tool=EditTool.REPLACE_TEXT,
+    )
+    assert result.new_text == broad.new_text
+
+
+def test_minimal_replace_compares_exact_component_not_stripped_region() -> None:
+    """Reject an atomic result that only matches broad REPLACE after whitespace stripping."""
+    component = PROMPT.replace("- be nice\n- be brief", "  old  ")
+    lm = ScriptedLM(
+        [
+            tool_call(EditTool.DELETE_TEXT, target="old"),
+            tool_call(EditTool.INSERT_TEXT, anchor="", where="after", text="new"),
+        ]
+    )
+    result = run(
+        lm,
+        component_text=component,
+        allowed_tools=EDIT_TOOL_SETS["minimal"],
+        preferred_tool=EditTool.REPLACE_TEXT,
+        max_iterations=2,
+    )
+
+    assert result.changed is False
+    assert result.new_text == component
+    assert [step.action for step in result.steps] == ["DELETE_TEXT", "INVALID"]
+    assert "does not faithfully reproduce one REPLACE_TEXT" in result.steps[1].observation
+    assert result.executed_edit == ["DELETE 'old'"]
+
+
+def test_minimal_replace_rejects_finish_after_only_the_delete() -> None:
+    """Keep a partially lowered replacement open until its faithful insert arrives."""
+    lm = ScriptedLM(
+        [
+            tool_call(EditTool.DELETE_TEXT, target="old|"),
+            "<finish>Done.</finish>",
+            tool_call(EditTool.INSERT_TEXT, anchor="anchor", where="before", text="new|"),
+            "<finish>Done.</finish>",
+        ]
+    )
+
+    result = run(
+        lm,
+        component_text=LOWERING_PROMPT,
+        allowed_tools=EDIT_TOOL_SETS["minimal"],
+        preferred_tool=EditTool.REPLACE_TEXT,
+    )
+
+    assert [step.action for step in result.steps] == ["DELETE_TEXT", "INVALID", "INSERT_TEXT", "FINISH"]
+    assert "required" in result.steps[1].observation
+    assert "INSERT_TEXT" in result.steps[1].observation
+    assert result.tool_calls == 2
+
+
+def test_minimal_replace_rejects_extra_tool_call_after_faithful_lowering() -> None:
+    """Require finish immediately after the two valid atomic calls."""
+    lm = ScriptedLM(
+        [
+            tool_call(EditTool.DELETE_TEXT, target="old|"),
+            tool_call(EditTool.INSERT_TEXT, anchor="anchor", where="before", text="new|"),
+            tool_call(EditTool.DELETE_TEXT, target="tail"),
+            "<finish>Done.</finish>",
+        ]
+    )
+
+    result = run(
+        lm,
+        component_text=LOWERING_PROMPT,
+        allowed_tools=EDIT_TOOL_SETS["minimal"],
+        preferred_tool=EditTool.REPLACE_TEXT,
+    )
+
+    assert [step.action for step in result.steps] == ["DELETE_TEXT", "INSERT_TEXT", "INVALID", "FINISH"]
+    assert "lowering is complete" in result.steps[2].observation
+    assert "tail" in result.new_text
+    assert result.tool_calls == 2
+
+
+def test_minimal_move_native_calls_match_one_broad_move() -> None:
+    """Lower hidden MOVE with exact deleted bytes and the direct move destination."""
+    component = TEMPLATE.render({"Role": "helper", "Rules": "- one\n- two\n- three"})
+    lm = NativeScriptedLM(
+        [
+            ToolCompletion("", (native_call(EditTool.DELETE_TEXT, "delete", target="- two\n"),)),
+            ToolCompletion(
+                "",
+                (
+                    native_call(
+                        EditTool.INSERT_TEXT,
+                        "insert",
+                        anchor="- one\n",
+                        where="before",
+                        text="- two\n",
+                    ),
+                ),
+            ),
+            ToolCompletion("<finish>Done.</finish>", ()),
+        ]
+    )
+
+    result = run(
+        lm,
+        component_text=component,
+        allowed_tools=EDIT_TOOL_SETS["minimal"],
+        preferred_tool=EditTool.MOVE_TEXT,
+    )
+    broad = run(
+        NativeScriptedLM(
+            [
+                ToolCompletion(
+                    "",
+                    (
+                        native_call(
+                            EditTool.MOVE_TEXT,
+                            "move",
+                            target="- two\n",
+                            anchor="- one\n",
+                            where="before",
+                        ),
+                    ),
+                )
+            ]
+        ),
+        component_text=component,
+        preferred_tool=EditTool.MOVE_TEXT,
+    )
+
+    assert result.new_text == broad.new_text
+    assert [step.action for step in result.steps] == ["DELETE_TEXT", "INSERT_TEXT", "FINISH"]
+    assert result.tool_calls == 2
+    assert lm.tool_choices == ["auto", "auto", "auto"]
+
+
+def test_minimal_move_rejects_changed_bytes_and_original_destination() -> None:
+    """Keep the delete pending through invalid text and no-op destination retries."""
+    component = TEMPLATE.render({"Role": "helper", "Rules": "- one\n- two\n- three"})
+    lm = NativeScriptedLM(
+        [
+            ToolCompletion("", (native_call(EditTool.DELETE_TEXT, "delete", target="- two\n"),)),
+            ToolCompletion(
+                "",
+                (
+                    native_call(
+                        EditTool.INSERT_TEXT,
+                        "wrong-text",
+                        anchor="- one\n",
+                        where="before",
+                        text="- changed\n",
+                    ),
+                ),
+            ),
+            ToolCompletion(
+                "",
+                (
+                    native_call(
+                        EditTool.INSERT_TEXT,
+                        "same-place",
+                        anchor="- three",
+                        where="before",
+                        text="- two\n",
+                    ),
+                ),
+            ),
+            ToolCompletion(
+                "",
+                (
+                    native_call(
+                        EditTool.INSERT_TEXT,
+                        "correct",
+                        anchor="- one\n",
+                        where="before",
+                        text="- two\n",
+                    ),
+                ),
+            ),
+            ToolCompletion("<finish>Done.</finish>", ()),
+        ]
+    )
+
+    result = run(
+        lm,
+        component_text=component,
+        allowed_tools=EDIT_TOOL_SETS["minimal"],
+        preferred_tool=EditTool.MOVE_TEXT,
+    )
+
+    assert [step.action for step in result.steps] == [
+        "DELETE_TEXT",
+        "INVALID",
+        "INVALID",
+        "INSERT_TEXT",
+        "FINISH",
+    ]
+    assert "reinsert exactly the bytes" in result.steps[1].observation
+    assert "distinct replacement or MOVE_TEXT destination" in result.steps[2].observation
+    assert "changed" not in result.new_text
 
 
 @pytest.mark.parametrize(

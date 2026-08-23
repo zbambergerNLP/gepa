@@ -20,13 +20,13 @@ from gepa.strategies.intervention import ControllerAction, Intervention, Interve
 SPEC = InterventionSpec(
     name="expand",
     description="Expand the region with missing guidance.",
-    compatible_tools=(EditTool.INSERT_TEXT,),
+    edit_tool=EditTool.INSERT_TEXT,
     instruction="Name the missing guidance and where the editor should add it.",
 )
 FIXED_SPEC = InterventionSpec(
     name="fixed",
     description="Use fixed steering.",
-    compatible_tools=(EditTool.INSERT_TEXT,),
+    edit_tool=EditTool.INSERT_TEXT,
     fixed_text="Add one concise requirement.",
     inject_as="system",
 )
@@ -62,8 +62,7 @@ class SequenceLM:
 
 def action(spec: InterventionSpec | None = SPEC) -> ControllerAction:
     """Build a Rules-section Controller action."""
-    tool = spec.edit_tool if spec is not None else None
-    return ControllerAction(EditTarget("sys", "Rules"), tool, spec)
+    return ControllerAction(EditTarget("sys", "Rules"), spec)
 
 
 @pytest.mark.parametrize(
@@ -170,12 +169,20 @@ def test_repeated_empty_manifestation_raises_explicit_error() -> None:
     assert len(lm.calls) == 2
 
 
+def test_inapplicable_action_is_dropped_instead_of_inventing_an_edit() -> None:
+    """Let the Manifestor reject a sampled action whose precondition is absent."""
+    lm = RecordingLM("<not_applicable>The selected region contains no duplicated content.</not_applicable>")
+    with pytest.raises(ManifestationError, match="is not applicable.*no duplicated content"):
+        Manifestor(lm).manifest(action(), "region", "full", "feedback", "traces")
+    assert len(lm.calls) == 1
+
+
 def test_blank_fixed_manifestation_is_rejected() -> None:
     """Prevent fixed semantic steering from silently collapsing to empty text."""
     blank_spec = InterventionSpec(
         name="blank",
         description="Invalid blank steering.",
-        compatible_tools=(EditTool.INSERT_TEXT,),
+        edit_tool=EditTool.INSERT_TEXT,
         fixed_text="   ",
     )
     lm = RecordingLM()

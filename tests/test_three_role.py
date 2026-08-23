@@ -6,15 +6,16 @@
 import json
 import random
 from copy import deepcopy
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
-from gepa.lm import TrackingLM
+from gepa.lm import LM, TrackingLM
 from gepa.proposer.reflective_mutation.reflection_lm import ReflectionProposal, StatelessReflectionLM
 from gepa.proposer.reflective_mutation.reflective_mutation import ReflectiveMutationProposer
-from gepa.proposer.reflective_mutation.three_role import ThreeRoleReflectionLM
+from gepa.proposer.reflective_mutation.three_role import ThreeRoleReflectionLM, ensure_reflection_run_contract
 from gepa.strategies.document_template import TEMPLATE_FAMILIES, TEMPLATES, DocumentTemplate, MalformedDocumentError
 from gepa.strategies.edit_tools import EditTool
 
@@ -40,8 +41,8 @@ BROAD_LEVEL1_REPLIES = [
 ]
 DIRECT_REPHRASE_REPLIES = [tool_call(EditTool.REPLACE_TEXT, target="be nice", text="be kind")]
 MINIMAL_REPHRASE_REPLIES = [
-    tool_call(EditTool.DELETE_TEXT, target="be nice"),
-    tool_call(EditTool.INSERT_TEXT, anchor="be brief", where="before", text="be kind\n"),
+    tool_call(EditTool.DELETE_TEXT, target="- be nice\n- be brief"),
+    tool_call(EditTool.INSERT_TEXT, anchor="", where="after", text="- be kind\n- be brief"),
     "<finish>The semantic edit is complete.</finish>",
 ]
 
@@ -82,19 +83,28 @@ class ThreeRoleLM:
             self.roles.append("controller")
             semantic_needle = f"{self.semantic_action}@{self.region}/"
             atomic_needle = f"EDIT@{self.region}"
-            chosen = None
+            options: list[str] = []
             for line in prompt.splitlines():
-                if line.startswith("- **") and (semantic_needle in line or atomic_needle in line):
-                    chosen = line.split("**", 2)[1]
-                    if semantic_needle in line:
-                        break
+                if line.startswith("- **"):
+                    options.append(line.split("**", 2)[1])
+            chosen = next((option for option in options if semantic_needle in option), None)
+            if chosen is None:
+                chosen = next((option for option in options if atomic_needle in option), None)
             if chosen is None:
                 raise AssertionError(f"No Controller option for region {self.region!r}")
-            return (
-                "<response><candidate>"
-                f"<action>{chosen}</action><reasoning>test</reasoning><probability>1.0</probability>"
-                "</candidate></response>"
+            requested = int(prompt.rsplit("...repeat for ", 1)[1].split(" candidates", 1)[0])
+            if requested != len(options):
+                options = [chosen]
+            chosen_probability = 1.0 if len(options) == 1 else 0.99
+            other_probability = 0.0 if len(options) == 1 else 0.01 / (len(options) - 1)
+            candidates = "".join(
+                "<candidate>"
+                f"<action>{option}</action><reasoning>test</reasoning>"
+                f"<probability>{chosen_probability if option == chosen else other_probability}</probability>"
+                "</candidate>"
+                for option in options
             )
+            return f"<response>{candidates}</response>"
         if "You steer a language model editor" in prompt:
             self.roles.append("manifestor")
             return "The failures expose vague wording, so make that wording exact."
@@ -162,6 +172,7 @@ def strategy(
     if lm is None:
         default_replies = DIRECT_REPHRASE_REPLIES if level == 2 else BROAD_LEVEL1_REPLIES
         lm = ThreeRoleLM(list(default_replies if react_replies is None else react_replies))
+    kwargs.setdefault("base_lm_run_identity", {"test_lm": "ThreeRoleLM"})
     instance = ThreeRoleReflectionLM(lm, level=level, rng=random.Random(0), max_menu=999, **kwargs)
     return instance, lm
 
@@ -217,6 +228,15 @@ def test_validate_candidate_names_the_migration_path_for_free_form_text() -> Non
         strat.validate_candidate({"sys": "You are a helpful assistant."})
 
 
+def test_validate_candidate_rejects_uncataloged_level2_kind_before_reflection() -> None:
+    """Fail before evaluation when a custom document kind has no action catalog."""
+    strat, _ = strategy(2, templates={"memo": MEMO_TEMPLATE}, component_kinds={"memo": "memo"})
+    with pytest.raises(ValueError, match="has no level-2 semantic catalog"):
+        strat.validate_candidate({"memo": MEMO})
+    with pytest.raises(ValueError, match="has no level-2 semantic catalog"):
+        strat.run_contract({"memo": MEMO})
+
+
 @pytest.mark.parametrize(
     ("kwargs", "candidate", "accepted"),
     [
@@ -257,12 +277,79 @@ def test_level1_selects_a_region_and_runs_react_without_manifestor() -> None:
     assert proposal.metadata["preferred_edit_tool"] is None
 
 
+def test_three_role_run_contract_blocks_catalog_or_policy_drift(tmp_path: Path) -> None:
+    """Make direct API resumes as strict as the benchmark harnesses."""
+    strat, _ = strategy(2)
+    contract = strat.run_contract({"sys": PROMPT})
+    assert contract["controller"]["factorization"] == "P(region) * P(action | region)"
+    assert len(contract["semantic_action_spaces"]["prompt"]["actions"]) == 13
+    assert contract["reflection_prompt_template"] is None
+    assert contract["controller_react_lm"]["configuration_source"] == "explicit"
+    assert contract["manifestor_lm"]["configuration_source"] == "explicit"
+
+    path = Path(ensure_reflection_run_contract(str(tmp_path), contract))
+    assert path.name == "reflection-run-contract.json"
+    assert ensure_reflection_run_contract(str(tmp_path), contract) == str(path)
+    with pytest.raises(ValueError, match="different reflection strategy contract"):
+        ensure_reflection_run_contract(str(tmp_path), {**contract, "reflection_level": 1})
+
+    legacy_dir = tmp_path / "legacy"
+    legacy_dir.mkdir()
+    (legacy_dir / "gepa_state.bin").write_bytes(b"old")
+    with pytest.raises(ValueError, match="GEPA state but no reflection-run-contract.json"):
+        ensure_reflection_run_contract(str(legacy_dir), contract)
+
+
+def test_three_role_run_contract_identifies_role_lm_configuration_without_credentials() -> None:
+    """Distinguish Controller/ReAct and Manifestor behavior without writing secrets."""
+    base_lm = LM(
+        "openai/controller-model",
+        temperature=0.7,
+        max_tokens=123,
+        api_base="https://example.test/v1",
+        api_key="controller-secret",
+        token="generic-secret",
+        github_token="github-secret",
+        secret_key="key-secret",
+        private_key="private-secret",
+    )
+    manifestor_lm = LM(
+        "openai/manifestor-model",
+        temperature=0.0,
+        api_key="manifestor-secret",
+    )
+    strat = ThreeRoleReflectionLM(base_lm, 2, manifestor_lm=manifestor_lm)
+    contract = strat.run_contract({"sys": PROMPT})
+
+    assert contract["controller_react_lm"]["model"] == "openai/controller-model"
+    assert contract["controller_react_lm"]["completion_kwargs"] == {
+        "temperature": 0.7,
+        "max_tokens": 123,
+        "api_base": "https://example.test/v1",
+        "api_key": "<redacted>",
+        "token": "<redacted>",
+        "github_token": "<redacted>",
+        "secret_key": "<redacted>",
+        "private_key": "<redacted>",
+    }
+    assert contract["manifestor_lm"]["model"] == "openai/manifestor-model"
+    assert contract["manifestor_lm"]["completion_kwargs"]["temperature"] == 0.0
+    assert contract["manifestor_lm"]["completion_kwargs"]["api_key"] == "<redacted>"
+
+
+def test_three_role_run_contract_requires_identity_for_custom_lm() -> None:
+    """Refuse resumable state when a custom callable has no stable configuration identity."""
+    strat = ThreeRoleReflectionLM(ThreeRoleLM(DIRECT_REPHRASE_REPLIES), 2)
+    with pytest.raises(ValueError, match="stable run identity"):
+        strat.run_contract({"sys": PROMPT})
+
+
 def test_level2_selects_semantic_action_manifests_and_executes_one_direct_call() -> None:
     """Run rephrase through Controller, Manifestor, and one coupled REPLACE call."""
     strat, lm = strategy(2)
     proposal, _ = strat.reflect({"sys": PROMPT}, reflective_dataset("sys"), ["sys"])
     assert proposal.new_texts["sys"] != PROMPT
-    assert lm.roles == ["controller", "manifestor", "react_v2"]
+    assert lm.roles == ["controller", "controller", "manifestor", "react_v2"]
     assert proposal.metadata["intervention_spec"] == "rephrase"
     assert proposal.metadata["preferred_edit_tool"] == "REPLACE_TEXT"
     assert proposal.metadata["manifested_intervention"]
@@ -272,9 +359,18 @@ def test_level2_selects_semantic_action_manifests_and_executes_one_direct_call()
     assert record["react_steps"][0]["action"] == "REPLACE_TEXT"
     sampling = proposal.metadata["controller_sampling"]
     assert sampling["sampled"] == ["rephrase@Rules/REPLACE_TEXT"]
-    assert sampling["probs"] == {"rephrase@Rules/REPLACE_TEXT": 1.0}
+    assert len(sampling["probs"]) == 13
+    assert sampling["probs"]["rephrase@Rules/REPLACE_TEXT"] == pytest.approx(0.99)
     assert sampling["fallback"] is False
-    assert sampling["used_full_fallback"] is True
+    assert sampling["policy"] == "region_then_action_v1"
+    assert sampling["sampling_policy"] == "full_distribution_uniform_mixture"
+    assert sampling["exploration_epsilon"] == pytest.approx(0.1)
+    assert sampling["region"]["sampled"] == ["EDIT@Rules"]
+    assert sampling["action"]["sampled"] == ["rephrase@Rules/REPLACE_TEXT"]
+    assert sampling["joint_sampling_probability"] == pytest.approx(
+        sampling["region"]["sampled_probabilities"][0] * sampling["action"]["sampled_probabilities"][0]
+    )
+    assert sampling["joint_sampling_probability"] > 0
     assert record["controller_sampling"] == sampling
 
 
@@ -317,6 +413,8 @@ def test_skill_component_is_independently_sectioned_and_editable() -> None:
     after = TEMPLATES["skill"].parse(proposal.new_texts["skill"])
     assert after["Name"] == before["Name"]
     assert after["Instructions"] != before["Instructions"]
+    assert all("document component" in prompt for prompt in lm.string_calls[:2])
+    assert all("improve a prompt" not in prompt for prompt in lm.string_calls[:2])
 
 
 @pytest.mark.parametrize(
@@ -372,7 +470,7 @@ def test_think_only_manifestation_retries_then_runs_react() -> None:
     proposal, _ = strat.reflect({"sys": PROMPT}, reflective_dataset("sys"), ["sys"])
     assert proposal.new_texts["sys"] != PROMPT
     assert len(manifestor.calls) == 2
-    assert base.roles == ["controller", "react_v2"]
+    assert base.roles == ["controller", "controller", "react_v2"]
     assert proposal.metadata["manifested_intervention"] == "Make the vague rule exact."
 
 
@@ -384,7 +482,7 @@ def test_repeated_empty_manifestation_is_recorded_as_a_dropped_attempt() -> None
     proposal, _ = strat.reflect({"sys": PROMPT}, reflective_dataset("sys"), ["sys"])
     assert proposal.new_texts == {}
     assert len(manifestor.calls) == 2
-    assert base.roles == ["controller"]
+    assert base.roles == ["controller", "controller"]
     assert proposal.metadata["revision_records"] == []
     assert proposal.metadata["attempt_records"] == proposal.metadata["three_role_actions"]
     record = proposal.metadata["attempt_records"][0]

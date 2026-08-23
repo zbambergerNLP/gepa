@@ -1,292 +1,292 @@
 # Copyright (c) 2025 Lakshya A Agrawal and the GEPA contributors
 # https://github.com/gepa-ai/gepa
 
-"""Tests for semantic actions and the Controller (:mod:`gepa.strategies.intervention`).
+"""Tests for semantic interventions and verbalized Controller selection."""
 
-Exercises the intervention data model, the ``intervention_specs`` catalog,
-controller-menu construction, the Controller's LM-driven selection, and feedback
-summarization. The Controller LM is replaced by an in-file fake.
-
-Expected usage:
-```bash
-pytest tests/test_intervention.py -vv
-```
-"""
-
-# Standard library imports
 import random
 
-# Third-party imports
 import pytest
 
-# Local imports
-from gepa.strategies.document_template import TEMPLATES, DocumentTemplate, EditTarget
+from gepa.strategies.document_template import TEMPLATE_FAMILIES, TEMPLATES, DocumentTemplate, EditTarget
 from gepa.strategies.edit_tools import EDIT_TOOL_SETS, EditTool
 from gepa.strategies.intervention import (
+    INJECTION_SITES,
     Controller,
     ControllerAction,
+    Intervention,
     InterventionSpec,
     build_controller_menu,
     intervention_specs,
     summarize_feedback,
 )
 
-# ====================== #
-# Test Fakes and Helpers #
-# ====================== #
-
-
 PROMPT_TEMPLATE = TEMPLATES["prompt"]
-PROMPT = PROMPT_TEMPLATE.render({"Role": "you are a helper", "Rules": "- be nice\n- be brief"})
+PROMPT = PROMPT_TEMPLATE.render({"Role": "helper", "Rules": "- be kind\n- be brief"})
 
 
 class VotingLM:
-    """A fake Controller LM: votes all probability mass on one menu id substring."""
+    """Select the first Controller option containing a requested substring."""
 
-    def __init__(self, prefer: str):
-        self.prefer = prefer
+    def __init__(self, preferred: str):
+        """Store the preferred menu-id fragment."""
+        self.preferred = preferred
         self.calls: list[str] = []
 
     def __call__(self, prompt: str) -> str:
+        """Return a one-candidate verbalized distribution."""
         self.calls.append(prompt)
-        # The action menu lists options as "- **<menu_id>**: <desc>"; vote for the
-        # first id that contains `prefer`.
-        chosen = None
+        chosen = self.preferred
         for line in prompt.splitlines():
-            if line.startswith("- **") and self.prefer in line:
-                chosen = line.split("**")[1]
+            if line.startswith("- **") and self.preferred in line:
+                chosen = line.split("**", 2)[1]
                 break
-        chosen = chosen or self.prefer
         return (
             "<response><candidate>"
-            f"<action>{chosen}</action><reasoning>r</reasoning><probability>1.0</probability>"
+            f"<action>{chosen}</action><reasoning>test</reasoning><probability>1.0</probability>"
             "</candidate></response>"
         )
 
 
-class TestControllerAction:
-    """Test cases for ControllerAction."""
+def test_builtin_catalog_is_exactly_three_direct_bound_semantic_actions() -> None:
+    """Expose rephrase, summarize, and expand with one direct tool each."""
+    expected = {
+        "rephrase": EditTool.REPLACE_TEXT,
+        "summarize": EditTool.REPLACE_TEXT,
+        "expand": EditTool.INSERT_TEXT,
+    }
+    for kind in ("prompt", "skill"):
+        for section in (*TEMPLATES[kind].sections, None):
+            specs = intervention_specs(kind, section)
+            assert {spec.name: spec.edit_tool for spec in specs} == expected
+            assert all(len(spec.compatible_tools) == 1 for spec in specs)
+            assert all(spec.instruction and spec.fixed_text is None for spec in specs)
 
-    @pytest.mark.parametrize(
-        # Parameter names
-        [
-            "spec",
-            "edit_tool",
-            "expected_menu_id",
-            "expected_menu_description",
-        ],
-        # Parameter values
-        [
-            pytest.param(
-                InterventionSpec("tighten_rule", "Tighten a rule.", (EditTool.REPLACE_TEXT,), ("Rules",)),  # spec
-                EditTool.REPLACE_TEXT,  # edit_tool
-                "tighten_rule@Rules/REPLACE_TEXT",  # expected_menu_id
-                "Tighten a rule. (region 'Rules', via REPLACE_TEXT)",  # expected_menu_description
-                id="with_spec",
-            ),
-            pytest.param(
-                None,  # spec
-                EditTool.INSERT_TEXT,  # edit_tool
-                "INSERT_TEXT@Rules",  # expected_menu_id
-                "Edit region 'Rules' using INSERT_TEXT.",  # expected_menu_description
-                id="without_spec",
-            ),
-        ],
+
+def test_unknown_document_kind_has_no_semantic_catalog() -> None:
+    """Avoid silently applying prompt semantics to an undeclared kind."""
+    assert intervention_specs("memo", "Body") == []
+
+
+@pytest.mark.parametrize("site", INJECTION_SITES)
+def test_intervention_spec_accepts_every_supported_injection_site(site: str) -> None:
+    """Keep the public manifestation-site contract stable."""
+    spec = InterventionSpec(
+        "custom",
+        "Custom action.",
+        (EditTool.INSERT_TEXT,),
+        instruction="Manifest this action.",
+        inject_as=site,
     )
-    def test_menu_id_and_description(
-        self,
-        spec: InterventionSpec | None,
-        edit_tool: EditTool,
-        expected_menu_id: str,
-        expected_menu_description: str,
-    ) -> None:
-        """Test that ControllerAction derives its menu id and description from target, tool, and spec.
-
-        Args:
-            spec: The semantic action attached to the action, or None for an operator-only action.
-            edit_tool: The atomic edit tool the action carries.
-            expected_menu_id: The stable menu id the action must expose.
-            expected_menu_description: The one-line menu description the action must expose.
-        """
-        action = ControllerAction(EditTarget("sys", "Rules"), edit_tool, spec)
-        assert action.menu_id == expected_menu_id
-        assert action.menu_description == expected_menu_description
+    assert spec.inject_as == site
 
 
-class TestInterventionSpecs:
-    """Test cases for intervention_specs."""
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        pytest.param({}, "at least one direct edit tool", id="missing_direct_tool"),
+        pytest.param(
+            {"compatible_tools": (EditTool.INSERT_TEXT,)},
+            "exactly one of instruction or fixed_text",
+            id="missing_manifestation_source",
+        ),
+        pytest.param(
+            {
+                "compatible_tools": (EditTool.INSERT_TEXT,),
+                "instruction": "instruction",
+                "fixed_text": "fixed",
+            },
+            "exactly one of instruction or fixed_text",
+            id="two_manifestation_sources",
+        ),
+        pytest.param(
+            {
+                "compatible_tools": (EditTool.INSERT_TEXT,),
+                "instruction": "instruction",
+                "inject_as": "tool",
+            },
+            "inject_as must be one of",
+            id="unknown_injection_site",
+        ),
+    ],
+)
+def test_intervention_spec_rejects_invalid_contracts(kwargs: dict[str, object], message: str) -> None:
+    """Reject specs that cannot be executed or manifested unambiguously."""
+    construction = dict(kwargs)
+    compatible_tools = construction.pop("compatible_tools", ())
+    with pytest.raises(ValueError, match=message):
+        InterventionSpec("custom", "Custom action.", compatible_tools, **construction)
 
-    @pytest.mark.parametrize(
-        # Parameter names
-        [
-            "kind",
-            "section",
-            "expected_present",
-            "expected_exact",
-        ],
-        # Parameter values
-        [
-            pytest.param(
-                "prompt",  # kind
-                "Rules",  # section
-                {"add_constraint", "tighten_rule", "condense"},  # expected_present (Rules-specific + global)
-                None,  # expected_exact
-                id="prompt_rules_section_and_global",
-            ),
-            pytest.param(
-                "prompt",  # kind
-                None,  # section
-                {"condense", "reorder"},  # expected_present
-                {"condense", "reorder"},  # expected_exact (whole-target gets only global specs)
-                id="prompt_whole_target_global_only",
-            ),
-            pytest.param(
-                "prompt",  # kind
-                "Context",  # section
-                {"add_context", "clarify_context", "remove_stale_context"},  # expected_present
-                None,  # expected_exact
-                id="prompt_context_section",
-            ),
-            pytest.param(
-                "prompt",  # kind
-                "Reasoning",  # section
-                {"add_reasoning_step", "strengthen_reasoning", "prune_reasoning"},  # expected_present
-                None,  # expected_exact
-                id="prompt_reasoning_section",
-            ),
-            pytest.param(
-                "skill",  # kind
-                "Instructions",  # section
-                {"add_instruction", "tighten_instruction"},  # expected_present
-                None,  # expected_exact
-                id="skill_instructions_section",
-            ),
-            pytest.param(
-                "mystery",  # kind
-                "Rules",  # section
-                set(),  # expected_present
-                set(),  # expected_exact (unknown kind has no specs)
-                id="unknown_kind_has_no_specs",
-            ),
-        ],
+
+def test_intervention_remains_a_text_and_role_value_object() -> None:
+    """Preserve the small public object passed from Manifestor to ReAct V2."""
+    assert Intervention("Steer this edit.", "developer") == Intervention("Steer this edit.", "developer")
+
+
+def test_level1_menu_selects_regions_only_and_not_tools() -> None:
+    """Present each addressable region once while keeping tools in the execution basis."""
+    menu = build_controller_menu(
+        PROMPT_TEMPLATE,
+        "system_prompt",
+        EDIT_TOOL_SETS["minimal"],
+        1,
+        rng=random.Random(0),
+        max_menu=999,
     )
-    def test_specs_for_kind_and_section(
-        self,
-        kind: str,
-        section: str | None,
-        expected_present: set[str],
-        expected_exact: set[str] | None,
-    ) -> None:
-        """Test that intervention_specs offers the section-scoped and global specs for a kind.
-
-        Args:
-            kind: The document kind whose catalog is queried.
-            section: The section being edited, or None for a whole-document target.
-            expected_present: Spec names that must appear (subset check).
-            expected_exact: The full set of spec names, or None to skip the exact-equality check.
-        """
-        names = {spec.name for spec in intervention_specs(kind, section)}
-        assert expected_present <= names
-        if expected_exact is not None:
-            assert names == expected_exact
+    assert [action.edit_target.section for action in menu] == [*PROMPT_TEMPLATE.sections, None]
+    assert all(action.edit_tool is None for action in menu)
+    assert all(action.intervention_spec is None for action in menu)
+    assert all(action.menu_id == f"EDIT@{action.edit_target.name}" for action in menu)
+    assert len({action.menu_id for action in menu}) == len(menu)
 
 
-class TestBuildControllerMenu:
-    """Test cases for build_controller_menu."""
+def test_level1_menu_is_independent_of_atomic_basis_size() -> None:
+    """Do not make the Controller choose tools by creating a region/tool cross-product."""
+    minimal = build_controller_menu(
+        PROMPT_TEMPLATE,
+        "sys",
+        EDIT_TOOL_SETS["minimal"],
+        1,
+        rng=random.Random(0),
+        max_menu=999,
+    )
+    broad = build_controller_menu(
+        PROMPT_TEMPLATE,
+        "sys",
+        EDIT_TOOL_SETS["broad"],
+        1,
+        rng=random.Random(0),
+        max_menu=999,
+    )
+    assert [action.menu_id for action in minimal] == [action.menu_id for action in broad]
 
-    def test_level1_pairs_targets_with_tools_no_specs(self) -> None:
-        """Test that level 1 offers operator-only actions across every tool in the set."""
-        menu = build_controller_menu(PROMPT_TEMPLATE, "sys", EDIT_TOOL_SETS["minimal"], 1, rng=random.Random(0))
-        assert all(a.intervention_spec is None for a in menu)
-        tools = {a.edit_tool for a in menu}
-        assert tools == {EditTool.INSERT_TEXT, EditTool.DELETE_TEXT}
 
-    def test_level2_attaches_specs(self) -> None:
-        """Test that level 2 attaches semantic specs to at least some actions."""
-        menu = build_controller_menu(PROMPT_TEMPLATE, "sys", EDIT_TOOL_SETS["broad"], 2, rng=random.Random(0))
-        assert any(a.intervention_spec is not None for a in menu)
+def test_level2_menu_couples_each_semantic_action_directly_to_one_tool() -> None:
+    """Avoid a second independent tool choice or a semantic/tool cross-product."""
+    menu = build_controller_menu(
+        PROMPT_TEMPLATE,
+        "sys",
+        EDIT_TOOL_SETS["broad"],
+        2,
+        rng=random.Random(0),
+        max_menu=999,
+    )
+    expected_count = len(PROMPT_TEMPLATE.edit_targets("sys")) * 3
+    assert len(menu) == expected_count
+    for action in menu:
+        assert action.intervention_spec is not None
+        assert action.edit_tool is action.intervention_spec.edit_tool
+        assert action.menu_id.endswith(f"/{action.edit_tool.value}")
+        assert "direct tool" in action.menu_description
 
-    def test_level2_only_offers_compatible_tools(self) -> None:
-        """Test that every level-2 action pairs a spec with one of its compatible tools."""
-        menu = build_controller_menu(
-            PROMPT_TEMPLATE, "sys", EDIT_TOOL_SETS["broad"], 2, rng=random.Random(0), max_menu=999
+
+def test_default_menu_keeps_every_gpt56_region_action_pair() -> None:
+    """Do not silently discard supported built-in Controller choices."""
+    template = TEMPLATE_FAMILIES["openai-gpt-5.6"]["prompt"]
+    menu = build_controller_menu(
+        template,
+        "system_prompt",
+        EDIT_TOOL_SETS["broad"],
+        level=2,
+        rng=random.Random(0),
+    )
+
+    assert len(menu) == (len(template.sections) + 1) * 3 == 27
+    assert len({action.menu_id for action in menu}) == 27
+
+
+def test_level2_semantic_menu_does_not_disappear_under_minimal_basis() -> None:
+    """Let ReAct V2 compose insert/delete when a semantic direct tool is hidden."""
+    minimal = build_controller_menu(
+        PROMPT_TEMPLATE,
+        "sys",
+        EDIT_TOOL_SETS["minimal"],
+        2,
+        rng=random.Random(0),
+        max_menu=999,
+    )
+    broad = build_controller_menu(
+        PROMPT_TEMPLATE,
+        "sys",
+        EDIT_TOOL_SETS["broad"],
+        2,
+        rng=random.Random(0),
+        max_menu=999,
+    )
+    assert [action.menu_id for action in minimal] == [action.menu_id for action in broad]
+
+
+def test_unknown_kind_level2_falls_back_to_one_whole_document_atomic_action() -> None:
+    """Keep a custom template editable without inventing semantic actions."""
+    template = DocumentTemplate("memo", {"Body": "memo body"})
+    menu = build_controller_menu(
+        template,
+        "memo",
+        EDIT_TOOL_SETS["minimal"],
+        2,
+        rng=random.Random(0),
+    )
+    assert menu == [ControllerAction(EditTarget("memo", None), None, None)]
+
+
+def test_controller_maps_verbalized_pick_back_to_semantic_action() -> None:
+    """Return the rich action selected through the stand-in action menu."""
+    menu = build_controller_menu(
+        PROMPT_TEMPLATE,
+        "sys",
+        EDIT_TOOL_SETS["broad"],
+        2,
+        rng=random.Random(0),
+        max_menu=999,
+    )
+    lm = VotingLM("summarize@Rules/")
+    controller = Controller(menu, lm, rng=random.Random(0))
+    controller.set_context(PROMPT, "The answer repeats itself.")
+    selected = controller.select_controller(1, random.Random(0))[0]
+    assert selected.edit_target == EditTarget("sys", "Rules")
+    assert selected.intervention_spec is not None
+    assert selected.intervention_spec.name == "summarize"
+    assert selected.edit_tool is EditTool.REPLACE_TEXT
+    assert len(controller.history) == 1
+    assert lm.calls
+
+
+def test_controller_menu_bounds_are_validated_and_deterministic() -> None:
+    """Bound large menus through the supplied seeded random stream."""
+    with pytest.raises(ValueError, match="at least 1"):
+        build_controller_menu(
+            PROMPT_TEMPLATE,
+            "sys",
+            EDIT_TOOL_SETS["broad"],
+            2,
+            rng=random.Random(0),
+            max_menu=0,
         )
-        for action in menu:
-            spec = action.intervention_spec
-            assert spec is not None
-            assert action.edit_tool in spec.compatible_tools
-
-    def test_minimal_toolset_exposes_fewer_specs_than_broad(self) -> None:
-        """Test that the minimal 2-op tool set exposes fewer specs than the broad 4-op set."""
-        minimal = build_controller_menu(
-            PROMPT_TEMPLATE, "sys", EDIT_TOOL_SETS["minimal"], 2, rng=random.Random(0), max_menu=999
-        )
-        broad = build_controller_menu(
-            PROMPT_TEMPLATE, "sys", EDIT_TOOL_SETS["broad"], 2, rng=random.Random(0), max_menu=999
-        )
-        assert len(minimal) < len(broad)
-
-    def test_menu_falls_back_to_whole_document_edit(self) -> None:
-        """Test that a kind with no semantic catalog still yields one whole-document edit."""
-        # A kind with no semantic catalog yields no level-2 options; the builder
-        # still offers one whole-document edit so the Controller can act.
-        note = DocumentTemplate("note", {"Body": "the text"})
-        menu = build_controller_menu(note, "art", EDIT_TOOL_SETS["minimal"], 2, rng=random.Random(0))
-        assert [(a.edit_target.section, a.intervention_spec) for a in menu] == [(None, None)]
-        assert menu[0].edit_tool in EDIT_TOOL_SETS["minimal"]
-
-    def test_menu_capped_at_max_menu(self) -> None:
-        """Test that the menu is truncated to max_menu entries."""
-        menu = build_controller_menu(
-            PROMPT_TEMPLATE, "sys", EDIT_TOOL_SETS["broad"], 2, rng=random.Random(0), max_menu=5
-        )
-        assert len(menu) == 5
+    first = build_controller_menu(
+        PROMPT_TEMPLATE,
+        "sys",
+        EDIT_TOOL_SETS["broad"],
+        2,
+        rng=random.Random(7),
+        max_menu=5,
+    )
+    second = build_controller_menu(
+        PROMPT_TEMPLATE,
+        "sys",
+        EDIT_TOOL_SETS["broad"],
+        2,
+        rng=random.Random(7),
+        max_menu=5,
+    )
+    assert [action.menu_id for action in first] == [action.menu_id for action in second]
 
 
-class TestController:
-    """Test cases for Controller."""
-
-    def test_select_controller_maps_pick_back(self) -> None:
-        """Test that the Controller maps the LM's vote back to the matching menu action."""
-        menu = build_controller_menu(
-            PROMPT_TEMPLATE, "sys", EDIT_TOOL_SETS["broad"], 1, rng=random.Random(0), max_menu=999
-        )
-        lm = VotingLM(prefer="DELETE_TEXT@Rules")
-        controller = Controller(menu, lm, rng=random.Random(0))
-        controller.set_context(PROMPT, "too verbose")
-        picks = controller.select_controller(1, random.Random(0))
-        assert len(picks) == 1
-        assert isinstance(picks[0], ControllerAction)
-        assert picks[0].edit_tool == EditTool.DELETE_TEXT
-        assert picks[0].edit_target.section == "Rules"
-        assert lm.calls  # the Controller actually queried the LM
-
-    def test_controller_records_history(self) -> None:
-        """Test that selecting an action appends one entry to the Controller's history."""
-        menu = build_controller_menu(PROMPT_TEMPLATE, "sys", EDIT_TOOL_SETS["minimal"], 1, rng=random.Random(0))
-        controller = Controller(menu, VotingLM(prefer="INSERT_TEXT@Role"), rng=random.Random(0))
-        controller.set_context(PROMPT, "fb")
-        controller.select_controller(1, random.Random(0))
-        assert len(controller.history) == 1
-
-
-class TestSummarizeFeedback:
-    """Test cases for summarize_feedback."""
-
-    def test_concatenates_feedback_fields(self) -> None:
-        """Test that feedback and execution-feedback fields are concatenated into the summary."""
-        entries = [{"Feedback": "too vague"}, {"execution_feedback": "wrong format"}]
-        summary = summarize_feedback(entries)
-        assert "too vague" in summary
-        assert "wrong format" in summary
-
-    def test_empty_returns_placeholder(self) -> None:
-        """Test that an empty feedback list returns the no-feedback placeholder."""
-        assert summarize_feedback([]) == "(no feedback available)"
-
-    def test_truncates_to_budget(self) -> None:
-        """Test that an oversized summary is truncated to the char budget and ellipsized."""
-        entries = [{"Feedback": "x" * 10_000}]
-        summary = summarize_feedback(entries, max_chars=100)
-        assert len(summary) <= 103  # 100 + "..."
-        assert summary.endswith("...")
+def test_feedback_summary_supports_both_feedback_fields_and_a_hard_bound() -> None:
+    """Ground actions in both dataset shapes without unbounded prompt growth."""
+    summary = summarize_feedback(
+        [{"Feedback": "too vague"}, {"execution_feedback": "wrong format"}, {"Feedback": "x" * 200}],
+        max_chars=50,
+    )
+    assert summary.startswith("too vague\nwrong format")
+    assert len(summary) == 53
+    assert summary.endswith("...")
+    assert summarize_feedback([]) == "(no feedback available)"

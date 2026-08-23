@@ -229,10 +229,11 @@ class TestActionDiversityCallback:
             "metadata": self._metadata(action_name),
         }
 
-    def _accepted_event(self, iteration: int, action_name: str | None, score: float = 0.8) -> dict:
+    def _accepted_event(self, iteration: int, action_name: str | None, score: float = 0.8, old: float = 0.5) -> dict:
         return {
             "iteration": iteration,
             "new_candidate_idx": 1,
+            "old_score": old,
             "new_score": score,
             "parent_ids": [0],
             "metadata": self._metadata(action_name),
@@ -255,6 +256,23 @@ class TestActionDiversityCallback:
 
         assert cb.action_proposal_counts["add_constraint"] == 2
         assert cb.action_proposal_counts["restructure"] == 1
+
+    def test_length_capped_proposal_counts_but_adds_no_diversity_text(self) -> None:
+        """Test that a fully length-capped attempt (empty new_instructions) still counts (#7).
+
+        The attempt reaches on_proposal_end so it is not missing from the
+        action's proposal total, but its empty text is excluded from the
+        diversity metrics (an empty string would read as maximally dissimilar).
+        """
+        cb = ActionDiversityCallback()
+        cb.on_proposal_end(self._make_proposal_end_event(1, "add_constraint"))
+        capped = self._make_proposal_end_event(1, "add_constraint")
+        capped["new_instructions"] = {}
+        cb.on_proposal_end(capped)
+
+        assert cb.action_proposal_counts["add_constraint"] == 2
+        assert len(cb.action_texts["add_constraint"]) == 1
+        assert len(cb._iteration_texts[1]) == 1
 
     def test_tracks_acceptance_rate(self):
         cb = ActionDiversityCallback()
@@ -320,6 +338,37 @@ class TestActionDiversityCallback:
         assert dict(cb.action_rejection_counts) == {"action_b": 1, "action_c": 1}
         assert cb.action_score_deltas["action_b"] == [pytest.approx(-0.2)]
         assert cb.action_score_deltas["action_c"] == [pytest.approx(-0.3)]
+
+    def test_accepted_proposals_record_score_delta(self) -> None:
+        """Test that accepted proposals feed action_score_deltas via the event's old_score.
+
+        Without accepted deltas the field held only rejection outcomes (mostly
+        <= 0 under strict acceptance), so it could not show which actions improve
+        prompts. Both accept and reject now contribute a signed delta.
+        """
+        cb = ActionDiversityCallback()
+        cb.on_proposal_end(self._make_proposal_end_event(1, "add_constraint"))
+        cb.on_candidate_accepted(self._accepted_event(1, "add_constraint", score=0.9, old=0.5))
+
+        assert cb.action_acceptance_counts["add_constraint"] == 1
+        assert cb.action_score_deltas["add_constraint"] == [pytest.approx(0.4)]
+
+    def test_accepted_event_without_old_score_tolerated(self) -> None:
+        """Test that a synthetic accepted event lacking old_score still counts and records no delta."""
+        cb = ActionDiversityCallback()
+        cb.on_proposal_end(self._make_proposal_end_event(1, "add_constraint"))
+        cb.on_candidate_accepted(
+            {
+                "iteration": 1,
+                "new_candidate_idx": 1,
+                "new_score": 0.9,
+                "parent_ids": [0],
+                "metadata": {"action": "add_constraint"},
+            }
+        )
+
+        assert cb.action_acceptance_counts["add_constraint"] == 1
+        assert cb.action_score_deltas["add_constraint"] == []
 
     def test_events_without_metadata_tolerated(self):
         """Events lacking a metadata key (legacy/synthetic) neither crash nor count."""
@@ -661,6 +710,33 @@ class TestVerbalizedReflectionIntegration:
         # Distinct parents are disclosed in the candidate context.
         assert "2 distinct parent candidates" in action_lm.calls[0]
 
+    def test_per_job_selection_scopes_context_to_each_job(self) -> None:
+        """Test that opt-in per-job selection scopes each selector call to its own job.
+
+        Per-job mode makes one selector call per job, each drawn from that job's own
+        candidate and feedback, with no cross-job aggregation.
+        """
+        action_lm = FakeLM(VALID_LM_OUTPUT)
+        selector = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=action_lm)
+        reflection = StatelessReflectionLM(BatchRecordingLM(), action_selector=selector, per_job_action_selection=True)
+
+        ds_a = {"sp": [{"Inputs": "x", "Generated Outputs": "y", "Feedback": "feedback-alpha"}]}
+        ds_b = {"sp": [{"Inputs": "x", "Generated Outputs": "y", "Feedback": "feedback-beta"}]}
+        jobs = [({"sp": "parent one"}, ds_a, ["sp"]), ({"sp": "parent two"}, ds_b, ["sp"])]
+
+        reflection.reflect_many(jobs)
+
+        # One selector call per job, each scoped to its own candidate + feedback.
+        assert len(action_lm.calls) == 2
+        assert "parent one" in action_lm.calls[0]
+        assert "feedback-alpha" in action_lm.calls[0]
+        assert "feedback-beta" not in action_lm.calls[0]
+        assert "parent two" in action_lm.calls[1]
+        assert "feedback-beta" in action_lm.calls[1]
+        assert "feedback-alpha" not in action_lm.calls[1]
+        # No batch-aggregation disclosure in per-job mode.
+        assert "distinct parent candidates" not in action_lm.calls[0]
+
 
 # ---------------------------------------------------------------------------
 # Structured (section-scoped) action space (Rev 2)
@@ -803,3 +879,34 @@ class TestConfigWiring:
 
     def test_reflective_mutation_proposer_accepts_action_selector(self):
         assert "action_selector" in inspect.signature(ReflectiveMutationProposer.__init__).parameters
+
+    def test_stateless_reflection_lm_bind_rng_seeds_selection(self) -> None:
+        """Test that bind_rng rebinds the reflection LM's selection rng."""
+        run_rng = random.Random(1234)
+        reflection = StatelessReflectionLM(
+            RecordingLM(reply="x"), action_selector=RandomActionSelector(DEFAULT_ACTIONS)
+        )
+        # Default construction path leaves self.rng at Random(0).
+        assert reflection.rng is not run_rng
+        reflection.bind_rng(run_rng)
+        assert reflection.rng is run_rng
+
+    def test_proposer_binds_run_rng_to_default_reflection_lm(self) -> None:
+        """Test that the proposer binds the run rng onto its default reflection LM."""
+        adapter = type("_DummyAdapter", (), {"propose_new_texts": None})()
+        run_rng = random.Random(1234)
+        proposer = ReflectiveMutationProposer(
+            logger=None,
+            trainset=[{"x": 1}],
+            adapter=adapter,
+            candidate_selector=None,
+            module_selector=None,
+            batch_sampler=None,
+            perfect_score=None,
+            skip_perfect_score=False,
+            experiment_tracker=None,
+            reflection_lm=RecordingLM(reply="x"),
+            action_selector=RandomActionSelector(DEFAULT_ACTIONS),
+        )
+        proposer.bind_reflection_rng(run_rng)
+        assert proposer._reflection_lm.rng is run_rng

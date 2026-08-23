@@ -901,3 +901,6 @@ class TerminalBenchAdapter(GEPAAdapter[TerminalBenchTask, TerminalBenchTrajector
                 }
             )
         return {INSTRUCTION_COMPONENT: rows}
+
+
+TerminusAdapter = TerminalBenchAdapter

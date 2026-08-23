@@ -15,6 +15,7 @@ from gepa.adapters.terminal_bench_adapter import (
     HarborExecutionError,
     HarborRequirementError,
     TerminalBenchAdapter,
+    TerminusAdapter,
     derive_terminalbench_splits,
     load_terminalbench_manifest,
     render_terminus_prompt,
@@ -42,6 +43,11 @@ Iterate on command output.
 
 ## Output Format
 Use the fixed Terminus JSON format."""
+
+
+def test_terminus_adapter_alias_preserves_public_api() -> None:
+    """Keep the documented pre-existing adapter name importable."""
+    assert TerminusAdapter is TerminalBenchAdapter
 
 
 def _runner(tmp_path: Path) -> HarborCLI:

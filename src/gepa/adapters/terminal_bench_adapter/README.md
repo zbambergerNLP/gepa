@@ -1,9 +1,5 @@
-### Terminal-bench adapter
+# Terminal-Bench adapter
 
-This adapter is used to optimize the system prompt/terminal-use instruction for the default Terminus agent through custom a `GEPAAdapter` implementation.
+The adapter invokes the official Harbor CLI through an isolated subprocess boundary and parses its rewards, errors, and complete ATIF trajectories. See [`examples/terminalbench/README.md`](../../../../examples/terminalbench/README.md) for the pinned versions, manifest, setup, and run configuration.
 
-To run this example, you need to install `pip install terminal-bench` and run the following command:
-
-```bash
-python src/gepa/examples/terminal-bench/train_terminus.py --model_name=gpt-5-mini
-```
+The old `terminal_bench` Python-package integration under `src/gepa/examples/terminal-bench` is deprecated because it used the retired `tb` CLI, mutable `head` dataset version, shared prompt file, and partial legacy trajectory parsing.

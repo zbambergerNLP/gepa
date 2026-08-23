@@ -1,402 +1,184 @@
-"""TerminalBench evaluation: vanilla GEPA vs random vs verbalized action selection.
+"""Configure a pinned Terminal-Bench v3 GEPA optimization run.
 
-Replicates the GEPA paper's IFBench/PUPA evaluation pattern for TerminalBench
-(T-Bench, https://terminal-bench.github.io, 2024, 50+ terminal agent tasks,
-Docker-based). A 2-stage program (plan -> execute) generates shell commands;
-the 1-stage ablation uses a single command-generation prompt. Prompts are
-optimized on train, Pareto-selected on val, and held-out test scored via a
-proxy Docker/unit-test metric with feedback. The budget and splits are
-configurable; defaults mirror the TerminalBench 50-task scale.
+The harness offers two comparable proposer conditions and does not evaluate the
+held-out test split automatically:
 
-Conditions:
-    vanilla  - stock GEPA reflective mutation
-    random   - action-conditioned reflection, actions picked uniformly at random
-    action   - action-conditioned reflection with verbalized sampling
+* ``vanilla`` uses stock free-form GEPA reflection.
+* ``action`` uses the Controller -> Manifestor -> ReAct V2 workflow.
 
-Usage:
-    uv run python examples/terminalbench/main.py [--condition vanilla|random|action|all]
-        [--max-metric-calls N] [--train-limit N] [--val-limit N] [--test-limit N]
-        [--data-path PATH]
+Both conditions use the same official Harbor rewards, manifest, student model,
+task splits, and metric-call budget.
 """
 
 from __future__ import annotations
 
 import argparse
-import itertools
 import json
-import os
-from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import Any
 
-from examples.terminalbench.utils import (
-    load_terminalbench_dataset,
-    run_single_stage,
-    run_two_stage,
-    terminalbench_metric,
-)
-from gepa.core.action_tracking import ActionDiversityCallback
-from gepa.lm import LM
-from gepa.optimize_anything import (
-    EngineConfig,
-    GEPAConfig,
-    ReflectionConfig,
-    SideInfo,
-    optimize_anything,
-)
-from gepa.strategies.action_space import (
-    DEFAULT_ACTIONS,
-    RandomActionSelector,
-    VerbalizedActionSelector,
-    build_structured_actions,
+from examples.common.react_v2 import resolve_template_family, structured_prompt
+from gepa import optimize
+from gepa.adapters.terminal_bench_adapter import (
+    HarborCLI,
+    TerminalBenchAdapter,
+    TerminalBenchManifest,
+    TerminalBenchTask,
+    load_terminalbench_manifest,
 )
 
-# Seeds: task is shell command generation
-SEED_CANDIDATE = {
-    "plan": "Create a step-by-step plan to solve the terminal task",
-    "execute": (
-        "Generate the shell command or script that solves the task. "
-        "Output only the command, no explanation."
-    ),
-}
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_MANIFEST = Path(__file__).with_name("terminalbench-v3-manifest.json")
 
-SEED_CANDIDATE_1STAGE = {
-    "generate_command": "Generate the shell command or script that solves the terminal task"
-}
+SEED_INSTRUCTION = """You are an expert autonomous terminal agent operating in a Linux tmux session.
 
-_CONDITION_DIR_NAMES = {
-    "vanilla": "terminalbench_vanilla",
-    "random": "terminalbench_random_action",
-    "action": "terminalbench_verbalized_action",
-}
+Solve the assigned command-line task completely and leave the environment in the state required by its verifier. You receive the task description and current terminal screen on every turn.
+
+Work only through the fixed tmux terminal interface. Inspect the environment before making assumptions. Prefer reproducible, targeted changes, verify the final state, and recover explicitly from command errors or incomplete output. Continue until the requested artifact or behavior is present. Follow the fixed Terminus JSON command contract appended to this instruction prompt."""
+RUN_CONTRACT_FILENAME = "terminalbench-run-contract.json"
 
 
-def _structured_seed(task_sentence: str) -> str:
-    """Wrap a seed sentence in a best-practice markdown skeleton."""
-    return (
-        "## Role\nYou are an expert terminal agent.\n\n"
-        f"## Task\n{task_sentence}\n\n"
-        "## Rules\n- Output only valid bash commands\n- Prefer idempotent, non-destructive commands\n- Use absolute paths when needed\n\n"
-        "## Output Format\nA single bash command or script block.\n\n"
-        "## Examples\n(none yet)"
-    )
+def seed_candidate(student_model: str, template_family: str) -> tuple[dict[str, str], str]:
+    """Build the system-prompt target in the student's canonical template."""
+    resolved_family = resolve_template_family(template_family, student_model)
+    return {"instruction_prompt": structured_prompt(SEED_INSTRUCTION, resolved_family)}, resolved_family
 
 
-def condition_run_dir(condition: str, program: str, tag: str = "") -> str:
-    suffix = "_1stage" if program == "1stage" else ""
-    tag_suffix = f"_{tag}" if tag else ""
-    return f"outputs/{_CONDITION_DIR_NAMES[condition]}{suffix}{tag_suffix}"
-
-
-def seed_candidate(program: str, seed_style: str = "plain") -> dict:
-    seed = dict(SEED_CANDIDATE_1STAGE if program == "1stage" else SEED_CANDIDATE)
-    if seed_style == "structured":
-        seed = {component: _structured_seed(text) for component, text in seed.items()}
-    return seed
-
-
-def run_program(candidate: dict, task: str, program: str, model: str, api_base: str | None) -> tuple[str | None, str]:
-    """Run the candidate program on a task, returning (plan, final_command)."""
-    if program == "1stage":
-        return None, run_single_stage(candidate["generate_command"], task, model=model, api_base=api_base)
-    return run_two_stage(candidate["plan"], candidate["execute"], task, model=model, api_base=api_base)
-
-
-def make_evaluator(solver_model: str, api_base: str | None = None, program: str = "2stage"):
-    """Create an evaluator function closed over the solver model name."""
-
-    def evaluate(candidate: dict, example: dict) -> tuple[float, SideInfo]:
-        plan, final_command = run_program(candidate, example["prompt"], program, solver_model, api_base)
-        score, feedback = terminalbench_metric(final_command, example)
-
-        side_info: SideInfo = {
-            "score": score,
-            "query": example["prompt"],
-            "output": final_command,
-            "execution_feedback": feedback,
-        }
-        if plan is not None:
-            side_info["plan"] = plan
-            side_info["stage1_response"] = plan
-        return score, side_info
-
-    return evaluate
-
-
-def evaluate_on_set(
-    candidate: dict,
-    dataset: list[dict],
-    solver_model: str,
-    api_base: str | None = None,
-    max_workers: int = 24,
-    program: str = "2stage",
-) -> float:
-    """Evaluate a candidate on a dataset, returning mean task success."""
-
-    def score_one(example: dict) -> float:
-        _, final_command = run_program(candidate, example["prompt"], program, solver_model, api_base)
-        score, _ = terminalbench_metric(final_command, example)
-        return score
-
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        scores = list(pool.map(score_one, dataset))
-    return sum(scores) / len(scores) if scores else 0.0
-
-
-def prompt_diversity(candidates: list[dict]) -> dict[str, dict[str, float]]:
-    """Textual diversity of explored candidates, per component."""
-    if not candidates:
-        return {}
-    diversity: dict[str, dict[str, float]] = {}
-    for component in candidates[0]:
-        texts = [c[component] for c in candidates]
-        token_sets = [set(t.lower().split()) for t in texts]
-        distances = []
-        for a, b in itertools.combinations(token_sets, 2):
-            union = a | b
-            distances.append(1.0 - (len(a & b) / len(union)) if union else 0.0)
-        diversity[component] = {
-            "mean_pairwise_jaccard_distance": sum(distances) / len(distances) if distances else 0.0,
-            "num_unique_texts": float(len(set(texts))),
-        }
-    return diversity
-
-
-def dump_candidates(result, run_dir: str) -> str:
-    """Write all explored candidates (with lineage and scores) to candidates.json."""
-    payload = {
-        "best_idx": result.best_idx,
-        "total_metric_calls": result.total_metric_calls,
-        "num_full_val_evals": result.num_full_val_evals,
-        "candidates": result.candidates,
-        "parents": result.parents,
-        "val_aggregate_scores": result.val_aggregate_scores,
-        "discovery_eval_counts": result.discovery_eval_counts,
-    }
-    os.makedirs(run_dir, exist_ok=True)
-    path = os.path.join(run_dir, "candidates.json")
-    with open(path, "w") as f:
-        json.dump(payload, f, indent=2)
-    return path
-
-
-def dump_action_summary(tracker: ActionDiversityCallback, run_dir: str, selector=None) -> str:
-    """Persist the action tracker's aggregate summary plus raw per-action data."""
-    payload = {
-        "summary": tracker.summary(),
-        "action_score_deltas": dict(tracker.action_score_deltas),
-        "action_texts": dict(tracker.action_texts),
-    }
-    if selector is not None and getattr(selector, "history", None):
-        payload["verbalized_history"] = selector.history
-    os.makedirs(run_dir, exist_ok=True)
-    path = os.path.join(run_dir, "action_summary.json")
-    with open(path, "w") as f:
-        json.dump(payload, f, indent=2)
-    return path
-
-
-def build_config(condition: str, args, reflection_lm_kwargs: dict):
-    """Build the GEPAConfig for one condition. Returns (config, action_selector)."""
-    action_space = build_structured_actions() if args.actions == "structured" else DEFAULT_ACTIONS
-    action_selector = None
-    if condition == "random":
-        action_selector = RandomActionSelector(action_space)
-    elif condition == "action":
-        action_selector = VerbalizedActionSelector(
-            action_space,
-            lm=LM(args.reflection_model, **reflection_lm_kwargs),
+def ensure_run_contract(run_dir: Path, contract: dict[str, Any]) -> Path:
+    """Write the run contract or reject an incompatible resumable directory."""
+    path = run_dir / RUN_CONTRACT_FILENAME
+    if path.exists():
+        existing = json.loads(path.read_text())
+        if existing != contract:
+            raise ValueError(f"Run directory {run_dir} contains a different Terminal-Bench configuration.")
+        return path
+    if (run_dir / "gepa_state.bin").exists():
+        raise ValueError(
+            f"Run directory {run_dir} has GEPA state but no {RUN_CONTRACT_FILENAME}; choose a clean directory."
         )
+    run_dir.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(contract, indent=2, sort_keys=True) + "\n")
+    return path
 
-    config = GEPAConfig(
-        engine=EngineConfig(
-            run_dir=condition_run_dir(condition, args.program, args.tag),
-            max_metric_calls=args.max_metric_calls,
-            parallel=True,
-            max_workers=24,
-            cache_evaluation=True,
-        ),
-        reflection=ReflectionConfig(
-            reflection_lm=args.reflection_model,
-            reflection_lm_kwargs=reflection_lm_kwargs or None,
-            action_selector=action_selector,
-        ),
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the experiment CLI without launching any evaluation.
+
+    Returns:
+        Configured argument parser.
+    """
+    parser = argparse.ArgumentParser(description="GEPA on pinned Terminal-Bench v3 through Harbor")
+    parser.add_argument("--condition", choices=("vanilla", "react_v2", "action"), required=True)
+    parser.add_argument("--student-model", required=True, help="Terminus task-solving model")
+    parser.add_argument("--proposer-model", required=True, help="GEPA reflection/proposer model")
+    parser.add_argument("--student-api-base", default=None)
+    parser.add_argument("--proposer-api-base", default=None)
+    parser.add_argument("--max-metric-calls", type=int, required=True)
+    parser.add_argument("--reflection-minibatch-size", type=int, default=3)
+    parser.add_argument("--n-concurrent", type=int, default=1)
+    parser.add_argument("--train-limit", type=int, default=None)
+    parser.add_argument("--val-limit", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--edit-tool-set", choices=("minimal", "broad"), default="broad")
+    parser.add_argument("--reflection-level", type=int, choices=(1, 2), default=2)
+    parser.add_argument(
+        "--template-family",
+        choices=("auto", "generic", "openai", "openai-gpt-5.6", "anthropic", "google", "alibaba"),
+        default="auto",
     )
-    return config, action_selector
+    parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    parser.add_argument("--run-dir", type=Path, required=True)
+    parser.add_argument("--harbor-work-dir", type=Path, required=True)
+    parser.add_argument("--harbor-executable", default="harbor")
+    parser.add_argument("--docker-executable", default="docker")
+    parser.add_argument(
+        "--harbor-process-timeout-sec",
+        type=float,
+        default=None,
+        help="Optional whole-job timeout; default leaves long-horizon runs to task-level Harbor timeouts",
+    )
+    return parser
 
 
-def run_condition(
-    name: str,
-    seed: dict,
-    trainset: list[dict],
-    valset: list[dict],
-    config: GEPAConfig,
-    evaluator,
-    callbacks: list | None = None,
-):
-    """Run one optimization condition and return the result."""
-    print(f"\n{'=' * 60}")
-    print(f"  Running: {name}")
-    print(f"{'=' * 60}\n")
+def build_run_contract(
+    args: argparse.Namespace,
+    manifest: TerminalBenchManifest,
+    trainset: list[TerminalBenchTask],
+    valset: list[TerminalBenchTask],
+    condition: str,
+    resolved_family: str,
+) -> dict[str, Any]:
+    """Record every material axis needed for safe resume and comparison."""
+    return {
+        "condition": condition,
+        "dataset": manifest.dataset,
+        "edit_tool_set": args.edit_tool_set,
+        "harbor_process_timeout_sec": args.harbor_process_timeout_sec,
+        "manifest": str(args.manifest.resolve()),
+        "max_metric_calls": args.max_metric_calls,
+        "n_concurrent": args.n_concurrent,
+        "proposer_api_base": args.proposer_api_base,
+        "proposer_model": args.proposer_model,
+        "reflection_level": args.reflection_level if condition == "react_v2" else 0,
+        "reflection_minibatch_size": args.reflection_minibatch_size,
+        "seed": args.seed,
+        "student_api_base": args.student_api_base,
+        "student_model": args.student_model,
+        "template_family": resolved_family,
+        "train_task_ids": [task.task_id for task in trainset],
+        "val_task_ids": [task.task_id for task in valset],
+    }
 
-    if callbacks:
-        config.callbacks = callbacks
 
-    result = optimize_anything(
-        seed_candidate=seed,
-        evaluator=evaluator,
-        dataset=trainset,
+def main() -> None:
+    """Validate the pinned harness and start the requested GEPA condition."""
+    args = build_parser().parse_args()
+    manifest = load_terminalbench_manifest(args.manifest)
+    trainset = manifest.tasks("train", args.train_limit)
+    valset = manifest.tasks("val", args.val_limit)
+    if not trainset or not valset:
+        raise ValueError("train and validation selections must both be non-empty")
+
+    candidate, resolved_family = seed_candidate(args.student_model, args.template_family)
+    condition = "react_v2" if args.condition == "action" else args.condition
+    contract = build_run_contract(args, manifest, trainset, valset, condition, resolved_family)
+    ensure_run_contract(args.run_dir, contract)
+
+    harbor = HarborCLI(
+        student_model=args.student_model,
+        student_api_base=args.student_api_base,
+        work_dir=args.harbor_work_dir,
+        agent_python_path=REPO_ROOT,
+        n_concurrent=args.n_concurrent,
+        harbor_executable=args.harbor_executable,
+        docker_executable=args.docker_executable,
+        process_timeout_sec=args.harbor_process_timeout_sec,
+    )
+    harbor.check_requirements()
+    adapter = TerminalBenchAdapter(manifest, harbor)
+
+    reflection_lm_kwargs: dict[str, Any] = {}
+    if args.proposer_api_base is not None:
+        reflection_lm_kwargs["api_base"] = args.proposer_api_base
+
+    reflection_level = 0 if condition == "vanilla" else args.reflection_level
+    optimize(
+        seed_candidate=candidate,
+        trainset=trainset,
         valset=valset,
-        config=config,
+        adapter=adapter,
+        reflection_lm=args.proposer_model,
+        reflection_lm_kwargs=reflection_lm_kwargs,
+        max_metric_calls=args.max_metric_calls,
+        reflection_minibatch_size=args.reflection_minibatch_size,
+        run_dir=str(args.run_dir),
+        seed=args.seed,
+        reflection_level=reflection_level,
+        edit_tool_set=args.edit_tool_set,
+        component_kinds={"instruction_prompt": "prompt"},
+        template_family=resolved_family,
+        template_model=args.student_model,
     )
-
-    return result
-
-
-def main():
-    parser = argparse.ArgumentParser(description="TerminalBench evaluation for action-conditioned reflection")
-    parser.add_argument(
-        "--max-metric-calls",
-        type=int,
-        default=3000,
-        help="Budget per condition (default 3000 for TerminalBench 50-task scale)",
-    )
-    parser.add_argument(
-        "--solver-model", type=str, default="hosted_vllm/Qwen3-8B", help="Solver LM model (litellm format)"
-    )
-    parser.add_argument(
-        "--reflection-model", type=str, default="hosted_vllm/Qwen3-8B", help="Reflection LM model (litellm format)"
-    )
-    parser.add_argument("--api-base", type=str, default=None, help="Base URL for vLLM server (e.g. http://localhost:8000/v1)")
-    parser.add_argument("--data-path", type=str, default=None, help="Path to local terminalbench.jsonl (overrides HF/local fallback)")
-    parser.add_argument("--seed", type=int, default=0, help="Shuffle seed for splits")
-    parser.add_argument("--train-limit", type=int, default=None, help="Limit train-set size (default 20)")
-    parser.add_argument("--val-limit", type=int, default=None, help="Limit val-set size (default 15)")
-    parser.add_argument("--test-limit", type=int, default=None, help="Limit test-set size for final evaluation (default 15)")
-    parser.add_argument(
-        "--program",
-        type=str,
-        default="2stage",
-        choices=["2stage", "1stage"],
-        help="Program structure: 2stage (plan-then-execute) or 1stage (single command generation)",
-    )
-    parser.add_argument(
-        "--condition",
-        type=str,
-        default="all",
-        choices=["vanilla", "random", "action", "all"],
-        help="Which condition(s) to run",
-    )
-    parser.add_argument(
-        "--seed-style",
-        type=str,
-        default="plain",
-        choices=["plain", "structured"],
-        help="Seed prompts: plain sentences or markdown skeleton (Role/Task/Rules/Output Format/Examples)",
-    )
-    parser.add_argument(
-        "--actions",
-        type=str,
-        default="default",
-        choices=["default", "structured"],
-        help="Action space: DEFAULT_ACTIONS or section-scoped structured actions (implies --seed-style structured)",
-    )
-    parser.add_argument("--tag", type=str, default="", help="Suffix appended to run dirs (e.g. tb_rev1)")
-    args = parser.parse_args()
-
-    if args.actions == "structured" and args.seed_style != "structured":
-        print("--actions structured implies --seed-style structured; overriding seed style.")
-        args.seed_style = "structured"
-
-    trainset, valset, testset = load_terminalbench_dataset(data_path=args.data_path, seed=args.seed)
-    if args.train_limit is not None:
-        trainset = trainset[: args.train_limit]
-    if args.val_limit is not None:
-        valset = valset[: args.val_limit]
-    if args.test_limit is not None:
-        testset = testset[: args.test_limit]
-    print(f"Loaded {len(trainset)} train / {len(valset)} val / {len(testset)} test examples ({args.program})")
-
-    evaluator = make_evaluator(args.solver_model, api_base=args.api_base, program=args.program)
-
-    reflection_lm_kwargs = {}
-    if args.api_base is not None:
-        reflection_lm_kwargs["api_base"] = args.api_base
-
-    conditions = ["vanilla", "random", "action"] if args.condition == "all" else [args.condition]
-
-    results = {}
-    trackers: dict[str, ActionDiversityCallback] = {}
-    for condition in conditions:
-        config, selector = build_config(condition, args, reflection_lm_kwargs)
-        callbacks = None
-        if condition in ("random", "action"):
-            trackers[condition] = ActionDiversityCallback()
-            callbacks = [trackers[condition]]
-        results[condition] = run_condition(
-            f"{condition} GEPA ({args.program}, {args.seed_style} seeds)",
-            seed_candidate(args.program, args.seed_style),
-            trainset,
-            valset,
-            config,
-            evaluator,
-            callbacks=callbacks,
-        )
-        run_dir = condition_run_dir(condition, args.program, args.tag)
-        path = dump_candidates(results[condition], run_dir)
-        print(f"[{condition}] wrote {path}")
-        if condition in trackers:
-            path = dump_action_summary(trackers[condition], run_dir, selector=selector)
-            print(f"[{condition}] wrote {path}")
-
-    # Report: best prompts (full text)
-    print(f"\n{'=' * 60}")
-    print("  Best prompts")
-    print(f"{'=' * 60}")
-    for name, result in results.items():
-        print(f"\n----- [{name}] best candidate (val score {result.val_aggregate_scores[result.best_idx]:.4f}) -----")
-        for component, text in result.best_candidate.items():
-            print(f"\n[{name}] {component}:\n{text}")
-
-    # Report: test success + diversity
-    print(f"\n{'=' * 60}")
-    print("  Comparison")
-    print(f"{'=' * 60}\n")
-
-    baseline_score = evaluate_on_set(
-        seed_candidate(args.program, args.seed_style),
-        testset,
-        args.solver_model,
-        api_base=args.api_base,
-        program=args.program,
-    )
-    print(f"Baseline (seed prompts) test task success: {baseline_score:.2%} on {len(testset)} examples\n")
-
-    for name, result in results.items():
-        test_score = evaluate_on_set(
-            result.best_candidate, testset, args.solver_model, api_base=args.api_base, program=args.program
-        )
-        diversity = prompt_diversity(result.candidates)
-        print(f"[{name}]")
-        print(f"  candidates explored:      {len(result.candidates)}")
-        print(f"  best val score:           {result.val_aggregate_scores[result.best_idx]:.4f}")
-        print(f"  test task success:        {test_score:.2%}")
-        for component, stats in diversity.items():
-            print(
-                f"  diversity[{component}]: jaccard_dist={stats['mean_pairwise_jaccard_distance']:.3f} "
-                f"unique={int(stats['num_unique_texts'])}/{len(result.candidates)}"
-            )
-        print()
-
-    # Action diversity metrics (random / action conditions)
-    for name, tracker in trackers.items():
-        print(f"{'=' * 60}")
-        print(f"  Action Diversity Metrics [{name}]")
-        print(f"{'=' * 60}\n")
-        summary = tracker.summary()
-        print(f"Total proposals: {summary['total_proposals']}")
-        print(f"Total accepted:  {summary['total_accepted']}")
-        print(f"\nPer-action proposal counts: {summary['action_proposal_counts']}")
-        print(f"Per-action acceptance rates: {summary['action_acceptance_rates']}")
-        print(f"Textual diversity per iteration: {summary['textual_diversity_per_iteration']}\n")
 
 
 if __name__ == "__main__":

@@ -1,77 +1,91 @@
-# TerminalBench: Action-Conditioned Reflection Experiments
+# Terminal-Bench v3 through Harbor
 
-This example evaluates whether **action-conditioned reflection** (constraining each GEPA mutation to a typed edit action) and **verbalized sampling** (letting the reflection LM propose a probability distribution over actions, then sampling its tails) improve GEPA on **TerminalBench** (T-Bench, https://terminal-bench.github.io, 2024, 50+ terminal agent tasks, Docker-based).
+This harness evaluates GEPA candidates with the official Terminal-Bench verifier. It has no heuristic, synthetic, Hugging Face, or command-overlap fallback: every score comes from a pinned Harbor Docker trial.
 
-TerminalBench tasks require an agent to synthesize shell commands/scripts that are validated inside Docker containers via unit tests and exit-code checks. This example mirrors the GEPA paper's IFBench evaluation pattern (`examples/ifbench`) but with a terminal-code-agent program: a 2-stage **plan-then-execute** pipeline (stage 1: plan the approach; stage 2: emit the shell command) optimized with GEPA, plus a **1-stage** single-command-generation ablation. The metric is a proxy for task success — offline-friendly, using shell-validity heuristics and expected-command overlap with feedback — since real Docker evaluation requires containers. See `ATTRIBUTION.md` for provenance.
+## Reproducibility contract
 
-## Layout
+- Harbor: `0.22.0`, installed as a separate CLI because Harbor requires Python 3.12+ while GEPA supports Python 3.10+.
+- Dataset tag: `terminal-bench/terminal-bench@3.0.0`; `@latest` is never used. Runtime jobs resolve by the tag's immutable content hash below, so a later tag change cannot alter an experiment.
+- Registry content hash: `sha256:a32a61879ea94eb9dc16fa1fbeb398759f0c07ca633d9d1f6aec760207036da3`.
+- Source: [`harbor-framework/terminal-bench`](https://github.com/harbor-framework/terminal-bench) tag `v3.0.0`, commit `2b0442c3c583b710ca8da14c8e601b99f2f1f244`.
+- Task refs and splits: [`terminalbench-v3-manifest.json`](terminalbench-v3-manifest.json), captured from the official Harbor registry with Harbor 0.22.0.
 
-| File | Purpose |
-|---|---|
-| `main.py` | Experiment runner: conditions, programs, seeds, dumps, final report |
-| `utils.py` | Dataset loading (HF `laude/terminal-bench` or `data/terminalbench.jsonl` fallback), 1- and 2-stage LM programs, proxy metric + feedback, _call_lm identical to ifbench |
-| `run_terminalbench.sbatch` | SLURM job for della (serves Qwen via vLLM, runs one experiment, 48h) |
-| `ATTRIBUTION.md` | Data/code provenance |
-| `README.md` | This file |
+The registry does not publish train/validation/test partitions. The checked-in manifest hash-orders all 74 full task IDs by `SHA-256("gepa-terminalbench-v3-split-v1" + NUL + task_id)` and uses Hamilton largest-remainder apportionment for a 40/30/30 allocation: 30 train, 22 validation, and 22 held-out test tasks. Harness validation recomputes the policy, rejects overlaps, and requires every pinned task exactly once.
+
+## Initial optimization target
+
+The candidate has exactly one component: `instruction_prompt`, the Terminus 2 instruction/system prefix. The standard Terminus JSON response contract and tmux terminal tool remain fixed. Task- and agent-provided skills and MCP servers are disabled by `PromptedTerminus`, so this first harness does not conflate prompt optimization with skill or tool optimization.
+
+Turn count is not capped (`max_turns` is intentionally omitted). Long-horizon trajectories may continue until each pinned task's Harbor agent timeout. A whole-job subprocess timeout is optional and disabled by default.
+
+Every candidate evaluation gets a unique immutable directory containing:
+
+- the rendered candidate prompt;
+- the exact Harbor job JSON;
+- Harbor stdout/stderr;
+- the complete Harbor job and trial artifacts;
+- all `agent/trajectory*.json` ATIF files, rewards, and structured errors.
+
+Results are keyed back to the requested batch by full task ID, never by directory order.
 
 ## Setup
 
-```bash
-uv sync --extra dev
-# TerminalBench uses datasets + litellm (already in full). No extra system deps.
-# Optional: pip install datasets (if not in full)
-```
-
-First dataset load tries HF `laude/terminal-bench`; on failure (offline) it falls back to `examples/terminalbench/data/terminalbench.jsonl` if present, else synthetic tasks (so the pipeline never crashes offline). Pre-download on a login node for della:
+Install the exact Harbor version and start Docker:
 
 ```bash
-python -c "from datasets import load_dataset; load_dataset('laude/terminal-bench')"
-# Or place a jsonl at examples/terminalbench/data/terminalbench.jsonl:
-# one JSON object per line with at least {"task_id": "...", "prompt": "do X", "expected_commands": "echo hi"}
+uv tool install --force 'harbor==0.22.0'
+harbor --version
+docker info
 ```
 
-## Running
+The harness fails before spending model calls if Harbor is absent, the version is not exactly `0.22.0`, Docker is absent, or the Docker daemon is unreachable.
+
+## Configure a run
+
+Student and proposer models are deliberately separate required arguments. Use the provider-accurate model IDs for the planned Qwen 3.8 student and DeepSeek V4 Flash proposer in your environment:
 
 ```bash
-uv run python examples/terminalbench/main.py \
-    --condition all            # vanilla | random | action | all \
-    --program 2stage           # 2stage (plan-then-execute) | 1stage (single command gen) \
-    --seed-style plain         # plain | structured (markdown skeleton) \
-    --actions default          # default (6 generic) | structured (16 section-scoped) \
-    --max-metric-calls 3000    # budget per condition (TerminalBench 50-task scale) \
-    --solver-model hosted_vllm/Qwen3-8B --api-base http://localhost:8000/v1 \
-    --data-path examples/terminalbench/data/terminalbench.jsonl \
-    --tag tb_rev1               # suffix for output dirs
+uv run python -m examples.terminalbench.main \
+  --condition react_v2 \
+  --student-model '<qwen-3.8-model-id>' \
+  --proposer-model '<deepseek-v4-flash-model-id>' \
+  --max-metric-calls 400 \
+  --run-dir outputs/terminalbench/react-v2 \
+  --harbor-work-dir outputs/terminalbench/harbor-react-v2
 ```
 
-Conditions: `vanilla` is stock GEPA reflection; `random` picks actions uniformly; `action` uses `VerbalizedActionSelector`. `--actions structured` implies structured seeds. Mini runs: `--train-limit/--val-limit/--test-limit` and `--data-path` + `--seed`.
+Use `--condition vanilla` for stock GEPA reflection and `--condition react_v2` for Controller → Manifestor → ReAct V2 (`action` remains a compatibility alias). Prompt sections are inferred from the student model prefix by default. Keep model IDs, manifest, split prefixes, metric-call budget, minibatch size, concurrency, and random seed identical when comparing conditions. `--edit-tool-set minimal|broad` exposes the intended text-operator ablation without changing Harbor evaluation, while `--reflection-level 1|2` controls whether the Manifestor semantic-action layer is active.
 
-Splits: 50 total by default (shuffled seed 0): **20 train / 15 val / 15 test**. If the source has fewer than 50 tasks, splits scale proportionally; synthetic fallback generates 50. Override with `--train-limit/--val-limit/--test-limit`.
+Each GEPA run directory contains `terminalbench-run-contract.json`. Resuming with a different model, split, template, tool basis, reflection level, concurrency, or other material setting fails before evaluation, preventing ablation results from sharing stale GEPA state.
 
-On della, submit via sbatch (mirrors `ifbench` runner):
+For local infrastructure validation only, limit both partitions explicitly; these prefixes remain deterministic:
 
 ```bash
-MODEL=Qwen3-8B CONDITION=action PROGRAM=2stage SEED_STYLE=plain ACTIONS=default TAG=tb_rev1 MAX_METRIC_CALLS=3000 \
-    sbatch examples/terminalbench/run_terminalbench.sbatch
-# Mini test (10/5/5, 150 calls):
-# sbatch --export=ALL,TRAIN_LIMIT=10,VAL_LIMIT=5,TEST_LIMIT=5,MAX_METRIC_CALLS=150 --time=02:00:00 examples/terminalbench/run_terminalbench.sbatch
-# With local data:
-# sbatch --export=ALL,DATA_PATH=/path/to/terminalbench.jsonl examples/terminalbench/run_terminalbench.sbatch
+uv run python -m examples.terminalbench.main \
+  --condition react_v2 \
+  --student-model '<student-model-id>' \
+  --proposer-model '<proposer-model-id>' \
+  --max-metric-calls 2 \
+  --train-limit 1 \
+  --val-limit 1 \
+  --run-dir outputs/terminalbench/smoke-gepa \
+  --harbor-work-dir outputs/terminalbench/smoke-harbor
 ```
 
-## Artifacts per run (`outputs/<run_dir>/`)
+The runner does not score the held-out test split automatically. Test evaluation should happen once, after the experiment configuration and candidate-selection rule are frozen.
 
-- `candidates.json`: every accepted candidate with lineage (`parents`), val scores, discovery eval counts
-- `action_summary.json`: per-action proposal/accept counts, plus verbalized selector's full distribution history (`probs`, `sampled`, `fallback` per call)
-- `run_log.txt`: every proposal including rejected ones, with minibatch decisions
-- `candidate_tree.html`: interactive candidate tree (open in a browser)
+## Tests
 
-## Metric details
+Normal tests are offline and mock the Harbor subprocess boundary:
 
-`terminalbench_metric` in `utils.py` is a proxy for Docker/unit-test success (offline-friendly): empty check, shell-validity heuristics (contains shell tokens like `|`, `>`, `&&`, `ls`, `grep`), token overlap with `expected_commands`/`tests` when available, task keyword relevance, and markdown-fencing warning. Returns 0/0.25/0.5/1.0 with feedback listing which checks passed/failed for reflection. Real TerminalBench evaluation requires Docker — replace the proxy with container execution for publication runs (see https://terminal-bench.github.io).
+```bash
+uv run pytest tests/test_terminal_bench_adapter.py -m 'not smoke'
+```
 
-## Known pitfalls
+The opt-in smoke marker launches one real pinned Harbor task only when all required environment variables are present:
 
-- Qwen thinking models: hidden `<think>` blocks can consume the whole token budget, leaving empty `message.content`. The runner disables thinking (`enable_thinking: false`) and falls back to `reasoning_content`; do not remove this.
-- Long plans/commands: stage 1 output is capped at ~24k chars before feeding stage 2 so input + `max_tokens` fits the model context (32k for Qwen3-8B). `_call_lm` also steps `max_tokens` down on `ContextWindowExceededError`.
-- HF `datasets` caches to scratch on della; `run_terminalbench.sbatch` sets `HF_HOME` to scratch. First fetch needs internet; fallback is local `data/terminalbench.jsonl` or synthetic tasks.
+```bash
+GEPA_TERMINALBENCH_SMOKE=1 \
+GEPA_TERMINALBENCH_STUDENT_MODEL='<student-model-id>' \
+uv run pytest tests/test_terminal_bench_adapter.py -m smoke
+```

@@ -92,7 +92,11 @@ API_MAPPING = {
         ("gepa.adapters.dspy_full_program_adapter.full_program_adapter", "DspyAdapter", "DSPyFullProgramAdapter"),
         ("gepa.adapters.generic_rag_adapter.generic_rag_adapter", "GenericRAGAdapter", "RAGAdapter"),
         ("gepa.adapters.mcp_adapter.mcp_adapter", "MCPAdapter", "MCPAdapter"),
-        ("gepa.adapters.terminal_bench_adapter.terminal_bench_adapter", "TerminusAdapter", "TerminalBenchAdapter"),
+        (
+            "gepa.adapters.terminal_bench_adapter.terminal_bench_adapter",
+            "TerminalBenchAdapter",
+            "TerminalBenchAdapter",
+        ),
     ],
     "proposers": [
         ("gepa.proposer.base", "CandidateProposal", "CandidateProposal"),
@@ -137,7 +141,7 @@ CATEGORY_INFO = {
     },
     "gepa_engine": {
         "title": "GEPA Engine",
-        "description": "Configuration for the built-in GEPA engine (`engine=\"gepa\"`). These classes are passed via `OptimizeAnythingConfig(engine_config={...})` to control GEPA-specific behavior.",
+        "description": 'Configuration for the built-in GEPA engine (`engine="gepa"`). These classes are passed via `OptimizeAnythingConfig(engine_config={...})` to control GEPA-specific behavior.',
         "dir": "optimize_anything",
     },
     "core": {

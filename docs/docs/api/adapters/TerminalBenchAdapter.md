@@ -1,6 +1,6 @@
 # TerminalBenchAdapter
 
-::: gepa.adapters.terminal_bench_adapter.terminal_bench_adapter.TerminusAdapter
+::: gepa.adapters.terminal_bench_adapter.terminal_bench_adapter.TerminalBenchAdapter
     handler: python
     options:
         show_source: true

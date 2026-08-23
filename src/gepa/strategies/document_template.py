@@ -15,8 +15,29 @@ parses.
 
 A :class:`DocumentTemplate` is a kind plus its ordered sections. It parses and
 renders documents in the format, and lists the :class:`EditTarget` s the
-Controller can address; the RLM edits one section body in isolation and
-re-renders the document around it.
+Controller can address; ReAct V2 edits one section body in isolation and
+splices it back without changing the surrounding document bytes.
+
+Templates come in *families* (:data:`TEMPLATE_FAMILIES`): the ``"generic"``
+family is grounded in the convergent prompt-component taxonomies of the
+academic literature, while ``"openai"``, ``"anthropic"``, ``"google"``, and
+``"alibaba"`` rename and reorder the prompt sections to match the
+corresponding provider's own prompting guidance -- the closest public proxy to
+the prompt structure the provider's post-training rewarded. A provider gets a
+family only while its official guidance prescribes prompt structure, whether a
+named section skeleton (OpenAI's prompt-engineering guide, Google's Gemini
+template, Alibaba's six-part prompt framework) or explicit placement rules
+(Anthropic); providers whose guidance is technique-only -- Meta (Muse, and
+Llama before it), xAI, DeepSeek, Mistral, Moonshot, and Zhipu among them --
+map to ``"generic"``. When a provider additionally publishes a
+*model-specific* skeleton, that model line gets its own family
+(``"openai-gpt-5.6"``), preferred over the provider family for the models it
+names. Section *order* is the axis that varies: PromptPrism
+(arXiv:2505.12592) finds semantic component ordering statistically significant
+while delimiter changes are not, so every family keeps the same
+``## <Section>`` markdown format (one parser, one renderer) and differs only in
+which sections exist, what they are called, and where they sit.
+:func:`infer_template_family` maps a model name to its family.
 """
 
 from __future__ import annotations
@@ -152,7 +173,7 @@ class DocumentTemplate:
             MalformedDocumentError: The headers found are not exactly the
                 template's sections in order, or content precedes the first
                 header. The message names what was found so a caller (or the
-                RLM, via ``<error>`` feedback) can correct it.
+                ReAct V2, via an error observation) can correct it.
         """
         headers = list(_HEADER_RE.finditer(text))
         found = [match.group(1) for match in headers]
@@ -169,6 +190,47 @@ class DocumentTemplate:
             end = headers[i + 1].start() if i + 1 < len(headers) else len(text)
             bodies[match.group(1)] = text[match.end() : end].strip()
         return bodies
+
+    def section_body_span(self, text: str, section: str) -> tuple[int, int]:
+        """Locate a section body without including its surrounding whitespace.
+
+        The returned offsets select exactly the same body text as
+        ``parse(text)[section]``. Splicing at these offsets therefore preserves
+        every byte outside the selected section body, including header spacing
+        and blank lines between sections.
+
+        Args:
+            text: Canonical structured document.
+            section: Section whose body should be located.
+
+        Returns:
+            Start and end character offsets into ``text``.
+
+        Raises:
+            KeyError: ``section`` is not part of this template.
+            MalformedDocumentError: ``text`` does not conform to the template.
+        """
+        self.parse(text)
+        if section not in self.sections:
+            raise KeyError(section)
+        headers = list(_HEADER_RE.finditer(text))
+        index = list(self.sections).index(section)
+        raw_start = headers[index].end()
+        raw_end = headers[index + 1].start() if index + 1 < len(headers) else len(text)
+        raw_body = text[raw_start:raw_end]
+        if not raw_body.strip():
+            if raw_body.startswith("\r\n"):
+                insertion = raw_start + 2
+            elif raw_body.startswith(("\n", "\r")):
+                insertion = raw_start + 1
+            else:
+                insertion = raw_start
+            return insertion, insertion
+        leading = len(raw_body) - len(raw_body.lstrip())
+        trailing = len(raw_body) - len(raw_body.rstrip())
+        body_start = raw_start + leading
+        body_end = raw_end - trailing if trailing else raw_end
+        return body_start, max(body_start, body_end)
 
     def render(self, bodies: dict[str, str]) -> str:
         """Write section bodies out in the canonical format.
@@ -215,6 +277,152 @@ TEMPLATES: dict[str, DocumentTemplate] = {
         },
     ),
 }
+
+# OpenAI's provider-wide prompt-engineering guide ("Message formatting with
+# Markdown and XML"): a developer message "will contain the following sections,
+# usually in this order (though the exact optimal content and order may vary by
+# which model you are using)" -- Identity / Instructions / Examples / Context,
+# with Context last because it varies per request. That per-model caveat is the
+# hook for _OPENAI_GPT56_PROMPT below; for GPT models without a model-specific
+# skeleton this provider-wide one is the operative prescription (the older
+# GPT-4.1 seven-section skeleton is retired).
+# Source: https://developers.openai.com/api/docs/guides/prompt-engineering
+_OPENAI_PROMPT = DocumentTemplate(
+    "prompt",
+    {
+        "Identity": "Who the assistant is: its purpose, communication style, and high-level goals.",
+        "Instructions": "Guidance and rules the model must follow when generating the response.",
+        "Examples": "Example inputs paired with the desired output from the model.",
+        "Context": "Additional information the task depends on, placed near the end because it varies per request.",
+    },
+)
+
+# OpenAI's GPT-5.6 family guide ("Suggested prompt structure", applying to
+# "GPT-5.6 Sol or the GPT-5.6 family") prescribes its own eight-section
+# skeleton, offered as "a starting point for complex prompts". It supersedes
+# the provider-wide skeleton for GPT-5.6 models only; other GPT and o-series
+# models stay on _OPENAI_PROMPT.
+# Source: https://developers.openai.com/api/docs/guides/prompt-guidance-gpt-5p6
+_OPENAI_GPT56_PROMPT = DocumentTemplate(
+    "prompt",
+    {
+        "Role": "The model's function and the context it operates in.",
+        "Personality": "The tone and collaboration style the model should adopt.",
+        "Goal": "The user-visible outcome the model must deliver.",
+        "Success Criteria": "What must be true before the final answer is given.",
+        "Constraints": "Policy, safety, business, evidence, and side-effect limits on the work.",
+        "Tools": "Which tools to use, when to use them, and what not to use.",
+        "Output": "The sections, length, format, and tone of the final answer.",
+        "Stop Rules": "When to retry, fall back, abstain, ask, or stop.",
+    },
+)
+
+# Claude prompting best practices: longform data and context go at the top,
+# "above your query, instructions, and examples", and the query/instructions go
+# last. Constraints are folded into Instructions (Anthropic's docs never split
+# them out, and warn against over-structured rule piles). Instruction-last is
+# also PromptPrism's strongest per-model ordering effect for Claude. Anthropic
+# prescribes these placement rules rather than a named section skeleton.
+# Source: https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices
+_ANTHROPIC_PROMPT = DocumentTemplate(
+    "prompt",
+    {
+        "Role": "Who the model is: persona, expertise, and stance.",
+        "Context": "Background facts, documents, and longform data, placed before the instructions.",
+        "Examples": "Worked input/output examples that demonstrate the expected behavior.",
+        "Reasoning": "How the model should think before answering (steps, checks, decomposition).",
+        "Output Format": "The exact shape of the final answer (structure, fields, length, style).",
+        "Instructions": "What the model must accomplish, including its rules and constraints, stated last.",
+    },
+)
+
+# The Gemini "example template combining best practices" in Google's prompt
+# design strategies doc: role -> instructions -> constraints -> output_format
+# in the system instruction, then context -> task -> final_instruction in the
+# user prompt, with a closing reminder at the very end. The doc treats
+# XML-style tags and markdown headers as interchangeable delimiters, so the
+# family keeps the shared markdown format.
+# Source: https://ai.google.dev/gemini-api/docs/prompting-strategies
+_GOOGLE_PROMPT = DocumentTemplate(
+    "prompt",
+    {
+        "Role": "Who the model is: persona, identity, and qualities.",
+        "Instructions": "The numbered workflow the model should follow (plan, execute, validate).",
+        "Constraints": "Behavioral limits and requirements the output must satisfy (verbosity, tone, what to avoid).",
+        "Output Format": "The exact shape of the final answer (structure, fields, length, style).",
+        "Context": "Documents, code, and background data, marked as data rather than instructions.",
+        "Task": "The specific request the model must act on.",
+        "Final Instruction": "Closing reminder placed at the very end (e.g. to think step by step).",
+    },
+)
+
+# Alibaba Cloud Model Studio's prompt-engineering guide prescribes a six-part
+# prompt framework for Qwen models: Context / Objective / Style / Tone /
+# Audience / Response -- task background first, output format last. The guide
+# leaves the framework unnamed; the identical structure is known in the
+# community as CO-STAR.
+# Source: https://www.alibabacloud.com/help/en/model-studio/prompt-engineering-guide
+_ALIBABA_PROMPT = DocumentTemplate(
+    "prompt",
+    {
+        "Context": "Background information closely related to the task.",
+        "Objective": "The specific task the model must complete.",
+        "Style": "The writing style the output should follow.",
+        "Tone": "The tone the output should carry (e.g. formal, humorous, warm).",
+        "Audience": "The target readers of the output.",
+        "Response": "The exact form and format of the output.",
+    },
+)
+
+# Template families: kind -> template, per target-model family. The "generic"
+# family is the papers-grounded schema above; the provider families rename and
+# reorder the prompt sections to the provider's own prompting guidance. The
+# skill kind mirrors the agent-skill document shape and is provider-invariant,
+# so every family shares it. Providers whose guidance prescribes no prompt
+# structure (Meta, xAI, DeepSeek, Mistral, Moonshot, and Zhipu among them) get
+# no family; their models use "generic".
+TEMPLATE_FAMILIES: dict[str, dict[str, DocumentTemplate]] = {
+    "generic": TEMPLATES,
+    "openai": {"prompt": _OPENAI_PROMPT, "skill": TEMPLATES["skill"]},
+    "openai-gpt-5.6": {"prompt": _OPENAI_GPT56_PROMPT, "skill": TEMPLATES["skill"]},
+    "anthropic": {"prompt": _ANTHROPIC_PROMPT, "skill": TEMPLATES["skill"]},
+    "google": {"prompt": _GOOGLE_PROMPT, "skill": TEMPLATES["skill"]},
+    "alibaba": {"prompt": _ALIBABA_PROMPT, "skill": TEMPLATES["skill"]},
+}
+
+
+def infer_template_family(model: str | None) -> str:
+    """Infer the template family whose prompting guidance covers ``model``.
+
+    The match is a substring test on the (LiteLLM-style) model identifier:
+    Claude models map to ``"anthropic"``, Gemini/Gemma to ``"google"``, GPT-5.6
+    models to their model-specific ``"openai-gpt-5.6"``, other GPT and o-series
+    models to ``"openai"``, Qwen/QwQ to ``"alibaba"``. Everything else maps to
+    ``"generic"`` -- the providers behind Muse, Llama, Grok, DeepSeek, Mistral,
+    Kimi, and GLM models prescribe no prompt structure to mirror.
+
+    Args:
+        model: Model identifier such as ``"openai/gpt-5"`` or
+            ``"anthropic/claude-opus-4"``; ``None`` when no task model name is
+            available.
+
+    Returns:
+        A key of :data:`TEMPLATE_FAMILIES`.
+    """
+    if not model:
+        return "generic"
+    lowered = model.lower()
+    if "claude" in lowered:
+        return "anthropic"
+    if "gemini" in lowered or "gemma" in lowered:
+        return "google"
+    if re.search(r"gpt[-_]?5\.6", lowered):
+        return "openai-gpt-5.6"
+    if "gpt" in lowered or lowered.startswith("openai/") or re.search(r"(?:^|/)o\d+(?:$|[-.])", lowered):
+        return "openai"
+    if "qwen" in lowered or "qwq" in lowered:
+        return "alibaba"
+    return "generic"
 
 
 def migrate_document(text: str, template: DocumentTemplate, lm: LanguageModel) -> str:

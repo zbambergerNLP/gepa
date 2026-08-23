@@ -20,11 +20,38 @@ The returned callable conforms to the ``LanguageModel`` protocol
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
+from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, cast
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class NativeToolCall:
+    """One provider-native function call returned by a language model."""
+
+    id: str
+    name: str
+    arguments: str
+
+
+@dataclass(frozen=True)
+class ToolCompletion:
+    """Assistant content and provider-native function calls from one completion."""
+
+    content: str
+    tool_calls: tuple[NativeToolCall, ...]
+
+
+def _response_value(value: Any, key: str, default: Any = None) -> Any:
+    """Read one response field from either LiteLLM objects or mappings."""
+    if isinstance(value, Mapping):
+        return value.get(key, default)
+    return getattr(value, key, default)
 
 
 class LM:
@@ -93,6 +120,25 @@ class LM:
                 "Consider increasing max_tokens for better results."
             )
 
+    def _record_completion_usage(self, completion: Any) -> None:
+        """Accumulate cost and token usage from one LiteLLM completion."""
+        import litellm
+
+        self._check_truncation(completion.choices)
+        try:
+            cost = litellm.completion_cost(completion_response=completion) or 0.0
+        except Exception:
+            cost = 0.0
+
+        usage = getattr(completion, "usage", None)
+        tokens_in = (getattr(usage, "prompt_tokens", 0) or 0) if usage is not None else 0
+        tokens_out = (getattr(usage, "completion_tokens", 0) or 0) if usage is not None else 0
+
+        with self._cost_lock:
+            self._total_cost += cost
+            self._total_tokens_in += tokens_in
+            self._total_tokens_out += tokens_out
+
     def __call__(self, prompt: str | list[dict[str, Any]]) -> str:
         import litellm
 
@@ -109,26 +155,52 @@ class LM:
             **self.completion_kwargs,
         )
 
-        # Non-streaming calls always return ModelResponse (not CustomStreamWrapper)
-        self._check_truncation(completion.choices)  # type: ignore[union-attr]
-
-        # Accumulate cost
-        try:
-            cost = litellm.completion_cost(completion_response=completion) or 0.0  # type: ignore[attr-defined]
-        except Exception:
-            cost = 0.0
-
-        # Accumulate token usage
-        usage = getattr(completion, "usage", None)
-        tokens_in = (getattr(usage, "prompt_tokens", 0) or 0) if usage is not None else 0
-        tokens_out = (getattr(usage, "completion_tokens", 0) or 0) if usage is not None else 0
-
-        with self._cost_lock:
-            self._total_cost += cost
-            self._total_tokens_in += tokens_in
-            self._total_tokens_out += tokens_out
+        self._record_completion_usage(completion)
 
         return completion.choices[0].message.content  # type: ignore[union-attr]
+
+    def complete_with_tools(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        tool_choice: str = "auto",
+    ) -> ToolCompletion:
+        """Complete a chat turn with provider-native function tools enabled."""
+        import litellm
+
+        completion = cast(
+            Any,
+            litellm.completion(
+                model=self.model,
+                messages=messages,
+                tools=tools,
+                tool_choice=tool_choice,
+                num_retries=self.num_retries,
+                drop_params=True,
+                **self.completion_kwargs,
+            ),
+        )
+        self._record_completion_usage(completion)
+
+        message = completion.choices[0].message
+        content_value = _response_value(message, "content", "")
+        content = content_value if isinstance(content_value, str) else ""
+        calls: list[NativeToolCall] = []
+        for index, call in enumerate(_response_value(message, "tool_calls", ()) or ()):
+            function = _response_value(call, "function")
+            name = _response_value(function, "name", "")
+            arguments = _response_value(function, "arguments", "")
+            if not isinstance(arguments, str):
+                arguments = json.dumps(arguments, ensure_ascii=False)
+            calls.append(
+                NativeToolCall(
+                    id=str(_response_value(call, "id", "") or f"tool_call_{index}"),
+                    name=str(name),
+                    arguments=arguments,
+                )
+            )
+        return ToolCompletion(content=content, tool_calls=tuple(calls))
 
     def batch_complete(
         self, messages_list: list[list[dict[str, Any]]], max_workers: int = 10, **kwargs: Any
@@ -236,10 +308,24 @@ class TrackingLM:
         return result
 
     def __getattr__(self, name: str):
+        if name == "model":
+            return getattr(self._fn, name)
         # Conditionally expose batch_complete: hasattr(tracking_lm,
         # "batch_complete") must be True exactly when the wrapped callable
         # provides it, so batched reflection (StatelessReflectionLM) is not
         # silently downgraded to the per-task path by this wrapper.
+        if name == "complete_with_tools":
+            inner = getattr(self._fn, "complete_with_tools", None)
+            if not callable(inner):
+                raise AttributeError(name)
+
+            def tracked_complete_with_tools(messages, tools, *, tool_choice="auto"):
+                self._total_tokens_in += self._estimate_tokens(str((messages, tools)))
+                result = cast(Any, inner)(messages, tools, tool_choice=tool_choice)
+                self._total_tokens_out += self._estimate_tokens(str(result))
+                return result
+
+            return tracked_complete_with_tools
         if name == "batch_complete":
             inner = getattr(self._fn, "batch_complete", None)
             if not callable(inner):

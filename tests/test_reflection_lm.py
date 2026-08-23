@@ -715,7 +715,15 @@ def test_gepa_optimize_accepts_reflection_strategy_without_reflection_lm():
         def make_reflective_dataset(self, candidate, eval_batch, components):
             return {c: [{"Feedback": "f"}] for c in components}
 
-    stub = _ReflectOnlyLM()
+    class ValidatingStrategy(_ReflectOnlyLM):
+        def __init__(self):
+            super().__init__()
+            self.validated = []
+
+        def validate_candidate(self, candidate):
+            self.validated.append(candidate)
+
+    stub = ValidatingStrategy()
     result = gepa.optimize(
         seed_candidate={"c": "x"},
         trainset=[{"q": 1}] * 4,
@@ -727,6 +735,7 @@ def test_gepa_optimize_accepts_reflection_strategy_without_reflection_lm():
         seed=0,
     )
     assert stub.calls, "reflection_strategy never invoked via gepa.optimize"
+    assert stub.validated == [{"c": "x"}]
     assert result is not None
 
 

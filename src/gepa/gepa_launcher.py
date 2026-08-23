@@ -144,6 +144,7 @@ from gepa.proposer.merge import MergeProposer
 from gepa.proposer.reflective_mutation.base import CandidateSelector, LanguageModel, ReflectionComponentSelector
 from gepa.proposer.reflective_mutation.reflection_lm import ReflectionLM
 from gepa.proposer.reflective_mutation.reflective_mutation import ReflectiveMutationProposer
+from gepa.proposer.reflective_mutation.three_role import ThreeRoleReflectionLM
 from gepa.strategies.acceptance import AcceptanceCriterion, ImprovementOrEqualAcceptance, StrictImprovementAcceptance
 from gepa.strategies.action_space import ActionSelector
 from gepa.strategies.batch_sampler import BatchSampler, EpochShuffledBatchSampler
@@ -157,6 +158,7 @@ from gepa.strategies.component_selector import (
     AllReflectionComponentSelector,
     RoundRobinReflectionComponentSelector,
 )
+from gepa.strategies.document_template import MalformedDocumentError, infer_template_family
 from gepa.strategies.eval_policy import EvaluationPolicy, FullEvaluationPolicy
 from gepa.strategies.proposal_sampling import SamplingStrategy
 from gepa.strategies.proposal_selection import SelectionStrategy
@@ -168,6 +170,17 @@ Candidate = dict[str, OptimizableParam]
 
 # Cache storage modes for evaluator caching (when cache_evaluation=True)
 CacheEvaluationStorage = Literal["memory", "disk", "auto"]
+
+
+def _template_consumer_model(adapter: Any, template_model: str | None) -> str | None:
+    """Resolve the prompt consumer model used for automatic section families."""
+    if template_model is not None:
+        return template_model
+    for attribute in ("model", "model_name", "student_model", "solver_model"):
+        value = getattr(adapter, attribute, None)
+        if isinstance(value, str):
+            return value
+    return None
 
 
 # Sentinel object for single-instance mode
@@ -765,6 +778,13 @@ class ReflectionConfig:
     # Action-conditioned reflection (Rev 1): constrain each mutation to a
     # specific edit type for improved diversity and credit assignment.
     action_selector: "ActionSelector | None" = None
+    # 3-role reflection (Controller -> Manifestor -> ReAct V2). An explicit
+    # reflection_strategy takes precedence over these convenience fields.
+    reflection_level: Literal[0, 1, 2] = 0
+    edit_tool_set: Literal["minimal", "broad"] = "broad"
+    component_kinds: dict[str, str] | None = None
+    template_family: Literal["auto", "generic", "openai", "openai-gpt-5.6", "anthropic", "google", "alibaba"] = "auto"
+    template_model: str | None = None
 
 
 @dataclass
@@ -1392,14 +1412,18 @@ def optimize_anything(
             "Set config.reflection.reflection_lm to a model name or callable."
         )
     if not hasattr(active_adapter, "propose_new_texts"):
-        assert config.reflection.reflection_lm is not None, (
+        assert config.reflection.reflection_lm is not None or config.reflection.reflection_strategy is not None, (
             f"reflection_lm was not provided. The adapter '{active_adapter!s}' does not provide a propose_new_texts method, "
-            + "and hence, GEPA will use the default proposer, which requires a reflection_lm to be specified."
+            + "and hence, GEPA will use the default proposer, which requires a reflection_lm or reflection_strategy."
         )
 
     # Default refiner_lm to reflection_lm name BEFORE converting reflection_lm to callable
     if config.refiner is not None and config.refiner.refiner_lm is None:
         config.refiner.refiner_lm = config.reflection.reflection_lm
+
+    # Preserve the model identifier for provider routing and for the
+    # deterministic Manifestor sibling created at reflection level 2.
+    reflection_lm_model = config.reflection.reflection_lm if isinstance(config.reflection.reflection_lm, str) else None
 
     # Convert reflection_lm string to callable
     if isinstance(config.reflection.reflection_lm, str):
@@ -1669,6 +1693,45 @@ def optimize_anything(
         resolved_callbacks.append(cast(GEPACallback, ReflectiveDatasetDumpCallback(config.engine.run_dir)))
 
     # --- 11. Build reflective proposer from ReflectionConfig ---
+    if config.reflection.reflection_level > 0 and config.reflection.reflection_strategy is None:
+        reflection_lm = config.reflection.reflection_lm
+        if reflection_lm is None or isinstance(reflection_lm, str):
+            raise ValueError("reflection_level > 0 requires reflection_lm (the base LM ReAct V2 reuses).")
+
+        manifestor_lm: LanguageModel | None = None
+        if config.reflection.reflection_level == 2 and reflection_lm_model is not None:
+            manifestor_lm = make_litellm_lm(
+                reflection_lm_model,
+                **{**(config.reflection.reflection_lm_kwargs or {}), "temperature": 0.0},
+            )
+        consumer_model = _template_consumer_model(active_adapter, config.reflection.template_model)
+        resolved_family = (
+            infer_template_family(consumer_model)
+            if config.reflection.template_family == "auto"
+            else config.reflection.template_family
+        )
+        config.reflection.reflection_strategy = ThreeRoleReflectionLM(
+            base_lm=reflection_lm,
+            level=config.reflection.reflection_level,
+            edit_tool_set=config.reflection.edit_tool_set,
+            component_kinds=config.reflection.component_kinds,
+            template_family=resolved_family,
+            reflection_prompt_template=config.reflection.reflection_prompt_template,
+            manifestor_lm=manifestor_lm,
+            proposer_model=reflection_lm_model,
+        )
+        try:
+            config.reflection.reflection_strategy.validate_candidate(seed_candidate)
+        except MalformedDocumentError as exc:
+            if config.reflection.template_family == "auto" and resolved_family != "generic":
+                raise MalformedDocumentError(
+                    f"The seed candidate does not parse under the {resolved_family!r} template family "
+                    f"auto-inferred from prompt consumer model={consumer_model!r}. Write the seed in "
+                    "that family's section format (see gepa.strategies.document_template.TEMPLATE_FAMILIES) "
+                    "or pass template_family='generic'."
+                ) from exc
+            raise
+
     if config.reflection.reflection_strategy is not None:
         _bind_rng = getattr(config.reflection.reflection_strategy, "bind_rng", None)
         if callable(_bind_rng):
@@ -1701,6 +1764,9 @@ def optimize_anything(
         reflection_strategy=config.reflection.reflection_strategy,
         action_selector=config.reflection.action_selector,
     )
+    # Seed the default reflection LM (and thus action selection) from the run
+    # RNG; injected strategies were already bound above.
+    reflective_proposer.bind_reflection_rng(rng)
 
     # Define evaluator function for merge proposer
     def merge_evaluator(

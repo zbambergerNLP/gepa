@@ -26,6 +26,7 @@ from gepa.proposer.merge import MergeProposer
 from gepa.proposer.reflective_mutation.base import CandidateSelector, LanguageModel, ReflectionComponentSelector
 from gepa.proposer.reflective_mutation.reflection_lm import ReflectionLM
 from gepa.proposer.reflective_mutation.reflective_mutation import ReflectiveMutationProposer
+from gepa.proposer.reflective_mutation.three_role import ThreeRoleReflectionLM
 from gepa.strategies.acceptance import AcceptanceCriterion, ImprovementOrEqualAcceptance, StrictImprovementAcceptance
 from gepa.strategies.batch_sampler import BatchSampler, EpochShuffledBatchSampler
 from gepa.strategies.candidate_selector import (
@@ -38,10 +39,30 @@ from gepa.strategies.component_selector import (
     AllReflectionComponentSelector,
     RoundRobinReflectionComponentSelector,
 )
+from gepa.strategies.document_template import MalformedDocumentError, infer_template_family
 from gepa.strategies.eval_policy import EvaluationPolicy, FullEvaluationPolicy
 from gepa.strategies.proposal_sampling import SamplingStrategy
 from gepa.strategies.proposal_selection import SelectionStrategy
 from gepa.utils import FileStopper, StopperProtocol
+
+
+def _template_consumer_model(
+    task_lm: str | ChatCompletionCallable | None,
+    adapter: Any | None,
+    template_model: str | None,
+) -> str | None:
+    """Resolve the model identifier whose prompt template should be used."""
+    if template_model is not None:
+        return template_model
+    if isinstance(task_lm, str):
+        return task_lm
+    if adapter is None:
+        return None
+    for attribute in ("model", "model_name", "student_model", "solver_model"):
+        value = getattr(adapter, attribute, None)
+        if isinstance(value, str):
+            return value
+    return None
 
 
 def optimize(
@@ -104,6 +125,12 @@ def optimize(
     reflection_strategy: ReflectionLM | None = None,
     # Action-conditioned reflection (Rev 1)
     action_selector: "ActionSelector | None" = None,
+    # 3-role reflection (Controller -> Manifestor -> ReAct V2)
+    reflection_level: int = 0,
+    edit_tool_set: Literal["minimal", "broad"] = "broad",
+    component_kinds: dict[str, str] | None = None,
+    template_family: Literal["auto", "generic", "openai", "openai-gpt-5.6", "anthropic", "google", "alibaba"] = "auto",
+    template_model: str | None = None,
 ) -> GEPAResult[RolloutOutput, DataId]:
     """
     GEPA is an evolutionary optimizer that evolves (multiple) text components of a complex system to optimize them towards a given metric.
@@ -153,6 +180,11 @@ def optimize(
     - sampling_strategy: Controls how many (parent, minibatch) proposal tasks are sampled per iteration. One of `SingleMutationSampling` (default; 1 parent, 1 mutation — identical to classic GEPA), `SameParentSampling(n)`, `IndependentSampling(n)`, or `PxNSampling(p, n)`, or any custom `SamplingStrategy`.
     - selection_strategy: Controls which of an iteration's improving proposals enter the candidate pool. One of `AllImprovements` (default), `BestImprovement`, or `TopKImprovements(k)`, or any custom `SelectionStrategy`.
     - reflection_strategy: Advanced: a `ReflectionLM` implementation that owns how reflective mutation calls the reflection model (e.g. stateful sessions or aggregating reflectors). Defaults to the stateless single-call reflector built from `reflection_lm`. Implementations may provide `reflect_many` for batched reflection; otherwise `reflect` is called once per task.
+    - reflection_level: Ablation rung for the 3-role reflection architecture (Controller -> Manifestor -> ReAct V2), built from `reflection_lm`. 0 = free-form reflective rewrite (baseline, default); 1 = the Controller selects a document region and ReAct V2 revises it with the configured edit-tool basis; 2 = the Controller also selects one semantic action (`rephrase`, `summarize`, or `expand`), the Manifestor realizes that action into grounded steering, and ReAct V2 receives the steering as a real provider-appropriate chat role (developer for OpenAI, user for Claude and other providers). Each candidate branch retains a user/assistant transcript of its accepted, rejected, and dropped edit attempts for later revisions on that branch; no global history is constructed. At level 2, when `reflection_lm` is a model name, the Manifestor gets its own deterministic (temperature 0) copy of that model, as POSIT prescribes; pass a `ThreeRoleReflectionLM(manifestor_lm=...)` as `reflection_strategy` to control it otherwise. Ignored when an explicit `reflection_strategy` is supplied.
+    - edit_tool_set: Edit-operation basis used by ReAct V2 (only when `reflection_level > 0`). 'minimal' = {INSERT_TEXT, DELETE_TEXT}; 'broad' = {INSERT_TEXT, DELETE_TEXT, REPLACE_TEXT, MOVE_TEXT} (default). Semantic actions are each coupled to one direct broad tool; when that tool is absent from the minimal basis, ReAct V2 composes multiple insert/delete calls before finishing. This is the atomic-versus-semantic action-depth ablation axis.
+    - component_kinds: Optional map from component name to its declared document kind ('prompt' or 'skill'), selecting the section template the 3-role roles address. Unlisted components default to 'prompt'. When `reflection_level > 0`, every seed component must already be written in its kind's canonical section format (`## <Section>` headers, see `gepa.strategies.document_template`); convert free-form text once with `gepa.strategies.document_template.migrate_document`.
+    - template_family: Which prompt-section schema the 3-role reflection enforces (only when `reflection_level > 0`). 'auto' (default) derives the family from the prompt consumer's model identifier (Claude -> 'anthropic', Gemini/Gemma -> 'google', GPT-5.6 -> 'openai-gpt-5.6', other GPT/o-series -> 'openai', Qwen/QwQ -> 'alibaba', anything else -> 'generic'). GEPA reads a string `task_lm`, common model-name attributes on a custom adapter, or the explicit `template_model`; without an identifier it uses 'generic'. Only providers whose official guidance prescribes prompt structure get a family — a named section skeleton (OpenAI's prompt-engineering guide, Google's Gemini template, Alibaba's six-part prompt framework) or explicit placement rules (Anthropic); Meta (Muse/Llama), xAI, DeepSeek, Mistral, Moonshot, and Zhipu prescribe none, so their models use 'generic'. A model line whose own guide prescribes a skeleton gets a model-specific family preferred over the provider one: 'openai-gpt-5.6' carries the GPT-5.6 family guide's eight-section structure. The family follows the *task* model — the one that consumes the optimized prompt — because its post-training rewarded its provider's prompt structure. 'generic' is the papers-grounded 7-section schema; the provider families rename and reorder the sections to match the provider's own guidance, and passing one explicitly opts out of inference. The seed candidate must be written in the resolved family's section format; if auto-inference picks a family your seed does not follow, either rewrite the seed in that format (see `gepa.strategies.document_template.TEMPLATE_FAMILIES`) or pass `template_family='generic'`. For custom schemas or new kinds, pass a `ThreeRoleReflectionLM(templates=...)` as `reflection_strategy`.
+    - template_model: Optional provider/model identifier used by `template_family='auto'` when the prompt consumer is hidden behind a custom adapter or callable. If omitted, GEPA checks a string `task_lm`, then common adapter attributes (`model`, `model_name`, `student_model`, `solver_model`), and finally falls back to the generic family.
     - candidate_selection_strategy: The strategy to use for selecting the candidate to update. Supported strategies: 'pareto', 'current_best', 'epsilon_greedy'. Defaults to 'pareto'.
     - frontier_type: Strategy for tracking Pareto frontiers. 'instance' tracks per validation example, 'objective' tracks per objective metric, 'hybrid' combines both, 'cartesian' tracks per (example, objective) pair. Defaults to 'instance'.
     - skip_perfect_score: Whether to skip updating the candidate if it achieves a perfect score on the minibatch.
@@ -411,6 +443,53 @@ def optimize(
     if cache_evaluation:
         evaluation_cache = EvaluationCache[RolloutOutput, DataId]()
 
+    # 3-role reflection: construct the strategy from the base reflection LM when
+    # reflection_level > 0 and no explicit strategy was supplied. Level 0 is the
+    # untouched free-form baseline, so it needs no strategy. An explicit
+    # reflection_strategy always wins (seam preserved).
+    if reflection_level > 0 and reflection_strategy is None:
+        if reflection_lm_callable is None:
+            raise ValueError("reflection_level > 0 requires reflection_lm (the base LM the 3-role reflection reuses).")
+        # POSIT manifests deterministically. A model name lets us build a
+        # temperature-0 sibling for the Manifestor; a caller-supplied LM
+        # instance is reused as-is (pass ThreeRoleReflectionLM(manifestor_lm=...)
+        # as reflection_strategy to control it).
+        manifestor_lm: LanguageModel | None = None
+        if reflection_level == 2 and isinstance(reflection_lm, str):
+            from gepa.lm import LM
+
+            manifestor_lm = LM(reflection_lm, **{**(reflection_lm_kwargs or {}), "temperature": 0.0})
+        # The template family follows the task model (the prompt's consumer),
+        # not the reflection model. Adapter-backed systems can expose a common
+        # model-name attribute or pass template_model explicitly.
+        consumer_model = _template_consumer_model(task_lm, active_adapter, template_model)
+        resolved_family = infer_template_family(consumer_model) if template_family == "auto" else template_family
+        reflection_strategy = ThreeRoleReflectionLM(
+            base_lm=reflection_lm_callable,
+            level=reflection_level,
+            edit_tool_set=edit_tool_set,
+            component_kinds=component_kinds,
+            template_family=resolved_family,
+            reflection_prompt_template=reflection_prompt_template,
+            manifestor_lm=manifestor_lm,
+            proposer_model=reflection_lm if isinstance(reflection_lm, str) else None,
+        )
+        # Fail before any evaluation is spent: the roles address sections by
+        # name, so the seed must already be in the canonical section format.
+        # When the family was auto-inferred, name it and the way out -- the
+        # underlying error only knows the section names it expected.
+        try:
+            reflection_strategy.validate_candidate(seed_candidate)
+        except MalformedDocumentError as exc:
+            if template_family == "auto" and resolved_family != "generic":
+                raise MalformedDocumentError(
+                    f"The seed candidate does not parse under the {resolved_family!r} template family "
+                    f"auto-inferred from task_lm={task_lm!r}. Write the seed in that family's section format "
+                    "(see gepa.strategies.document_template.TEMPLATE_FAMILIES) or pass "
+                    "template_family='generic'."
+                ) from exc
+            raise
+
     if reflection_strategy is not None:
         _bind_rng = getattr(reflection_strategy, "bind_rng", None)
         if callable(_bind_rng):
@@ -443,6 +522,9 @@ def optimize(
         reflection_strategy=reflection_strategy,
         action_selector=action_selector,
     )
+    # Seed the default reflection LM (and thus action selection) from the run
+    # RNG; injected strategies were already bound above.
+    reflective_proposer.bind_reflection_rng(rng)
 
     def evaluator_fn(
         inputs: list[DataInst], prog: dict[str, str]

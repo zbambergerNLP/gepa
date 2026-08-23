@@ -395,10 +395,15 @@ def format_action_suffix(action: PromptEditAction) -> str:
     )
 
 
-# Canonical section names for structured (markdown-skeleton) prompts. Grounded in
-# the convergent prompt-component taxonomies of PromptPrism, The Prompt Report, and
-# "From Prompts to Templates", plus the Google/OpenAI/Anthropic prompting guides:
-# persona, directive, context, constraints, reasoning, exemplars, output format.
+# Canonical section names for structured (markdown-skeleton) prompts: the
+# "generic" family's schema, grounded in the convergent prompt-component
+# taxonomies of PromptPrism (https://arxiv.org/abs/2505.12592), The Prompt
+# Report (https://arxiv.org/abs/2406.06608), and "From Prompts to Templates"
+# (https://arxiv.org/abs/2504.02052): persona, directive, context, constraints,
+# reasoning, exemplars, output format. The provider prompting guides diverge
+# on section names and order;
+# those variants live in TEMPLATE_FAMILIES (document_template.py) — pass a
+# family's sections here to build a matching menu.
 STRUCTURED_SECTIONS: list[str] = ["Role", "Task", "Context", "Rules", "Reasoning", "Examples", "Output Format"]
 
 _SECTION_OPERATIONS: list[tuple[str, str, str]] = [
@@ -439,7 +444,9 @@ def build_structured_actions(sections: list[str] | None = None) -> list[PromptEd
 
     Args:
         sections: Section names to build operations for; ``None`` uses
-            :data:`STRUCTURED_SECTIONS`.
+            :data:`STRUCTURED_SECTIONS` (the generic family's schema). Pass a
+            :data:`~gepa.strategies.document_template.TEMPLATE_FAMILIES`
+            template's sections for a provider-family menu.
 
     Returns:
         The per-section actions in section order (rewrite, append, condense

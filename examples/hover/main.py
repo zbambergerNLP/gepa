@@ -1,4 +1,4 @@
-"""HoVer evaluation: vanilla GEPA vs Controller/Manifestor/ReAct V2.
+"""HoVer evaluation: vanilla GEPA vs Controller/Manifestor/ReAct V2/RLM.
 
 Replicates the GEPA artifact's HoVer experiment over official v1.1 claims with
 exactly three supporting documents. The program performs three live Wikipedia
@@ -11,11 +11,12 @@ of 7051 metric calls matches the paper.
 Conditions:
     vanilla  - stock GEPA reflective mutation
     react_v2 - section/action Controller, provider-routed Manifestor, ReAct V2 proposer
+    rlm      - the same decisions with the trusted-model, in-process RLM ablation
     random   - action-conditioned reflection, actions picked uniformly at random
     action   - action-conditioned reflection with verbalized sampling
 
 Usage:
-    uv run python -m examples.hover.main [--condition vanilla|react_v2|both]
+    uv run python -m examples.hover.main [--condition vanilla|react_v2|rlm|both]
         [--max-metric-calls N] [--train-limit N] [--val-limit N] [--test-limit N]
 """
 
@@ -24,6 +25,7 @@ import itertools
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict
 from pathlib import Path
 
 from examples.common.react_v2 import (
@@ -54,6 +56,8 @@ from gepa.optimize_anything import (
     SideInfo,
     optimize_anything,
 )
+from gepa.proposer.reflective_mutation.rlm_environment import RLMBudget
+from gepa.proposer.reflective_mutation.three_role import ThreeRoleReflectionLM
 from gepa.strategies.action_space import (
     DEFAULT_ACTIONS,
     RandomActionSelector,
@@ -79,9 +83,29 @@ SEED_CANDIDATE_1STAGE = {
 _CONDITION_DIR_NAMES = {
     "vanilla": "hover_vanilla",
     "react_v2": "hover_react_v2",
+    "rlm": "hover_rlm",
     "random": "hover_random_action",
     "action": "hover_verbalized_action",
 }
+
+
+def _rlm_budget() -> RLMBudget:
+    """Return the RLM budget matched to ReAct V2's eight proposer turns."""
+    return RLMBudget(
+        max_root_iterations=4,
+        max_child_iterations=2,
+        max_repl_calls=6,
+        max_llm_queries=2,
+        max_rlm_queries=1,
+        max_recursion_depth=1,
+        max_exec_seconds=5,
+        max_output_chars=4000,
+    )
+
+
+def _rlm_max_model_calls(budget: RLMBudget) -> int:
+    """Derive the root, child, and leaf model-call cap."""
+    return budget.max_model_calls
 
 
 def condition_run_dir(condition: str, program: str, tag: str = "", run_key: str = "") -> str:
@@ -96,9 +120,11 @@ def build_run_contract(condition: str, args) -> dict:
     family = resolve_template_family(args.template_family, args.solver_model)
     solver_api_base = args.solver_api_base if args.solver_api_base is not None else args.api_base
     reflection_api_base = args.reflection_api_base if args.reflection_api_base is not None else args.api_base
-    reflection_level = args.reflection_level if condition == "react_v2" else 0
-    edit_tool_set = args.edit_tool_set if condition == "react_v2" else None
+    operated = condition in ("react_v2", "rlm")
+    reflection_level = args.reflection_level if operated else 0
+    edit_tool_set = args.edit_tool_set if operated else None
     legacy_actions = args.actions if condition in ("random", "action") else None
+    rlm_budget = _rlm_budget() if condition == "rlm" else None
     return {
         "schema_version": 1,
         "benchmark": "hover-wikipedia",
@@ -116,6 +142,11 @@ def build_run_contract(condition: str, args) -> dict:
             "template_family": family,
             "reflection_level": reflection_level,
             "edit_tool_set": edit_tool_set,
+            "proposer_backend": condition if operated else "stateless",
+            "rlm_budget": asdict(rlm_budget) if rlm_budget is not None else None,
+            "max_proposer_model_calls": (
+                _rlm_max_model_calls(rlm_budget) if rlm_budget is not None else 8 if condition == "react_v2" else None
+            ),
             "semantic_action_space": semantic_action_catalog("prompt") if reflection_level == 2 else None,
             "semantic_controller_policy": controller_policy_contract() if reflection_level == 2 else None,
             "legacy_actions": legacy_actions,
@@ -352,6 +383,18 @@ def build_config(condition: str, args, reflection_lm_kwargs: dict, run_dir: str 
             edit_tool_set=args.edit_tool_set,
             template_family=args.template_family,
         )
+    elif condition == "rlm":
+        manifestor_kwargs = {**reflection_lm_kwargs, "temperature": 0}
+        reflection_strategy = ThreeRoleReflectionLM(
+            base_lm=LM(args.reflection_model, **reflection_lm_kwargs),
+            level=args.reflection_level,
+            edit_tool_set=args.edit_tool_set,
+            template_family=resolved_family,
+            manifestor_lm=LM(args.reflection_model, **manifestor_kwargs),
+            proposer_model=args.reflection_model,
+            proposer_backend="rlm",
+            rlm_budget=_rlm_budget(),
+        )
 
     config = GEPAConfig(
         engine=EngineConfig(
@@ -447,8 +490,8 @@ def main():
         "--condition",
         type=str,
         default="both",
-        choices=["vanilla", "react_v2", "random", "action", "all", "both"],
-        help="Which condition(s) to run",
+        choices=["vanilla", "react_v2", "rlm", "random", "action", "all", "both"],
+        help="Which condition(s) to run; rlm is an explicit trusted-model in-process ablation, not a security sandbox",
     )
     parser.add_argument(
         "--seed-style",
@@ -469,13 +512,13 @@ def main():
         type=int,
         default=2,
         choices=[1, 2],
-        help="ReAct V2 ablation rung: 1 selects a section; 2 also selects and manifests a semantic action",
+        help="Operated-proposer rung: 1 selects a section; 2 also selects and manifests a semantic action",
     )
     parser.add_argument(
         "--edit-tool-set",
         choices=["minimal", "broad"],
         default="broad",
-        help="ReAct V2 tool basis: insert/delete only, or insert/delete/replace/move",
+        help="Operator basis: insert/delete only, or insert/delete/replace/move; RLM requires broad",
     )
     parser.add_argument(
         "--template-family",
@@ -548,8 +591,13 @@ def main():
         conditions = [args.condition]
 
     resolved_family = resolve_template_family(args.template_family, args.solver_model)
-    if "react_v2" in conditions and args.seed_style != "structured":
-        parser.error("--condition react_v2 requires --seed-style structured")
+    operated_conditions = {"react_v2", "rlm"}.intersection(conditions)
+    if operated_conditions and args.seed_style != "structured":
+        parser.error(f"--condition {', '.join(sorted(operated_conditions))} requires --seed-style structured")
+    if "rlm" in conditions and args.edit_tool_set != "broad":
+        parser.error("--condition rlm requires --edit-tool-set broad")
+    if "rlm" in conditions and args.reflection_level != 2:
+        parser.error("--condition rlm requires --reflection-level 2")
 
     results = {}
     trackers: dict[str, ActionDiversityCallback] = {}
@@ -559,7 +607,7 @@ def main():
         ensure_wikipedia_run_contract(run_dir, run_contract)
         config, selector = build_config(condition, args, reflection_lm_kwargs, run_dir=run_dir)
         callbacks = None
-        if condition in ("react_v2", "random", "action"):
+        if condition in ("react_v2", "rlm", "random", "action"):
             trackers[condition] = ActionDiversityCallback()
             callbacks = [trackers[condition]]
         results[condition] = run_condition(

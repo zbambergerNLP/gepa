@@ -1,13 +1,14 @@
 # Copyright (c) 2025 Lakshya A Agrawal and the GEPA contributors
 # https://github.com/gepa-ai/gepa
 
-"""Three-role reflection strategy: Controller -> Manifestor -> ReAct V2.
+"""Three-role reflection strategy with ReAct V2 primary and explicit RLM ablation.
 
 The strategy changes only reflective mutation. GEPA's evaluator, Pareto search,
 acceptance, and merge behavior remain unchanged. Reflection level 0 delegates
 to vanilla GEPA. Level 1 selects a document region and lets ReAct V2 operate
 over the configured edit basis. Level 2 also selects a semantic action and uses
-the Manifestor to steer ReAct V2 through a provider-appropriate chat role.
+the Manifestor to steer the primary ReAct V2 workflow or the explicitly selected
+RLM proposer ablation.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import json
 import os
 import random
 from collections.abc import Mapping, Sequence
+from dataclasses import asdict
 from typing import Any
 
 from gepa.proposer.reflective_mutation.base import LanguageModel
@@ -31,6 +33,8 @@ from gepa.proposer.reflective_mutation.reflection_lm import (
     ReflectionProposal,
     StatelessReflectionLM,
 )
+from gepa.proposer.reflective_mutation.rlm_environment import RLMBudget
+from gepa.proposer.reflective_mutation.rlm_proposer import RLMProposer, rlm_protocol_contract
 from gepa.strategies.action_space import MAX_PROPOSAL_CHARS
 from gepa.strategies.document_template import TEMPLATE_FAMILIES, DocumentTemplate, MalformedDocumentError
 from gepa.strategies.edit_tools import EDIT_TOOL_SETS
@@ -48,6 +52,7 @@ from gepa.strategies.intervention import (
 MAX_HISTORY_TEXT_CHARS = 2000
 MAX_HISTORY_STEPS = 16
 MAX_HISTORY_EDIT_ENTRIES = 32
+PROPOSER_BACKENDS = frozenset({"react_v2", "rlm"})
 REFLECTION_RUN_CONTRACT_FILENAME = "reflection-run-contract.json"
 _SENSITIVE_CONFIG_KEYS = {
     "access_token",
@@ -179,6 +184,18 @@ def _react_chat_messages(steps: Sequence[Any]) -> list[dict[str, str]]:
     return messages
 
 
+def _bounded_chat_messages(messages: Sequence[Mapping[str, Any]]) -> list[dict[str, str]]:
+    """Bound a proposer's actual user/assistant messages for branch history."""
+    bounded: list[dict[str, str]] = []
+    for message in list(messages)[: 2 * MAX_HISTORY_STEPS]:
+        role = message.get("role")
+        content = message.get("content")
+        if role not in {"user", "assistant"} or not isinstance(content, str):
+            raise ValueError("Proposer chat messages must contain string user/assistant role and content fields.")
+        bounded.append({"role": role, "content": _bounded_history_text(content) or ""})
+    return bounded
+
+
 def _controller_sampling_record(history: Mapping[str, Any]) -> dict[str, Any]:
     """Copy Controller distribution and fallback provenance as JSON primitives."""
     probabilities = history.get("probs", {})
@@ -287,7 +304,7 @@ def _branch_history(metadata: Mapping[str, Any] | None) -> list[dict[str, str]]:
 
 
 class ThreeRoleReflectionLM:
-    """Controller/Manifestor/ReAct V2 reflection with explicit ablation levels.
+    """Controller/Manifestor reflection with selectable ReAct V2 or RLM proposer.
 
     Args:
         base_lm: Reflection model reused by the Controller and ReAct V2.
@@ -315,8 +332,14 @@ class ThreeRoleReflectionLM:
         manifestor_traces_chars: Trace budget for the Manifestor.
         proposer_model: Provider/model identifier used to route Manifestor
             steering. When omitted, ``base_lm.model`` is inspected.
+        proposer_backend: ``"react_v2"`` (the primary workflow) or ``"rlm"``
+            for the explicit recursive-language-model ablation. RLM currently
+            requires level 2 and the broad edit basis so every semantic action
+            remains coupled to one directly executable operator.
         react_max_iterations: Maximum ReAct assistant turns per component.
         react_max_tool_calls: Maximum valid calls in an atomic-basis proposal.
+        rlm_budget: Tree-wide RLM turn, REPL, delegation, recursion, execution,
+            and output limits. Used only by the RLM backend.
 
     Raises:
         ValueError: Configuration names or reflection level are invalid.
@@ -343,14 +366,27 @@ class ThreeRoleReflectionLM:
         manifestor_lm_run_identity: Mapping[str, Any] | None = None,
         manifestor_traces_chars: int | None = MAX_TRACES_CHARS,
         proposer_model: str | None = None,
+        proposer_backend: str = "react_v2",
         react_max_iterations: int = 8,
         react_max_tool_calls: int = 4,
+        rlm_budget: RLMBudget | None = None,
     ):
         """Validate and store strategy configuration."""
         if level not in (0, 1, 2):
             raise ValueError(f"reflection level must be 0, 1, or 2; got {level}")
         if edit_tool_set not in EDIT_TOOL_SETS:
             raise ValueError(f"edit_tool_set must be one of {sorted(EDIT_TOOL_SETS)}; got {edit_tool_set!r}")
+        if proposer_backend not in PROPOSER_BACKENDS:
+            raise ValueError(f"proposer_backend must be one of {sorted(PROPOSER_BACKENDS)}; got {proposer_backend!r}")
+        if proposer_backend == "rlm" and level != 2:
+            raise ValueError("proposer_backend='rlm' requires reflection level 2 so every edit has a coupled operator.")
+        if proposer_backend == "rlm" and edit_tool_set != "broad":
+            raise ValueError(
+                "proposer_backend='rlm' requires edit_tool_set='broad'; the RLM commits one coupled operation and "
+                "does not silently bypass minimal-basis multi-call lowering."
+            )
+        if rlm_budget is not None and not isinstance(rlm_budget, RLMBudget):
+            raise TypeError(f"rlm_budget must be an RLMBudget; got {type(rlm_budget).__name__}.")
         if template_family not in TEMPLATE_FAMILIES:
             raise ValueError(f"template_family must be one of {sorted(TEMPLATE_FAMILIES)}; got {template_family!r}")
         self.templates: dict[str, DocumentTemplate] = {**TEMPLATE_FAMILIES[template_family], **(templates or {})}
@@ -385,8 +421,10 @@ class ThreeRoleReflectionLM:
             inferred_model = model_attribute if isinstance(model_attribute, str) else None
         self.proposer_model = inferred_model
         self.manifestor_injection_site: InjectionSite = infer_manifestor_injection_site(inferred_model)
+        self.proposer_backend = proposer_backend
         self.react_max_iterations = react_max_iterations
         self.react_max_tool_calls = react_max_tool_calls
+        self.rlm_budget = RLMBudget(**asdict(rlm_budget)) if rlm_budget is not None else RLMBudget()
         self._stateless: StatelessReflectionLM | None = (
             StatelessReflectionLM(base_lm, reflection_prompt_template, logger) if level == 0 else None
         )
@@ -435,7 +473,7 @@ class ThreeRoleReflectionLM:
         unstable_roles = [
             role
             for role, identity in (
-                ("Controller/ReAct", controller_lm_identity),
+                ("Controller/Proposer", controller_lm_identity),
                 ("Manifestor", manifestor_lm_identity),
             )
             if identity is not None and identity["configuration_source"] in {"opaque", "partial"}
@@ -464,12 +502,29 @@ class ThreeRoleReflectionLM:
             ),
             "max_chars": self.max_chars,
             "manifestor_traces_chars": self.manifestor_traces_chars,
-            "manifestor_injection_site": self.manifestor_injection_site,
+            "manifestor_delivery": (
+                "provider_chat_role" if self.proposer_backend == "react_v2" else "rlm_prompt_guidance"
+            ),
+            "manifestor_injection_site": (
+                self.manifestor_injection_site if self.proposer_backend == "react_v2" else None
+            ),
             "proposer_model": self.proposer_model,
+            "proposer_backend": self.proposer_backend,
             "controller_react_lm": controller_lm_identity,
             "manifestor_lm": manifestor_lm_identity,
-            "react_max_iterations": self.react_max_iterations,
-            "react_max_tool_calls": self.react_max_tool_calls,
+            "max_proposer_model_calls": (
+                self.react_max_iterations if self.proposer_backend == "react_v2" else self.rlm_budget.max_model_calls
+            ),
+            "react_max_iterations": self.react_max_iterations if self.proposer_backend == "react_v2" else None,
+            "react_max_tool_calls": self.react_max_tool_calls if self.proposer_backend == "react_v2" else None,
+            "rlm": (
+                {
+                    "budget": asdict(self.rlm_budget),
+                    "protocol": rlm_protocol_contract(),
+                }
+                if self.proposer_backend == "rlm"
+                else None
+            ),
         }
 
     def validate_candidate(self, candidate: dict[str, str]) -> None:
@@ -611,7 +666,7 @@ class ThreeRoleReflectionLM:
         components_to_update: list[str],
         metadata: Mapping[str, Any] | None,
     ) -> tuple[ReflectionProposal, ThreeRoleReflectionLM]:
-        """Run Controller, optional Manifestor, and ReAct V2 per component.
+        """Run Controller, optional Manifestor, and the selected proposer per component.
 
         Args:
             candidate: Parent candidate.
@@ -697,23 +752,38 @@ class ThreeRoleReflectionLM:
                     intervention = manifestor.manifest(action, region_text, text, feedback, traces)
                 except ManifestationError as exc:
                     error = _bounded_history_text(exc)
+                    if self.proposer_backend == "react_v2":
+                        failed_proposer_record = {
+                            "react_iterations": 0,
+                            "react_tool_calls": 0,
+                            "react_steps": [],
+                            "react_steps_truncated": 0,
+                        }
+                    else:
+                        failed_proposer_record = {
+                            "rlm_iterations": 0,
+                            "rlm_repl_calls": 0,
+                            "rlm_llm_queries": 0,
+                            "rlm_recursive_queries": 0,
+                            "rlm_steps": [],
+                            "rlm_steps_truncated": 0,
+                        }
                     records.append(
                         {
-                            "backend": "react_v2",
+                            "backend": self.proposer_backend,
                             "component": name,
                             "edit_target": action.edit_target.label,
                             "preferred_edit_tool": preferred_edit_tool,
                             "intervention_spec": intervention_spec,
                             "manifested_intervention": "",
+                            "manifestor_delivery": (
+                                "provider_chat_role" if self.proposer_backend == "react_v2" else "rlm_prompt_guidance"
+                            ),
                             "inject_as": None,
                             "feedback": _bounded_history_text(feedback),
                             "controller_sampling": controller_sampling,
                             "manifestor_error": error,
                             "executed_edit": [],
-                            "react_iterations": 0,
-                            "react_tool_calls": 0,
-                            "react_steps": [],
-                            "react_steps_truncated": 0,
                             "chat_messages": [
                                 {
                                     "role": "user",
@@ -723,61 +793,105 @@ class ThreeRoleReflectionLM:
                             "dropped_reason": error,
                             "attempt_status": "dropped",
                             "tracking_id": _tracking_id(action),
+                            **failed_proposer_record,
                         }
                     )
                     dropped.append(name)
                     self._log(f"Component {name!r} dropped after Manifestor failure: {exc}")
                     continue
 
-            react = ReActV2Proposer(
-                self.base_lm,
-                template,
-                self.edit_tools,
-                max_iterations=self.react_max_iterations,
-                max_tool_calls=self.react_max_tool_calls,
-                logger=self.logger,
-            )
-            result = react.propose(
-                text,
-                action.edit_target,
-                action.edit_tool,
-                intervention,
-                feedback,
-                traces,
-                history,
-                self.max_chars,
-            )
+            manifested_text = intervention.text if intervention is not None else ""
+            if self.proposer_backend == "react_v2":
+                react = ReActV2Proposer(
+                    self.base_lm,
+                    template,
+                    self.edit_tools,
+                    max_iterations=self.react_max_iterations,
+                    max_tool_calls=self.react_max_tool_calls,
+                    logger=self.logger,
+                )
+                result = react.propose(
+                    text,
+                    action.edit_target,
+                    action.edit_tool,
+                    intervention,
+                    feedback,
+                    traces,
+                    history,
+                    self.max_chars,
+                )
+                proposer_record = {
+                    "react_iterations": result.iterations,
+                    "react_tool_calls": result.tool_calls,
+                    "react_steps": [
+                        {
+                            "turn": step.turn,
+                            "assistant": _bounded_history_text(step.assistant),
+                            "action": step.action,
+                            "observation": _bounded_history_text(step.observation),
+                            "error": _bounded_history_text(step.error),
+                            "executed_edit": _bounded_history_edits(step.executed_edit),
+                        }
+                        for step in result.steps[:MAX_HISTORY_STEPS]
+                    ],
+                    "react_steps_truncated": max(0, len(result.steps) - MAX_HISTORY_STEPS),
+                    "chat_messages": _react_chat_messages(result.steps),
+                }
+            else:
+                if action.edit_tool is None:
+                    raise ValueError("The level-2 Controller must couple every RLM action to one edit operator.")
+                rlm = RLMProposer(self.base_lm, template, budget=self.rlm_budget, logger=self.logger)
+                result = rlm.propose(
+                    text,
+                    action.edit_target,
+                    action.edit_tool,
+                    manifested_text,
+                    feedback,
+                    traces,
+                    self.max_chars,
+                    history,
+                )
+                proposer_record = {
+                    "rlm_iterations": result.iterations,
+                    "rlm_repl_calls": result.repl_calls,
+                    "rlm_llm_queries": result.llm_queries,
+                    "rlm_recursive_queries": result.rlm_queries,
+                    "rlm_steps": [
+                        {
+                            "iteration": step.iteration,
+                            "action": step.action,
+                            "code": _bounded_history_text(step.code),
+                            "stdout": _bounded_history_text(step.stdout),
+                            "error": _bounded_history_text(step.error),
+                            "child_calls": len(step.child_calls),
+                        }
+                        for step in result.steps[:MAX_HISTORY_STEPS]
+                    ],
+                    "rlm_steps_truncated": max(0, len(result.steps) - MAX_HISTORY_STEPS),
+                    "chat_messages": _bounded_chat_messages(result.chat_messages),
+                }
 
             record = {
-                "backend": "react_v2",
+                "backend": self.proposer_backend,
                 "component": name,
                 "edit_target": action.edit_target.label,
                 "preferred_edit_tool": preferred_edit_tool,
                 "intervention_spec": intervention_spec,
                 "manifested_intervention": _bounded_history_text(intervention.text) if intervention is not None else "",
-                "inject_as": intervention.inject_as if intervention is not None else None,
+                "manifestor_delivery": (
+                    "provider_chat_role" if self.proposer_backend == "react_v2" else "rlm_prompt_guidance"
+                ),
+                "inject_as": (
+                    intervention.inject_as if intervention is not None and self.proposer_backend == "react_v2" else None
+                ),
                 "feedback": _bounded_history_text(feedback),
                 "controller_sampling": controller_sampling,
                 "manifestor_error": None,
                 "executed_edit": _bounded_history_edits(result.executed_edit),
-                "react_iterations": result.iterations,
-                "react_tool_calls": result.tool_calls,
-                "react_steps": [
-                    {
-                        "turn": step.turn,
-                        "assistant": _bounded_history_text(step.assistant),
-                        "action": step.action,
-                        "observation": _bounded_history_text(step.observation),
-                        "error": _bounded_history_text(step.error),
-                        "executed_edit": _bounded_history_edits(step.executed_edit),
-                    }
-                    for step in result.steps[:MAX_HISTORY_STEPS]
-                ],
-                "react_steps_truncated": max(0, len(result.steps) - MAX_HISTORY_STEPS),
-                "chat_messages": _react_chat_messages(result.steps),
                 "dropped_reason": _bounded_history_text(result.dropped_reason),
                 "attempt_status": "completed" if result.changed else "dropped",
                 "tracking_id": _tracking_id(action),
+                **proposer_record,
             }
             records.append(record)
 
@@ -795,12 +909,13 @@ class ThreeRoleReflectionLM:
                 {
                     "action": primary["tracking_id"],
                     "reflection_level": self.level,
-                    "proposer_backend": "react_v2",
+                    "proposer_backend": self.proposer_backend,
                     "edit_target": primary["edit_target"],
                     "edit_tool": primary["preferred_edit_tool"],
                     "preferred_edit_tool": primary["preferred_edit_tool"],
                     "intervention_spec": primary["intervention_spec"],
                     "manifested_intervention": primary["manifested_intervention"],
+                    "manifestor_delivery": primary["manifestor_delivery"],
                     "executed_edit": primary["executed_edit"],
                     "controller_sampling": primary["controller_sampling"],
                     "branch_history_length": len(history),
@@ -810,7 +925,7 @@ class ThreeRoleReflectionLM:
                 }
             )
         if dropped:
-            proposal.metadata["react_v2_dropped"] = dropped
+            proposal.metadata[f"{self.proposer_backend}_dropped"] = dropped
             proposal.metadata["length_capped_dropped"] = dropped
         return proposal, self
 

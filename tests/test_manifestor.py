@@ -66,23 +66,20 @@ def action(spec: InterventionSpec | None = SPEC) -> ControllerAction:
 
 
 @pytest.mark.parametrize(
-    ("model", "expected"),
+    "model",
     [
-        pytest.param("openai/gpt-5.6", "developer", id="openai_prefix"),
-        pytest.param("gpt-4.1", "developer", id="bare_gpt"),
-        pytest.param("openai/o3", "developer", id="openai_o_series"),
-        pytest.param("anthropic/claude-sonnet-4-5", "user", id="claude"),
-        pytest.param("claude-opus-4-1", "user", id="bare_claude"),
-        pytest.param("deepseek/deepseek-v4-flash", "user", id="portable_fallback"),
-        pytest.param(None, "user", id="custom_callable_fallback"),
+        pytest.param("openai/gpt-5.6", id="openai_prefix"),
+        pytest.param("gpt-4.1", id="bare_gpt"),
+        pytest.param("openai/o3", id="openai_o_series"),
+        pytest.param("anthropic/claude-sonnet-4-5", id="claude"),
+        pytest.param("claude-opus-4-1", id="bare_claude"),
+        pytest.param("deepseek/deepseek-v4-flash", id="portable_fallback"),
+        pytest.param(None, id="custom_callable_fallback"),
     ],
 )
-def test_provider_routing_uses_developer_for_openai_and_user_elsewhere(
-    model: str | None,
-    expected: str,
-) -> None:
-    """Apply the meeting's provider-specific steering-role decision."""
-    assert infer_manifestor_injection_site(model) == expected
+def test_provider_routing_always_uses_a_portable_user_message(model: str | None) -> None:
+    """Route manifested steering through the user role for every provider."""
+    assert infer_manifestor_injection_site(model) == "user"
 
 
 def test_level1_action_skips_manifestation() -> None:
@@ -107,9 +104,9 @@ def test_fixed_text_skips_lm_and_honors_provider_override() -> None:
 
 
 def test_instruction_spec_is_manifested_once_with_full_grounding() -> None:
-    """Give the Manifestor the action, document, selected region, feedback, and traces."""
+    """Use default user steering grounded in the action, document, feedback, and traces."""
     lm = RecordingLM()
-    result = Manifestor(lm, inject_as="user").manifest(
+    result = Manifestor(lm).manifest(
         action(),
         region_text="- be accurate",
         full_text="## Role\nhelper\n\n## Rules\n- be accurate",
@@ -156,7 +153,7 @@ def test_empty_visible_manifestation_is_retried_once() -> None:
     """Recover from a think-only first reply without sending empty steering."""
     lm = SequenceLM(["<think>private only</think>", "Use the feedback to make the rule precise."])
     result = Manifestor(lm).manifest(action(), "region", "full", "feedback", "traces")
-    assert result == Intervention("Use the feedback to make the rule precise.", "assistant_reasoning")
+    assert result == Intervention("Use the feedback to make the rule precise.", "user")
     assert len(lm.calls) == 2
     assert "previous reply contained no visible steering text" in lm.calls[1].lower()
 

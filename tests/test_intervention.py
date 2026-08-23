@@ -13,7 +13,6 @@ from gepa.strategies.intervention import (
     INJECTION_SITES,
     SEMANTIC_ACTIONS,
     Controller,
-    ControllerAction,
     Intervention,
     InterventionSpec,
     build_controller_menu,
@@ -92,10 +91,10 @@ def test_semantic_action_catalog_persists_the_full_ordered_contract() -> None:
     ]
     assert all(action["description"] and action["instruction"] for action in catalog["actions"])
     assert all(action["fixed_text"] is None for action in catalog["actions"])
-    assert all(action["inject_as"] == "assistant_reasoning" for action in catalog["actions"])
+    assert all(action["inject_as"] == "user" for action in catalog["actions"])
     assert [action["name"] for action in catalog["actions"] if action["allow_whole_document"]] == ["relocate"]
     assert semantic_action_catalog("skill")["actions"] == catalog["actions"]
-    assert controller_policy_contract()["factorization"] == "P(region) * P(action | region)"
+    assert controller_policy_contract()["factorization"] == "P(region, action)"
     assert controller_policy_contract()["exploration_epsilon"] == pytest.approx(0.1)
 
 
@@ -199,9 +198,9 @@ def test_level1_menu_is_independent_of_atomic_basis_size() -> None:
     assert [action.menu_id for action in minimal] == [action.menu_id for action in broad]
 
 
-def test_level2_factors_region_then_operator_coupled_semantic_action() -> None:
-    """Expose each region and conditional action once instead of their product."""
-    region_menu = build_controller_menu(
+def test_level2_jointly_selects_region_and_operator_coupled_semantic_action() -> None:
+    """Expose every applicable region/action pair in one Controller menu."""
+    menu = build_controller_menu(
         PROMPT_TEMPLATE,
         "sys",
         EDIT_TOOL_SETS["broad"],
@@ -209,14 +208,16 @@ def test_level2_factors_region_then_operator_coupled_semantic_action() -> None:
         rng=random.Random(0),
         max_menu=999,
     )
-    assert len(region_menu) == len(PROMPT_TEMPLATE.edit_targets("sys"))
-    assert all(action.intervention_spec is None for action in region_menu)
-    local = next(action for action in region_menu if action.edit_target.section == "Rules")
-    whole = next(action for action in region_menu if action.edit_target.section is None)
-    assert len(local.semantic_options) == len(SEMANTIC_ACTIONS)
-    assert [spec.name for spec in whole.semantic_options] == ["relocate"]
-    assert "relocate/MOVE_TEXT" in whole.menu_description
-    assert "rephrase/REPLACE_TEXT" not in whole.menu_description
+    expected_count = len(PROMPT_TEMPLATE.sections) * len(SEMANTIC_ACTIONS) + 1
+    assert len(menu) == expected_count
+    assert len({action.menu_id for action in menu}) == expected_count
+    assert all(action.intervention_spec is not None for action in menu)
+    local = [action for action in menu if action.edit_target.section == "Rules"]
+    whole = [action for action in menu if action.edit_target.section is None]
+    assert [action.intervention_spec.name for action in local if action.intervention_spec] == [
+        spec.name for spec in SEMANTIC_ACTIONS
+    ]
+    assert [action.intervention_spec.name for action in whole if action.intervention_spec] == ["relocate"]
 
     action_menu = build_semantic_action_menu(PROMPT_TEMPLATE, EditTarget("sys", "Rules"))
     assert len(action_menu) == len(SEMANTIC_ACTIONS)
@@ -230,8 +231,8 @@ def test_level2_factors_region_then_operator_coupled_semantic_action() -> None:
     assert [action.intervention_spec.name for action in whole_menu if action.intervention_spec] == ["relocate"]
 
 
-def test_default_gpt56_controller_avoids_the_cartesian_menu() -> None:
-    """Keep all nine regions while scoring actions only after region sampling."""
+def test_default_gpt56_controller_builds_the_complete_joint_menu() -> None:
+    """Score every applicable region/action pair in the single Controller pass."""
     template = TEMPLATE_FAMILIES["openai-gpt-5.6"]["prompt"]
     menu = build_controller_menu(
         template,
@@ -241,8 +242,8 @@ def test_default_gpt56_controller_avoids_the_cartesian_menu() -> None:
         rng=random.Random(0),
     )
 
-    expected_count = len(template.sections) + 1
-    assert len(menu) == expected_count == 9
+    expected_count = len(template.sections) * len(SEMANTIC_ACTIONS) + 1
+    assert len(menu) == expected_count == 105
     assert len({action.menu_id for action in menu}) == expected_count
 
 
@@ -265,10 +266,7 @@ def test_level2_semantic_menu_does_not_disappear_under_minimal_basis() -> None:
         max_menu=999,
     )
     assert [action.menu_id for action in minimal] == [action.menu_id for action in broad]
-    target = EditTarget("sys", "Rules")
-    assert any(
-        action.edit_tool is EditTool.REPLACE_TEXT for action in build_semantic_action_menu(PROMPT_TEMPLATE, target)
-    )
+    assert any(action.edit_tool is EditTool.REPLACE_TEXT for action in minimal)
 
 
 def test_unknown_kind_level2_fails_before_manifestation() -> None:
@@ -286,7 +284,13 @@ def test_unknown_kind_level2_fails_before_manifestation() -> None:
 
 def test_controller_maps_verbalized_pick_back_to_semantic_action() -> None:
     """Return the rich action selected through the stand-in action menu."""
-    menu = build_semantic_action_menu(PROMPT_TEMPLATE, EditTarget("sys", "Rules"))
+    menu = build_controller_menu(
+        PROMPT_TEMPLATE,
+        "sys",
+        EDIT_TOOL_SETS["broad"],
+        2,
+        rng=random.Random(0),
+    )
     lm = VotingLM("summarize@Rules/")
     controller = Controller(menu, lm, rng=random.Random(0))
     controller.set_context(PROMPT, "The answer repeats itself.")

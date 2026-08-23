@@ -152,6 +152,10 @@ def test_branch_history_is_externalized_as_user_assistant_json_and_attempt_is_re
     assert result.chat_messages[1]["role"] == "user"
     assert serialized in result.chat_messages[1]["content"]
     assert result.chat_messages[2] == {"role": "assistant", "content": edit_turn}
+    assert result.chat_messages[3] == {
+        "role": "user",
+        "content": "OK: REPLACE_TEXT applied.\nExecuted edit:\nDELETE 'be nice'\nINSERT 'be kind'",
+    }
 
 
 def test_branch_history_over_cap_is_a_fatal_context_error_before_model_use() -> None:

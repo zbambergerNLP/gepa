@@ -72,7 +72,7 @@ def test_planned_model_roles_build_without_running_an_experiment() -> None:
     }
 
 
-def test_openai_proposer_routes_manifestor_to_developer_role() -> None:
+def test_openai_proposer_routes_manifestor_to_portable_user_message() -> None:
     strategy, _ = build_react_v2_strategy(
         reflection_model="openai/gpt-5.6",
         task_model="hosted_vllm/Qwen3.8",
@@ -82,7 +82,7 @@ def test_openai_proposer_routes_manifestor_to_developer_role() -> None:
         template_family="auto",
     )
 
-    assert strategy.manifestor_injection_site == "developer"
+    assert strategy.manifestor_injection_site == "user"
 
 
 def _hotpot_args(**overrides):

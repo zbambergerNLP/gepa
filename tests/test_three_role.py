@@ -307,7 +307,8 @@ def test_three_role_run_contract_blocks_catalog_or_policy_drift(tmp_path: Path) 
     """Make direct API resumes as strict as the benchmark harnesses."""
     strat, _ = strategy(2)
     contract = strat.run_contract({"sys": PROMPT})
-    assert contract["controller"]["factorization"] == "P(region) * P(action | region)"
+    assert contract["controller"]["version"] == 2
+    assert contract["controller"]["factorization"] == "P(region, action)"
     assert len(contract["semantic_action_spaces"]["prompt"]["actions"]) == 13
     assert contract["reflection_prompt_template"] is None
     assert contract["controller_react_lm"]["configuration_source"] == "explicit"
@@ -434,7 +435,7 @@ def test_rlm_backend_runs_controller_manifestor_and_retains_branch_chat() -> Non
     )
 
     assert proposal.new_texts["sys"] != PROMPT
-    assert lm.roles == ["controller", "controller", "manifestor", "rlm", "rlm"]
+    assert lm.roles == ["controller", "manifestor", "rlm", "rlm"]
     assert "parent-assistant-marker" not in lm.rlm_calls[0]
     assert "parent-assistant-marker" in lm.rlm_calls[1]
     assert proposal.metadata["proposer_backend"] == "rlm"
@@ -450,6 +451,8 @@ def test_rlm_backend_runs_controller_manifestor_and_retains_branch_chat() -> Non
     assert record["chat_messages"][0] == {"role": "assistant", "content": python_turn}
     assert record["chat_messages"][1]["role"] == "user"
     assert record["chat_messages"][2] == {"role": "assistant", "content": edit_turn}
+    assert record["chat_messages"][3]["role"] == "user"
+    assert record["chat_messages"][3]["content"].startswith("OK: REPLACE_TEXT applied.")
     assert proposal.metadata["revision_records"] == [record]
 
 
@@ -458,7 +461,7 @@ def test_level2_selects_semantic_action_manifests_and_executes_one_direct_call()
     strat, lm = strategy(2)
     proposal, _ = strat.reflect({"sys": PROMPT}, reflective_dataset("sys"), ["sys"])
     assert proposal.new_texts["sys"] != PROMPT
-    assert lm.roles == ["controller", "controller", "manifestor", "react_v2"]
+    assert lm.roles == ["controller", "manifestor", "react_v2"]
     assert proposal.metadata["intervention_spec"] == "rephrase"
     assert proposal.metadata["preferred_edit_tool"] == "REPLACE_TEXT"
     assert proposal.metadata["manifested_intervention"]
@@ -468,17 +471,13 @@ def test_level2_selects_semantic_action_manifests_and_executes_one_direct_call()
     assert record["react_steps"][0]["action"] == "REPLACE_TEXT"
     sampling = proposal.metadata["controller_sampling"]
     assert sampling["sampled"] == ["rephrase@Rules/REPLACE_TEXT"]
-    assert len(sampling["probs"]) == 13
+    assert len(sampling["probs"]) == 92
     assert sampling["probs"]["rephrase@Rules/REPLACE_TEXT"] == pytest.approx(0.99)
     assert sampling["fallback"] is False
-    assert sampling["policy"] == "region_then_action_v1"
+    assert sampling["policy"] == "joint_region_action_v2"
     assert sampling["sampling_policy"] == "full_distribution_uniform_mixture"
     assert sampling["exploration_epsilon"] == pytest.approx(0.1)
-    assert sampling["region"]["sampled"] == ["EDIT@Rules"]
-    assert sampling["action"]["sampled"] == ["rephrase@Rules/REPLACE_TEXT"]
-    assert sampling["joint_sampling_probability"] == pytest.approx(
-        sampling["region"]["sampled_probabilities"][0] * sampling["action"]["sampled_probabilities"][0]
-    )
+    assert sampling["joint_sampling_probability"] == pytest.approx(sampling["sampled_probabilities"][0])
     assert sampling["joint_sampling_probability"] > 0
     assert record["controller_sampling"] == sampling
 
@@ -522,34 +521,32 @@ def test_skill_component_is_independently_sectioned_and_editable() -> None:
     after = TEMPLATES["skill"].parse(proposal.new_texts["skill"])
     assert after["Name"] == before["Name"]
     assert after["Instructions"] != before["Instructions"]
-    assert all("document component" in prompt for prompt in lm.string_calls[:2])
-    assert all("improve a prompt" not in prompt for prompt in lm.string_calls[:2])
+    assert "document component" in lm.string_calls[0]
+    assert "improve a prompt" not in lm.string_calls[0]
 
 
 @pytest.mark.parametrize(
-    ("model", "expected_role"),
+    "model",
     [
-        pytest.param("openai/gpt-5.6", "developer", id="openai"),
-        pytest.param("anthropic/claude-sonnet-4-5", "user", id="claude"),
+        pytest.param("openai/gpt-5.6", id="openai"),
+        pytest.param("anthropic/claude-sonnet-4-5", id="claude"),
     ],
 )
-def test_manifestor_steering_reaches_react_in_provider_role(model: str, expected_role: str) -> None:
-    """Use developer messages for OpenAI and user messages for Claude."""
+def test_manifestor_steering_reaches_react_as_a_portable_user_message(model: str) -> None:
+    """Use the same user-message steering route for every provider."""
     lm = ThreeRoleLM(list(DIRECT_REPHRASE_REPLIES), model=model)
     strat, _ = strategy(2, lm=lm)
     proposal, _ = strat.reflect({"sys": PROMPT}, reflective_dataset("sys"), ["sys"])
     record = proposal.metadata["three_role_actions"][0]
-    assert record["inject_as"] == expected_role
+    assert record["inject_as"] == "user"
+    assert record["manifestor_delivery"] == "user_message"
     first_messages = lm.react_calls[0]
-    if expected_role == "developer":
-        assert any(message["role"] == "developer" for message in first_messages)
-    else:
-        assert [message["role"] for message in first_messages] == ["system", "user"]
-        assert first_messages[-1]["content"].startswith(record["manifested_intervention"])
+    assert [message["role"] for message in first_messages] == ["system", "user"]
+    assert first_messages[-1]["content"].startswith(record["manifested_intervention"])
 
 
-def test_tracking_wrapper_preserves_openai_provider_routing() -> None:
-    """Keep wrapped callable model metadata visible to the Manifestor router."""
+def test_tracking_wrapper_preserves_portable_manifestor_routing() -> None:
+    """Keep user-message steering when the proposer callable is wrapped."""
     base = ThreeRoleLM(list(DIRECT_REPHRASE_REPLIES), model="openai/gpt-5.6")
     wrapped = TrackingLM(base)
     strat = ThreeRoleReflectionLM(wrapped, level=2, rng=random.Random(0))
@@ -557,8 +554,8 @@ def test_tracking_wrapper_preserves_openai_provider_routing() -> None:
     proposal, _ = strat.reflect({"sys": PROMPT}, reflective_dataset("sys"), ["sys"])
 
     assert wrapped.model == "openai/gpt-5.6"
-    assert proposal.metadata["three_role_actions"][0]["inject_as"] == "developer"
-    assert any(message["role"] == "developer" for message in base.react_calls[0])
+    assert proposal.metadata["three_role_actions"][0]["inject_as"] == "user"
+    assert [message["role"] for message in base.react_calls[0]] == ["system", "user"]
 
 
 def test_separate_manifestor_lm_receives_only_manifestation_call() -> None:
@@ -579,7 +576,7 @@ def test_think_only_manifestation_retries_then_runs_react() -> None:
     proposal, _ = strat.reflect({"sys": PROMPT}, reflective_dataset("sys"), ["sys"])
     assert proposal.new_texts["sys"] != PROMPT
     assert len(manifestor.calls) == 2
-    assert base.roles == ["controller", "controller", "react_v2"]
+    assert base.roles == ["controller", "react_v2"]
     assert proposal.metadata["manifested_intervention"] == "Make the vague rule exact."
 
 
@@ -591,7 +588,7 @@ def test_repeated_empty_manifestation_is_recorded_as_a_dropped_attempt() -> None
     proposal, _ = strat.reflect({"sys": PROMPT}, reflective_dataset("sys"), ["sys"])
     assert proposal.new_texts == {}
     assert len(manifestor.calls) == 2
-    assert base.roles == ["controller", "controller"]
+    assert base.roles == ["controller"]
     assert proposal.metadata["revision_records"] == []
     assert proposal.metadata["attempt_records"] == proposal.metadata["three_role_actions"]
     record = proposal.metadata["attempt_records"][0]

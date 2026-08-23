@@ -276,9 +276,10 @@ def test_persisted_history_contains_only_user_assistant_content_messages() -> No
     assert all(isinstance(message["content"], str) for message in history)
 
 
-def test_persisted_chat_messages_are_bounded_and_json_serializable() -> None:
-    """Bound each actual turn while leaving total-history overflow explicit to ReAct."""
+def test_persisted_chat_messages_are_lossless_and_json_serializable() -> None:
+    """Preserve every actual turn so proposer-level total-history guards can fail explicitly."""
     state = GEPAState({"sys": "seed"}, evaluation())
+    assistant_attempt = "x" * 5000
     child = accept(
         state,
         [0],
@@ -287,7 +288,7 @@ def test_persisted_chat_messages_are_bounded_and_json_serializable() -> None:
             "attempt_records": [
                 {
                     "chat_messages": [
-                        {"role": "assistant", "content": "x" * 5000},
+                        {"role": "assistant", "content": assistant_attempt},
                         {"role": "user", "content": "tool observation"},
                     ]
                 }
@@ -295,8 +296,7 @@ def test_persisted_chat_messages_are_bounded_and_json_serializable() -> None:
         },
     )
     history = state.revision_history_for_candidate(child)
-    assert len(history[0]["content"]) <= 2048
-    assert history[0]["content"].endswith("chars)")
+    assert history[0] == {"role": "assistant", "content": assistant_attempt}
     json.dumps(history)
 
 

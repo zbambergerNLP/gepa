@@ -719,17 +719,8 @@ def test_finish_before_a_changing_tool_call_is_rejected() -> None:
     assert "Cannot finish" in result.steps[0].observation
 
 
-def test_provider_routed_interventions_use_real_chat_roles() -> None:
-    """Keep OpenAI steering as developer and Claude/fallback steering as user."""
-    developer_lm = ScriptedLM([tool_call(EditTool.REPLACE_TEXT, target="be nice", text="be kind")])
-    run(
-        developer_lm,
-        preferred_tool=EditTool.REPLACE_TEXT,
-        intervention=Intervention("Developer steering", "developer"),
-    )
-    developer_messages = developer_lm.calls[0]
-    assert developer_messages[1] == {"role": "developer", "content": "Developer steering"}
-
+def test_manifestor_steering_is_delivered_in_the_current_user_message() -> None:
+    """Keep portable Manifestor steering coupled to the current editing task."""
     user_lm = ScriptedLM([tool_call(EditTool.REPLACE_TEXT, target="be nice", text="be kind")])
     run(
         user_lm,

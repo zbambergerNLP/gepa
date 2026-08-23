@@ -58,24 +58,49 @@ class ActionDiversityCallback:
         return metadata.get("action")
 
     def on_proposal_end(self, event: ProposalEndEvent) -> None:
-        """Record the proposed instruction and its action (if present)."""
+        """Record the proposed instruction and its action (if present).
+
+        A length-capped attempt reaches here with empty ``new_instructions`` (#7):
+        it still counts toward the action's proposal total, but contributes no
+        text to the diversity metrics (an empty string would read as maximally
+        dissimilar and inflate them).
+
+        Args:
+            event: The proposal-end event; its ``metadata["action"]`` names the
+                action credited with the proposal.
+        """
         self._current_iteration = event["iteration"]
         new_instructions = event["new_instructions"]
 
         action_name = self._action_from_event(event)
         if action_name:
             self.action_proposal_counts[action_name] += 1
-            # Store the concatenated instruction text for diversity analysis.
-            self.action_texts[action_name].append(" ".join(new_instructions.values()))
+            if new_instructions:
+                # Store the concatenated instruction text for diversity analysis.
+                self.action_texts[action_name].append(" ".join(new_instructions.values()))
 
         # Collect all sibling texts within this iteration for diversity.
-        self._iteration_texts[self._current_iteration].append(" ".join(new_instructions.values()))
+        if new_instructions:
+            self._iteration_texts[self._current_iteration].append(" ".join(new_instructions.values()))
 
     def on_candidate_accepted(self, event: CandidateAcceptedEvent) -> None:
-        """Attribute the acceptance to the action recorded on the event."""
+        """Attribute the acceptance and its score delta to the event's action.
+
+        Accepted and rejected proposals both feed ``action_score_deltas``, so the
+        field captures each action's full outcome rather than only its rejections.
+        ``old_score`` is tolerated as optional for legacy/synthetic events.
+
+        Args:
+            event: The acceptance event; ``metadata["action"]`` names the action
+                and ``new_score - old_score`` is the recorded delta.
+        """
         action_name = self._action_from_event(event)
-        if action_name:
-            self.action_acceptance_counts[action_name] += 1
+        if not action_name:
+            return
+        self.action_acceptance_counts[action_name] += 1
+        old_score = event.get("old_score")
+        if old_score is not None:
+            self.action_score_deltas[action_name].append(event["new_score"] - old_score)
 
     def on_candidate_rejected(self, event: CandidateRejectedEvent) -> None:
         """Attribute the rejection to the action recorded on the event."""

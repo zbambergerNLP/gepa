@@ -23,6 +23,7 @@ class GEPAResult(Generic[RolloutOutput, DataId]):
         val_aggregate_scores: Per-candidate average validation score (higher is better).
         candidates: All candidates explored during optimization.
         parents: Lineage — ``parents[i]`` is a list of parent indices for candidate ``i``.
+        revision_histories: User/assistant edit transcript for each candidate branch.
         per_val_instance_best_candidates: Pareto frontier — per validation example,
             the set of candidate indices achieving the best score.
         best_refiner_prompt: The refiner prompt from the best candidate (if refiner was enabled).
@@ -44,6 +45,7 @@ class GEPAResult(Generic[RolloutOutput, DataId]):
     val_subscores: list[dict[DataId, float]]
     per_val_instance_best_candidates: dict[DataId, set[ProgramIdx]]
     discovery_eval_counts: list[int]
+    revision_histories: list[list[dict[str, Any]]] | None = None
     val_aggregate_subscores: list[dict[str, float]] | None = None
     per_objective_best_candidates: dict[str, set[ProgramIdx]] | None = None
     objective_pareto_front: dict[str, float] | None = None
@@ -61,7 +63,7 @@ class GEPAResult(Generic[RolloutOutput, DataId]):
     # This is the internal dict key used to wrap str seed_candidates.
     _str_candidate_key: str | None = None
 
-    _VALIDATION_SCHEMA_VERSION: ClassVar[int] = 2
+    _VALIDATION_SCHEMA_VERSION: ClassVar[int] = 3
 
     # -------- Convenience properties --------
     @property
@@ -124,6 +126,7 @@ class GEPAResult(Generic[RolloutOutput, DataId]):
         return {
             "candidates": cands,
             "parents": self.parents,
+            "revision_histories": self.revision_histories,
             "val_aggregate_scores": self.val_aggregate_scores,
             "val_subscores": self.val_subscores,
             "best_outputs_valset": self.best_outputs_valset,
@@ -166,6 +169,9 @@ class GEPAResult(Generic[RolloutOutput, DataId]):
         return {
             "candidates": [dict(candidate) for candidate in d.get("candidates", [])],
             "parents": [list(parent_row) for parent_row in d.get("parents", [])],
+            "revision_histories": [[dict(record) for record in history] for history in d.get("revision_histories", [])]
+            if d.get("revision_histories") is not None
+            else None,
             "val_aggregate_scores": list(d.get("val_aggregate_scores", [])),
             "discovery_eval_counts": list(d.get("discovery_eval_counts", [])),
             "total_metric_calls": d.get("total_metric_calls"),
@@ -253,6 +259,9 @@ class GEPAResult(Generic[RolloutOutput, DataId]):
         return GEPAResult(
             candidates=list(state.program_candidates),
             parents=list(state.parent_program_for_candidate),
+            revision_histories=[
+                state.revision_history_for_candidate(index) for index in range(len(state.program_candidates))
+            ],
             val_aggregate_scores=list(state.program_full_scores_val_set),
             best_outputs_valset=getattr(state, "best_outputs_valset", None),
             val_subscores=[dict(scores) for scores in state.prog_candidate_val_subscores],

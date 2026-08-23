@@ -3,6 +3,9 @@
 
 """Tests for the ReflectionLM protocol and StatelessReflectionLM (#329 Phase 1)."""
 
+import pytest
+
+from gepa.proposer.reflective_mutation.react_v2_proposer import ReActV2ContextError
 from gepa.proposer.reflective_mutation.reflection_lm import (
     ReflectionLM,
     ReflectionProposal,
@@ -214,6 +217,90 @@ def test_reflect_only_strategy_used_per_task_in_batch_path():
     assert [r[0] for r in results] == [{"c": "new_c"}, {"c": "new_c"}]
 
 
+def test_reflect_only_batch_fallback_forwards_aligned_metadata() -> None:
+    """Keep each branch history aligned when only reflect() is available."""
+
+    class _MetadataReflectOnlyLM:
+        def __init__(self):
+            self.metadatas = []
+
+        def reflect(self, candidate, reflective_dataset, components_to_update, *, metadata=None):
+            self.metadatas.append(metadata)
+            return ReflectionProposal(new_texts={"c": candidate["c"] + "!"}), self
+
+    strategy = _MetadataReflectOnlyLM()
+    proposer = _make_proposer(reflection_strategy=strategy)
+    jobs = [
+        ({"c": "left"}, {"c": [{"feedback": "f1"}]}, ["c"]),
+        ({"c": "right"}, {"c": [{"feedback": "f2"}]}, ["c"]),
+    ]
+    metadatas = [
+        {"branch_edit_history": [{"role": "user", "content": "left-only"}]},
+        {"branch_edit_history": [{"role": "user", "content": "right-only"}]},
+    ]
+    proposer._propose_texts_batch(jobs, metadatas)
+    assert strategy.metadatas == metadatas
+
+
+def test_react_context_error_is_not_retried_or_swallowed() -> None:
+    """Propagate deterministic branch-history overflow as an explicit failure."""
+
+    class _OverflowLM:
+        def __init__(self):
+            self.calls = 0
+
+        def reflect(self, candidate, reflective_dataset, components_to_update, *, metadata=None):
+            self.calls += 1
+            raise ReActV2ContextError("branch history overflow")
+
+    strategy = _OverflowLM()
+    proposer = _make_proposer(reflection_strategy=strategy)
+    jobs = [
+        ({"c": "left"}, {"c": [{"feedback": "f1"}]}, ["c"]),
+        ({"c": "right"}, {"c": [{"feedback": "f2"}]}, ["c"]),
+    ]
+    with pytest.raises(ReActV2ContextError, match="branch history overflow"):
+        proposer._propose_texts_batch_safe(jobs, [{}, {}])
+    assert strategy.calls == 1
+
+
+def test_engine_propagates_react_context_error_when_other_errors_are_nonfatal() -> None:
+    """Do not convert deterministic ReAct context overflow into an empty iteration."""
+    import gepa
+    from gepa.core.adapter import EvaluationBatch
+
+    class _Adapter:
+        propose_new_texts = None
+
+        def evaluate(self, batch, candidate, capture_traces=False):
+            return EvaluationBatch(
+                outputs=["o"] * len(batch),
+                scores=[0.5] * len(batch),
+                trajectories=[{"trace": 1}] * len(batch) if capture_traces else None,
+                objective_scores=None,
+                num_metric_calls=len(batch),
+            )
+
+        def make_reflective_dataset(self, candidate, eval_batch, components):
+            return {component: [{"Feedback": "f"}] for component in components}
+
+    class _OverflowLM:
+        def reflect(self, candidate, reflective_dataset, components_to_update, *, metadata=None):
+            raise ReActV2ContextError("history cannot fit")
+
+    with pytest.raises(ReActV2ContextError, match="history cannot fit"):
+        gepa.optimize(
+            seed_candidate={"c": "seed"},
+            trainset=[{"q": 1}],
+            valset=[{"q": 1}],
+            adapter=_Adapter(),
+            reflection_strategy=_OverflowLM(),
+            max_metric_calls=5,
+            display_progress_bar=False,
+            raise_on_exception=False,
+        )
+
+
 def test_reflection_strategy_receives_public_prompt_template():
     """Strategies that opt in to template binding must see the public API
     value, instead of silently falling back to their own generic default."""
@@ -327,6 +414,65 @@ def test_nonempty_new_texts_still_produces_a_proposal():
     assert len(proposals) == 1
     assert proposals[0].candidate["c"] == "improved"
     assert adapter.batch_evaluate.call_count == 2  # parent stage + child stage
+
+
+def test_length_capped_empty_proposal_still_fires_on_proposal_end() -> None:
+    """Test that a proposal emptied by the length cap still reaches on_proposal_end (#7).
+
+    No child is evaluated (empty new_texts), but the attempt is counted so an
+    action's acceptance rate is not silently inflated by vanished attempts.
+    """
+    from gepa.core.callbacks import GEPACallback
+
+    events: list[dict] = []
+
+    class _Recorder(GEPACallback):
+        """Callback that records every on_proposal_end event."""
+
+        def on_proposal_end(self, event):
+            events.append(event)
+
+    class _CappedLM(_FixedProposalLM):
+        """ReflectionLM stub whose proposal is emptied by the length cap."""
+
+        def reflect(self, candidate, reflective_dataset, components_to_update):
+            return (
+                ReflectionProposal(
+                    new_texts={},
+                    metadata={
+                        "action": "add_constraint",
+                        "length_capped_dropped": ["c"],
+                        "attempt_records": [
+                            {
+                                "component": "c",
+                                "assistant": "attempted edit",
+                                "action": "INSERT_TEXT",
+                                "observation": "length cap exceeded",
+                                "error": "no completed edit",
+                            }
+                        ],
+                    },
+                ),
+                self,
+            )
+
+    proposer, adapter = _make_propose_harness(_CappedLM({}))
+    proposer.callbacks = [_Recorder()]
+
+    state = _make_state()
+    proposals = proposer.propose(state)
+
+    assert proposals == []  # nothing to evaluate
+    assert adapter.batch_evaluate.call_count == 1  # parent stage only
+    assert len(events) == 1
+    assert events[0]["new_instructions"] == {}
+    assert events[0]["metadata"]["action"] == "add_constraint"
+    assert events[0]["metadata"]["length_capped_dropped"] == ["c"]
+    history = state.revision_history_for_candidate(0)
+    assert history[0] == {"role": "assistant", "content": "attempted edit"}
+    assert history[1] == {"role": "user", "content": "length cap exceeded"}
+    assert history[2]["role"] == "user"
+    assert "Optimizer feedback: DROPPED" in history[2]["content"]
 
 
 # ---------------------------------------------------------------------------

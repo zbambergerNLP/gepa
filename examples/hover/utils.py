@@ -60,12 +60,13 @@ def _extract_final_response(output: str) -> str:
 
 def _call_lm(system: str, user: str, model: str, api_base: str | None) -> str:
     """Call the solver with the decoding settings used by the GEPA artifact."""
+    messages = []
+    if system.strip():
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": user})
     kwargs: dict = {
         "model": model,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
+        "messages": messages,
         "temperature": 0.6,
         "top_p": 0.95,
         "top_k": 20,

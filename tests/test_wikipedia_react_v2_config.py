@@ -21,6 +21,7 @@ from examples.hotpotqa.main import build_run_contract as build_hotpotqa_run_cont
 from examples.hotpotqa.main import dump_candidates as dump_hotpotqa_candidates
 from examples.hotpotqa.main import seed_candidate as hotpotqa_seed_candidate
 from examples.hover.main import _run_key as hover_run_key
+from examples.hover.main import build_config as build_hover_config
 from examples.hover.main import build_run_contract as build_hover_run_contract
 from examples.hover.main import dump_candidates as dump_hover_candidates
 from examples.hover.main import seed_candidate as hover_seed_candidate
@@ -177,6 +178,38 @@ def test_hotpot_and_hover_contracts_record_exact_model_roles() -> None:
         assert contract["retrieval"]["endpoint"] == "https://en.wikipedia.org/w/api.php"
 
     assert hover_run_key("react_v2", hover_args) != hover_run_key("react_v2", _hotpot_args(final_retrieval_k=11))
+
+
+def test_hover_rlm_condition_builds_an_explicit_strategy_with_matched_budget() -> None:
+    """Make RLM selectable without running it or changing the ReAct V2 primary path."""
+    args = _hotpot_args(final_retrieval_k=10)
+
+    contract = build_hover_run_contract("rlm", args)
+    react_contract = build_hover_run_contract("react_v2", args)
+    config, selector = build_hover_config("rlm", args, {}, run_dir="/tmp/gepa-hover-rlm-test")
+    strategy = config.reflection.reflection_strategy
+
+    assert selector is None
+    assert strategy.proposer_backend == "rlm"
+    assert strategy.level == 2
+    assert strategy.edit_tool_set == "broad"
+    assert strategy.rlm_budget.max_model_calls == 8
+    assert contract["optimizer"]["proposer_backend"] == "rlm"
+    assert contract["optimizer"]["max_proposer_model_calls"] == 8
+    assert contract["optimizer"]["rlm_budget"] == {
+        "max_root_iterations": 4,
+        "max_child_iterations": 2,
+        "max_repl_calls": 6,
+        "max_llm_queries": 2,
+        "max_rlm_queries": 1,
+        "max_recursion_depth": 1,
+        "max_exec_seconds": 5,
+        "max_output_chars": 4000,
+    }
+    assert react_contract["optimizer"]["proposer_backend"] == "react_v2"
+    assert react_contract["optimizer"]["max_proposer_model_calls"] == 8
+    assert react_contract["optimizer"]["rlm_budget"] is None
+    assert hover_run_key("rlm", args) != hover_run_key("react_v2", args)
 
 
 def test_run_contract_rejects_drift_and_legacy_state(tmp_path: Path) -> None:

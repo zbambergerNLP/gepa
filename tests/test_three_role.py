@@ -15,6 +15,7 @@ import pytest
 from gepa.lm import LM, TrackingLM
 from gepa.proposer.reflective_mutation.reflection_lm import ReflectionProposal, StatelessReflectionLM
 from gepa.proposer.reflective_mutation.reflective_mutation import ReflectiveMutationProposer
+from gepa.proposer.reflective_mutation.rlm_environment import RLMBudget
 from gepa.proposer.reflective_mutation.three_role import ThreeRoleReflectionLM, ensure_reflection_run_contract
 from gepa.strategies.document_template import TEMPLATE_FAMILIES, TEMPLATES, DocumentTemplate, MalformedDocumentError
 from gepa.strategies.edit_tools import EditTool
@@ -112,6 +113,25 @@ class ThreeRoleLM:
         return "```revised free-form instruction```"
 
 
+class ThreeRoleRLMLM(ThreeRoleLM):
+    """Route Editor prompts to a separate scripted RLM reply stream."""
+
+    def __init__(self, rlm_replies: list[str]) -> None:
+        super().__init__([])
+        self.rlm_replies = rlm_replies
+        self.rlm_calls: list[str] = []
+
+    def __call__(self, prompt: str | list[dict[str, Any]]) -> str:
+        if isinstance(prompt, str) and prompt.startswith("You are the Editor."):
+            self.roles.append("rlm")
+            self.rlm_calls.append(prompt)
+            index = len(self.rlm_calls) - 1
+            if index >= len(self.rlm_replies):
+                raise AssertionError(f"Unexpected RLM turn {index + 1}")
+            return self.rlm_replies[index]
+        return super().__call__(prompt)
+
+
 class CostTrackingLM(ThreeRoleLM):
     """Expose a fixed cumulative LM cost."""
 
@@ -202,6 +222,12 @@ def make_reflective_proposer(reflection_strategy: ThreeRoleReflectionLM) -> Refl
     [
         pytest.param({"level": 3}, id="invalid_level"),
         pytest.param({"level": 1, "edit_tool_set": "huge"}, id="invalid_tool_set"),
+        pytest.param({"level": 2, "proposer_backend": "unknown"}, id="invalid_backend"),
+        pytest.param({"level": 1, "proposer_backend": "rlm"}, id="rlm_level_one"),
+        pytest.param(
+            {"level": 2, "proposer_backend": "rlm", "edit_tool_set": "minimal"},
+            id="rlm_minimal_basis",
+        ),
         pytest.param({"level": 1, "template_family": "meta"}, id="invalid_template_family"),
         pytest.param(
             {"level": 1, "component_kinds": {"sys": "memo"}},
@@ -342,6 +368,89 @@ def test_three_role_run_contract_requires_identity_for_custom_lm() -> None:
     strat = ThreeRoleReflectionLM(ThreeRoleLM(DIRECT_REPHRASE_REPLIES), 2)
     with pytest.raises(ValueError, match="stable run identity"):
         strat.run_contract({"sys": PROMPT})
+
+
+def test_rlm_run_contract_records_backend_protocol_and_matched_call_cap() -> None:
+    """Make RLM resumes distinguishable and keep proposer budgets apples-to-apples."""
+    budget = RLMBudget(
+        max_root_iterations=4,
+        max_child_iterations=2,
+        max_repl_calls=6,
+        max_llm_queries=2,
+        max_rlm_queries=1,
+        max_recursion_depth=1,
+        max_exec_seconds=5,
+        max_output_chars=4000,
+    )
+    lm = ThreeRoleRLMLM([tool_call(EditTool.REPLACE_TEXT, target="be nice", text="be kind")])
+    strat, _ = strategy(2, lm=lm, proposer_backend="rlm", rlm_budget=budget)
+
+    contract = strat.run_contract({"sys": PROMPT})
+
+    assert contract["proposer_backend"] == "rlm"
+    assert contract["max_proposer_model_calls"] == 8
+    assert contract["react_max_iterations"] is None
+    assert contract["react_max_tool_calls"] is None
+    assert contract["manifestor_delivery"] == "rlm_prompt_guidance"
+    assert contract["manifestor_injection_site"] is None
+    assert contract["rlm"]["budget"] == {
+        "max_root_iterations": 4,
+        "max_child_iterations": 2,
+        "max_repl_calls": 6,
+        "max_llm_queries": 2,
+        "max_rlm_queries": 1,
+        "max_recursion_depth": 1,
+        "max_exec_seconds": 5,
+        "max_output_chars": 4000,
+    }
+    assert contract["rlm"]["protocol"]["context_transport"] == "read_only_python_variables"
+    assert strat.rlm_budget == budget
+    assert strat.rlm_budget is not budget
+
+
+def test_rlm_backend_runs_controller_manifestor_and_retains_branch_chat() -> None:
+    """Exercise the selectable backend through the full operated-reflection seam."""
+    python_turn = "<python>print(history)</python>"
+    edit_turn = "<edit><target>be nice</target><text>be kind</text></edit>"
+    lm = ThreeRoleRLMLM([python_turn, edit_turn])
+    budget = RLMBudget(
+        max_root_iterations=4,
+        max_child_iterations=2,
+        max_repl_calls=6,
+        max_llm_queries=2,
+        max_rlm_queries=1,
+    )
+    strat, _ = strategy(2, lm=lm, proposer_backend="rlm", rlm_budget=budget)
+    history = [
+        {"role": "assistant", "content": "parent-assistant-marker"},
+        {"role": "user", "content": "parent-user-marker"},
+    ]
+
+    proposal, _ = strat.reflect(
+        {"sys": PROMPT},
+        reflective_dataset("sys"),
+        ["sys"],
+        metadata={"branch_edit_history": history},
+    )
+
+    assert proposal.new_texts["sys"] != PROMPT
+    assert lm.roles == ["controller", "controller", "manifestor", "rlm", "rlm"]
+    assert "parent-assistant-marker" not in lm.rlm_calls[0]
+    assert "parent-assistant-marker" in lm.rlm_calls[1]
+    assert proposal.metadata["proposer_backend"] == "rlm"
+    assert proposal.metadata["branch_history_length"] == 2
+    record = proposal.metadata["three_role_actions"][0]
+    assert record["backend"] == "rlm"
+    assert record["manifestor_delivery"] == "rlm_prompt_guidance"
+    assert record["inject_as"] is None
+    assert record["rlm_iterations"] == 2
+    assert record["rlm_repl_calls"] == 1
+    assert record["rlm_llm_queries"] == 0
+    assert record["rlm_recursive_queries"] == 0
+    assert record["chat_messages"][0] == {"role": "assistant", "content": python_turn}
+    assert record["chat_messages"][1]["role"] == "user"
+    assert record["chat_messages"][2] == {"role": "assistant", "content": edit_turn}
+    assert proposal.metadata["revision_records"] == [record]
 
 
 def test_level2_selects_semantic_action_manifests_and_executes_one_direct_call() -> None:

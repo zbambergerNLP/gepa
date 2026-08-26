@@ -165,7 +165,9 @@ class _ProposalEndEventOptional(TypedDict, total=False):
     """
 
     metadata: dict[str, Any]
-    """Strategy diagnostics, including ComBEE map/reduce details when available."""
+    """Proposal metadata: ``proposal_id``, ``action`` (when action-conditioned),
+    ``prompt:<comp>``/``raw_lm_output:<comp>`` diagnostics, and ComBEE map/reduce
+    details when available."""
 
 
 class ProposalEndEvent(_ProposalEndEventOptional):
@@ -180,12 +182,26 @@ class ProposalEndEvent(_ProposalEndEventOptional):
 
 
 class CandidateAcceptedEvent(TypedDict):
-    """Event for on_candidate_accepted callback."""
+    """Event for on_candidate_accepted callback.
+
+    Fired once per proposal that enters the candidate pool, on both the
+    reflective and the merge path. ``old_score`` and ``new_score`` bracket the
+    accepted subsample score change; ``metadata`` carries the proposer's
+    attribution (e.g. the selected action) so trackers can credit the outcome.
+    """
 
     iteration: int
     new_candidate_idx: int
+    old_score: float
+    """Subsample score before this proposal: the parent's on the reflective path,
+    ``max(parent scores)`` on the merge path. Paired with ``new_score`` it gives
+    the full accepted score delta, so per-action deltas cover accepted proposals
+    too, not only rejected ones."""
     new_score: float
     parent_ids: Sequence[ProgramIdx]
+    metadata: dict[str, Any]
+    """Metadata of the accepted proposal (see ``ProposalEndEvent.metadata``);
+    empty for merge-path acceptances."""
 
 
 class CandidateRejectedEvent(TypedDict):
@@ -195,6 +211,8 @@ class CandidateRejectedEvent(TypedDict):
     old_score: float
     new_score: float
     reason: str
+    metadata: dict[str, Any]
+    """Metadata of the rejected proposal (see ``ProposalEndEvent.metadata``)."""
 
 
 class MergeAttemptedEvent(TypedDict):

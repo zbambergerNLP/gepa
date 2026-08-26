@@ -1,13 +1,13 @@
 # Copyright (c) 2025 Lakshya A Agrawal and the GEPA contributors
 # https://github.com/gepa-ai/gepa
 
-"""Semantic actions and verbalized Controller for three-role reflection.
+"""Define the shared semantic action space and its execution-path bindings.
 
-The Controller makes one joint document-region/semantic-action decision at
-reflection level 2. An action expresses editorial intent and owns exactly one
-direct text operator. ReAct V2 uses that operator directly when the broad tool
-set exposes it; the minimal insert/delete basis decomposes replace and move
-into their two atomic calls.
+Every semantic action owns one direct text operator. Stateless reflection binds
+the actions to template sections as prompt constraints. Three-role reflection
+binds them to Controller choices before Manifestor steering and ReAct V2 or RLM
+execution. The broad tool set exposes each operator directly; the minimal
+insert/delete basis decomposes replace and move into atomic calls.
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ from gepa.proposer.reflective_mutation.base import LanguageModel
 from gepa.strategies.action_space import (
     FULL_SUPPORT_EXPLORATION_EPSILON,
     SOFT_PROMPT_CHAR_BUDGET,
-    PromptEditAction,
     VerbalizedActionSelector,
 )
 from gepa.strategies.document_template import DocumentTemplate, EditTarget
@@ -34,7 +33,7 @@ INJECTION_SITES: tuple[InjectionSite, ...] = get_args(InjectionSite)
 
 
 @dataclass(frozen=True)
-class InterventionSpec:
+class SemanticActionSpec:
     """Static semantic action selected by the Controller.
 
     Args:
@@ -66,15 +65,15 @@ class InterventionSpec:
     def __post_init__(self) -> None:
         """Validate the direct-tool and manifestation contracts."""
         if not isinstance(self.edit_tool, EditTool):
-            raise TypeError(f"InterventionSpec {self.name!r} edit_tool must be one EditTool value")
+            raise TypeError(f"SemanticActionSpec {self.name!r} edit_tool must be one EditTool value")
         if (self.instruction is None) == (self.fixed_text is None):
-            raise ValueError(f"InterventionSpec {self.name!r} must set exactly one of instruction or fixed_text")
+            raise ValueError(f"SemanticActionSpec {self.name!r} must set exactly one of instruction or fixed_text")
         if self.inject_as not in INJECTION_SITES:
-            raise ValueError(f"InterventionSpec {self.name!r}: inject_as must be one of {INJECTION_SITES}")
+            raise ValueError(f"SemanticActionSpec {self.name!r}: inject_as must be one of {INJECTION_SITES}")
 
 
 @dataclass(frozen=True)
-class Intervention:
+class SteeringMessage:
     """Manifested steering text and the chat role where the proposer receives it.
 
     Args:
@@ -87,21 +86,21 @@ class Intervention:
 
 
 @dataclass(frozen=True)
-class ControllerAction:
+class ControllerChoice:
     """Controller decision over a region and optional semantic action.
 
     Args:
         edit_target: Independently selectable document section or whole document.
-        intervention_spec: Semantic action, or ``None`` at level 1.
+        semantic_action: Semantic action, or ``None`` at level 1.
     """
 
     edit_target: EditTarget
-    intervention_spec: InterventionSpec | None
+    semantic_action: SemanticActionSpec | None
 
     @property
     def edit_tool(self) -> EditTool | None:
         """Return the semantic action's structurally coupled operator."""
-        return self.intervention_spec.edit_tool if self.intervention_spec is not None else None
+        return self.semantic_action.edit_tool if self.semantic_action is not None else None
 
     @property
     def menu_id(self) -> str:
@@ -111,9 +110,9 @@ class ControllerAction:
             Semantic action/region/direct-tool identifier, or an atomic-basis
             region identifier at level 1.
         """
-        if self.intervention_spec is not None:
+        if self.semantic_action is not None:
             assert self.edit_tool is not None
-            return f"{self.intervention_spec.name}@{self.edit_target.name}/{self.edit_tool.value}"
+            return f"{self.semantic_action.name}@{self.edit_target.name}/{self.edit_tool.value}"
         return f"EDIT@{self.edit_target.name}"
 
     @property
@@ -124,17 +123,18 @@ class ControllerAction:
             Controller menu description.
         """
         region = self.edit_target.name
-        if self.intervention_spec is not None:
+        if self.semantic_action is not None:
             assert self.edit_tool is not None
-            return f"{self.intervention_spec.description} (region '{region}', direct tool {self.edit_tool.value})"
+            return f"{self.semantic_action.description} (region '{region}', direct tool {self.edit_tool.value})"
         return f"Revise region '{region}' using the available edit-tool basis."
 
 
 SEMANTIC_ACTION_CATALOG_VERSION = 1
 CONTROLLER_POLICY_VERSION = 2
+STATELESS_ACTION_MENU_VERSION = 1
 
-SEMANTIC_ACTIONS: tuple[InterventionSpec, ...] = (
-    InterventionSpec(
+SEMANTIC_ACTIONS: tuple[SemanticActionSpec, ...] = (
+    SemanticActionSpec(
         "rephrase",
         "Rewrite unclear text without changing its meaning, requirements, scope, or level of detail.",
         EditTool.REPLACE_TEXT,
@@ -143,7 +143,7 @@ SEMANTIC_ACTIONS: tuple[InterventionSpec, ...] = (
             "detail, and representation. Use reformat when the representation itself is the problem."
         ),
     ),
-    InterventionSpec(
+    SemanticActionSpec(
         "summarize",
         "Shorten a passage without losing an operative requirement or necessary fact.",
         EditTool.REPLACE_TEXT,
@@ -152,7 +152,7 @@ SEMANTIC_ACTIONS: tuple[InterventionSpec, ...] = (
             "dependency, and fact."
         ),
     ),
-    InterventionSpec(
+    SemanticActionSpec(
         "reformat",
         "Change a passage's representation without adding, removing, or moving information.",
         EditTool.REPLACE_TEXT,
@@ -162,7 +162,7 @@ SEMANTIC_ACTIONS: tuple[InterventionSpec, ...] = (
             "detail should be removed."
         ),
     ),
-    InterventionSpec(
+    SemanticActionSpec(
         "correct",
         "Correct false, contradictory, or procedurally wrong content whose purpose is still needed.",
         EditTool.REPLACE_TEXT,
@@ -172,7 +172,7 @@ SEMANTIC_ACTIONS: tuple[InterventionSpec, ...] = (
             "relax_requirement when scope or normative force is the main defect."
         ),
     ),
-    InterventionSpec(
+    SemanticActionSpec(
         "specialize",
         "Narrow a passage that applies to too many cases.",
         EditTool.REPLACE_TEXT,
@@ -181,7 +181,7 @@ SEMANTIC_ACTIONS: tuple[InterventionSpec, ...] = (
             "rephrase for ambiguity, expand for missing detail, or add_constraint when the original rule remains valid."
         ),
     ),
-    InterventionSpec(
+    SemanticActionSpec(
         "generalize",
         "Broaden an overfit or unjustifiably narrow passage while keeping its safeguards.",
         EditTool.REPLACE_TEXT,
@@ -190,7 +190,7 @@ SEMANTIC_ACTIONS: tuple[InterventionSpec, ...] = (
             "invariant supported by the failures and retain the necessary safeguards."
         ),
     ),
-    InterventionSpec(
+    SemanticActionSpec(
         "strengthen_requirement",
         "Make a correct requirement less permissive without changing what or where it governs.",
         EditTool.REPLACE_TEXT,
@@ -199,7 +199,7 @@ SEMANTIC_ACTIONS: tuple[InterventionSpec, ...] = (
             "its subject and applicability unchanged."
         ),
     ),
-    InterventionSpec(
+    SemanticActionSpec(
         "relax_requirement",
         "Make an otherwise useful requirement less absolute without changing what or where it governs.",
         EditTool.REPLACE_TEXT,
@@ -208,7 +208,7 @@ SEMANTIC_ACTIONS: tuple[InterventionSpec, ...] = (
             "Keep its subject and applicability; delete it instead when none of its intent should survive."
         ),
     ),
-    InterventionSpec(
+    SemanticActionSpec(
         "expand",
         "Insert one missing statement, step, example, definition, or fact without changing existing text.",
         EditTool.INSERT_TEXT,
@@ -217,7 +217,7 @@ SEMANTIC_ACTIONS: tuple[InterventionSpec, ...] = (
             "unchanged and use add_constraint for a boundary or guardrail."
         ),
     ),
-    InterventionSpec(
+    SemanticActionSpec(
         "add_constraint",
         "Keep a valid rule and insert one missing boundary, prohibition, condition, or guardrail.",
         EditTool.INSERT_TEXT,
@@ -226,7 +226,7 @@ SEMANTIC_ACTIONS: tuple[InterventionSpec, ...] = (
             "the rule unchanged; use specialize when the rule itself is overbroad."
         ),
     ),
-    InterventionSpec(
+    SemanticActionSpec(
         "remove_redundancy",
         "Delete one span whose full meaning already appears elsewhere.",
         EditTool.DELETE_TEXT,
@@ -235,7 +235,7 @@ SEMANTIC_ACTIONS: tuple[InterventionSpec, ...] = (
             "its meaning and qualifiers."
         ),
     ),
-    InterventionSpec(
+    SemanticActionSpec(
         "remove_harmful_content",
         "Delete one harmful, obsolete, irrelevant, or non-operative span when none of its intent should remain.",
         EditTool.DELETE_TEXT,
@@ -244,7 +244,7 @@ SEMANTIC_ACTIONS: tuple[InterventionSpec, ...] = (
             "replacement."
         ),
     ),
-    InterventionSpec(
+    SemanticActionSpec(
         "relocate",
         "Move one unchanged span when its placement is the only defect.",
         EditTool.MOVE_TEXT,
@@ -259,13 +259,10 @@ SEMANTIC_ACTIONS: tuple[InterventionSpec, ...] = (
 if len({spec.name for spec in SEMANTIC_ACTIONS}) != len(SEMANTIC_ACTIONS):
     raise ValueError("Built-in semantic action names must be unique")
 
-_INTERVENTION_CATALOG: dict[str, tuple[InterventionSpec, ...]] = {
-    "prompt": SEMANTIC_ACTIONS,
-    "skill": SEMANTIC_ACTIONS,
-}
+_SEMANTIC_ACTION_KINDS = frozenset({"prompt", "skill"})
 
 
-def intervention_specs(kind: str, section: str | None) -> list[InterventionSpec]:
+def semantic_action_specs(kind: str, section: str | None) -> list[SemanticActionSpec]:
     """List semantic actions available for one document region.
 
     Args:
@@ -275,7 +272,7 @@ def intervention_specs(kind: str, section: str | None) -> list[InterventionSpec]
     Returns:
         Actions whose optional section restriction includes this region.
     """
-    specs = _INTERVENTION_CATALOG.get(kind, ())
+    specs = SEMANTIC_ACTIONS if kind in _SEMANTIC_ACTION_KINDS else ()
     if section is None:
         return [spec for spec in specs if spec.allow_whole_document]
     return [spec for spec in specs if spec.applicable_sections is None or section in spec.applicable_sections]
@@ -305,7 +302,122 @@ def semantic_action_catalog(kind: str) -> dict[str, Any]:
                 "applicable_sections": list(spec.applicable_sections) if spec.applicable_sections is not None else None,
                 "allow_whole_document": spec.allow_whole_document,
             }
-            for spec in _INTERVENTION_CATALOG.get(kind, ())
+            for spec in (SEMANTIC_ACTIONS if kind in _SEMANTIC_ACTION_KINDS else ())
+        ],
+    }
+
+
+@dataclass(frozen=True)
+class StatelessActionConstraint:
+    """Bind one canonical semantic action to a stateless edit region.
+
+    Stateless reflection emits a complete revised document instead of calling
+    an edit tool. This value keeps that baseline on the same semantic action
+    catalog and records the operator whose effect the full-document rewrite
+    must realize.
+
+    Args:
+        semantic_action: Canonical semantic operation and coupled edit tool.
+        target_section: Named section to revise, or ``None`` for the complete
+            document when the action permits a cross-section edit.
+    """
+
+    semantic_action: SemanticActionSpec
+    target_section: str | None
+
+    @property
+    def edit_tool(self) -> EditTool:
+        """Return the semantic action's coupled text operator."""
+        return self.semantic_action.edit_tool
+
+    @property
+    def menu_id(self) -> str:
+        """Return a unique selector identifier for this action/region pair."""
+        region = self.target_section if self.target_section is not None else "whole"
+        return f"{self.semantic_action.name}@{region}/{self.edit_tool.value}"
+
+    @property
+    def menu_description(self) -> str:
+        """Describe the semantic action, target region, and coupled operator."""
+        region = f"section '{self.target_section}'" if self.target_section is not None else "the whole document"
+        return f"{self.semantic_action.description} (target {region}, direct tool {self.edit_tool.value})"
+
+
+def build_stateless_action_menu(template: DocumentTemplate) -> list[StatelessActionConstraint]:
+    """Build the stateless baseline menu from the canonical action catalog.
+
+    Args:
+        template: Document template whose named sections become edit targets.
+
+    Returns:
+        Every applicable named-section/action pair followed by permitted
+        whole-document choices, all in deterministic template/catalog order.
+    """
+    named_choices = [
+        StatelessActionConstraint(spec, section)
+        for section in template.sections
+        for spec in semantic_action_specs(template.kind, section)
+    ]
+    whole_document_choices = [
+        StatelessActionConstraint(spec, None) for spec in semantic_action_specs(template.kind, None)
+    ]
+    return [*named_choices, *whole_document_choices]
+
+
+def format_stateless_action_constraint(action: StatelessActionConstraint) -> str:
+    """Render one canonical action/region choice as a reflection constraint.
+
+    Args:
+        action: Semantic action bound to its selected target region.
+
+    Returns:
+        Constraint suffix suitable for a stateless full-document proposer.
+    """
+    if action.target_section is None:
+        section_scope = "Apply this cross-section edit to the whole document."
+    else:
+        section_scope = (
+            f"Apply this edit only within the '## {action.target_section}' section. "
+            "If that section is currently omitted because it is empty, add its header in template order only when "
+            "this edit adds content. Reproduce every other section verbatim, including its header."
+        )
+    manifestation = action.semantic_action.instruction or action.semantic_action.fixed_text
+    assert manifestation is not None
+    return (
+        "\n\n--- Edit constraint ---\n"
+        f"Make exactly one semantic edit: {action.semantic_action.name}\n"
+        f"Description: {action.semantic_action.description}\n"
+        f"Coupled text operator: {action.edit_tool.value}\n"
+        f"{section_scope}\n"
+        f"Guidance: {manifestation}\n\n"
+        f"Length budget: the complete revised document must stay under {SOFT_PROMPT_CHAR_BUDGET} characters. "
+        "If this edit would exceed the budget, replace or remove existing content instead of adding.\n\n"
+        "Make no other changes."
+    )
+
+
+def stateless_action_menu_contract(template: DocumentTemplate) -> dict[str, Any]:
+    """Return the reproducible stateless menu derived from one action catalog.
+
+    Args:
+        template: Document template whose sections define the menu regions.
+
+    Returns:
+        JSON-serializable template identity and ordered action/region choices.
+    """
+    return {
+        "version": STATELESS_ACTION_MENU_VERSION,
+        "semantic_action_catalog_version": SEMANTIC_ACTION_CATALOG_VERSION,
+        "kind": template.kind,
+        "sections": list(template.sections),
+        "choices": [
+            {
+                "id": choice.menu_id,
+                "semantic_action": choice.semantic_action.name,
+                "operator": choice.edit_tool.value,
+                "target_section": choice.target_section,
+            }
+            for choice in build_stateless_action_menu(template)
         ],
     }
 
@@ -331,13 +443,13 @@ def build_controller_menu(
     *,
     rng: random.Random,
     max_menu: int | None = None,
-) -> list[ControllerAction]:
+) -> list[ControllerChoice]:
     """Build the Controller's region/action menu.
 
     At level 1, each independently addressable region appears once. At level 2,
     every applicable region/action pair appears once so one verbalized-sampling
     call makes the complete semantic decision. The action's direct operator is
-    derived from its :class:`InterventionSpec`; it is never a separate choice.
+    derived from its :class:`SemanticActionSpec`; it is never a separate choice.
 
     Args:
         template: Document template whose sections become targets.
@@ -363,20 +475,16 @@ def build_controller_menu(
 
     targets = template.edit_targets(component_name)
     if level >= 2:
-        menu = [
-            action
-            for target in targets
-            for action in build_semantic_action_menu(template, target)
-        ]
+        menu = [action for target in targets for action in build_semantic_action_menu(template, target)]
     else:
-        menu = [ControllerAction(target, None) for target in targets]
+        menu = [ControllerChoice(target, None) for target in targets]
 
     if not menu and level >= 2:
         raise ValueError(
             f"Document kind {template.kind!r} has no semantic actions; level 2 supports only cataloged kinds."
         )
     if not menu:
-        menu = [ControllerAction(EditTarget(component_name, None), None)]
+        menu = [ControllerChoice(EditTarget(component_name, None), None)]
     if max_menu is not None and len(menu) > max_menu:
         if level >= 2:
             raise ValueError(
@@ -394,7 +502,7 @@ def build_controller_menu(
     return menu
 
 
-def build_semantic_action_menu(template: DocumentTemplate, edit_target: EditTarget) -> list[ControllerAction]:
+def build_semantic_action_menu(template: DocumentTemplate, edit_target: EditTarget) -> list[ControllerChoice]:
     """Build every semantic action applicable to one sampled region.
 
     Args:
@@ -404,10 +512,10 @@ def build_semantic_action_menu(template: DocumentTemplate, edit_target: EditTarg
     Returns:
         Complete conditional semantic-action menu in catalog order.
     """
-    return [ControllerAction(edit_target, spec) for spec in intervention_specs(template.kind, edit_target.section)]
+    return [ControllerChoice(edit_target, spec) for spec in semantic_action_specs(template.kind, edit_target.section)]
 
 
-class Controller(VerbalizedActionSelector):
+class Controller(VerbalizedActionSelector[ControllerChoice]):
     """Select one region/semantic-action option by verbalized sampling.
 
     Args:
@@ -422,7 +530,7 @@ class Controller(VerbalizedActionSelector):
 
     def __init__(
         self,
-        menu: list[ControllerAction],
+        menu: list[ControllerChoice],
         lm: LanguageModel,
         *,
         k: int = 5,
@@ -430,33 +538,15 @@ class Controller(VerbalizedActionSelector):
         rng: random.Random | None = None,
         require_full_support: bool = False,
     ):
-        """Wrap rich actions as selector-compatible menu entries."""
-        stand_ins = [
-            PromptEditAction(name=action.menu_id, description=action.menu_description, instruction_suffix="")
-            for action in menu
-        ]
+        """Configure verbalized sampling over the rich Controller choices."""
         super().__init__(
-            actions=stand_ins,
+            actions=menu,
             lm=lm,
             k=k,
             tau=tau,
             rng=rng,
             require_full_support=require_full_support,
         )
-        self._controller_by_id = {action.menu_id: action for action in menu}
-
-    def select_controller(self, n: int, rng: random.Random | None = None) -> list[ControllerAction]:
-        """Draw rich Controller actions from the verbalized distribution.
-
-        Args:
-            n: Number of draws with replacement.
-            rng: Optional call-specific RNG.
-
-        Returns:
-            Selected rich actions in draw order.
-        """
-        picks = self.select(n, rng)
-        return [self._controller_by_id[pick.name] for pick in picks]
 
 
 def summarize_feedback(reflective_entries: Any, max_chars: int = SOFT_PROMPT_CHAR_BUDGET) -> str:

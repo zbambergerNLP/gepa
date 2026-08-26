@@ -160,6 +160,7 @@ from gepa.strategies.component_selector import (
 )
 from gepa.strategies.document_template import MalformedDocumentError, infer_template_family
 from gepa.strategies.eval_policy import EvaluationPolicy, FullEvaluationPolicy
+from gepa.strategies.intervention import StatelessActionConstraint
 from gepa.strategies.proposal_sampling import SamplingStrategy
 from gepa.strategies.proposal_selection import SelectionStrategy
 from gepa.utils import FileStopper, StopperProtocol
@@ -778,9 +779,8 @@ class ReflectionConfig:
     Ignored when ``reflection_lm`` is already a callable."""
     reflection_prompt_template: str | dict[str, str] | None = optimize_anything_reflection_prompt_template
     custom_candidate_proposer: ProposalFn | None = None
-    # Action-conditioned reflection (Rev 1): constrain each mutation to a
-    # specific edit type for improved diversity and credit assignment.
-    action_selector: "ActionSelector | None" = None
+    # Stateless action-conditioned reflection over canonical semantic bindings.
+    action_selector: "ActionSelector[StatelessActionConstraint] | None" = None
     # 3-role reflection (Controller -> Manifestor -> ReAct V2). An explicit
     # reflection_strategy takes precedence over these convenience fields.
     reflection_level: Literal[0, 1, 2] = 0

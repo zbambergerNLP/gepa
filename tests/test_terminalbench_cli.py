@@ -78,7 +78,7 @@ def test_generated_run_contract_records_metric_call_budget(tmp_path: Path) -> No
     )
 
     assert contract["max_metric_calls"] == 400
-    assert contract["schema_version"] == 2
+    assert contract["schema_version"] == 3
     assert contract["component_kinds"] == {"instruction_prompt": "user_prompt"}
     assert contract["semantic_action_space"] == semantic_action_catalog("prompt")
     assert contract["semantic_controller_policy"] == controller_policy_contract()

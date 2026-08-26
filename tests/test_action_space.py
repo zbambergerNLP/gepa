@@ -1,10 +1,11 @@
 # Copyright (c) 2025 Lakshya A Agrawal and the GEPA contributors
 # https://github.com/gepa-ai/gepa
 
-"""Tests for action-conditioned reflection (Rev 1)."""
+"""Tests for generic selection and canonical action-conditioned reflection."""
 
 import inspect
 import random
+from dataclasses import dataclass
 
 import pytest
 
@@ -18,15 +19,52 @@ from gepa.proposer.reflective_mutation.reflection_lm import (
 )
 from gepa.proposer.reflective_mutation.reflective_mutation import ReflectiveMutationProposer
 from gepa.strategies.action_space import (
-    DEFAULT_ACTIONS,
-    STRUCTURED_SECTIONS,
     ActionDistribution,
-    PromptEditAction,
     RandomActionSelector,
     VerbalizedActionSelector,
     _sample_from_tails,
-    build_structured_actions,
-    format_action_suffix,
+    stateless_selector_policy_contract,
+)
+from gepa.strategies.document_template import DocumentTemplate
+from gepa.strategies.intervention import (
+    build_stateless_action_menu,
+    format_stateless_action_constraint,
+)
+
+
+@dataclass(frozen=True)
+class MenuItem:
+    """Minimal structural option accepted by action selectors."""
+
+    menu_id: str
+    menu_description: str
+
+
+TEST_ACTIONS = [
+    MenuItem("action_a", "First selectable test option."),
+    MenuItem("action_b", "Second selectable test option."),
+    MenuItem("action_c", "Third selectable test option."),
+    MenuItem("action_d", "Fourth selectable test option."),
+    MenuItem("action_e", "Fifth selectable test option."),
+    MenuItem("action_f", "Sixth selectable test option."),
+]
+
+TEST_TEMPLATE = DocumentTemplate("prompt", {"Role": "Assistant role.", "Task": "Task to perform."})
+STATELESS_ACTIONS = build_stateless_action_menu(TEST_TEMPLATE)
+STATELESS_LM_OUTPUT = (
+    "<response>"
+    + "".join(
+        "<candidate>"
+        f"<action>{action.menu_id}</action>"
+        f"<reasoning>Reason {index}</reasoning>"
+        f"<probability>{probability}</probability>"
+        "</candidate>"
+        for index, (action, probability) in enumerate(
+            zip(STATELESS_ACTIONS[:5], [0.35, 0.30, 0.20, 0.10, 0.05], strict=True),
+            start=1,
+        )
+    )
+    + "</response>"
 )
 
 # ---------------------------------------------------------------------------
@@ -69,17 +107,17 @@ def _reflective_dataset(components):
 
 class TestRandomActionSelector:
     def test_returns_correct_count(self):
-        selector = RandomActionSelector(DEFAULT_ACTIONS, rng=random.Random(42))
+        selector = RandomActionSelector(TEST_ACTIONS, rng=random.Random(42))
         rng = random.Random(0)  # Passed rng takes precedence over the constructor rng.
         actions = selector.select(5, rng)
         assert len(actions) == 5
 
     def test_membership(self):
-        selector = RandomActionSelector(DEFAULT_ACTIONS, rng=random.Random(42))
+        selector = RandomActionSelector(TEST_ACTIONS, rng=random.Random(42))
         rng = random.Random(0)
         actions = selector.select(20, rng)
         for action in actions:
-            assert action in DEFAULT_ACTIONS
+            assert action in TEST_ACTIONS
 
     def test_empty_actions_raises(self):
         with pytest.raises(ValueError):
@@ -87,32 +125,68 @@ class TestRandomActionSelector:
 
     def test_passed_rng_takes_precedence(self):
         # Different constructor rngs, same passed rng -> identical sequences.
-        selector_a = RandomActionSelector(DEFAULT_ACTIONS, rng=random.Random(1))
-        selector_b = RandomActionSelector(DEFAULT_ACTIONS, rng=random.Random(2))
+        selector_a = RandomActionSelector(TEST_ACTIONS, rng=random.Random(1))
+        selector_b = RandomActionSelector(TEST_ACTIONS, rng=random.Random(2))
         actions_a = selector_a.select(20, random.Random(42))
         actions_b = selector_b.select(20, random.Random(42))
-        assert [a.name for a in actions_a] == [a.name for a in actions_b]
+        assert [action.menu_id for action in actions_a] == [action.menu_id for action in actions_b]
 
     def test_falls_back_to_instance_rng(self):
-        selector_a = RandomActionSelector(DEFAULT_ACTIONS, rng=random.Random(7))
-        selector_b = RandomActionSelector(DEFAULT_ACTIONS, rng=random.Random(7))
+        selector_a = RandomActionSelector(TEST_ACTIONS, rng=random.Random(7))
+        selector_b = RandomActionSelector(TEST_ACTIONS, rng=random.Random(7))
         actions_a = selector_a.select(20)
         actions_b = selector_b.select(20)
-        assert [a.name for a in actions_a] == [a.name for a in actions_b]
+        assert [action.menu_id for action in actions_a] == [action.menu_id for action in actions_b]
 
+    @pytest.mark.parametrize("selector_type", [RandomActionSelector, VerbalizedActionSelector])
+    def test_duplicate_menu_ids_raise(self, selector_type):
+        actions = [MenuItem("duplicate", "first"), MenuItem("DUPLICATE", "second")]
+        if selector_type is VerbalizedActionSelector:
+            with pytest.raises(ValueError, match="unique menu IDs"):
+                selector_type(actions, lm=RecordingLM())
+        else:
+            with pytest.raises(ValueError, match="unique menu IDs"):
+                selector_type(actions)
 
-class TestFormatActionSuffix:
-    def test_contains_name_and_instruction(self):
-        action = DEFAULT_ACTIONS[0]
-        suffix = format_action_suffix(action)
-        assert action.name in suffix
-        assert action.instruction_suffix in suffix
-        assert "--- Edit constraint ---" in suffix
+    @pytest.mark.parametrize("selector_type", [RandomActionSelector, VerbalizedActionSelector])
+    def test_menu_id_with_surrounding_whitespace_raises(self, selector_type):
+        actions = [MenuItem(" action_a ", "padded ID")]
+        if selector_type is VerbalizedActionSelector:
+            with pytest.raises(ValueError, match="without surrounding whitespace"):
+                selector_type(actions, lm=RecordingLM())
+        else:
+            with pytest.raises(ValueError, match="without surrounding whitespace"):
+                selector_type(actions)
 
-    def test_contains_description(self):
-        action = DEFAULT_ACTIONS[0]
-        suffix = format_action_suffix(action)
-        assert action.description in suffix
+    @pytest.mark.parametrize("selector_type", [RandomActionSelector, VerbalizedActionSelector])
+    def test_empty_menu_id_raises(self, selector_type):
+        actions = [MenuItem(" ", "blank ID")]
+        if selector_type is VerbalizedActionSelector:
+            with pytest.raises(ValueError, match="non-empty menu_id"):
+                selector_type(actions, lm=RecordingLM())
+        else:
+            with pytest.raises(ValueError, match="non-empty menu_id"):
+                selector_type(actions)
+
+    def test_stateless_selector_policy_contract_records_material_defaults(self):
+        assert stateless_selector_policy_contract("random") == {
+            "version": 1,
+            "selector": "random",
+            "selection_granularity": "batch_shared",
+            "context": "none",
+            "sampling": "uniform",
+        }
+        assert stateless_selector_policy_contract("verbalized") == {
+            "version": 1,
+            "selector": "verbalized",
+            "selection_granularity": "batch_shared",
+            "context": "first_parent_and_aggregated_feedback",
+            "sampling": "tail",
+            "k": 5,
+            "tau": 0.2,
+            "require_full_support": False,
+            "exploration_epsilon": 0.0,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +197,7 @@ class TestFormatActionSuffix:
 class TestActionConditionedReflection:
     def test_action_suffix_appended_to_prompt(self):
         lm = RecordingLM()
-        selector = RandomActionSelector(DEFAULT_ACTIONS, rng=random.Random(0))
+        selector = RandomActionSelector(STATELESS_ACTIONS, rng=random.Random(0))
         reflection = StatelessReflectionLM(lm, action_selector=selector)
         candidate = {"system_prompt": "old instruction"}
         ds = _reflective_dataset(["system_prompt"])
@@ -137,7 +211,7 @@ class TestActionConditionedReflection:
 
     def test_action_recorded_in_metadata(self):
         lm = RecordingLM()
-        selector = RandomActionSelector(DEFAULT_ACTIONS, rng=random.Random(0))
+        selector = RandomActionSelector(STATELESS_ACTIONS, rng=random.Random(0))
         reflection = StatelessReflectionLM(lm, action_selector=selector)
         candidate = {"system_prompt": "old instruction"}
         ds = _reflective_dataset(["system_prompt"])
@@ -145,7 +219,10 @@ class TestActionConditionedReflection:
         proposal, _ = reflection.reflect(candidate, ds, ["system_prompt"])
 
         assert "action" in proposal.metadata
-        assert proposal.metadata["action"] in [a.name for a in DEFAULT_ACTIONS]
+        assert proposal.metadata["semantic_action"] == proposal.metadata["action"]
+        assert proposal.metadata["action_choice"] in [action.menu_id for action in STATELESS_ACTIONS]
+        assert proposal.metadata["action_operator"] in {action.edit_tool.value for action in STATELESS_ACTIONS}
+        assert proposal.metadata["action_target_section"] in {*TEST_TEMPLATE.sections, None}
 
     def test_no_action_selector_backward_compatible(self):
         lm = RecordingLM()
@@ -165,14 +242,14 @@ class TestActionConditionedReflection:
 
     def test_satisfies_protocol(self):
         lm = RecordingLM()
-        selector = RandomActionSelector(DEFAULT_ACTIONS, rng=random.Random(0))
+        selector = RandomActionSelector(STATELESS_ACTIONS, rng=random.Random(0))
         reflection = StatelessReflectionLM(lm, action_selector=selector)
         assert isinstance(reflection, ReflectionLM)
 
     def test_all_components_share_action(self):
         """Multi-component job: all components should use the same action."""
         lm = RecordingLM()
-        selector = RandomActionSelector(DEFAULT_ACTIONS, rng=random.Random(0))
+        selector = RandomActionSelector(STATELESS_ACTIONS, rng=random.Random(0))
         reflection = StatelessReflectionLM(lm, action_selector=selector)
         candidate = {"system_prompt": "sys", "user_prompt": "usr"}
         ds = _reflective_dataset(["system_prompt", "user_prompt"])
@@ -181,16 +258,16 @@ class TestActionConditionedReflection:
 
         # Both components should have been rendered with the same action.
         assert len(lm.calls) == 2
-        action_name = proposal.metadata["action"]
-        assert action_name in [a.name for a in DEFAULT_ACTIONS]
+        action_id = proposal.metadata["action_choice"]
+        selected = next(action for action in STATELESS_ACTIONS if action.menu_id == action_id)
         for call in lm.calls:
             prompt_text = call if isinstance(call, str) else str(call)
-            assert action_name in prompt_text
+            assert selected.semantic_action.name in prompt_text
 
     def test_batch_reflect_many_assigns_actions(self):
         """Multiple jobs each get an action assigned."""
         lm = BatchRecordingLM()
-        selector = RandomActionSelector(DEFAULT_ACTIONS, rng=random.Random(0))
+        selector = RandomActionSelector(STATELESS_ACTIONS, rng=random.Random(0))
         reflection = StatelessReflectionLM(lm, action_selector=selector)
 
         jobs = [
@@ -202,10 +279,10 @@ class TestActionConditionedReflection:
         results = reflection.reflect_many(jobs)
 
         assert len(results) == 3
-        # Each job should have an action from DEFAULT_ACTIONS.
+        action_ids = {action.menu_id for action in STATELESS_ACTIONS}
         for r in results:
             assert "action" in r[0].metadata
-            assert r[0].metadata["action"] in [a.name for a in DEFAULT_ACTIONS]
+            assert r[0].metadata["action_choice"] in action_ids
 
 
 # ---------------------------------------------------------------------------
@@ -250,12 +327,12 @@ class TestActionDiversityCallback:
 
     def test_counts_proposals_per_action(self):
         cb = ActionDiversityCallback()
-        cb.on_proposal_end(self._make_proposal_end_event(1, "add_constraint"))
-        cb.on_proposal_end(self._make_proposal_end_event(1, "add_constraint"))
-        cb.on_proposal_end(self._make_proposal_end_event(2, "restructure"))
+        cb.on_proposal_end(self._make_proposal_end_event(1, "action_e"))
+        cb.on_proposal_end(self._make_proposal_end_event(1, "action_e"))
+        cb.on_proposal_end(self._make_proposal_end_event(2, "action_f"))
 
-        assert cb.action_proposal_counts["add_constraint"] == 2
-        assert cb.action_proposal_counts["restructure"] == 1
+        assert cb.action_proposal_counts["action_e"] == 2
+        assert cb.action_proposal_counts["action_f"] == 1
 
     def test_length_capped_proposal_counts_but_adds_no_diversity_text(self) -> None:
         """Test that a fully length-capped attempt (empty new_instructions) still counts (#7).
@@ -265,30 +342,30 @@ class TestActionDiversityCallback:
         diversity metrics (an empty string would read as maximally dissimilar).
         """
         cb = ActionDiversityCallback()
-        cb.on_proposal_end(self._make_proposal_end_event(1, "add_constraint"))
-        capped = self._make_proposal_end_event(1, "add_constraint")
+        cb.on_proposal_end(self._make_proposal_end_event(1, "action_e"))
+        capped = self._make_proposal_end_event(1, "action_e")
         capped["new_instructions"] = {}
         cb.on_proposal_end(capped)
 
-        assert cb.action_proposal_counts["add_constraint"] == 2
-        assert len(cb.action_texts["add_constraint"]) == 1
+        assert cb.action_proposal_counts["action_e"] == 2
+        assert len(cb.action_texts["action_e"]) == 1
         assert len(cb._iteration_texts[1]) == 1
 
     def test_tracks_acceptance_rate(self):
         cb = ActionDiversityCallback()
-        cb.on_proposal_end(self._make_proposal_end_event(1, "add_constraint"))
-        cb.on_candidate_accepted(self._accepted_event(1, "add_constraint"))
+        cb.on_proposal_end(self._make_proposal_end_event(1, "action_e"))
+        cb.on_candidate_accepted(self._accepted_event(1, "action_e"))
 
-        cb.on_proposal_end(self._make_proposal_end_event(2, "add_constraint"))
-        cb.on_candidate_rejected(self._rejected_event(2, "add_constraint"))
+        cb.on_proposal_end(self._make_proposal_end_event(2, "action_e"))
+        cb.on_candidate_rejected(self._rejected_event(2, "action_e"))
 
-        assert cb.action_acceptance_counts["add_constraint"] == 1
-        assert cb.action_rejection_counts["add_constraint"] == 1
+        assert cb.action_acceptance_counts["action_e"] == 1
+        assert cb.action_rejection_counts["action_e"] == 1
 
     def test_summary_returns_expected_keys(self):
         cb = ActionDiversityCallback()
-        cb.on_proposal_end(self._make_proposal_end_event(1, "restructure"))
-        cb.on_candidate_accepted(self._accepted_event(1, "restructure", score=0.9))
+        cb.on_proposal_end(self._make_proposal_end_event(1, "action_f"))
+        cb.on_candidate_accepted(self._accepted_event(1, "action_f", score=0.9))
 
         s = cb.summary()
         assert "action_proposal_counts" in s
@@ -302,8 +379,8 @@ class TestActionDiversityCallback:
     def test_textual_diversity_computed(self):
         cb = ActionDiversityCallback()
         # Two different proposals in the same iteration.
-        cb.on_proposal_end(self._make_proposal_end_event(1, "add_constraint"))
-        cb.on_proposal_end(self._make_proposal_end_event(1, "restructure"))
+        cb.on_proposal_end(self._make_proposal_end_event(1, "action_e"))
+        cb.on_proposal_end(self._make_proposal_end_event(1, "action_f"))
 
         diversity = cb.textual_diversity()
         assert "1" in diversity
@@ -347,28 +424,28 @@ class TestActionDiversityCallback:
         prompts. Both accept and reject now contribute a signed delta.
         """
         cb = ActionDiversityCallback()
-        cb.on_proposal_end(self._make_proposal_end_event(1, "add_constraint"))
-        cb.on_candidate_accepted(self._accepted_event(1, "add_constraint", score=0.9, old=0.5))
+        cb.on_proposal_end(self._make_proposal_end_event(1, "action_e"))
+        cb.on_candidate_accepted(self._accepted_event(1, "action_e", score=0.9, old=0.5))
 
-        assert cb.action_acceptance_counts["add_constraint"] == 1
-        assert cb.action_score_deltas["add_constraint"] == [pytest.approx(0.4)]
+        assert cb.action_acceptance_counts["action_e"] == 1
+        assert cb.action_score_deltas["action_e"] == [pytest.approx(0.4)]
 
     def test_accepted_event_without_old_score_tolerated(self) -> None:
         """Test that a synthetic accepted event lacking old_score still counts and records no delta."""
         cb = ActionDiversityCallback()
-        cb.on_proposal_end(self._make_proposal_end_event(1, "add_constraint"))
+        cb.on_proposal_end(self._make_proposal_end_event(1, "action_e"))
         cb.on_candidate_accepted(
             {
                 "iteration": 1,
                 "new_candidate_idx": 1,
                 "new_score": 0.9,
                 "parent_ids": [0],
-                "metadata": {"action": "add_constraint"},
+                "metadata": {"action": "action_e"},
             }
         )
 
-        assert cb.action_acceptance_counts["add_constraint"] == 1
-        assert cb.action_score_deltas["add_constraint"] == []
+        assert cb.action_acceptance_counts["action_e"] == 1
+        assert cb.action_score_deltas["action_e"] == []
 
     def test_events_without_metadata_tolerated(self):
         """Events lacking a metadata key (legacy/synthetic) neither crash nor count."""
@@ -396,27 +473,27 @@ class TestActionDiversityCallback:
 VALID_LM_OUTPUT = """
 <response>
 <candidate>
-<action>add_constraint</action>
+<action>action_e</action>
 <reasoning>The feedback shows edge cases being missed</reasoning>
 <probability>0.35</probability>
 </candidate>
 <candidate>
-<action>adjust_specificity</action>
+<action>action_b</action>
 <reasoning>The prompt is too vague for multi-hop reasoning</reasoning>
 <probability>0.30</probability>
 </candidate>
 <candidate>
-<action>add_illustration</action>
+<action>action_a</action>
 <reasoning>A worked example would help</reasoning>
 <probability>0.20</probability>
 </candidate>
 <candidate>
-<action>restructure</action>
+<action>action_f</action>
 <reasoning>Reordering might improve attention</reasoning>
 <probability>0.10</probability>
 </candidate>
 <candidate>
-<action>edit_guidelines</action>
+<action>action_c</action>
 <reasoning>Could refine the persona</reasoning>
 <probability>0.05</probability>
 </candidate>
@@ -439,7 +516,7 @@ class FakeLM:
 class TestVerbalizedActionSelector:
     def test_parse_valid_distribution(self):
         lm = FakeLM(VALID_LM_OUTPUT)
-        selector = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=lm)
+        selector = VerbalizedActionSelector(TEST_ACTIONS, lm=lm)
         dist = selector._parse_distribution(VALID_LM_OUTPUT, random.Random(42))
         assert len(dist.entries) == 5
         # Probabilities should be renormalized to sum to 1.
@@ -447,11 +524,11 @@ class TestVerbalizedActionSelector:
 
     def test_parse_malformed_xml_falls_back(self):
         lm = FakeLM("this is not xml at all")
-        selector = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=lm)
+        selector = VerbalizedActionSelector(TEST_ACTIONS, lm=lm)
         dist = selector._parse_distribution("this is not xml at all", random.Random(42))
         # Should fall back to uniform over all actions.
-        assert len(dist.entries) == len(DEFAULT_ACTIONS)
-        expected_prob = 1.0 / len(DEFAULT_ACTIONS)
+        assert len(dist.entries) == len(TEST_ACTIONS)
+        expected_prob = 1.0 / len(TEST_ACTIONS)
         for _, p, _ in dist.entries:
             assert abs(p - expected_prob) < 1e-6
 
@@ -459,57 +536,57 @@ class TestVerbalizedActionSelector:
         partial_output = """
 <response>
 <candidate>
-<action>add_constraint</action>
+<action>action_e</action>
 <reasoning>good</reasoning>
 <probability>0.60</probability>
 </candidate>
 <candidate>
-<action>restructure</action>
+<action>action_f</action>
 <reasoning>no probability here</reasoning>
 </candidate>
 </response>
 """
         lm = FakeLM(partial_output)
-        selector = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=lm)
+        selector = VerbalizedActionSelector(TEST_ACTIONS, lm=lm)
         dist = selector._parse_distribution(partial_output, random.Random(42))
         assert len(dist.entries) == 1
-        assert dist.entries[0][0].name == "add_constraint"
+        assert dist.entries[0][0].menu_id == "action_e"
 
     def test_required_full_support_falls_back_on_an_incomplete_distribution(self) -> None:
         """Never treat a shortlist as a distribution over the declared menu."""
         selector = VerbalizedActionSelector(
-            DEFAULT_ACTIONS,
+            TEST_ACTIONS,
             lm=FakeLM(VALID_LM_OUTPUT),
             require_full_support=True,
         )
         dist = selector._parse_distribution(VALID_LM_OUTPUT, random.Random(42))
         assert dist.is_fallback is True
-        assert len(dist.entries) == len(DEFAULT_ACTIONS)
-        assert len({action.name for action, _, _ in dist.entries}) == len(DEFAULT_ACTIONS)
+        assert len(dist.entries) == len(TEST_ACTIONS)
+        assert len({action.menu_id for action, _, _ in dist.entries}) == len(TEST_ACTIONS)
 
     @pytest.mark.parametrize("probability", ["nan", "inf", "-0.1"])
     def test_invalid_numeric_probability_falls_back_uniformly(self, probability: str) -> None:
         """Reject non-finite and negative weights before sampling or logging."""
         output = (
-            "<response><candidate><action>add_constraint</action><reasoning>x</reasoning>"
+            "<response><candidate><action>action_e</action><reasoning>x</reasoning>"
             f"<probability>{probability}</probability></candidate>"
-            "<candidate><action>restructure</action><reasoning>y</reasoning>"
+            "<candidate><action>action_f</action><reasoning>y</reasoning>"
             "<probability>1.0</probability></candidate></response>"
         )
-        selector = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=FakeLM(output))
+        selector = VerbalizedActionSelector(TEST_ACTIONS, lm=FakeLM(output))
         dist = selector._parse_distribution(output, random.Random(42))
         assert dist.is_fallback is True
-        assert dist.probabilities == pytest.approx([1.0 / len(DEFAULT_ACTIONS)] * len(DEFAULT_ACTIONS))
+        assert dist.probabilities == pytest.approx([1.0 / len(TEST_ACTIONS)] * len(TEST_ACTIONS))
 
     def test_zero_mass_distribution_falls_back_uniformly(self) -> None:
         """Never pass a zero-total verbalized distribution to the sampler."""
         output = """
 <response>
-<candidate><action>add_constraint</action><probability>0</probability></candidate>
-<candidate><action>restructure</action><probability>0</probability></candidate>
+<candidate><action>action_e</action><probability>0</probability></candidate>
+<candidate><action>action_f</action><probability>0</probability></candidate>
 </response>
 """
-        selector = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=FakeLM(output))
+        selector = VerbalizedActionSelector(TEST_ACTIONS, lm=FakeLM(output))
         dist = selector._parse_distribution(output, random.Random(42))
         assert dist.is_fallback is True
 
@@ -522,22 +599,22 @@ class TestVerbalizedActionSelector:
 <probability>0.50</probability>
 </candidate>
 <candidate>
-<action>add_constraint</action>
+<action>action_e</action>
 <reasoning>real action</reasoning>
 <probability>0.50</probability>
 </candidate>
 </response>
 """
         lm = FakeLM(bad_action_output)
-        selector = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=lm)
+        selector = VerbalizedActionSelector(TEST_ACTIONS, lm=lm)
         dist = selector._parse_distribution(bad_action_output, random.Random(42))
         assert len(dist.entries) == 1
-        assert dist.entries[0][0].name == "add_constraint"
+        assert dist.entries[0][0].menu_id == "action_e"
 
     def test_parse_strips_think_tags(self):
         output_with_think = "<think>\nLet me analyze...\n</think>\n" + VALID_LM_OUTPUT
         lm = FakeLM(output_with_think)
-        selector = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=lm)
+        selector = VerbalizedActionSelector(TEST_ACTIONS, lm=lm)
         dist = selector._parse_distribution(output_with_think, random.Random(42))
         assert len(dist.entries) == 5
 
@@ -546,25 +623,25 @@ class TestVerbalizedActionSelector:
         # remain and the parser must fall back to a uniform distribution.
         truncated_output = "<think>\nreasoning cut off mid-stream " + VALID_LM_OUTPUT
         lm = FakeLM(truncated_output)
-        selector = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=lm)
+        selector = VerbalizedActionSelector(TEST_ACTIONS, lm=lm)
         dist = selector._parse_distribution(truncated_output, random.Random(42))
-        assert len(dist.entries) == len(DEFAULT_ACTIONS)
-        expected_prob = 1.0 / len(DEFAULT_ACTIONS)
+        assert len(dist.entries) == len(TEST_ACTIONS)
+        expected_prob = 1.0 / len(TEST_ACTIONS)
         for _, p, _ in dist.entries:
             assert abs(p - expected_prob) < 1e-6
 
     def test_select_returns_correct_count(self):
         lm = FakeLM(VALID_LM_OUTPUT)
-        selector = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=lm)
+        selector = VerbalizedActionSelector(TEST_ACTIONS, lm=lm)
         selector.set_context("You are a helpful assistant.", "The model failed on edge cases.")
         actions = selector.select(3, random.Random(42))
         assert len(actions) == 3
         for action in actions:
-            assert action in DEFAULT_ACTIONS
+            assert action in TEST_ACTIONS
 
     def test_select_calls_lm(self):
         lm = FakeLM(VALID_LM_OUTPUT)
-        selector = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=lm)
+        selector = VerbalizedActionSelector(TEST_ACTIONS, lm=lm)
         selector.set_context("You are a helpful assistant.", "Bad output.")
         selector.select(1, random.Random(42))
         assert len(lm.calls) == 1
@@ -573,7 +650,7 @@ class TestVerbalizedActionSelector:
 
     def test_select_without_context_falls_back(self):
         lm = FakeLM(VALID_LM_OUTPUT)
-        selector = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=lm)
+        selector = VerbalizedActionSelector(TEST_ACTIONS, lm=lm)
         # No set_context call.
         actions = selector.select(2, random.Random(42))
         assert len(actions) == 2
@@ -586,15 +663,15 @@ class TestVerbalizedActionSelector:
 
     def test_select_without_rng_uses_instance_rng(self):
         # No context and no passed rng: falls back to the constructor rng deterministically.
-        selector_a = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=FakeLM(VALID_LM_OUTPUT), rng=random.Random(3))
-        selector_b = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=FakeLM(VALID_LM_OUTPUT), rng=random.Random(3))
+        selector_a = VerbalizedActionSelector(TEST_ACTIONS, lm=FakeLM(VALID_LM_OUTPUT), rng=random.Random(3))
+        selector_b = VerbalizedActionSelector(TEST_ACTIONS, lm=FakeLM(VALID_LM_OUTPUT), rng=random.Random(3))
         actions_a = selector_a.select(10)
         actions_b = selector_b.select(10)
-        assert [a.name for a in actions_a] == [a.name for a in actions_b]
+        assert [action.menu_id for action in actions_a] == [action.menu_id for action in actions_b]
 
     def test_context_cleared_after_select(self):
         lm = FakeLM(VALID_LM_OUTPUT)
-        selector = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=lm)
+        selector = VerbalizedActionSelector(TEST_ACTIONS, lm=lm)
         selector.set_context("prompt", "feedback")
         selector.select(1, random.Random(42))
         # Context cleared, second call should fall back.
@@ -605,22 +682,22 @@ class TestVerbalizedActionSelector:
         output = """
 <response>
 <candidate>
-<action>Add_Constraint</action>
+<action>ACTION_E</action>
 <reasoning>test</reasoning>
 <probability>1.0</probability>
 </candidate>
 </response>
 """
         lm = FakeLM(output)
-        selector = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=lm)
+        selector = VerbalizedActionSelector(TEST_ACTIONS, lm=lm)
         dist = selector._parse_distribution(output, random.Random(42))
         assert len(dist.entries) == 1
-        assert dist.entries[0][0].name == "add_constraint"
+        assert dist.entries[0][0].menu_id == "action_e"
 
 
 class TestSampleFromTails:
     def test_samples_only_from_tail(self):
-        actions = DEFAULT_ACTIONS[:3]
+        actions = TEST_ACTIONS[:3]
         dist = ActionDistribution(
             entries=[
                 (actions[0], 0.70, "high"),
@@ -631,13 +708,13 @@ class TestSampleFromTails:
         rng = random.Random(42)
         # With tau=0.10, only the third entry (p=0.05) is in the tail.
         results, stats = _sample_from_tails(dist, 10, tau=0.10, rng=rng)
-        assert all(a.name == actions[2].name for a in results)
+        assert all(action.menu_id == actions[2].menu_id for action in results)
         assert stats.n_parsed_entries == 3
         assert stats.used_full_fallback is False
         assert stats.tail_mass == pytest.approx(0.05)
 
     def test_falls_back_when_no_tail(self):
-        actions = DEFAULT_ACTIONS[:2]
+        actions = TEST_ACTIONS[:2]
         dist = ActionDistribution(
             entries=[
                 (actions[0], 0.60, "high"),
@@ -649,13 +726,13 @@ class TestSampleFromTails:
         results, stats = _sample_from_tails(dist, 20, tau=0.10, rng=rng)
         assert len(results) == 20
         # Should sample from both (full distribution fallback).
-        names = {a.name for a in results}
-        assert len(names) >= 1  # At least one action sampled.
+        menu_ids = {action.menu_id for action in results}
+        assert len(menu_ids) >= 1  # At least one action sampled.
         assert stats.used_full_fallback is True
         assert stats.tail_mass == pytest.approx(0.0)
 
     def test_respects_weights(self):
-        actions = DEFAULT_ACTIONS[:2]
+        actions = TEST_ACTIONS[:2]
         dist = ActionDistribution(
             entries=[
                 (actions[0], 0.01, "very low"),
@@ -664,8 +741,8 @@ class TestSampleFromTails:
         )
         rng = random.Random(42)
         results, _stats = _sample_from_tails(dist, 1000, tau=0.10, rng=rng)
-        count_0 = sum(1 for a in results if a.name == actions[0].name)
-        count_1 = sum(1 for a in results if a.name == actions[1].name)
+        count_0 = sum(1 for action in results if action.menu_id == actions[0].menu_id)
+        count_1 = sum(1 for action in results if action.menu_id == actions[1].menu_id)
         # Actions[1] has 9x the weight, so it should be sampled much more often.
         assert count_1 > count_0
 
@@ -700,19 +777,19 @@ class TestTauDefault:
             k: The number of actions the selector draws per selection.
             expected_tau: The tail threshold tau must resolve to.
         """
-        assert VerbalizedActionSelector(DEFAULT_ACTIONS, lm=FakeLM(""), k=k).tau == pytest.approx(expected_tau)
+        assert VerbalizedActionSelector(TEST_ACTIONS, lm=FakeLM(""), k=k).tau == pytest.approx(expected_tau)
 
     def test_explicit_tau_overrides_default(self) -> None:
         """Test that an explicit tau overrides the reciprocal-k default."""
-        assert VerbalizedActionSelector(DEFAULT_ACTIONS, lm=FakeLM(""), k=5, tau=0.1).tau == pytest.approx(0.1)
+        assert VerbalizedActionSelector(TEST_ACTIONS, lm=FakeLM(""), k=5, tau=0.1).tau == pytest.approx(0.1)
 
 
 class TestVerbalizedReflectionIntegration:
     """Test that VerbalizedActionSelector integrates with StatelessReflectionLM."""
 
     def test_reflect_many_calls_set_context(self):
-        action_lm = FakeLM(VALID_LM_OUTPUT)
-        selector = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=action_lm)
+        action_lm = FakeLM(STATELESS_LM_OUTPUT)
+        selector = VerbalizedActionSelector(STATELESS_ACTIONS, lm=action_lm)
         reflection_lm = RecordingLM()
         reflection = StatelessReflectionLM(reflection_lm, action_selector=selector)
 
@@ -731,8 +808,8 @@ class TestVerbalizedReflectionIntegration:
         assert "action" in results[0][0].metadata
 
     def test_reflect_many_aggregates_feedback_across_jobs(self):
-        action_lm = FakeLM(VALID_LM_OUTPUT)
-        selector = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=action_lm)
+        action_lm = FakeLM(STATELESS_LM_OUTPUT)
+        selector = VerbalizedActionSelector(STATELESS_ACTIONS, lm=action_lm)
         reflection = StatelessReflectionLM(BatchRecordingLM(), action_selector=selector)
 
         ds_a = {"sp": [{"Inputs": "x", "Generated Outputs": "y", "Feedback": "feedback-alpha"}]}
@@ -754,8 +831,8 @@ class TestVerbalizedReflectionIntegration:
         Per-job mode makes one selector call per job, each drawn from that job's own
         candidate and feedback, with no cross-job aggregation.
         """
-        action_lm = FakeLM(VALID_LM_OUTPUT)
-        selector = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=action_lm)
+        action_lm = FakeLM(STATELESS_LM_OUTPUT)
+        selector = VerbalizedActionSelector(STATELESS_ACTIONS, lm=action_lm)
         reflection = StatelessReflectionLM(BatchRecordingLM(), action_selector=selector, per_job_action_selection=True)
 
         ds_a = {"sp": [{"Inputs": "x", "Generated Outputs": "y", "Feedback": "feedback-alpha"}]}
@@ -776,73 +853,17 @@ class TestVerbalizedReflectionIntegration:
         assert "distinct parent candidates" not in action_lm.calls[0]
 
 
-# ---------------------------------------------------------------------------
-# Structured (section-scoped) action space (Rev 2)
-# ---------------------------------------------------------------------------
-
-
-class TestStructuredActions:
-    def test_default_menu_shape(self):
-        actions = build_structured_actions()
-        # 3 operations per section + 1 global restructure.
-        assert len(actions) == 3 * len(STRUCTURED_SECTIONS) + 1
-        names = [a.name for a in actions]
-        assert len(set(names)) == len(names)
-        assert "restructure" in names
-        assert "rewrite_rules" in names
-        assert "append_output_format" in names
-        assert "condense_examples" in names
-
-    def test_section_actions_carry_target_section(self):
-        actions = build_structured_actions()
-        by_name = {a.name: a for a in actions}
-        assert by_name["rewrite_role"].target_section == "Role"
-        assert by_name["append_output_format"].target_section == "Output Format"
-        assert by_name["restructure"].target_section is None
-
-    def test_custom_sections(self):
-        actions = build_structured_actions(["Alpha", "Beta"])
-        names = {a.name for a in actions}
-        assert names == {
-            "rewrite_alpha",
-            "append_alpha",
-            "condense_alpha",
-            "rewrite_beta",
-            "append_beta",
-            "condense_beta",
-            "restructure",
-        }
-
-    def test_suffix_includes_section_scope(self):
-        action = build_structured_actions()[0]
-        assert action.target_section == "Role"
-        suffix = format_action_suffix(action)
-        assert "only within the '## Role' section" in suffix
-        assert "Reproduce every other section verbatim" in suffix
-
-    def test_suffix_omits_scope_without_target_section(self):
-        action = PromptEditAction(name="x", description="d", instruction_suffix="s")
-        suffix = format_action_suffix(action)
-        assert "ONLY within" not in suffix
-
-    def test_selectors_work_over_structured_menu(self):
-        actions = build_structured_actions()
-        picks = RandomActionSelector(actions, rng=random.Random(0)).select(5)
-        assert len(picks) == 5
-        assert all(p in actions for p in picks)
-
-
 class TestVerbalizedHistory:
     def test_history_records_distribution_and_samples(self):
         lm = FakeLM(VALID_LM_OUTPUT)
-        selector = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=lm, rng=random.Random(0))
+        selector = VerbalizedActionSelector(TEST_ACTIONS, lm=lm, rng=random.Random(0))
         selector.set_context("prompt text", "feedback text")
         picks = selector.select(3)
 
         assert len(selector.history) == 1
         record = selector.history[0]
         assert record["fallback"] is False
-        assert record["sampled"] == [p.name for p in picks]
+        assert record["sampled"] == [pick.menu_id for pick in picks]
         assert len(record["sampled_probabilities"]) == len(picks)
         assert all(0.0 <= probability <= 1.0 for probability in record["sampled_probabilities"])
         assert abs(sum(record["probs"].values()) - 1.0) < 1e-6
@@ -851,12 +872,12 @@ class TestVerbalizedHistory:
 
     def test_full_support_policy_mixes_verbalized_and_uniform_probabilities(self) -> None:
         """Give every declared action a logged nonzero sampling propensity."""
-        actions = DEFAULT_ACTIONS[:3]
+        actions = TEST_ACTIONS[:3]
         output = (
             "<response>"
             + "".join(
                 "<candidate>"
-                f"<action>{action.name}</action><reasoning>x</reasoning><probability>{probability}</probability>"
+                f"<action>{action.menu_id}</action><reasoning>x</reasoning><probability>{probability}</probability>"
                 "</candidate>"
                 for action, probability in zip(actions, [1.0, 0.0, 0.0], strict=True)
             )
@@ -876,9 +897,9 @@ class TestVerbalizedHistory:
         assert record["exploration_epsilon"] == pytest.approx(0.1)
         assert record["sampling_probs"] == pytest.approx(
             {
-                actions[0].name: 0.9 + 0.1 / 3,
-                actions[1].name: 0.1 / 3,
-                actions[2].name: 0.1 / 3,
+                actions[0].menu_id: 0.9 + 0.1 / 3,
+                actions[1].menu_id: 0.1 / 3,
+                actions[2].menu_id: 0.1 / 3,
             }
         )
         assert sum(record["sampling_probs"].values()) == pytest.approx(1.0)
@@ -886,7 +907,7 @@ class TestVerbalizedHistory:
     def test_history_records_tail_sample_stats(self) -> None:
         """Test that a history record carries the tail-sampling diagnostics."""
         lm = FakeLM(VALID_LM_OUTPUT)
-        selector = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=lm, rng=random.Random(0))
+        selector = VerbalizedActionSelector(TEST_ACTIONS, lm=lm, rng=random.Random(0))
         selector.set_context("prompt text", "feedback text")
         selector.select(3)
 
@@ -899,20 +920,20 @@ class TestVerbalizedHistory:
 
     def test_history_marks_fallback_on_unparseable_output(self):
         lm = FakeLM("no xml here")
-        selector = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=lm, rng=random.Random(0))
+        selector = VerbalizedActionSelector(TEST_ACTIONS, lm=lm, rng=random.Random(0))
         selector.set_context("prompt text", "feedback text")
         selector.select(2)
 
         assert selector.history[0]["fallback"] is True
 
     def test_uniform_fallback_without_context_leaves_no_history(self):
-        selector = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=FakeLM(VALID_LM_OUTPUT), rng=random.Random(0))
+        selector = VerbalizedActionSelector(TEST_ACTIONS, lm=FakeLM(VALID_LM_OUTPUT), rng=random.Random(0))
         selector.select(2)
         assert selector.history == []
 
 
 # ---------------------------------------------------------------------------
-# Length control (Rev 2.1): soft budget, length-aware selection, hard cap
+# Length control: soft budget, length-aware selection, hard cap
 # ---------------------------------------------------------------------------
 
 
@@ -920,29 +941,29 @@ class TestLengthControl:
     def test_suffix_includes_length_budget(self):
         from gepa.strategies.action_space import SOFT_PROMPT_CHAR_BUDGET
 
-        suffix = format_action_suffix(DEFAULT_ACTIONS[0])
+        suffix = format_stateless_action_constraint(STATELESS_ACTIONS[0])
         assert f"under {SOFT_PROMPT_CHAR_BUDGET} characters" in suffix
 
     def test_verbalized_prompt_includes_length_stats(self):
         lm = FakeLM(VALID_LM_OUTPUT)
-        selector = VerbalizedActionSelector(DEFAULT_ACTIONS, lm=lm, rng=random.Random(0))
+        selector = VerbalizedActionSelector(TEST_ACTIONS, lm=lm, rng=random.Random(0))
         selector.set_context("p" * 1234, "some feedback")
         selector.select(1)
         assert "Current component length: 1234 characters" in lm.calls[0]
-        assert "favor condensing" in lm.calls[0]
+        assert "favor actions that shorten or replace existing text" in lm.calls[0]
 
 
 class TestConfigWiring:
     """Keep ``action_selector`` wired through the public configuration path."""
 
     def test_reflection_config_accepts_action_selector(self):
-        selector = RandomActionSelector(DEFAULT_ACTIONS, rng=random.Random(0))
+        selector = RandomActionSelector(STATELESS_ACTIONS, rng=random.Random(0))
         config = ReflectionConfig(reflection_lm="m", action_selector=selector)
         assert config.action_selector is selector
         assert ReflectionConfig(reflection_lm="m").action_selector is None
 
     def test_action_selector_survives_legacy_config_conversion(self):
-        selector = RandomActionSelector(DEFAULT_ACTIONS, rng=random.Random(0))
+        selector = RandomActionSelector(STATELESS_ACTIONS, rng=random.Random(0))
         legacy = GEPAConfig(reflection=ReflectionConfig(reflection_lm="m", action_selector=selector))
         rebuilt = GEPAConfig(**_from_legacy_config(legacy).engine_config)
         assert rebuilt.reflection.action_selector is selector
@@ -954,7 +975,7 @@ class TestConfigWiring:
         """Test that bind_rng rebinds the reflection LM's selection rng."""
         run_rng = random.Random(1234)
         reflection = StatelessReflectionLM(
-            RecordingLM(reply="x"), action_selector=RandomActionSelector(DEFAULT_ACTIONS)
+            RecordingLM(reply="x"), action_selector=RandomActionSelector(STATELESS_ACTIONS)
         )
         assert reflection.rng is not run_rng
         reflection.bind_rng(run_rng)
@@ -975,7 +996,7 @@ class TestConfigWiring:
             skip_perfect_score=False,
             experiment_tracker=None,
             reflection_lm=RecordingLM(reply="x"),
-            action_selector=RandomActionSelector(DEFAULT_ACTIONS),
+            action_selector=RandomActionSelector(STATELESS_ACTIONS),
         )
         proposer.bind_reflection_rng(run_rng)
         assert proposer._reflection_lm.rng is run_rng

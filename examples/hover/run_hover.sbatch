@@ -54,7 +54,6 @@ MAX_METRIC_CALLS="${MAX_METRIC_CALLS:-7051}"
 CONDITION="${CONDITION:-both}"
 PROGRAM="${PROGRAM:-2stage}"
 SEED_STYLE="${SEED_STYLE:-structured}"
-ACTIONS="${ACTIONS:-default}"
 TAG="${TAG:-}"
 TRAIN_LIMIT="${TRAIN_LIMIT:-}"
 VAL_LIMIT="${VAL_LIMIT:-}"
@@ -189,7 +188,6 @@ echo "==> reflection=${REFLECTION_MODEL} reflection_api_base=${REFLECTION_API_BA
     --condition "${CONDITION}" \
     --program "${PROGRAM}" \
     --seed-style "${SEED_STYLE}" \
-    --actions "${ACTIONS}" \
     --wikipedia-endpoint "${WIKIPEDIA_ENDPOINT}" \
     --wikipedia-cache "${WIKIPEDIA_CACHE}" \
     --retrieval-k "${RETRIEVAL_K}" \

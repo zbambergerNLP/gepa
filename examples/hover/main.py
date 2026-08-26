@@ -59,13 +59,17 @@ from gepa.optimize_anything import (
 from gepa.proposer.reflective_mutation.rlm_environment import RLMBudget
 from gepa.proposer.reflective_mutation.three_role import ThreeRoleReflectionLM
 from gepa.strategies.action_space import (
-    DEFAULT_ACTIONS,
     RandomActionSelector,
     VerbalizedActionSelector,
-    build_structured_actions,
+    stateless_selector_policy_contract,
 )
 from gepa.strategies.document_template import TEMPLATE_FAMILIES
-from gepa.strategies.intervention import controller_policy_contract, semantic_action_catalog
+from gepa.strategies.intervention import (
+    build_stateless_action_menu,
+    controller_policy_contract,
+    semantic_action_catalog,
+    stateless_action_menu_contract,
+)
 
 # GEPA artifact components: summarize1 -> create_query_hop2 -> summarize2 -> create_query_hop3.
 SEED_CANDIDATE = {
@@ -129,10 +133,11 @@ def build_run_contract(condition: str, args) -> dict:
     operated = condition in ("react_v2", "rlm")
     reflection_level = args.reflection_level if operated else 0
     edit_tool_set = args.edit_tool_set if operated else None
-    legacy_actions = args.actions if condition in ("random", "action") else None
+    stateless_semantic = condition in ("random", "action")
+    template = TEMPLATE_FAMILIES[family]["system_prompt"]
     rlm_budget = _rlm_budget() if condition == "rlm" else None
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "benchmark": "hover-wikipedia",
         "condition": condition,
         "models": {
@@ -154,9 +159,16 @@ def build_run_contract(condition: str, args) -> dict:
             "max_proposer_model_calls": (
                 _rlm_max_model_calls(rlm_budget) if rlm_budget is not None else 8 if condition == "react_v2" else None
             ),
-            "semantic_action_space": semantic_action_catalog("prompt") if reflection_level == 2 else None,
+            "semantic_action_space": (
+                semantic_action_catalog("prompt") if reflection_level == 2 or stateless_semantic else None
+            ),
             "semantic_controller_policy": controller_policy_contract() if reflection_level == 2 else None,
-            "legacy_actions": legacy_actions,
+            "stateless_action_menu": stateless_action_menu_contract(template) if stateless_semantic else None,
+            "stateless_selector_policy": (
+                stateless_selector_policy_contract("random" if condition == "random" else "verbalized")
+                if stateless_semantic
+                else None
+            ),
         },
         "program": {
             "name": args.program,
@@ -368,11 +380,8 @@ def dump_action_summary(tracker: ActionDiversityCallback, run_dir: str, selector
 def build_config(condition: str, args, reflection_lm_kwargs: dict, run_dir: str | None = None):
     """Build the GEPAConfig for one condition. Returns (config, action_selector)."""
     resolved_family = resolve_template_family(args.template_family, args.solver_model)
-    action_space = (
-        build_structured_actions(list(TEMPLATE_FAMILIES[resolved_family]["system_prompt"].sections))
-        if args.actions == "structured"
-        else DEFAULT_ACTIONS
-    )
+    template = TEMPLATE_FAMILIES[resolved_family]["system_prompt"]
+    action_space = build_stateless_action_menu(template)
     action_selector = None
     if condition == "random":
         action_selector = RandomActionSelector(action_space)
@@ -512,13 +521,6 @@ def main():
         help="Seed prompts: plain paper sentences or the template selected for the solver provider",
     )
     parser.add_argument(
-        "--actions",
-        type=str,
-        default="default",
-        choices=["default", "structured"],
-        help="Action space: DEFAULT_ACTIONS or section-scoped structured actions (implies --seed-style structured)",
-    )
-    parser.add_argument(
         "--reflection-level",
         type=int,
         default=2,
@@ -539,10 +541,6 @@ def main():
     )
     parser.add_argument("--tag", type=str, default="", help="Suffix appended to run dirs (e.g. rev2, 48h)")
     args = parser.parse_args()
-
-    if args.actions == "structured" and args.seed_style != "structured":
-        print("--actions structured implies --seed-style structured; overriding seed style.")
-        args.seed_style = "structured"
 
     dataset_kwargs = {"seed": args.seed, "smoke": args.smoke}
     if args.data_dir is not None:
@@ -602,9 +600,9 @@ def main():
         conditions = [args.condition]
 
     resolved_family = resolve_template_family(args.template_family, args.solver_model)
-    operated_conditions = {"react_v2", "rlm"}.intersection(conditions)
-    if operated_conditions and args.seed_style != "structured":
-        parser.error(f"--condition {', '.join(sorted(operated_conditions))} requires --seed-style structured")
+    semantic_conditions = {"react_v2", "rlm", "random", "action"}.intersection(conditions)
+    if semantic_conditions and args.seed_style != "structured":
+        parser.error(f"--condition {', '.join(sorted(semantic_conditions))} requires --seed-style structured")
     if "rlm" in conditions and args.edit_tool_set != "broad":
         parser.error("--condition rlm requires --edit-tool-set broad")
     if "rlm" in conditions and args.reflection_level != 2:

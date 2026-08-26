@@ -39,7 +39,7 @@ from gepa.strategies.document_template import TEMPLATE_FAMILIES, DocumentTemplat
 from gepa.strategies.edit_tools import EDIT_TOOL_SETS
 from gepa.strategies.intervention import (
     Controller,
-    ControllerAction,
+    ControllerChoice,
     InjectionSite,
     build_controller_menu,
     controller_policy_contract,
@@ -243,7 +243,7 @@ def _summarize_traces(entries: Sequence[Mapping[str, Any]]) -> str:
     return "\n\n".join(blocks) or "(no traces available)"
 
 
-def _tracking_id(action: ControllerAction) -> str:
+def _tracking_id(action: ControllerChoice) -> str:
     """Return the action-diversity bucket for one Controller choice.
 
     Args:
@@ -252,8 +252,8 @@ def _tracking_id(action: ControllerAction) -> str:
     Returns:
         Semantic action name at level 2, or ``"edit:<region>"`` at level 1.
     """
-    if action.intervention_spec is not None:
-        return action.intervention_spec.name
+    if action.semantic_action is not None:
+        return action.semantic_action.name
     return f"edit:{action.edit_target.name}"
 
 
@@ -493,7 +493,7 @@ class ThreeRoleReflectionLM:
                 "manifestor_lm_run_identity when constructing ThreeRoleReflectionLM with custom callables."
             )
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "strategy": "three_role_reflection",
             "reflection_level": self.level,
             "edit_tool_set": self.edit_tool_set,
@@ -720,17 +720,17 @@ class ThreeRoleReflectionLM:
                 require_full_support=self.level >= 2,
             )
             controller.set_context(text, feedback)
-            action = controller.select_controller(1, self.rng)[0]
+            action = controller.select(1, self.rng)[0]
             if self.level >= 2:
                 controller_sampling = _joint_controller_sampling_record(controller.history[-1])
             else:
                 controller_sampling = _controller_sampling_record(controller.history[-1])
             preferred_edit_tool = action.edit_tool.value if action.edit_tool is not None else None
-            intervention_spec = action.intervention_spec.name if action.intervention_spec else None
+            semantic_action = action.semantic_action.name if action.semantic_action else None
 
             section = action.edit_target.section
             region_text = text if section is None else template.parse(text)[section]
-            intervention = None
+            steering_message = None
             if self.level >= 2:
                 manifestor = Manifestor(
                     self.manifestor_lm,
@@ -739,7 +739,7 @@ class ThreeRoleReflectionLM:
                     inject_as=self.manifestor_injection_site,
                 )
                 try:
-                    intervention = manifestor.manifest(action, region_text, text, feedback, traces)
+                    steering_message = manifestor.manifest(action, region_text, text, feedback, traces)
                 except ManifestationError as exc:
                     error = _bounded_history_text(exc)
                     if self.proposer_backend == "react_v2":
@@ -763,9 +763,12 @@ class ThreeRoleReflectionLM:
                             "backend": self.proposer_backend,
                             "component": name,
                             "edit_target": action.edit_target.label,
+                            "action_choice": action.menu_id,
+                            "action_operator": preferred_edit_tool,
+                            "action_target_section": section,
                             "preferred_edit_tool": preferred_edit_tool,
-                            "intervention_spec": intervention_spec,
-                            "manifested_intervention": "",
+                            "semantic_action": semantic_action,
+                            "steering_message": "",
                             "manifestor_delivery": (
                                 "user_message" if self.proposer_backend == "react_v2" else "rlm_prompt_guidance"
                             ),
@@ -790,7 +793,7 @@ class ThreeRoleReflectionLM:
                     self._log(f"Component {name!r} dropped after Manifestor failure: {exc}")
                     continue
 
-            manifested_text = intervention.text if intervention is not None else ""
+            manifested_text = steering_message.text if steering_message is not None else ""
             if self.proposer_backend == "react_v2":
                 react = ReActV2Proposer(
                     self.base_lm,
@@ -804,7 +807,7 @@ class ThreeRoleReflectionLM:
                     text,
                     action.edit_target,
                     action.edit_tool,
-                    intervention,
+                    steering_message,
                     feedback,
                     traces,
                     history,
@@ -865,14 +868,21 @@ class ThreeRoleReflectionLM:
                 "backend": self.proposer_backend,
                 "component": name,
                 "edit_target": action.edit_target.label,
+                "action_choice": action.menu_id,
+                "action_operator": preferred_edit_tool,
+                "action_target_section": section,
                 "preferred_edit_tool": preferred_edit_tool,
-                "intervention_spec": intervention_spec,
-                "manifested_intervention": _bounded_history_text(intervention.text) if intervention is not None else "",
+                "semantic_action": semantic_action,
+                "steering_message": (
+                    _bounded_history_text(steering_message.text) if steering_message is not None else ""
+                ),
                 "manifestor_delivery": (
                     "user_message" if self.proposer_backend == "react_v2" else "rlm_prompt_guidance"
                 ),
                 "inject_as": (
-                    intervention.inject_as if intervention is not None and self.proposer_backend == "react_v2" else None
+                    steering_message.inject_as
+                    if steering_message is not None and self.proposer_backend == "react_v2"
+                    else None
                 ),
                 "feedback": _bounded_history_text(feedback),
                 "controller_sampling": controller_sampling,
@@ -888,7 +898,7 @@ class ThreeRoleReflectionLM:
             if result.changed:
                 proposal.new_texts[name] = result.new_text
                 proposal.raw_lm_outputs[name] = result.final_output
-                proposal.prompts[name] = intervention.text if intervention is not None else ""
+                proposal.prompts[name] = steering_message.text if steering_message is not None else ""
                 accepted_revisions.append(record)
             else:
                 dropped.append(name)
@@ -901,10 +911,13 @@ class ThreeRoleReflectionLM:
                     "reflection_level": self.level,
                     "proposer_backend": self.proposer_backend,
                     "edit_target": primary["edit_target"],
+                    "action_choice": primary["action_choice"],
+                    "action_operator": primary["action_operator"],
+                    "action_target_section": primary["action_target_section"],
                     "edit_tool": primary["preferred_edit_tool"],
                     "preferred_edit_tool": primary["preferred_edit_tool"],
-                    "intervention_spec": primary["intervention_spec"],
-                    "manifested_intervention": primary["manifested_intervention"],
+                    "semantic_action": primary["semantic_action"],
+                    "steering_message": primary["steering_message"],
                     "manifestor_delivery": primary["manifestor_delivery"],
                     "executed_edit": primary["executed_edit"],
                     "controller_sampling": primary["controller_sampling"],

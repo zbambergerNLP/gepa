@@ -25,8 +25,14 @@ from examples.hover.main import build_config as build_hover_config
 from examples.hover.main import build_run_contract as build_hover_run_contract
 from examples.hover.main import dump_candidates as dump_hover_candidates
 from examples.hover.main import seed_candidate as hover_seed_candidate
+from gepa.strategies.action_space import stateless_selector_policy_contract
 from gepa.strategies.document_template import TEMPLATE_FAMILIES
-from gepa.strategies.intervention import controller_policy_contract, semantic_action_catalog
+from gepa.strategies.intervention import (
+    build_stateless_action_menu,
+    controller_policy_contract,
+    semantic_action_catalog,
+    stateless_action_menu_contract,
+)
 
 
 def test_student_model_selects_provider_specific_template() -> None:
@@ -119,7 +125,6 @@ def test_openai_proposer_routes_manifestor_to_portable_user_message() -> None:
 
 def _hotpot_args(**overrides):
     values = {
-        "actions": "structured",
         "api_base": None,
         "data_identity": {
             "source": {"type": "huggingface", "dataset": "hotpot_qa", "config": "fullwiki"},
@@ -197,7 +202,7 @@ def test_hotpot_and_hover_contracts_record_exact_model_roles() -> None:
     hover = build_hover_run_contract("react_v2", hover_args)
 
     for contract in (hotpot, hover):
-        assert contract["schema_version"] == 2
+        assert contract["schema_version"] == 3
         assert contract["models"] == {
             "solver": "hosted_vllm/Qwen3.8",
             "solver_api_base": "http://localhost:8000/v1",
@@ -282,8 +287,38 @@ def test_candidate_artifacts_embed_run_contract(tmp_path: Path, dump_candidates)
     assert json.loads(Path(path).read_text())["run_contract"] == contract
 
 
-def test_legacy_structured_condition_uses_student_provider_sections() -> None:
-    _, selector = build_hotpotqa_config("random", _hotpot_args(), {})
+@pytest.mark.parametrize("condition", ["random", "action"])
+def test_stateless_conditions_use_the_canonical_provider_action_menu(condition: str) -> None:
+    args = _hotpot_args()
+    template = TEMPLATE_FAMILIES["alibaba"]["system_prompt"]
+    contract = build_hotpotqa_run_contract(condition, args)
+    config, selector = build_hotpotqa_config(condition, args, {})
+    hover_config, hover_selector = build_hover_config(condition, _hotpot_args(final_retrieval_k=10), {})
+    expected_menu = build_stateless_action_menu(template)
 
-    targeted_sections = {action.target_section for action in selector.actions if action.target_section is not None}
-    assert targeted_sections == set(TEMPLATE_FAMILIES["alibaba"]["system_prompt"].sections)
+    assert contract["optimizer"]["semantic_action_space"] == semantic_action_catalog("prompt")
+    assert contract["optimizer"]["semantic_controller_policy"] is None
+    assert contract["optimizer"]["stateless_action_menu"] == stateless_action_menu_contract(template)
+    assert contract["optimizer"]["stateless_selector_policy"] == stateless_selector_policy_contract(
+        "random" if condition == "random" else "verbalized"
+    )
+    assert config.reflection.action_selector is selector
+    assert hover_config.reflection.action_selector is hover_selector
+    assert [choice.menu_id for choice in hover_selector.actions] == [choice.menu_id for choice in expected_menu]
+    assert [choice.menu_id for choice in selector.actions] == [choice.menu_id for choice in expected_menu]
+    assert {choice.target_section for choice in selector.actions if choice.target_section is not None} == set(
+        template.sections
+    )
+    assert all(choice.edit_tool is choice.semantic_action.edit_tool for choice in selector.actions)
+
+
+def test_stateless_action_menu_contract_matches_between_wikipedia_benchmarks() -> None:
+    args = _hotpot_args(final_retrieval_k=10)
+    expected = stateless_action_menu_contract(TEMPLATE_FAMILIES["alibaba"]["system_prompt"])
+
+    for build_contract in (build_hotpotqa_run_contract, build_hover_run_contract):
+        contract = build_contract("random", args)
+        assert contract["schema_version"] == 3
+        assert contract["optimizer"]["stateless_action_menu"] == expected
+        assert contract["optimizer"]["stateless_selector_policy"] == stateless_selector_policy_contract("random")
+        assert "legacy_actions" not in contract["optimizer"]

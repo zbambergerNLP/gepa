@@ -7,7 +7,7 @@ import pytest
 
 from gepa.proposer.reflective_mutation.manifestor import (
     INJECTION_SITE_DESCRIPTIONS,
-    MAX_INTERVENTION_CHARS,
+    MAX_STEERING_MESSAGE_CHARS,
     MAX_TRACES_CHARS,
     ManifestationError,
     Manifestor,
@@ -15,15 +15,15 @@ from gepa.proposer.reflective_mutation.manifestor import (
 )
 from gepa.strategies.document_template import EditTarget
 from gepa.strategies.edit_tools import EditTool
-from gepa.strategies.intervention import ControllerAction, Intervention, InterventionSpec
+from gepa.strategies.intervention import ControllerChoice, SemanticActionSpec, SteeringMessage
 
-SPEC = InterventionSpec(
+SPEC = SemanticActionSpec(
     name="expand",
     description="Expand the region with missing guidance.",
     edit_tool=EditTool.INSERT_TEXT,
     instruction="Name the missing guidance and where the editor should add it.",
 )
-FIXED_SPEC = InterventionSpec(
+FIXED_SPEC = SemanticActionSpec(
     name="fixed",
     description="Use fixed steering.",
     edit_tool=EditTool.INSERT_TEXT,
@@ -60,9 +60,9 @@ class SequenceLM:
         return self.replies[len(self.calls) - 1]
 
 
-def action(spec: InterventionSpec | None = SPEC) -> ControllerAction:
+def action(spec: SemanticActionSpec | None = SPEC) -> ControllerChoice:
     """Build a Rules-section Controller action."""
-    return ControllerAction(EditTarget("sys", "Rules"), spec)
+    return ControllerChoice(EditTarget("sys", "Rules"), spec)
 
 
 @pytest.mark.parametrize(
@@ -99,7 +99,7 @@ def test_fixed_text_skips_lm_and_honors_provider_override() -> None:
         "feedback",
         "traces",
     )
-    assert result == Intervention("Add one concise requirement.", "developer")
+    assert result == SteeringMessage("Add one concise requirement.", "developer")
     assert lm.calls == []
 
 
@@ -113,7 +113,7 @@ def test_instruction_spec_is_manifested_once_with_full_grounding() -> None:
         feedback_summary="The answer omitted its source.",
         traces="Output: unsupported claim",
     )
-    assert result == Intervention(lm.reply, "user")
+    assert result == SteeringMessage(lm.reply, "user")
     assert len(lm.calls) == 1
     prompt = lm.calls[0]
     for expected in (
@@ -142,10 +142,10 @@ def test_prompt_explains_the_effective_injection_site(site: str) -> None:
 
 def test_hidden_thoughts_and_overlong_manifestation_are_removed() -> None:
     """Keep steering concise and free of hidden-reasoning wrappers."""
-    lm = RecordingLM(f"<think>private</think>{'x' * (MAX_INTERVENTION_CHARS + 50)}")
+    lm = RecordingLM(f"<think>private</think>{'x' * (MAX_STEERING_MESSAGE_CHARS + 50)}")
     result = Manifestor(lm).manifest(action(), "region", "full", "feedback", "traces")
     assert result is not None
-    assert result.text == "x" * MAX_INTERVENTION_CHARS + "..."
+    assert result.text == "x" * MAX_STEERING_MESSAGE_CHARS + "..."
     assert "private" not in result.text
 
 
@@ -153,7 +153,7 @@ def test_empty_visible_manifestation_is_retried_once() -> None:
     """Recover from a think-only first reply without sending empty steering."""
     lm = SequenceLM(["<think>private only</think>", "Use the feedback to make the rule precise."])
     result = Manifestor(lm).manifest(action(), "region", "full", "feedback", "traces")
-    assert result == Intervention("Use the feedback to make the rule precise.", "user")
+    assert result == SteeringMessage("Use the feedback to make the rule precise.", "user")
     assert len(lm.calls) == 2
     assert "previous reply contained no visible steering text" in lm.calls[1].lower()
 
@@ -176,7 +176,7 @@ def test_inapplicable_action_is_dropped_instead_of_inventing_an_edit() -> None:
 
 def test_blank_fixed_manifestation_is_rejected() -> None:
     """Prevent fixed semantic steering from silently collapsing to empty text."""
-    blank_spec = InterventionSpec(
+    blank_spec = SemanticActionSpec(
         name="blank",
         description="Invalid blank steering.",
         edit_tool=EditTool.INSERT_TEXT,

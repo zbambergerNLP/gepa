@@ -15,46 +15,95 @@ import math
 import random
 import re
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Generic, Literal, Protocol, TypeVar
 
 from gepa.proposer.reflective_mutation.base import LanguageModel
 from gepa.utils.text import strip_think_tags
 
 
-@dataclass(frozen=True)
-class PromptEditAction:
-    """One type of prompt mutation the reflection LM is constrained to perform.
+class SelectableItem(Protocol):
+    """Structural contract for one option shown to an action selector."""
 
-    Attributes:
-        name: Short identifier (e.g. ``"add_illustration"``).
-        description: Human-readable description shown to the reflection LM and
-            available to learned selectors.
-        instruction_suffix: Directive appended to the reflection prompt to
-            constrain the LM to this edit type.
-        target_section: Optional markdown section name (e.g. ``"Rules"``) this
-            action is scoped to. When set, the reflection LM is instructed to
-            edit only that section of a structured prompt.
-    """
+    @property
+    def menu_id(self) -> str:
+        """Return the stable identifier used in model output and logs."""
+        ...
 
-    name: str
-    description: str
-    instruction_suffix: str
-    target_section: str | None = None
+    @property
+    def menu_description(self) -> str:
+        """Return the description shown in the verbalized action menu."""
+        ...
+
+
+SelectableItemT = TypeVar("SelectableItemT", bound=SelectableItem)
 
 
 logger = logging.getLogger(__name__)
 
-# Length pressure for evolved prompts. Soft budget communicated to the
-# reflection LM in every action suffix; hard cap is the default
-# ThreeRoleReflectionLM.max_chars in the 3-role path. Without this, additive actions
-# (append/illustration) accrete text every acceptance until candidate prompts
-# exhaust the model context.
+# Length pressure for evolved prompts. The selector communicates this soft
+# budget while the proposer paths enforce their configured hard caps.
 SOFT_PROMPT_CHAR_BUDGET = 8000
 MAX_PROPOSAL_CHARS = 10000
 FULL_SUPPORT_EXPLORATION_EPSILON = 0.1
+DEFAULT_VERBALIZED_ACTION_K = 5
+STATELESS_SELECTOR_POLICY_VERSION = 1
 
 
-class ActionSelector(Protocol):
+def stateless_selector_policy_contract(
+    selector: Literal["random", "verbalized"],
+    *,
+    per_job_action_selection: bool = False,
+    k: int = DEFAULT_VERBALIZED_ACTION_K,
+    tau: float | None = None,
+    require_full_support: bool = False,
+) -> dict[str, Any]:
+    """Return the reproducibility contract for a stateless selection policy."""
+    selection_granularity = "per_job" if per_job_action_selection else "batch_shared"
+    if selector == "random":
+        return {
+            "version": STATELESS_SELECTOR_POLICY_VERSION,
+            "selector": selector,
+            "selection_granularity": selection_granularity,
+            "context": "none",
+            "sampling": "uniform",
+        }
+    if k < 1:
+        raise ValueError("k must be at least 1")
+    resolved_tau = tau if tau is not None else 1.0 / k
+    return {
+        "version": STATELESS_SELECTOR_POLICY_VERSION,
+        "selector": selector,
+        "selection_granularity": selection_granularity,
+        "context": "per_job" if per_job_action_selection else "first_parent_and_aggregated_feedback",
+        "sampling": "full_distribution_uniform_mixture" if require_full_support else "tail",
+        "k": k,
+        "tau": resolved_tau,
+        "require_full_support": require_full_support,
+        "exploration_epsilon": FULL_SUPPORT_EXPLORATION_EPSILON if require_full_support else 0.0,
+    }
+
+
+def _validate_actions(actions: list[SelectableItemT], selector_name: str) -> None:
+    """Require a non-empty menu with one non-empty stable ID per item."""
+    if not actions:
+        raise ValueError(f"{selector_name} requires a non-empty actions list")
+    menu_ids = [action.menu_id for action in actions]
+    if any(not menu_id.strip() for menu_id in menu_ids):
+        raise ValueError(f"{selector_name} requires every action to have a non-empty menu_id")
+    if any(menu_id != menu_id.strip() for menu_id in menu_ids):
+        raise ValueError(f"{selector_name} requires menu IDs without surrounding whitespace")
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for menu_id in menu_ids:
+        normalized_id = menu_id.casefold()
+        if normalized_id in seen:
+            duplicates.add(menu_id)
+        seen.add(normalized_id)
+    if duplicates:
+        raise ValueError(f"{selector_name} requires unique menu IDs; duplicates: {sorted(duplicates)}")
+
+
+class ActionSelector(Protocol[SelectableItemT]):
     """Picks which action(s) to apply to a batch of reflection jobs.
 
     The primary implementation is ``VerbalizedActionSelector``, which asks
@@ -68,19 +117,18 @@ class ActionSelector(Protocol):
     ``select()``, providing prompt state for context-aware selection.
     """
 
-    def select(self, n: int, rng: random.Random | None = None) -> list[PromptEditAction]: ...
+    def select(self, n: int, rng: random.Random | None = None) -> list[SelectableItemT]: ...
 
 
-class RandomActionSelector:
+class RandomActionSelector(Generic[SelectableItemT]):
     """Pick actions uniformly at random from the action space."""
 
-    def __init__(self, actions: list[PromptEditAction], rng: random.Random | None = None):
-        if not actions:
-            raise ValueError("RandomActionSelector requires a non-empty actions list")
+    def __init__(self, actions: list[SelectableItemT], rng: random.Random | None = None):
+        _validate_actions(actions, type(self).__name__)
         self.actions = actions
         self.rng = rng if rng is not None else random.Random(0)
 
-    def select(self, n: int, rng: random.Random | None = None) -> list[PromptEditAction]:
+    def select(self, n: int, rng: random.Random | None = None) -> list[SelectableItemT]:
         rng = rng if rng is not None else self.rng
         return [rng.choice(self.actions) for _ in range(n)]
 
@@ -105,13 +153,13 @@ the feedback. Probabilities must sum to 1.0.
 {support_rule}
 
 Consider less obvious actions when the feedback supports them. If the component \
-is near or over its length budget, favor condensing, rewriting, or restructuring \
-over additive actions.
+is near or over its length budget, favor actions that shorten or replace existing \
+text over actions that add content.
 
 Return:
 <response>
 <candidate>
-<action>action_name_here</action>
+<action>menu_id_here</action>
 <reasoning>why this action fits the current failure patterns</reasoning>
 <probability>0.XX</probability>
 </candidate>
@@ -121,14 +169,14 @@ Return:
 
 
 @dataclass
-class ActionDistribution:
+class ActionDistribution(Generic[SelectableItemT]):
     """A parsed distribution over actions from the verbalized selector."""
 
-    entries: list[tuple[PromptEditAction, float, str]]  # (action, probability, reasoning)
+    entries: list[tuple[SelectableItemT, float, str]]  # (action, probability, reasoning)
     is_fallback: bool = False  # True when parsing failed and a uniform fallback was used
 
     @property
-    def actions(self) -> list[PromptEditAction]:
+    def actions(self) -> list[SelectableItemT]:
         return [a for a, _, _ in self.entries]
 
     @property
@@ -142,7 +190,7 @@ class TailSampleStats:
 
     Lets analysis quantify how far tail sampling diverged from the LM's
     verbalized distribution without re-deriving parser state from the
-    name-keyed ``probs`` map (which collapses duplicate action names).
+    ID-keyed ``probs`` map (which collapses duplicate menu IDs).
 
     Attributes:
         n_parsed_entries: Number of distribution entries, counting duplicates.
@@ -159,11 +207,11 @@ class TailSampleStats:
 
 
 def _sample_from_tails(
-    distribution: ActionDistribution,
+    distribution: ActionDistribution[SelectableItemT],
     n: int,
     tau: float,
     rng: random.Random,
-) -> tuple[list[PromptEditAction], TailSampleStats]:
+) -> tuple[list[SelectableItemT], TailSampleStats]:
     """Sample ``n`` actions from the tail of the distribution (probability < ``tau``).
 
     Tail sampling favors options the LM rated as unlikely-but-plausible, which
@@ -209,7 +257,7 @@ def _sample_from_tails(
     return rng.choices(actions, weights=weights, k=n), stats
 
 
-class VerbalizedActionSelector:
+class VerbalizedActionSelector(Generic[SelectableItemT]):
     """Use the reflection LM to generate a probability distribution over actions, then sample.
 
     Instead of picking actions uniformly at random, this selector asks the LM
@@ -238,16 +286,15 @@ class VerbalizedActionSelector:
 
     def __init__(
         self,
-        actions: list[PromptEditAction],
+        actions: list[SelectableItemT],
         lm: LanguageModel,
-        k: int = 5,
+        k: int = DEFAULT_VERBALIZED_ACTION_K,
         tau: float | None = None,
         rng: random.Random | None = None,
         require_full_support: bool = False,
     ):
         """Store the menu, LM, and sampling parameters; no LM call is made here."""
-        if not actions:
-            raise ValueError("VerbalizedActionSelector requires a non-empty actions list")
+        _validate_actions(actions, type(self).__name__)
         self.actions = actions
         self.lm = lm
         self.k = k
@@ -260,14 +307,14 @@ class VerbalizedActionSelector:
         self.rng = rng if rng is not None else random.Random(0)
         self.require_full_support = require_full_support
         self._context: dict[str, str] | None = None
-        self._action_by_name: dict[str, PromptEditAction] = {a.name: a for a in actions}
+        self._action_by_id: dict[str, SelectableItemT] = {action.menu_id: action for action in actions}
         self.history: list[dict] = []
 
     def set_context(self, candidate: str, feedback_summary: str) -> None:
         """Provide current prompt state for the next select() call."""
         self._context = {"candidate": candidate, "feedback_summary": feedback_summary}
 
-    def select(self, n: int, rng: random.Random | None = None) -> list[PromptEditAction]:
+    def select(self, n: int, rng: random.Random | None = None) -> list[SelectableItemT]:
         """Draw ``n`` actions for the context set by the last :meth:`set_context` call.
 
         Makes one LM call to verbalize a distribution over the menu, tail-samples
@@ -298,8 +345,8 @@ class VerbalizedActionSelector:
                 (1.0 - epsilon) * probability + epsilon / len(actions) for probability in probabilities
             ]
             result = rng.choices(actions, weights=mixed_probabilities, k=n)
-            sampled_probability_by_name = {
-                action.name: probability for action, probability in zip(actions, mixed_probabilities, strict=True)
+            sampled_probability_by_id = {
+                action.menu_id: probability for action, probability in zip(actions, mixed_probabilities, strict=True)
             }
             tail_mass = sum(probability for probability in probabilities if probability < self.tau)
             stats = TailSampleStats(
@@ -325,23 +372,23 @@ class VerbalizedActionSelector:
             )
             eligible_total = sum(probability for _, probability, _ in eligible)
             if eligible_total > 0:
-                sampled_probability_by_name = {
-                    name: sum(probability for action, probability, _ in eligible if action.name == name)
+                sampled_probability_by_id = {
+                    menu_id: sum(probability for action, probability, _ in eligible if action.menu_id == menu_id)
                     / eligible_total
-                    for name in {action.name for action, _, _ in eligible}
+                    for menu_id in {action.menu_id for action, _, _ in eligible}
                 }
             else:
-                eligible_names = [action.name for action, _, _ in eligible]
-                sampled_probability_by_name = {
-                    name: eligible_names.count(name) / len(eligible_names) for name in set(eligible_names)
+                eligible_ids = [action.menu_id for action, _, _ in eligible]
+                sampled_probability_by_id = {
+                    menu_id: eligible_ids.count(menu_id) / len(eligible_ids) for menu_id in set(eligible_ids)
                 }
             sampling_policy = "tail"
         self.history.append(
             {
-                "probs": {a.name: p for a, p, _ in distribution.entries},
-                "sampling_probs": sampled_probability_by_name,
-                "sampled": [a.name for a in result],
-                "sampled_probabilities": [sampled_probability_by_name[a.name] for a in result],
+                "probs": {action.menu_id: probability for action, probability, _ in distribution.entries},
+                "sampling_probs": sampled_probability_by_id,
+                "sampled": [action.menu_id for action in result],
+                "sampled_probabilities": [sampled_probability_by_id[action.menu_id] for action in result],
                 "fallback": distribution.is_fallback,
                 "n_parsed_entries": stats.n_parsed_entries,
                 "tail_mass": stats.tail_mass,
@@ -355,10 +402,10 @@ class VerbalizedActionSelector:
         self._context = None
         return result
 
-    def _generate_distribution(self, rng: random.Random) -> ActionDistribution:
+    def _generate_distribution(self, rng: random.Random) -> ActionDistribution[SelectableItemT]:
         """Call the LM to produce a verbalized probability distribution over actions."""
         assert self._context is not None
-        action_menu = "\n".join(f"- {a.name}: {a.description}" for a in self.actions)
+        action_menu = "\n".join(f"- {action.menu_id}: {action.menu_description}" for action in self.actions)
         prompt = VERBALIZED_ACTION_PROMPT.format(
             current_prompt=self._context["candidate"],
             prompt_chars=len(self._context["candidate"]),
@@ -377,11 +424,11 @@ class VerbalizedActionSelector:
         raw_output = self.lm(prompt)
         return self._parse_distribution(raw_output, rng)
 
-    def _parse_distribution(self, raw_output: str, rng: random.Random) -> ActionDistribution:
+    def _parse_distribution(self, raw_output: str, rng: random.Random) -> ActionDistribution[SelectableItemT]:
         """Parse XML-formatted action distribution from LM output."""
         raw_output = strip_think_tags(raw_output)
 
-        entries: list[tuple[PromptEditAction, float, str]] = []
+        entries: list[tuple[SelectableItemT, float, str]] = []
         invalid_candidate = False
         invalid_probability = False
         for candidate_match in re.finditer(r"<candidate>(.*?)</candidate>", raw_output, re.DOTALL):
@@ -394,7 +441,7 @@ class VerbalizedActionSelector:
                 invalid_candidate = True
                 continue
 
-            action_name = action_m.group(1).strip()
+            menu_id = action_m.group(1).strip()
             reasoning = reasoning_m.group(1).strip() if reasoning_m else ""
 
             try:
@@ -408,10 +455,10 @@ class VerbalizedActionSelector:
                 invalid_probability = True
                 continue
 
-            action = self._action_by_name.get(action_name)
+            action = self._action_by_id.get(menu_id)
             if action is None:
-                for name, act in self._action_by_name.items():
-                    if name.lower() == action_name.lower():
+                for candidate_id, act in self._action_by_id.items():
+                    if candidate_id.lower() == menu_id.lower():
                         action = act
                         break
             if action is not None:
@@ -419,11 +466,9 @@ class VerbalizedActionSelector:
             else:
                 invalid_candidate = True
 
-        parsed_names = [action.name for action, _, _ in entries]
+        parsed_ids = [action.menu_id for action, _, _ in entries]
         full_support_invalid = self.require_full_support and (
-            invalid_candidate
-            or len(parsed_names) != len(self.actions)
-            or set(parsed_names) != set(self._action_by_name)
+            invalid_candidate or len(parsed_ids) != len(self.actions) or set(parsed_ids) != set(self._action_by_id)
         )
         total = sum(probability for _, probability, _ in entries)
         is_fallback = False
@@ -438,154 +483,3 @@ class VerbalizedActionSelector:
         entries = [(a, p / total, r) for a, p, r in entries]
 
         return ActionDistribution(entries=entries, is_fallback=is_fallback)
-
-
-def format_action_suffix(action: PromptEditAction) -> str:
-    """Build the constraint text appended to the reflection prompt."""
-    section_scope = ""
-    if action.target_section is not None:
-        section_scope = (
-            f"\nApply this edit only within the '## {action.target_section}' section of the prompt. "
-            "Reproduce every other section verbatim, including their headers.\n"
-        )
-    return (
-        "\n\n--- Edit constraint ---\n"
-        f"Make exactly one type of edit: {action.name}\n"
-        f"Description: {action.description}\n"
-        f"{section_scope}\n"
-        f"{action.instruction_suffix}\n\n"
-        f"Length budget: the complete revised prompt must stay under {SOFT_PROMPT_CHAR_BUDGET} characters. "
-        "If this edit would exceed the budget, merge with or replace existing content instead of adding.\n\n"
-        "Make no other changes."
-    )
-
-
-# The generic seven-section schema follows PromptPrism
-# (https://arxiv.org/abs/2505.12592), The Prompt Report
-# (https://arxiv.org/abs/2406.06608), and From Prompts to Templates
-# (https://arxiv.org/abs/2504.02052). Provider variants live in
-# TEMPLATE_FAMILIES; pass their sections here to build a matching menu.
-STRUCTURED_SECTIONS: list[str] = ["Role", "Task", "Context", "Rules", "Reasoning", "Examples", "Output Format"]
-
-_SECTION_OPERATIONS: list[tuple[str, str, str]] = [
-    (
-        "rewrite",
-        "Replace the content of the '{section}' section.",
-        "Rewrite the '## {section}' section from scratch so it directly addresses the failure "
-        "patterns in the feedback. Replace its current content entirely; keep the section header.",
-    ),
-    (
-        "append",
-        "Add one targeted item (rule, detail, or example) to the '{section}' section.",
-        "Add exactly one new item to the '## {section}' section that directly addresses a failure "
-        "pattern observed in the feedback. The new item should be precise and actionable, not "
-        "generic advice. Keep the section lean: if it already contains several items, replace or "
-        "merge the weakest existing item instead of growing the list.",
-    ),
-    (
-        "condense",
-        "Remove redundant, conflicting, or harmful items from the '{section}' section.",
-        "Examine the '## {section}' section for items that are redundant, mutually conflicting, "
-        "overly narrow, or likely causing the failures in the feedback. Remove or merge them. "
-        "Do not add new content.",
-    ),
-]
-
-
-def _slugify_section(section: str) -> str:
-    return section.lower().replace(" ", "_")
-
-
-def build_structured_actions(sections: list[str] | None = None) -> list[PromptEditAction]:
-    """Build a section-scoped action space for structured (markdown) prompts.
-
-    For each section, three operations: rewrite, append, condense. Plus one
-    global restructure action. With the default seven sections this yields a
-    22-action menu.
-
-    Args:
-        sections: Section names to build operations for; ``None`` uses
-            :data:`STRUCTURED_SECTIONS` (the generic family's schema). Pass a
-            :data:`~gepa.strategies.document_template.TEMPLATE_FAMILIES`
-            template's sections for a provider-family menu.
-
-    Returns:
-        The per-section actions in section order (rewrite, append, condense
-        for each), followed by the global ``restructure`` action.
-    """
-    sections = sections if sections is not None else STRUCTURED_SECTIONS
-    actions: list[PromptEditAction] = []
-    for section in sections:
-        for op_name, op_desc, op_suffix in _SECTION_OPERATIONS:
-            actions.append(
-                PromptEditAction(
-                    name=f"{op_name}_{_slugify_section(section)}",
-                    description=op_desc.format(section=section),
-                    instruction_suffix=op_suffix.format(section=section),
-                    target_section=section,
-                )
-            )
-    actions.append(
-        PromptEditAction(
-            name="restructure",
-            description="Reorder or rebalance sections without adding or removing content.",
-            instruction_suffix=(
-                "Reorganize the prompt's sections: reorder them so the most critical information "
-                "appears first, move misplaced items to the section where they belong, or adjust "
-                "emphasis. Keep all existing content; do not add or remove information."
-            ),
-        )
-    )
-    return actions
-
-
-DEFAULT_ACTIONS: list[PromptEditAction] = [
-    PromptEditAction(
-        name="add_illustration",
-        description="Add one worked example based on a failure in the feedback.",
-        instruction_suffix=(
-            "Add one worked example that shows the correct behavior for a failure in the feedback. "
-            "Place it within the instruction and make it useful for similar future cases."
-        ),
-    ),
-    PromptEditAction(
-        name="adjust_specificity",
-        description="Adjust the task's specificity to address the feedback.",
-        instruction_suffix=(
-            "Decide whether the instruction is too vague or too narrow. Add the missing detail when "
-            "it is vague; allow valid alternatives when it is narrow."
-        ),
-    ),
-    PromptEditAction(
-        name="edit_guidelines",
-        description="Revise the role or behavioral guidance.",
-        instruction_suffix=(
-            "Revise the role or behavioral guidance only where it would prevent a failure in the feedback. "
-            "Adjust expertise, approach, or priorities as needed."
-        ),
-    ),
-    PromptEditAction(
-        name="edit_field_description",
-        description="Clarify input fields, output fields, or format requirements.",
-        instruction_suffix=(
-            "Clarify the input, output, or field description implicated by the feedback. State the "
-            "required structure and constraints directly."
-        ),
-    ),
-    PromptEditAction(
-        name="add_constraint",
-        description="Add one rule for a failure or edge case in the feedback.",
-        instruction_suffix=(
-            "Add one precise rule that prevents a failure in the feedback. State what to do and when; "
-            "do not add generic advice."
-        ),
-    ),
-    PromptEditAction(
-        name="restructure",
-        description="Reorganize existing content without changing its meaning.",
-        instruction_suffix=(
-            "Reorder sections, group related instructions, add headings, or adjust emphasis. Keep all "
-            "existing information and add nothing new."
-        ),
-    ),
-]

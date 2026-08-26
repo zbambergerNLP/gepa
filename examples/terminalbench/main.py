@@ -153,7 +153,7 @@ def build_run_contract(
     reflection_level = args.reflection_level if operated else 0
     rlm_budget = _rlm_budget() if condition == "rlm" else None
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "condition": condition,
         "component_kinds": {"instruction_prompt": "user_prompt"},
         "dataset": manifest.dataset,

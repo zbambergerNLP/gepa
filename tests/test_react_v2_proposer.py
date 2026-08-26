@@ -25,7 +25,7 @@ from gepa.strategies.edit_tools import (
     MoveTextArgs,
     ReplaceTextArgs,
 )
-from gepa.strategies.intervention import Intervention
+from gepa.strategies.intervention import SteeringMessage
 
 TEMPLATE = TEMPLATES["system_prompt"]
 PROMPT = TEMPLATE.render({"Role": "helper", "Rules": "- be nice\n- be brief"})
@@ -94,7 +94,7 @@ def run(
     *,
     allowed_tools: list[EditTool] | None = None,
     preferred_tool: EditTool | None = None,
-    intervention: Intervention | None = None,
+    steering_message: SteeringMessage | None = None,
     history: list[dict[str, Any]] | None = None,
     max_iterations: int = 8,
     max_tool_calls: int = 4,
@@ -119,7 +119,7 @@ def run(
         component_text,
         edit_target,
         preferred_tool,
-        intervention,
+        steering_message,
         "The answer was vague.",
         traces,
         history or [],
@@ -757,7 +757,7 @@ def test_manifestor_steering_is_delivered_in_the_current_user_message() -> None:
     run(
         user_lm,
         preferred_tool=EditTool.REPLACE_TEXT,
-        intervention=Intervention("User steering", "user"),
+        steering_message=SteeringMessage("User steering", "user"),
     )
     user_messages = user_lm.calls[0]
     assert [message["role"] for message in user_messages] == ["system", "user"]

@@ -337,15 +337,17 @@ def test_level1_selects_a_region_and_runs_react_without_manifestor() -> None:
     assert lm.roles.count("controller") == 1
     assert "manifestor" not in lm.roles
     assert lm.roles.count("react_v2") == 2
-    assert proposal.metadata["intervention_spec"] is None
+    assert proposal.metadata["semantic_action"] is None
     assert proposal.metadata["preferred_edit_tool"] is None
+    assert proposal.metadata["action_choice"].startswith("EDIT@")
+    assert proposal.metadata["action_operator"] is None
 
 
 def test_three_role_run_contract_blocks_catalog_or_policy_drift(tmp_path: Path) -> None:
     """Make direct API resumes as strict as the benchmark harnesses."""
     strat, _ = strategy(2)
     contract = strat.run_contract({"sys": PROMPT})
-    assert contract["schema_version"] == 2
+    assert contract["schema_version"] == 3
     assert contract["component_kinds"] == {"sys": "system_prompt"}
     assert contract["controller"]["version"] == 2
     assert contract["controller"]["factorization"] == "P(region, action)"
@@ -360,6 +362,8 @@ def test_three_role_run_contract_blocks_catalog_or_policy_drift(tmp_path: Path) 
     assert ensure_reflection_run_contract(str(tmp_path), contract) == str(path)
     with pytest.raises(ValueError, match="different reflection strategy contract"):
         ensure_reflection_run_contract(str(tmp_path), {**contract, "reflection_level": 1})
+    with pytest.raises(ValueError, match="different reflection strategy contract"):
+        ensure_reflection_run_contract(str(tmp_path), {**contract, "schema_version": 2})
 
     legacy_dir = tmp_path / "legacy"
     legacy_dir.mkdir()
@@ -503,10 +507,16 @@ def test_level2_selects_semantic_action_manifests_and_executes_one_direct_call()
     proposal, _ = strat.reflect({"sys": PROMPT}, reflective_dataset("sys"), ["sys"])
     assert proposal.new_texts["sys"] != PROMPT
     assert lm.roles == ["controller", "manifestor", "react_v2"]
-    assert proposal.metadata["intervention_spec"] == "rephrase"
+    assert proposal.metadata["semantic_action"] == "rephrase"
+    assert proposal.metadata["action_choice"] == "rephrase@Rules/REPLACE_TEXT"
+    assert proposal.metadata["action_operator"] == "REPLACE_TEXT"
+    assert proposal.metadata["action_target_section"] == "Rules"
     assert proposal.metadata["preferred_edit_tool"] == "REPLACE_TEXT"
-    assert proposal.metadata["manifested_intervention"]
+    assert proposal.metadata["steering_message"]
     record = proposal.metadata["three_role_actions"][0]
+    assert record["action_choice"] == proposal.metadata["action_choice"]
+    assert record["action_operator"] == proposal.metadata["action_operator"]
+    assert record["action_target_section"] == proposal.metadata["action_target_section"]
     assert record["react_iterations"] == 1
     assert record["react_tool_calls"] == 1
     assert record["react_steps"][0]["action"] == "REPLACE_TEXT"
@@ -583,7 +593,7 @@ def test_manifestor_steering_reaches_react_as_a_user_message(model: str) -> None
     assert record["manifestor_delivery"] == "user_message"
     first_messages = lm.react_calls[0]
     assert [message["role"] for message in first_messages] == ["system", "user"]
-    assert first_messages[-1]["content"].startswith(record["manifested_intervention"])
+    assert first_messages[-1]["content"].startswith(record["steering_message"])
 
 
 def test_tracking_wrapper_preserves_manifestor_user_routing() -> None:
@@ -618,7 +628,7 @@ def test_think_only_manifestation_retries_then_runs_react() -> None:
     assert proposal.new_texts["sys"] != PROMPT
     assert len(manifestor.calls) == 2
     assert base.roles == ["controller", "react_v2"]
-    assert proposal.metadata["manifested_intervention"] == "Make the vague rule exact."
+    assert proposal.metadata["steering_message"] == "Make the vague rule exact."
 
 
 def test_repeated_empty_manifestation_is_recorded_as_a_dropped_attempt() -> None:
@@ -736,20 +746,23 @@ def test_controller_uniform_fallback_provenance_is_persisted() -> None:
     assert proposal.metadata["attempt_records"][0]["controller_sampling"] == sampling
 
 
-def test_reflection_metadata_keeps_legacy_keys_and_react_diagnostics() -> None:
-    """Preserve downstream metadata consumers while adding ReAct V2 provenance."""
+def test_reflection_metadata_keeps_action_and_react_diagnostics() -> None:
+    """Preserve the documented metadata contract and ReAct V2 provenance."""
     strat, _ = strategy(2)
     proposal, _ = strat.reflect({"sys": PROMPT}, reflective_dataset("sys"), ["sys"])
     metadata = proposal.metadata
     for key in (
         "action",
+        "action_choice",
+        "action_operator",
+        "action_target_section",
         "reflection_level",
         "proposer_backend",
         "edit_target",
         "edit_tool",
         "preferred_edit_tool",
-        "intervention_spec",
-        "manifested_intervention",
+        "semantic_action",
+        "steering_message",
         "executed_edit",
         "controller_sampling",
         "three_role_actions",
@@ -773,7 +786,7 @@ def test_reflective_proposer_seam_preserves_reflection_metadata() -> None:
         metadata={"branch_edit_history": []},
     )
     assert new_texts["sys"] != PROMPT
-    assert prompts["sys"] == metadata["manifested_intervention"]
+    assert prompts["sys"] == metadata["steering_message"]
     assert raw_outputs["sys"]
     assert metadata["proposer_backend"] == "react_v2"
     assert metadata["revision_records"]

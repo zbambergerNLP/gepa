@@ -1,7 +1,7 @@
 # Copyright (c) 2025 Lakshya A Agrawal and the GEPA contributors
 # https://github.com/gepa-ai/gepa
 
-"""Tests for semantic interventions and verbalized Controller selection."""
+"""Tests for canonical semantic actions and verbalized Controller selection."""
 
 import random
 
@@ -13,13 +13,18 @@ from gepa.strategies.intervention import (
     INJECTION_SITES,
     SEMANTIC_ACTIONS,
     Controller,
-    Intervention,
-    InterventionSpec,
+    ControllerChoice,
+    SemanticActionSpec,
+    StatelessActionConstraint,
+    SteeringMessage,
     build_controller_menu,
     build_semantic_action_menu,
+    build_stateless_action_menu,
     controller_policy_contract,
-    intervention_specs,
+    format_stateless_action_constraint,
     semantic_action_catalog,
+    semantic_action_specs,
+    stateless_action_menu_contract,
     summarize_feedback,
 )
 
@@ -73,13 +78,22 @@ def test_builtin_catalog_is_the_curated_operator_coupled_action_space() -> None:
     assert "use rephrase" in guidance["specialize"]
     assert "valid rule" in guidance["add_constraint"]
     assert "use add_constraint" in guidance["expand"]
-    for template in (TEMPLATES["system_prompt"], TEMPLATES["skill"]):
+    for template in (TEMPLATES["system_prompt"], TEMPLATES["user_prompt"], TEMPLATES["skill"]):
         kind = template.kind
         for section in template.sections:
-            specs = intervention_specs(kind, section)
+            specs = semantic_action_specs(kind, section)
             assert {spec.name: spec.edit_tool for spec in specs} == expected
             assert all(spec.instruction and spec.fixed_text is None for spec in specs)
-        assert [spec.name for spec in intervention_specs(kind, None)] == ["relocate"]
+        assert [spec.name for spec in semantic_action_specs(kind, None)] == ["relocate"]
+
+
+@pytest.mark.parametrize("template_name", ["system_prompt", "user_prompt", "skill"])
+def test_every_document_role_derives_the_same_actions_for_each_named_section(template_name: str) -> None:
+    """Apply the canonical action space to system, user, and skill sections."""
+    template = TEMPLATES[template_name]
+    menu = build_stateless_action_menu(template)
+    for section in template.sections:
+        assert [choice.semantic_action for choice in menu if choice.target_section == section] == list(SEMANTIC_ACTIONS)
 
 
 def test_semantic_action_catalog_persists_the_full_ordered_contract() -> None:
@@ -99,15 +113,63 @@ def test_semantic_action_catalog_persists_the_full_ordered_contract() -> None:
     assert controller_policy_contract()["exploration_epsilon"] == pytest.approx(0.1)
 
 
+def test_stateless_menu_derives_every_binding_from_the_canonical_catalog() -> None:
+    """Cross canonical actions with sections without defining a second action space."""
+    menu = build_stateless_action_menu(PROMPT_TEMPLATE)
+    expected_count = len(PROMPT_TEMPLATE.sections) * len(SEMANTIC_ACTIONS) + 1
+    assert len(menu) == expected_count
+    assert all(isinstance(choice, StatelessActionConstraint) for choice in menu)
+    assert len({choice.menu_id for choice in menu}) == expected_count
+
+    rules = [choice for choice in menu if choice.target_section == "Rules"]
+    assert [choice.semantic_action for choice in rules] == list(SEMANTIC_ACTIONS)
+    assert [choice for choice in menu if choice.target_section is None] == [
+        StatelessActionConstraint(SEMANTIC_ACTIONS[-1], None)
+    ]
+    stateless_whole = next(choice for choice in menu if choice.target_section is None)
+    controller_whole = ControllerChoice(EditTarget("component", None), stateless_whole.semantic_action)
+    assert stateless_whole.menu_id == controller_whole.menu_id == "relocate@whole/MOVE_TEXT"
+    assert all(choice.edit_tool is choice.semantic_action.edit_tool for choice in menu)
+
+
+def test_stateless_constraint_and_contract_preserve_region_action_operator_binding() -> None:
+    """Render and serialize exact bindings while retaining semantic action identity."""
+    choice = next(
+        choice
+        for choice in build_stateless_action_menu(PROMPT_TEMPLATE)
+        if choice.semantic_action.name == "summarize" and choice.target_section == "Rules"
+    )
+    suffix = format_stateless_action_constraint(choice)
+    assert "Make exactly one semantic edit: summarize" in suffix
+    assert "Coupled text operator: REPLACE_TEXT" in suffix
+    assert "only within the '## Rules' section" in suffix
+    assert "currently omitted because it is empty" in suffix
+
+    contract = stateless_action_menu_contract(PROMPT_TEMPLATE)
+    assert contract["version"] == 1
+    assert contract["semantic_action_catalog_version"] == 1
+    assert contract["kind"] == "prompt"
+    assert contract["sections"] == list(PROMPT_TEMPLATE.sections)
+    assert contract["choices"] == [
+        {
+            "id": item.menu_id,
+            "semantic_action": item.semantic_action.name,
+            "operator": item.edit_tool.value,
+            "target_section": item.target_section,
+        }
+        for item in build_stateless_action_menu(PROMPT_TEMPLATE)
+    ]
+
+
 def test_unknown_document_kind_has_no_semantic_catalog() -> None:
     """Avoid silently applying prompt semantics to an undeclared kind."""
-    assert intervention_specs("memo", "Body") == []
+    assert semantic_action_specs("memo", "Body") == []
 
 
 @pytest.mark.parametrize("site", INJECTION_SITES)
-def test_intervention_spec_accepts_every_supported_injection_site(site: str) -> None:
+def test_semantic_action_spec_accepts_every_supported_injection_site(site: str) -> None:
     """Keep the public manifestation-site contract stable."""
-    spec = InterventionSpec(
+    spec = SemanticActionSpec(
         "custom",
         "Custom action.",
         EditTool.INSERT_TEXT,
@@ -150,15 +212,15 @@ def test_intervention_spec_accepts_every_supported_injection_site(site: str) -> 
         ),
     ],
 )
-def test_intervention_spec_rejects_invalid_contracts(kwargs: dict[str, object], message: str) -> None:
+def test_semantic_action_spec_rejects_invalid_contracts(kwargs: dict[str, object], message: str) -> None:
     """Reject specs that cannot be executed or manifested unambiguously."""
     with pytest.raises((TypeError, ValueError), match=message):
-        InterventionSpec("custom", "Custom action.", **kwargs)
+        SemanticActionSpec("custom", "Custom action.", **kwargs)
 
 
-def test_intervention_remains_a_text_and_role_value_object() -> None:
+def test_steering_message_is_a_text_and_role_value_object() -> None:
     """Preserve the small public object passed from Manifestor to ReAct V2."""
-    assert Intervention("Steer this edit.", "developer") == Intervention("Steer this edit.", "developer")
+    assert SteeringMessage("Steer this edit.", "developer") == SteeringMessage("Steer this edit.", "developer")
 
 
 def test_level1_menu_selects_regions_only_and_not_tools() -> None:
@@ -173,7 +235,7 @@ def test_level1_menu_selects_regions_only_and_not_tools() -> None:
     )
     assert [action.edit_target.section for action in menu] == [*PROMPT_TEMPLATE.sections, None]
     assert all(action.edit_tool is None for action in menu)
-    assert all(action.intervention_spec is None for action in menu)
+    assert all(action.semantic_action is None for action in menu)
     assert all(action.menu_id == f"EDIT@{action.edit_target.name}" for action in menu)
     assert len({action.menu_id for action in menu}) == len(menu)
 
@@ -212,24 +274,24 @@ def test_level2_jointly_selects_region_and_operator_coupled_semantic_action() ->
     expected_count = len(PROMPT_TEMPLATE.sections) * len(SEMANTIC_ACTIONS) + 1
     assert len(menu) == expected_count
     assert len({action.menu_id for action in menu}) == expected_count
-    assert all(action.intervention_spec is not None for action in menu)
+    assert all(action.semantic_action is not None for action in menu)
     local = [action for action in menu if action.edit_target.section == "Rules"]
     whole = [action for action in menu if action.edit_target.section is None]
-    assert [action.intervention_spec.name for action in local if action.intervention_spec] == [
+    assert [action.semantic_action.name for action in local if action.semantic_action] == [
         spec.name for spec in SEMANTIC_ACTIONS
     ]
-    assert [action.intervention_spec.name for action in whole if action.intervention_spec] == ["relocate"]
+    assert [action.semantic_action.name for action in whole if action.semantic_action] == ["relocate"]
 
     action_menu = build_semantic_action_menu(PROMPT_TEMPLATE, EditTarget("sys", "Rules"))
     assert len(action_menu) == len(SEMANTIC_ACTIONS)
     for action in action_menu:
-        assert action.intervention_spec is not None
-        assert action.edit_tool is action.intervention_spec.edit_tool
+        assert action.semantic_action is not None
+        assert action.edit_tool is action.semantic_action.edit_tool
         assert action.menu_id.endswith(f"/{action.edit_tool.value}")
         assert "direct tool" in action.menu_description
 
     whole_menu = build_semantic_action_menu(PROMPT_TEMPLATE, EditTarget("sys", None))
-    assert [action.intervention_spec.name for action in whole_menu if action.intervention_spec] == ["relocate"]
+    assert [action.semantic_action.name for action in whole_menu if action.semantic_action] == ["relocate"]
 
 
 def test_openai_controller_builds_the_complete_joint_menu() -> None:
@@ -283,8 +345,8 @@ def test_unknown_kind_level2_fails_before_manifestation() -> None:
         )
 
 
-def test_controller_maps_verbalized_pick_back_to_semantic_action() -> None:
-    """Return the rich action selected through the stand-in action menu."""
+def test_controller_selects_rich_choice_directly() -> None:
+    """Pass rich choices through verbalized sampling without stand-ins or lookup."""
     menu = build_controller_menu(
         PROMPT_TEMPLATE,
         "sys",
@@ -295,10 +357,13 @@ def test_controller_maps_verbalized_pick_back_to_semantic_action() -> None:
     lm = VotingLM("summarize@Rules/")
     controller = Controller(menu, lm, rng=random.Random(0))
     controller.set_context(PROMPT, "The answer repeats itself.")
-    selected = controller.select_controller(1, random.Random(0))[0]
+    selected = controller.select(1, random.Random(0))[0]
+    assert isinstance(selected, ControllerChoice)
+    assert selected is next(action for action in menu if action.menu_id == selected.menu_id)
+    assert controller.actions == menu
     assert selected.edit_target == EditTarget("sys", "Rules")
-    assert selected.intervention_spec is not None
-    assert selected.intervention_spec.name == "summarize"
+    assert selected.semantic_action is not None
+    assert selected.semantic_action.name == "summarize"
     assert selected.edit_tool is EditTool.REPLACE_TEXT
     assert len(controller.history) == 1
     assert lm.calls

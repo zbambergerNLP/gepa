@@ -18,12 +18,12 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 from gepa.proposer.reflective_mutation.base import LanguageModel
-from gepa.strategies.action_space import (
-    ActionSelector,
-    PromptEditAction,
-    format_action_suffix,
-)
+from gepa.strategies.action_space import ActionSelector
 from gepa.strategies.instruction_proposal import InstructionProposalSignature
+from gepa.strategies.intervention import (
+    StatelessActionConstraint,
+    format_stateless_action_constraint,
+)
 
 # One reflection job = (candidate, reflective_dataset, components_to_update).
 ReflectionJob = tuple[dict[str, str], "Mapping[str, Sequence[Mapping[str, Any]]]", list[str]]
@@ -114,8 +114,9 @@ class StatelessReflectionLM:
             the default template.
         logger: Optional run logger with a ``log(message)`` method.
         action_selector: Optional selector that picks one
-            :class:`PromptEditAction` per job and appends its instruction suffix
-            to the prompt (action-conditioned reflection); ``None`` disables it.
+            :class:`StatelessActionConstraint` per job and appends the canonical
+            semantic action and region constraint to the prompt; ``None``
+            disables action-conditioned reflection.
         rng: RNG passed to the action selector; ``random.Random(0)`` when
             ``None``, rebound to the run RNG through :meth:`bind_rng`.
         per_job_action_selection: Choose each job's action from its own context
@@ -128,7 +129,7 @@ class StatelessReflectionLM:
         lm: LanguageModel,
         reflection_prompt_template: str | dict[str, str] | None = None,
         logger: Any | None = None,
-        action_selector: ActionSelector | None = None,
+        action_selector: ActionSelector[StatelessActionConstraint] | None = None,
         rng: random.Random | None = None,
         per_job_action_selection: bool = False,
     ):
@@ -194,7 +195,7 @@ class StatelessReflectionLM:
         current_instruction_doc: str,
         dataset_with_feedback: Any,
         prompt_template: str | None,
-        action: PromptEditAction | None = None,
+        action: StatelessActionConstraint | None = None,
     ):
         """Render a reflection prompt and its chat-messages form.
 
@@ -210,7 +211,7 @@ class StatelessReflectionLM:
         )
 
         if action is not None:
-            suffix = format_action_suffix(action)
+            suffix = format_stateless_action_constraint(action)
             if isinstance(prompt, str):
                 prompt = prompt + suffix
             else:
@@ -243,7 +244,7 @@ class StatelessReflectionLM:
             return list(batch_complete(messages_list))
         return [self.lm(prompt) for prompt in prompts]
 
-    def _select_actions_batch(self, jobs: list[ReflectionJob]) -> list[PromptEditAction | None]:
+    def _select_actions_batch(self, jobs: list[ReflectionJob]) -> list[StatelessActionConstraint | None]:
         """Choose all jobs' actions in one selector call (default cost tradeoff).
 
         Verbalized selectors receive context aggregated across the batch:
@@ -269,7 +270,7 @@ class StatelessReflectionLM:
             set_context(candidate_text, feedback_summary)
         return list(self.action_selector.select(len(jobs), self.rng))
 
-    def _select_actions_per_job(self, jobs: list[ReflectionJob]) -> list[PromptEditAction | None]:
+    def _select_actions_per_job(self, jobs: list[ReflectionJob]) -> list[StatelessActionConstraint | None]:
         """Choose each job's action from its own context.
 
         One selector call per job, each seeing only that job's candidate text and
@@ -286,7 +287,7 @@ class StatelessReflectionLM:
         """
         assert self.action_selector is not None
         set_context = getattr(self.action_selector, "set_context", None)
-        actions: list[PromptEditAction | None] = []
+        actions: list[StatelessActionConstraint | None] = []
         for candidate, reflective_dataset, _components in jobs:
             if set_context is not None:
                 set_context("\n\n".join(candidate.values()), self._summarize_feedback(reflective_dataset))
@@ -321,7 +322,7 @@ class StatelessReflectionLM:
             One ``(proposal, self)`` pair per job, in job order; ``self`` is
             returned as the next reflection LM because no state is carried.
         """
-        actions: list[PromptEditAction | None]
+        actions: list[StatelessActionConstraint | None]
         if self.action_selector is None:
             actions = [None] * len(jobs)
         elif self.per_job_action_selection:
@@ -352,6 +353,14 @@ class StatelessReflectionLM:
 
         for job_idx, action in enumerate(actions):
             if action is not None and job_idx < len(proposals):
-                proposals[job_idx].metadata["action"] = action.name
+                proposals[job_idx].metadata.update(
+                    {
+                        "action": action.semantic_action.name,
+                        "semantic_action": action.semantic_action.name,
+                        "action_choice": action.menu_id,
+                        "action_operator": action.edit_tool.value,
+                        "action_target_section": action.target_section,
+                    }
+                )
 
         return [(proposal, self) for proposal in proposals]

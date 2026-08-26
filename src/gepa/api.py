@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 if TYPE_CHECKING:
     from gepa.core.callbacks import GEPACallback
     from gepa.strategies.action_space import ActionSelector
+    from gepa.strategies.intervention import StatelessActionConstraint
 
 from gepa.adapters.default_adapter.default_adapter import (
     ChatCompletionCallable,
@@ -123,8 +124,8 @@ def optimize(
     sampling_strategy: SamplingStrategy | None = None,
     selection_strategy: SelectionStrategy | None = None,
     reflection_strategy: ReflectionLM | None = None,
-    # Action-conditioned reflection (Rev 1)
-    action_selector: "ActionSelector | None" = None,
+    # Stateless action-conditioned reflection over canonical semantic bindings.
+    action_selector: "ActionSelector[StatelessActionConstraint] | None" = None,
     # 3-role reflection (Controller -> Manifestor -> ReAct V2)
     reflection_level: int = 0,
     edit_tool_set: Literal["minimal", "broad"] = "broad",

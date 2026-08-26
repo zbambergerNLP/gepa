@@ -30,7 +30,7 @@ from gepa.strategies.edit_tools import (
     ReplaceTextArgs,
     apply_edit,
 )
-from gepa.strategies.intervention import Intervention
+from gepa.strategies.intervention import SteeringMessage
 from gepa.utils.text import strip_think_tags
 
 MAX_BRANCH_HISTORY_CHARS = 12_000
@@ -540,7 +540,7 @@ class ReActV2Proposer:
         component_text: str,
         edit_target: EditTarget,
         preferred_tool: EditTool | None,
-        intervention: Intervention | None,
+        steering_message: SteeringMessage | None,
         feedback_summary: str,
         traces_text: str,
         branch_history: Sequence[Mapping[str, Any]],
@@ -553,7 +553,7 @@ class ReActV2Proposer:
             component_text: Current canonical component.
             edit_target: Controller-selected region.
             preferred_tool: Tool directly coupled to a semantic action, if any.
-            intervention: Manifested semantic steering message.
+            steering_message: Manifested semantic steering message.
             feedback_summary: Minibatch failure feedback.
             traces_text: Flattened execution traces.
             branch_history: User/assistant transcript along this parent branch.
@@ -617,13 +617,13 @@ class ReActV2Proposer:
         )
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
         messages.extend(_validated_branch_history(branch_history, self.max_history_chars))
-        if intervention is not None and intervention.text:
-            if intervention.inject_as in {"system", "developer"}:
-                messages.append({"role": intervention.inject_as, "content": intervention.text})
-            elif intervention.inject_as == "user":
-                task = f"{intervention.text}\n\n{task}"
+        if steering_message is not None and steering_message.text:
+            if steering_message.inject_as in {"system", "developer"}:
+                messages.append({"role": steering_message.inject_as, "content": steering_message.text})
+            elif steering_message.inject_as == "user":
+                task = f"{steering_message.text}\n\n{task}"
             else:
-                messages.append({"role": "assistant", "content": intervention.text})
+                messages.append({"role": "assistant", "content": steering_message.text})
         messages.append({"role": "user", "content": task})
         return messages
 
@@ -641,7 +641,7 @@ class ReActV2Proposer:
             raise ReActV2ContextError(
                 f"ReAct V2 context is {len(rendered)} characters, exceeding the "
                 f"{self.max_initial_context_chars}-character total context budget. The total includes system "
-                "instructions, native tool schemas, the current document, feedback, traces, intervention, and "
+                "instructions, native tool schemas, the current document, feedback, traces, steering message, and "
                 "branch-local history plus prior ReAct turns; automatic compression is intentionally disabled."
             )
 
@@ -725,7 +725,7 @@ class ReActV2Proposer:
         component_text: str,
         edit_target: EditTarget,
         preferred_tool: EditTool | None,
-        intervention: Intervention | None,
+        steering_message: SteeringMessage | None,
         feedback_summary: str,
         traces_text: str,
         branch_history: Sequence[Mapping[str, Any]],
@@ -738,7 +738,7 @@ class ReActV2Proposer:
             edit_target: Controller-selected section or whole document.
             preferred_tool: Direct tool coupled to the semantic action. ``None``
                 means the proposer is operating directly over the configured basis.
-            intervention: Manifestor steering, normally delivered as a user message.
+            steering_message: Manifestor steering, normally delivered as a user message.
             feedback_summary: Minibatch failure feedback.
             traces_text: Execution traces grounding the revision.
             branch_history: User/assistant messages from this parent candidate's lineage only.
@@ -762,7 +762,7 @@ class ReActV2Proposer:
             component_text,
             edit_target,
             preferred_tool,
-            intervention,
+            steering_message,
             feedback_summary,
             traces_text,
             branch_history,

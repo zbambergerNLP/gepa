@@ -14,10 +14,10 @@ import re
 from typing import Any
 
 from gepa.proposer.reflective_mutation.base import LanguageModel
-from gepa.strategies.intervention import ControllerAction, InjectionSite, Intervention
+from gepa.strategies.intervention import ControllerChoice, InjectionSite, SteeringMessage
 from gepa.utils.text import strip_think_tags
 
-MAX_INTERVENTION_CHARS = 1200
+MAX_STEERING_MESSAGE_CHARS = 1200
 MAX_MANIFESTATION_ATTEMPTS = 2
 # Traces are the only unbounded input; the candidate, region, and feedback stay whole.
 MAX_TRACES_CHARS = 8000
@@ -96,7 +96,7 @@ def infer_manifestor_injection_site(_model: str | None) -> InjectionSite:
 
 
 class Manifestor:
-    """Realize a :class:`ControllerAction` as an :class:`Intervention`.
+    """Realize a :class:`ControllerChoice` as a :class:`SteeringMessage`.
 
     Args:
         lm: Model that writes steering text for instruction-based actions.
@@ -125,12 +125,12 @@ class Manifestor:
 
     def manifest(
         self,
-        action: ControllerAction,
+        action: ControllerChoice,
         region_text: str,
         full_text: str,
         feedback_summary: str,
         traces: str,
-    ) -> Intervention | None:
+    ) -> SteeringMessage | None:
         """Return steering text for ``action`` or ``None`` when it has no spec.
 
         Fixed text is returned without an LM call. Instruction-based actions
@@ -139,8 +139,8 @@ class Manifestor:
 
         Args:
             action: The Controller's joint decision; only its
-                ``intervention_spec``, ``edit_target`` and ``edit_tool`` are
-                read (the last two so the LM knows which edit will follow).
+                ``semantic_action``, ``edit_target`` and ``edit_tool`` are read
+                (the last two tell the LM which edit will follow).
             region_text: Current text of ``action.edit_target`` (a section body,
                 or the whole document for a global target). Shown whole.
             full_text: Current text of the whole component (the candidate
@@ -155,14 +155,14 @@ class Manifestor:
         Raises:
             ManifestationError: Steering is blank or the action does not apply.
         """
-        spec = action.intervention_spec
+        spec = action.semantic_action
         if spec is None:
             return None
         inject_as: InjectionSite = self.inject_as if self.inject_as is not None else spec.inject_as
         if spec.fixed_text is not None:
             if not spec.fixed_text.strip():
-                raise ManifestationError(f"InterventionSpec {spec.name!r} has empty fixed steering text.")
-            return Intervention(spec.fixed_text, inject_as)
+                raise ManifestationError(f"SemanticActionSpec {spec.name!r} has empty fixed steering text.")
+            return SteeringMessage(spec.fixed_text, inject_as)
         if self.max_traces_chars is not None and len(traces) > self.max_traces_chars:
             traces = traces[: self.max_traces_chars] + f"\n...(+{len(traces) - self.max_traces_chars} chars)"
         state = STATE_TEMPLATE.format(
@@ -188,9 +188,9 @@ class Manifestor:
                 if inapplicable is not None:
                     reason = inapplicable.group(1).strip() or "the selected action's precondition is not met"
                     raise ManifestationError(f"Semantic action {spec.name!r} is not applicable: {reason}")
-                if len(raw) > MAX_INTERVENTION_CHARS:
-                    raw = raw[:MAX_INTERVENTION_CHARS] + "..."
-                return Intervention(raw, inject_as)
+                if len(raw) > MAX_STEERING_MESSAGE_CHARS:
+                    raw = raw[:MAX_STEERING_MESSAGE_CHARS] + "..."
+                return SteeringMessage(raw, inject_as)
             self._log(
                 f"Manifestor returned no visible steering text for action {spec.name!r} "
                 f"(attempt {attempt + 1}/{MAX_MANIFESTATION_ATTEMPTS})."

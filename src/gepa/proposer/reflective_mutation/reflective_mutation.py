@@ -41,6 +41,7 @@ from gepa.proposer.reflective_mutation.reflection_lm import ReflectionLM, Statel
 from gepa.strategies.action_space import ActionSelector
 from gepa.strategies.batch_sampler import BatchSampler
 from gepa.strategies.instruction_proposal import InstructionProposalSignature
+from gepa.strategies.intervention import StatelessActionConstraint
 from gepa.strategies.proposal_sampling import ProposalTask, SamplingStrategy, SingleMutationSampling
 
 
@@ -78,7 +79,7 @@ class ReflectiveMutationProposer:
         callbacks: list[GEPACallback] | None = None,
         sampling_strategy: SamplingStrategy | None = None,
         reflection_strategy: ReflectionLM | None = None,
-        action_selector: ActionSelector | None = None,
+        action_selector: ActionSelector[StatelessActionConstraint] | None = None,
     ):
         self.logger = logger
         self.trainset = ensure_loader(trainset)

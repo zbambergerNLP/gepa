@@ -120,7 +120,7 @@ headers and their order. Empty sections are absent until the harness gives them 
 only: never write, delete, rename, or move a header line yourself.
 
 ## Guidance from the planner
-{intervention}
+{steering_message}
 
 ## Your workspace
 Read the context from these read-only variables in the persistent Python environment:
@@ -307,7 +307,7 @@ class RLMProposer:
         component_text: str,
         edit_target: EditTarget,
         edit_tool: EditTool,
-        intervention: str,
+        steering_message: str,
         feedback_summary: str,
         traces_text: str,
         max_chars: int | None,
@@ -333,7 +333,7 @@ class RLMProposer:
             component_text: Current text of the component (canonical format).
             edit_target: The Controller-selected region.
             edit_tool: The Controller-selected operation the edit must use.
-            intervention: The Manifestor's steering guidance (may be empty).
+            steering_message: The Manifestor's steering guidance (may be empty).
             feedback_summary: Failure feedback, exposed as ``feedback``.
             traces_text: Execution traces, exposed as ``traces``.
             max_chars: Size budget of the edited component; ``None`` = unbounded.
@@ -389,7 +389,7 @@ class RLMProposer:
             kind=self.template.kind,
             tool=edit_tool.value,
             region=edit_target.name,
-            intervention=intervention or "(no additional guidance)",
+            steering_message=steering_message or "(no additional guidance)",
             variables=variables,
             modules=", ".join(ALLOWED_MODULES),
             tools=env.tools_help(),

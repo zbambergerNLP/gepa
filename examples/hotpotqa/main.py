@@ -54,13 +54,17 @@ from gepa.optimize_anything import (
     optimize_anything,
 )
 from gepa.strategies.action_space import (
-    DEFAULT_ACTIONS,
     RandomActionSelector,
     VerbalizedActionSelector,
-    build_structured_actions,
+    stateless_selector_policy_contract,
 )
 from gepa.strategies.document_template import TEMPLATE_FAMILIES
-from gepa.strategies.intervention import controller_policy_contract, semantic_action_catalog
+from gepa.strategies.intervention import (
+    build_stateless_action_menu,
+    controller_policy_contract,
+    semantic_action_catalog,
+    stateless_action_menu_contract,
+)
 
 # GEPA artifact components: summarize1 -> create_query_hop2 -> summarize2 -> final_answer.
 SEED_CANDIDATE = {
@@ -108,9 +112,10 @@ def build_run_contract(condition: str, args) -> dict:
     reflection_api_base = args.reflection_api_base if args.reflection_api_base is not None else args.api_base
     reflection_level = args.reflection_level if condition == "react_v2" else 0
     edit_tool_set = args.edit_tool_set if condition == "react_v2" else None
-    legacy_actions = args.actions if condition in ("random", "action") else None
+    stateless_semantic = condition in ("random", "action")
+    template = TEMPLATE_FAMILIES[family]["system_prompt"]
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "benchmark": "hotpotqa-wikipedia",
         "condition": condition,
         "models": {
@@ -127,9 +132,16 @@ def build_run_contract(condition: str, args) -> dict:
             "component_kinds": _component_kinds(args.program),
             "reflection_level": reflection_level,
             "edit_tool_set": edit_tool_set,
-            "semantic_action_space": semantic_action_catalog("prompt") if reflection_level == 2 else None,
+            "semantic_action_space": (
+                semantic_action_catalog("prompt") if reflection_level == 2 or stateless_semantic else None
+            ),
             "semantic_controller_policy": controller_policy_contract() if reflection_level == 2 else None,
-            "legacy_actions": legacy_actions,
+            "stateless_action_menu": stateless_action_menu_contract(template) if stateless_semantic else None,
+            "stateless_selector_policy": (
+                stateless_selector_policy_contract("random" if condition == "random" else "verbalized")
+                if stateless_semantic
+                else None
+            ),
         },
         "program": {
             "name": args.program,
@@ -341,14 +353,9 @@ def dump_action_summary(tracker: ActionDiversityCallback, run_dir: str, selector
 
 def build_config(condition: str, args, reflection_lm_kwargs: dict, run_dir: str | None = None):
     """Build the GEPAConfig for one condition. Returns (config, action_selector)."""
-    import inspect
-
     resolved_family = resolve_template_family(args.template_family, args.solver_model)
-    action_space = (
-        build_structured_actions(list(TEMPLATE_FAMILIES[resolved_family]["system_prompt"].sections))
-        if args.actions == "structured"
-        else DEFAULT_ACTIONS
-    )
+    template = TEMPLATE_FAMILIES[resolved_family]["system_prompt"]
+    action_space = build_stateless_action_menu(template)
     action_selector = None
     if condition == "random":
         action_selector = RandomActionSelector(action_space)
@@ -370,71 +377,19 @@ def build_config(condition: str, args, reflection_lm_kwargs: dict, run_dir: str 
             component_kinds=_component_kinds(args.program),
         )
 
-    # Support old GEPAConfig.action_selector and the newer engine API, which stores
-    # action_selector on the reflection strategy.
-    engine_cfg = EngineConfig(
-        run_dir=run_dir or condition_run_dir(condition, args.program, args.tag, _run_key(condition, args)),
-        max_metric_calls=args.max_metric_calls,
-        parallel=True,
-        max_workers=24,
-        cache_evaluation=True,
-    )
-
-    if reflection_strategy is not None:
-        return (
-            GEPAConfig(
-                engine=engine_cfg,
-                reflection=ReflectionConfig(
-                    reflection_lm=args.reflection_model,
-                    reflection_lm_kwargs=reflection_lm_kwargs or None,
-                    reflection_strategy=reflection_strategy,
-                ),
-            ),
-            None,
-        )
-
-    # Prefer the legacy ReflectionConfig.action_selector if the installed GEPA still has it
-    try:
-        sig = inspect.signature(ReflectionConfig)
-        if "action_selector" in sig.parameters:
-            config = GEPAConfig(
-                engine=engine_cfg,
-                reflection=ReflectionConfig(
-                    reflection_lm=args.reflection_model,
-                    reflection_lm_kwargs=reflection_lm_kwargs or None,
-                    action_selector=action_selector,
-                ),
-            )
-            return config, action_selector
-    except Exception:
-        pass
-
-    # New path: wrap the selector in a StatelessReflectionLM and pass as reflection_strategy
-    if action_selector is not None:
-        try:
-            sig2 = inspect.signature(ReflectionConfig)
-            if "reflection_strategy" in sig2.parameters:
-                from gepa.proposer.reflective_mutation.reflection_lm import StatelessReflectionLM
-
-                lm = LM(args.reflection_model, **(reflection_lm_kwargs or {}))
-                strategy = StatelessReflectionLM(lm=lm, action_selector=action_selector)
-                config = GEPAConfig(
-                    engine=engine_cfg,
-                    reflection=ReflectionConfig(
-                        reflection_lm=args.reflection_model,
-                        reflection_lm_kwargs=reflection_lm_kwargs or None,
-                        reflection_strategy=strategy,
-                    ),
-                )
-                return config, action_selector
-        except Exception as e:
-            print(f"WARNING: action_selector via reflection_strategy failed ({e}); falling back to vanilla reflection.")
-
     config = GEPAConfig(
-        engine=engine_cfg,
+        engine=EngineConfig(
+            run_dir=run_dir or condition_run_dir(condition, args.program, args.tag, _run_key(condition, args)),
+            max_metric_calls=args.max_metric_calls,
+            parallel=True,
+            max_workers=24,
+            cache_evaluation=True,
+        ),
         reflection=ReflectionConfig(
             reflection_lm=args.reflection_model,
             reflection_lm_kwargs=reflection_lm_kwargs or None,
+            reflection_strategy=reflection_strategy,
+            action_selector=action_selector,
         ),
     )
     return config, action_selector
@@ -525,13 +480,6 @@ def main():
         help="Seed prompts: plain paper sentences or the template selected for the solver provider",
     )
     parser.add_argument(
-        "--actions",
-        type=str,
-        default="default",
-        choices=["default", "structured"],
-        help="Action space: DEFAULT_ACTIONS or section-scoped structured actions (implies --seed-style structured)",
-    )
-    parser.add_argument(
         "--reflection-level",
         type=int,
         default=2,
@@ -552,10 +500,6 @@ def main():
     )
     parser.add_argument("--tag", type=str, default="", help="Suffix appended to run dirs (e.g. rev2, 6871)")
     args = parser.parse_args()
-
-    if args.actions == "structured" and args.seed_style != "structured":
-        print("--actions structured implies --seed-style structured; overriding seed style.")
-        args.seed_style = "structured"
 
     trainset, valset, testset = load_hotpotqa_dataset(
         data_path=args.data_path,
@@ -614,8 +558,9 @@ def main():
         conditions = [args.condition]
 
     resolved_family = resolve_template_family(args.template_family, args.solver_model)
-    if "react_v2" in conditions and args.seed_style != "structured":
-        parser.error("--condition react_v2 requires --seed-style structured")
+    semantic_conditions = {"react_v2", "random", "action"}.intersection(conditions)
+    if semantic_conditions and args.seed_style != "structured":
+        parser.error(f"--condition {', '.join(sorted(semantic_conditions))} requires --seed-style structured")
 
     results = {}
     trackers: dict[str, ActionDiversityCallback] = {}

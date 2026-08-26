@@ -4,7 +4,7 @@
 """Callback for tracking per-action statistics and proposal diversity.
 
 When action-conditioned reflection is active, each proposal is tagged with the
-action that constrained it (e.g. ``"add_constraint"``, ``"restructure"``).
+semantic action that constrained it (e.g. ``"summarize"``, ``"relocate"``).
 This callback collects per-action counts, acceptance rates, score deltas,
 and textual diversity metrics for analysis.
 """

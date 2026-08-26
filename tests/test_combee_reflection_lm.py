@@ -15,6 +15,7 @@ import random
 import re
 from collections import defaultdict
 from typing import ClassVar
+from unittest.mock import Mock
 
 import pytest
 
@@ -208,9 +209,11 @@ def test_plain_callable_tracks_tokens_but_not_provider_cost():
     assert combee.total_tokens_in > 0
     assert combee.total_tokens_out > 0
 
-    from gepa.lm import TrackingLM
+    from gepa.lm import InlineReasoningLM, TrackingLM
 
-    assert not ComBEEReflectionLM(TrackingLM(lambda prompt: "update")).supports_cost_tracking()
+    assert not ComBEEReflectionLM(TrackingLM(Mock(return_value="update"))).supports_cost_tracking()
+    wrapped_tracker = InlineReasoningLM(TrackingLM(Mock(return_value="update")))
+    assert not ComBEEReflectionLM(wrapped_tracker).supports_cost_tracking()
 
 
 def test_str_model_name_resolved_via_gepa_lm():

@@ -134,6 +134,16 @@ def state_trace_entries(run_dir):
 
 
 def _assert_invariants(result, adapter, by, run_dir, expect_tasks, topk):
+    """Assert cross-cutting budget, lineage, event, and persistence invariants.
+
+    Args:
+        result: Completed optimization result.
+        adapter: Test adapter exposing observed metric-call counts.
+        by: Callback events grouped by event name.
+        run_dir: Persisted run directory.
+        expect_tasks: Expected proposal-task count for each iteration.
+        topk: Expected upper bound on accepted proposals per iteration.
+    """
     # I1 — budget truth
     budget = by["on_budget_updated"]
     assert budget, "no budget events"
@@ -207,6 +217,13 @@ def _assert_invariants(result, adapter, by, run_dir, expect_tasks, topk):
     # I6 — batched adapters get grouped calls in multi-task iterations
     if isinstance(adapter, BatchedSyntheticAdapter) and expect_tasks > 1:
         assert any(n > 1 for n in adapter.grouped_calls)
+
+    # I7: proposal metadata is the order-independent correlation key used by
+    # ActionDiversityCallback.
+    for e in by["on_proposal_end"]:
+        assert "metadata" in e and "proposal_id" in e["metadata"]
+    for e in accepted + rejected:
+        assert "metadata" in e
 
 
 CONFIGS = [

@@ -383,6 +383,7 @@ class TestCandidateEvents:
             CandidateAcceptedEvent(
                 iteration=5,
                 new_candidate_idx=3,
+                old_score=0.85,
                 new_score=0.92,
                 parent_ids=[1],
             ),

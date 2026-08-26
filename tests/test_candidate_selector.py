@@ -15,7 +15,11 @@ from gepa.strategies.candidate_selector import (
 
 @pytest.fixture
 def mock_state():
-    """Create a mock GEPAState with 3 candidates for testing."""
+    """Create optimizer state with three differently scored candidates.
+
+    Returns:
+        Consistent state used by candidate-selector tests.
+    """
     seed_candidate = {"system_prompt": "test"}
     # GEPAState expects ValsetEvaluation with dicts for outputs and scores keyed by data IDs
     base_valset_eval_output = ValsetEvaluation(
@@ -28,6 +32,7 @@ def mock_state():
     # Add two more candidates with different scores
     state.program_candidates.append({"system_prompt": "test2"})
     state.program_candidates.append({"system_prompt": "test3"})
+    state.revision_history_by_candidate.extend([[], []])
 
     # prog_candidate_val_subscores should be dicts, not lists
     state.prog_candidate_val_subscores.append({0: 0.6, 1: 0.6, 2: 0.6})

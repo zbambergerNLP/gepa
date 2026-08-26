@@ -3,6 +3,13 @@
 
 """Tests for the ReflectionLM protocol and StatelessReflectionLM (#329 Phase 1)."""
 
+from copy import deepcopy
+from dataclasses import dataclass, field
+from unittest.mock import MagicMock
+
+import pytest
+
+from gepa.proposer.reflective_mutation.react_v2_proposer import ReActV2ContextError
 from gepa.proposer.reflective_mutation.reflection_lm import (
     ReflectionLM,
     ReflectionProposal,
@@ -214,6 +221,143 @@ def test_reflect_only_strategy_used_per_task_in_batch_path():
     assert [r[0] for r in results] == [{"c": "new_c"}, {"c": "new_c"}]
 
 
+def test_reflect_only_batch_fallback_forwards_aligned_metadata() -> None:
+    """Keep each branch history aligned when only reflect() is available."""
+
+    @dataclass
+    class _MetadataReflectOnlyLM:
+        metadatas: list = field(default_factory=list)
+
+        def reflect(self, candidate, reflective_dataset, components_to_update, *, metadata=None):
+            """Record branch metadata and return a marked candidate.
+
+            Args:
+                candidate: Parent component mapping.
+                reflective_dataset: Unused reflective rows.
+                components_to_update: Unused selected components.
+                metadata: Parent-specific branch context.
+
+            Returns:
+                One marked proposal and this test reflector.
+            """
+            self.metadatas.append(metadata)
+            return ReflectionProposal(new_texts={"c": candidate["c"] + "!"}), self
+
+    strategy = _MetadataReflectOnlyLM()
+    proposer = _make_proposer(reflection_strategy=strategy)
+    jobs = [
+        ({"c": "left"}, {"c": [{"feedback": "f1"}]}, ["c"]),
+        ({"c": "right"}, {"c": [{"feedback": "f2"}]}, ["c"]),
+    ]
+    metadatas = [
+        {"branch_edit_history": [{"role": "user", "content": "left-only"}]},
+        {"branch_edit_history": [{"role": "user", "content": "right-only"}]},
+    ]
+    proposer._propose_texts_batch(jobs, metadatas)
+    assert strategy.metadatas == metadatas
+
+
+def test_react_context_error_is_not_retried_or_swallowed() -> None:
+    """Propagate deterministic branch-history overflow as an explicit failure."""
+
+    @dataclass
+    class _OverflowLM:
+        calls: int = 0
+
+        def reflect(self, candidate, reflective_dataset, components_to_update, *, metadata=None):
+            """Raise a deterministic context error on every reflection.
+
+            Args:
+                candidate: Unused parent candidate.
+                reflective_dataset: Unused reflective rows.
+                components_to_update: Unused selected components.
+                metadata: Unused branch context.
+
+            Raises:
+                ReActV2ContextError: Always, after incrementing the call count.
+            """
+            self.calls += 1
+            raise ReActV2ContextError("branch history overflow")
+
+    strategy = _OverflowLM()
+    proposer = _make_proposer(reflection_strategy=strategy)
+    jobs = [
+        ({"c": "left"}, {"c": [{"feedback": "f1"}]}, ["c"]),
+        ({"c": "right"}, {"c": [{"feedback": "f2"}]}, ["c"]),
+    ]
+    with pytest.raises(ReActV2ContextError, match="branch history overflow"):
+        proposer._propose_texts_batch_safe(jobs, [{}, {}])
+    assert strategy.calls == 1
+
+
+def test_engine_propagates_react_context_error_when_other_errors_are_nonfatal() -> None:
+    """Do not convert deterministic ReAct context overflow into an empty iteration."""
+    import gepa
+    from gepa.core.adapter import EvaluationBatch
+
+    class _Adapter:
+        propose_new_texts = None
+
+        def evaluate(self, batch, candidate, capture_traces=False):
+            """Return fixed scores for a requested batch.
+
+            Args:
+                batch: Examples being evaluated.
+                candidate: Unused candidate mapping.
+                capture_traces: Whether to include fixed trajectories.
+
+            Returns:
+                Evaluation batch matching the input length.
+            """
+            return EvaluationBatch(
+                outputs=["o"] * len(batch),
+                scores=[0.5] * len(batch),
+                trajectories=[{"trace": 1}] * len(batch) if capture_traces else None,
+                objective_scores=None,
+                num_metric_calls=len(batch),
+            )
+
+        def make_reflective_dataset(self, candidate, eval_batch, components):
+            """Build fixed feedback for selected components.
+
+            Args:
+                candidate: Unused candidate mapping.
+                eval_batch: Unused evaluation results.
+                components: Components selected for reflection.
+
+            Returns:
+                One feedback row per component.
+            """
+            return {component: [{"Feedback": "f"}] for component in components}
+
+    class _OverflowLM:
+        def reflect(self, candidate, reflective_dataset, components_to_update, *, metadata=None):
+            """Raise a deterministic context error on every reflection.
+
+            Args:
+                candidate: Unused parent candidate.
+                reflective_dataset: Unused reflective rows.
+                components_to_update: Unused selected components.
+                metadata: Unused branch context.
+
+            Raises:
+                ReActV2ContextError: Always.
+            """
+            raise ReActV2ContextError("history cannot fit")
+
+    with pytest.raises(ReActV2ContextError, match="history cannot fit"):
+        gepa.optimize(
+            seed_candidate={"c": "seed"},
+            trainset=[{"q": 1}],
+            valset=[{"q": 1}],
+            adapter=_Adapter(),
+            reflection_strategy=_OverflowLM(),
+            max_metric_calls=5,
+            display_progress_bar=False,
+            raise_on_exception=False,
+        )
+
+
 def test_reflection_strategy_receives_public_prompt_template():
     """Strategies that opt in to template binding must see the public API
     value, instead of silently falling back to their own generic default."""
@@ -327,6 +471,69 @@ def test_nonempty_new_texts_still_produces_a_proposal():
     assert len(proposals) == 1
     assert proposals[0].candidate["c"] == "improved"
     assert adapter.batch_evaluate.call_count == 2  # parent stage + child stage
+
+
+def test_length_capped_empty_proposal_still_fires_on_proposal_end() -> None:
+    """Test that a proposal emptied by the length cap still reaches on_proposal_end (#7).
+
+    No child is evaluated (empty new_texts), but the attempt is counted so an
+    action's acceptance rate is not silently inflated by vanished attempts.
+    """
+    events: list[dict] = []
+    recorder = MagicMock()
+    recorder.on_proposal_end.side_effect = events.append
+
+    class _CappedLM(_FixedProposalLM):
+        """ReflectionLM stub whose proposal is emptied by the length cap."""
+
+        def reflect(self, candidate, reflective_dataset, components_to_update):
+            """Return a deliberately empty, length-capped proposal.
+
+            Args:
+                candidate: Unused parent candidate.
+                reflective_dataset: Unused reflective rows.
+                components_to_update: Unused selected components.
+
+            Returns:
+                Empty proposal with action and dropped-attempt metadata.
+            """
+            return (
+                ReflectionProposal(
+                    new_texts={},
+                    metadata={
+                        "action": "contextualize",
+                        "length_capped_dropped": ["c"],
+                        "attempt_records": [
+                            {
+                                "component": "c",
+                                "assistant": "attempted edit",
+                                "action": "INSERT_TEXT",
+                                "observation": "length cap exceeded",
+                                "error": "no completed edit",
+                            }
+                        ],
+                    },
+                ),
+                self,
+            )
+
+    proposer, adapter = _make_propose_harness(_CappedLM({}))
+    proposer.callbacks = [recorder]
+
+    state = _make_state()
+    proposals = proposer.propose(state)
+
+    assert proposals == []  # nothing to evaluate
+    assert adapter.batch_evaluate.call_count == 1  # parent stage only
+    assert len(events) == 1
+    assert events[0]["new_instructions"] == {}
+    assert events[0]["metadata"]["action"] == "contextualize"
+    assert events[0]["metadata"]["length_capped_dropped"] == ["c"]
+    history = deepcopy(state.revision_history_by_candidate[0])
+    assert history[0] == {"role": "assistant", "content": "attempted edit"}
+    assert history[1] == {"role": "user", "content": "length cap exceeded"}
+    assert history[2]["role"] == "user"
+    assert "Optimizer result: dropped" in history[2]["content"]
 
 
 # ---------------------------------------------------------------------------
@@ -551,6 +758,7 @@ def test_legacy_tracker_metric_keys_still_emitted():
 
 
 def test_gepa_optimize_accepts_reflection_strategy_without_reflection_lm():
+    """Verify optimize accepts a strategy without a separate reflection LM."""
     import gepa
     from gepa.core.adapter import EvaluationBatch
 
@@ -569,7 +777,21 @@ def test_gepa_optimize_accepts_reflection_strategy_without_reflection_lm():
         def make_reflective_dataset(self, candidate, eval_batch, components):
             return {c: [{"Feedback": "f"}] for c in components}
 
-    stub = _ReflectOnlyLM()
+    class ValidatingStrategy(_ReflectOnlyLM):
+        def __init__(self):
+            """Initialize the strategy validation counter."""
+            super().__init__()
+            self.validated = []
+
+        def validate_candidate(self, candidate):
+            """Record the seed validated by the strategy.
+
+            Args:
+                candidate: Candidate passed by the optimizer front door.
+            """
+            self.validated.append(candidate)
+
+    stub = ValidatingStrategy()
     result = gepa.optimize(
         seed_candidate={"c": "x"},
         trainset=[{"q": 1}] * 4,
@@ -581,6 +803,7 @@ def test_gepa_optimize_accepts_reflection_strategy_without_reflection_lm():
         seed=0,
     )
     assert stub.calls, "reflection_strategy never invoked via gepa.optimize"
+    assert stub.validated == [{"c": "x"}]
     assert result is not None
 
 

@@ -3,6 +3,7 @@
 
 """Tests for batch-based parallel proposals."""
 
+from copy import deepcopy
 from itertools import pairwise
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -29,7 +30,11 @@ from gepa.strategies.proposal_selection import (
 
 @pytest.fixture
 def mock_state():
-    """Create a GEPAState with 2 candidates."""
+    """Create optimizer state with two differently scored candidates.
+
+    Returns:
+        Consistent state used by parallel-proposal tests.
+    """
     seed_candidate = {"system_prompt": "test0"}
     base_eval = ValsetEvaluation(
         outputs_by_val_id={0: "out0", 1: "out1"},
@@ -40,6 +45,7 @@ def mock_state():
 
     # Add a second candidate
     state.program_candidates.append({"system_prompt": "test1"})
+    state.revision_history_by_candidate.append([])
     state.prog_candidate_val_subscores.append({0: 0.7, 1: 0.7})
     state.prog_candidate_objective_scores.append({})
     state.parent_program_for_candidate.append([0])
@@ -388,9 +394,11 @@ def test_selection_dropped_rejection_reason_is_truthful():
     mock_engine.acceptance_criterion = StrictImprovementAcceptance()
     mock_engine.selection_strategy = BestImprovement()
     logged: list[str] = []
-    mock_engine.logger.log = lambda m: logged.append(m)
+    mock_engine.logger.log.side_effect = logged.append
     events: list[dict] = []
-    mock_engine.callbacks = [type("Cb", (), {"on_candidate_rejected": staticmethod(lambda e: events.append(dict(e)))})()]
+    callback = MagicMock()
+    callback.on_candidate_rejected.side_effect = events.append
+    mock_engine.callbacks = [callback]
 
     GEPAEngine._report_rejected_proposal(mock_engine, proposal, 3, MagicMock(), dropped_by_selection=True)
 
@@ -403,3 +411,50 @@ def test_selection_dropped_rejection_reason_is_truthful():
     events.clear()
     GEPAEngine._report_rejected_proposal(mock_engine, proposal, 3, MagicMock(), dropped_by_selection=False)
     assert "not better than" in logged[0] or "rejected by acceptance criterion" in logged[0]
+
+
+def test_score_rejected_attempt_is_persisted_on_its_parent_branch(mock_state) -> None:
+    """Show a reselected parent which completed edit failed to help.
+
+    Args:
+        mock_state: Two-candidate optimizer state fixture.
+    """
+    from gepa.core.engine import GEPAEngine
+
+    proposal = CandidateProposal(
+        candidate={"system_prompt": "regressed"},
+        parent_program_ids=[0],
+        subsample_indices=[0],
+        subsample_scores_before=[0.8],
+        subsample_scores_after=[0.2],
+        eval_before=SubsampleEvaluation(scores=[0.8], outputs=["before"]),
+        eval_after=SubsampleEvaluation(scores=[0.2], outputs=["after"]),
+        tag="reflective",
+        metadata={
+            "attempt_records": [
+                {
+                    "component": "system_prompt",
+                    "assistant": "I will replace the vague rule.",
+                    "action": "REPLACE_TEXT",
+                    "observation": "Edit applied.",
+                    "error": None,
+                }
+            ]
+        },
+    )
+    mock_engine = MagicMock()
+    mock_engine.acceptance_criterion = StrictImprovementAcceptance()
+    mock_engine.selection_strategy = AllImprovements()
+    mock_engine.callbacks = []
+
+    GEPAEngine._report_rejected_proposal(mock_engine, proposal, 3, mock_state)
+
+    history = deepcopy(mock_state.revision_history_by_candidate[0])
+    assert history[0] == {"role": "assistant", "content": "I will replace the vague rule."}
+    assert history[1] == {"role": "user", "content": "Edit applied."}
+    assert history[2]["role"] == "user"
+    assert "Optimizer result: rejected" in history[2]["content"]
+    assert "Score before: 0.8" in history[2]["content"]
+    assert "Score after: 0.2" in history[2]["content"]
+    assert "not better" in history[2]["content"]
+    assert deepcopy(mock_state.revision_history_by_candidate[1]) == []

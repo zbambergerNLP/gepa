@@ -7,7 +7,7 @@ from gepa.strategies.document_template import infer_template_family
 class StudentAdapter:
     """Expose the prompt consumer through a common adapter attribute."""
 
-    student_model = "hosted_vllm/Qwen3.8"
+    student_model = "hosted_vllm/Qwen/Qwen3.8-27B"
 
 
 def test_custom_adapter_exposes_consumer_for_auto_template_inference() -> None:

@@ -221,3 +221,6 @@ archive/
 # Local MLflow tracking artifacts (TrackingConfig(use_mlflow=True))
 mlflow.db
 mlruns/
+
+# HoVer v1.1 data downloaded for local benchmark runs.
+examples/hover/data/

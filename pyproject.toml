@@ -114,6 +114,9 @@ gepa = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "smoke: opt-in tests that invoke external benchmark infrastructure",
+]
 
 [tool.ruff]
 include = ["src/**/*.py"]

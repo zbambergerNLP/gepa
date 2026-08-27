@@ -123,7 +123,28 @@ Provide the new instructions within ``` blocks."""
 
     @classmethod
     def output_extractor(cls, lm_out: str) -> dict[str, str]:
+        """Extract the proposed instruction from one language-model response.
+
+        Surrounding whitespace is removed first. When the response contains a
+        fenced code block, the text between its first opening fence and final
+        closing fence is returned without an optional language label. A lone
+        leading opening or trailing closing fence is removed. A lone fence in
+        the middle of the response remains, and unfenced text is returned as-is.
+
+        Args:
+            lm_out: Raw language-model response containing the proposal.
+
+        Returns:
+            A mapping whose ``new_instruction`` value is the extracted text.
+        """
+        lm_out = lm_out.strip()
+
         def extract_instruction_text() -> str:
+            """Extract instruction text from the normalized enclosing response.
+
+            Returns:
+                Unfenced instruction text with surrounding whitespace removed.
+            """
             # Find the first and last backtick positions (if any)
             start = lm_out.find("```") + 3
             end = lm_out.rfind("```")

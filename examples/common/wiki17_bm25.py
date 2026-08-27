@@ -12,7 +12,7 @@ import threading
 import urllib.request
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from examples.common.wikipedia import WikipediaPassage
 
@@ -49,6 +49,12 @@ WIKI17_B = 0.4
 WIKI17_INDEX_DIR_NAME = "bm25s_retriever"
 WIKI17_MANIFEST_NAME = "manifest.json"
 DEFAULT_WIKI17_ROOT = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "gepa" / "wiki17"
+DEFAULT_HOTPOTQA_TECHNICAL_MINI_ROOT = (
+    Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "gepa" / "hotpotqa-technical-mini"
+)
+HOTPOTQA_TECHNICAL_MINI_CORPUS_NAME = "selected_contexts.jsonl"
+HOTPOTQA_TECHNICAL_MINI_INDEX_DIR_NAME = "bm25s_retriever"
+HOTPOTQA_TECHNICAL_MINI_MANIFEST_NAME = "manifest.json"
 
 
 class Wiki17PreparationError(RuntimeError):
@@ -71,6 +77,10 @@ class Wiki17BM25Retriever:
         self.index_path = self.root / WIKI17_INDEX_DIR_NAME
         self.manifest_path = self.root / WIKI17_MANIFEST_NAME
         self.cache_path = self.root / "retriever_cache"
+        self.preparation_label = "Wiki-2017"
+        self.preparation_hint = (
+            f"Run `python -m examples.common.wiki17_bm25 prepare --root {self.root}` on an Internet-enabled host."
+        )
         self._initialize_lock = threading.Lock()
         self._retriever: Any | None = None
         self._stemmer: Any | None = None
@@ -98,9 +108,11 @@ class Wiki17BM25Retriever:
         self._ensure_archive()
         self._ensure_corpus()
         corpus = self._load_corpus()
-        if len(corpus) != WIKI17_DOCUMENT_COUNT:
+        expected_document_count = getattr(self, "expected_document_count", WIKI17_DOCUMENT_COUNT)
+        if len(corpus) != expected_document_count:
             raise Wiki17PreparationError(
-                f"Expected {WIKI17_DOCUMENT_COUNT} Wiki-2017 documents, found {len(corpus)} in {self.corpus_path}."
+                f"Expected {expected_document_count} {self.preparation_label} documents, "
+                f"found {len(corpus)} in {self.corpus_path}."
             )
 
         temporary_index = self.root / f".{WIKI17_INDEX_DIR_NAME}.building"
@@ -210,15 +222,16 @@ class Wiki17BM25Retriever:
             assert Cache is not None
             if self._prepared_manifest() is None:
                 raise Wiki17PreparationError(
-                    f"Wiki-2017 is not prepared under {self.root}. Run "
-                    f"`python -m examples.common.wiki17_bm25 prepare --root {self.root}` on an Internet-enabled host."
+                    f"{self.preparation_label} is not prepared under {self.root}. {self.preparation_hint}"
                 )
             retriever = bm25s.BM25.load(self.index_path)
             stemmer = Stemmer.Stemmer("english")
             corpus = self._load_corpus()
-            if len(corpus) != WIKI17_DOCUMENT_COUNT:
+            expected_document_count = getattr(self, "expected_document_count", WIKI17_DOCUMENT_COUNT)
+            if len(corpus) != expected_document_count:
                 raise Wiki17PreparationError(
-                    f"Expected {WIKI17_DOCUMENT_COUNT} Wiki-2017 documents, found {len(corpus)} in {self.corpus_path}."
+                    f"Expected {expected_document_count} {self.preparation_label} documents, "
+                    f"found {len(corpus)} in {self.corpus_path}."
                 )
             self._retriever = retriever
             self._stemmer = stemmer
@@ -279,7 +292,8 @@ class Wiki17BM25Retriever:
             return None
         if manifest != self._expected_manifest():
             return None
-        if self.corpus_path.stat().st_size != WIKI17_CORPUS_SIZE:
+        expected_corpus_size = getattr(self, "expected_corpus_size", WIKI17_CORPUS_SIZE)
+        if self.corpus_path.stat().st_size != expected_corpus_size:
             return None
         return manifest
 
@@ -405,6 +419,159 @@ class Wiki17BM25Retriever:
         except Exception as exc:
             raise Wiki17PreparationError(f"Malformed Wiki-2017 corpus row near line {_line_number}: {exc}") from exc
         return corpus
+
+
+class HotPotQATechnicalMiniBM25Retriever(Wiki17BM25Retriever):
+    """Search an explicitly non-scientific index of selected HotPotQA contexts."""
+
+    def __init__(
+        self,
+        examples: Sequence[dict[str, Any]],
+        root: str | os.PathLike[str] = DEFAULT_HOTPOTQA_TECHNICAL_MINI_ROOT,
+    ) -> None:
+        """Configure a deterministic mini index from selected benchmark records.
+
+        The corpus includes every context document attached to the selected
+        records, including distractors. This preserves the retrieval code path
+        for technical smoke tests but leaks benchmark-provided context into the
+        retrieval corpus, so resulting scores are not scientifically valid.
+
+        Args:
+            examples: Selected HotPotQA train, validation, and test records in
+                their deterministic experiment order.
+            root: Directory used for the mini corpus, BM25S index, and cache.
+
+        Raises:
+            Wiki17PreparationError: No usable context documents are present.
+        """
+        super().__init__(root)
+        rows_by_title: dict[str, dict[str, Any]] = {}
+        selected_ids: list[str] = []
+        for example in examples:
+            selected_ids.append(str(example.get("id", "")))
+            context = example.get("context", {})
+            if not isinstance(context, dict):
+                continue
+            titles = context.get("title", [])
+            sentence_groups = context.get("sentences", [])
+            for title, sentences in zip(titles, sentence_groups, strict=False):
+                normalized_title = str(title)
+                if normalized_title in rows_by_title:
+                    continue
+                rows_by_title[normalized_title] = {
+                    "title": normalized_title,
+                    "text": [str(sentence) for sentence in sentences],
+                }
+        if not rows_by_title:
+            raise Wiki17PreparationError("The selected HotPotQA records contain no context documents to index.")
+
+        self.rows = list(rows_by_title.values())
+        self.corpus_bytes = b"".join(
+            (json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8") for row in self.rows
+        )
+        self.corpus_sha256 = hashlib.sha256(self.corpus_bytes).hexdigest()
+        selection_bytes = json.dumps(selected_ids, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        self.selection_sha256 = hashlib.sha256(selection_bytes).hexdigest()
+        self.corpus_path = self.root / HOTPOTQA_TECHNICAL_MINI_CORPUS_NAME
+        self.index_path = self.root / HOTPOTQA_TECHNICAL_MINI_INDEX_DIR_NAME
+        self.manifest_path = self.root / HOTPOTQA_TECHNICAL_MINI_MANIFEST_NAME
+        self.cache_path = self.root / f"retriever_cache_{self.corpus_sha256[:12]}"
+        self.expected_document_count = len(self.rows)
+        self.expected_corpus_size = len(self.corpus_bytes)
+        self.preparation_label = "HotPotQA technical-mini"
+        self.preparation_hint = "Call `prepare()` with the selected HotPotQA records before searching."
+
+    def prepare(self) -> dict[str, Any]:
+        """Write, verify, and index the selected benchmark contexts.
+
+        Returns:
+            Persisted manifest that identifies the selected records, exact
+            corpus bytes, dependency versions, and BM25 parameters.
+
+        Raises:
+            Wiki17PreparationError: A pinned retrieval dependency is missing or
+                the generated corpus cannot be indexed.
+        """
+        self._require_dependencies()
+        assert bm25s is not None
+        assert Stemmer is not None
+        self.root.mkdir(parents=True, exist_ok=True)
+        prepared_manifest = self._prepared_manifest()
+        if prepared_manifest is not None:
+            return prepared_manifest
+
+        temporary_corpus = self.corpus_path.with_suffix(self.corpus_path.suffix + ".part")
+        temporary_corpus.write_bytes(self.corpus_bytes)
+        temporary_corpus.replace(self.corpus_path)
+        corpus = self._load_corpus()
+        if len(corpus) != self.expected_document_count:
+            raise Wiki17PreparationError(
+                f"Expected {self.expected_document_count} {self.preparation_label} documents, "
+                f"found {len(corpus)} in {self.corpus_path}."
+            )
+
+        temporary_index = self.root / f".{HOTPOTQA_TECHNICAL_MINI_INDEX_DIR_NAME}.building"
+        if temporary_index.exists():
+            shutil.rmtree(temporary_index)
+        corpus_tokens = bm25s.tokenize(corpus, stopwords="en", stemmer=Stemmer.Stemmer("english"))
+        retriever = bm25s.BM25(k1=WIKI17_K1, b=WIKI17_B)
+        retriever.index(corpus_tokens)
+        retriever.save(temporary_index)
+        if self.index_path.exists():
+            shutil.rmtree(self.index_path)
+        temporary_index.replace(self.index_path)
+
+        manifest = self._expected_manifest()
+        temporary_manifest = self.manifest_path.with_suffix(".json.part")
+        temporary_manifest.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        temporary_manifest.replace(self.manifest_path)
+        return manifest
+
+    def provenance(self) -> dict[str, Any]:
+        """Describe the mini corpus and mark it as unsuitable for scoring.
+
+        Returns:
+            JSON-serializable corpus, tokenizer, BM25, and comparability
+            metadata used in the run identity.
+        """
+        return {
+            "backend": "hotpotqa-technical-mini-bm25s",
+            "mode": "technical-smoke-only",
+            "scientific_comparability": False,
+            "source": "selected-hotpotqa-contexts",
+            "contains_benchmark_context": True,
+            "corpus": HOTPOTQA_TECHNICAL_MINI_CORPUS_NAME,
+            "corpus_sha256": self.corpus_sha256,
+            "corpus_size": self.expected_corpus_size,
+            "selection_sha256": self.selection_sha256,
+            "document_count": self.expected_document_count,
+            "bm25s_version": WIKI17_BM25_VERSION,
+            "pystemmer_version": WIKI17_PYSTEMMER_VERSION,
+            "jax_version": WIKI17_JAX_VERSION,
+            "k1": WIKI17_K1,
+            "b": WIKI17_B,
+            "stopwords": "en",
+            "stemmer": "PyStemmer english",
+            "retrieval_threads": 1,
+        }
+
+    def _prepared_manifest(self) -> dict[str, Any] | None:
+        """Accept prepared state only when its exact generated corpus matches.
+
+        Returns:
+            Verified manifest, or ``None`` when the corpus, index, manifest, or
+            selected-record identity is missing or stale.
+        """
+        manifest = super()._prepared_manifest()
+        if manifest is None:
+            return None
+        try:
+            corpus_digest = hashlib.sha256(self.corpus_path.read_bytes()).hexdigest()
+        except OSError:
+            return None
+        if corpus_digest != self.corpus_sha256:
+            return None
+        return manifest
 
 
 def main() -> None:

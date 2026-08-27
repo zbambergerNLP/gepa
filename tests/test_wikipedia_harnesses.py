@@ -475,8 +475,13 @@ def test_hotpot_openrouter_launcher_plans_eight_isolated_arms() -> None:
     assert all("--api-profile openrouter" in line for line in plans)
     assert all("--train-limit 6 --val-limit 5 --test-limit 2" in line for line in plans)
     assert all("--max-workers 1" in line for line in plans)
+    assert all("--technical-mini-index" in line for line in plans)
+    assert all("--technical-mini-index-dir" in line for line in plans)
+    assert all("--wiki17-dir" not in line for line in plans)
     assert all("--condition both" not in line for line in plans)
     assert all(line.count("--solver-model") == 1 and line.count("--reflection-model") == 1 for line in plans)
+    assert "NON-SCIENTIFIC selected-context technical-mini BM25 index" in result.stdout
+    assert "48 GiB" not in script.read_text(encoding="utf-8")
 
 
 def test_hotpot_openrouter_launcher_refuses_execution_without_a_key() -> None:

@@ -16,7 +16,7 @@ if [[ $# -gt 1 ]]; then
 fi
 
 cache_base="${XDG_CACHE_HOME:-${HOME}/.cache}"
-wiki17_dir="${WIKI17_DIR:-${cache_base}/gepa/wiki17}"
+technical_mini_index_dir="${HOTPOTQA_TECHNICAL_MINI_INDEX_DIR:-${cache_base}/gepa/hotpotqa-technical-mini}"
 smoke_tag="${SMOKE_TAG:-openrouter-tiny-$(date -u +%Y%m%dT%H%M%SZ)}"
 smoke_key_limit_usd="${OPENROUTER_SMOKE_KEY_LIMIT_USD:-25}"
 
@@ -46,6 +46,7 @@ budgets=(6 6 6 6 28 28 28 28)
 
 echo "HotPotQA OpenRouter technical-smoke matrix"
 echo "  fullwiki split: 6 train / 5 validation / 2 test"
+echo "  retrieval: NON-SCIENTIFIC selected-context technical-mini BM25 index"
 echo "  arms: 8 isolated processes; budgets are scheduling thresholds, not hard spend caps"
 echo "  tag: $smoke_tag"
 
@@ -68,7 +69,8 @@ for index in "${!arm_names[@]}"; do
         --template-family auto
         --retrieval-k 7
         --seed 0
-        --wiki17-dir "$wiki17_dir"
+        --technical-mini-index
+        --technical-mini-index-dir "$technical_mini_index_dir"
         --tag "${smoke_tag}-${arm_names[$index]}"
     )
     if [[ "${merge_flags[$index]}" == "1" ]]; then
@@ -102,34 +104,29 @@ if ! git diff --quiet --ignore-submodules -- || ! git diff --cached --quiet --ig
     exit 1
 fi
 
-memory_bytes=""
-if [[ "$(uname -s)" == "Darwin" ]]; then
-    memory_bytes="$(sysctl -n hw.memsize)"
-elif [[ -r /proc/meminfo ]]; then
-    memory_kib="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)"
-    memory_bytes="$((memory_kib * 1024))"
-fi
-minimum_memory_bytes="$((48 * 1024 * 1024 * 1024))"
-if [[ -z "$memory_bytes" || "$memory_bytes" -lt "$minimum_memory_bytes" ]]; then
-    echo "The frozen Wiki-2017 retriever requires a host with at least 48 GiB RAM for this launcher." >&2
-    echo "API inference removes the GPU requirement, but the 5.23M-document corpus and BM25 index remain local." >&2
-    exit 1
-fi
-
 preflight_cache_dir="outputs/openrouter_tiny_cache/${smoke_tag}/preflight"
 mkdir -p "$preflight_cache_dir"
-DSPY_CACHEDIR="$preflight_cache_dir" uv run python - <<'PY'
+DSPY_CACHEDIR="$preflight_cache_dir" uv run python - "$technical_mini_index_dir" <<'PY'
+import sys
+
+from examples.common.wiki17_bm25 import HotPotQATechnicalMiniBM25Retriever
 from examples.hotpotqa.utils import load_hotpotqa_dataset, validate_hotpotqa_dspy_runtime
 
 version, commit = validate_hotpotqa_dspy_runtime()
 trainset, valset, testset = load_hotpotqa_dataset(train_limit=6, val_limit=5, test_limit=2, seed=0)
 if (len(trainset), len(valset), len(testset)) != (6, 5, 2):
     raise RuntimeError("HotPotQA fullwiki preflight did not produce the required 6/5/2 split.")
+retriever = HotPotQATechnicalMiniBM25Retriever([*trainset, *valset, *testset], sys.argv[1])
+manifest = retriever.prepare()
+if not retriever.search(trainset[0]["question"], 7):
+    raise RuntimeError("The HotPotQA technical-mini retriever returned no passages.")
 print(f"DSPy preflight: {version} at {commit}")
 print("HotPotQA fullwiki preflight: 6/5/2 split ready")
+print(
+    "Technical-mini retrieval preflight: "
+    f"{manifest['document_count']} selected-context documents indexed and searchable"
+)
 PY
-uv run python -m examples.common.wiki17_bm25 verify --root "$wiki17_dir" >/dev/null
-echo "Wiki-2017 preflight: verified $wiki17_dir"
 
 qwen_endpoints="$(curl -fsS https://openrouter.ai/api/v1/models/qwen/qwen3.8-27b/endpoints)"
 if ! jq -e '
@@ -204,7 +201,8 @@ for index in "${!arm_names[@]}"; do
         --template-family auto
         --retrieval-k 7
         --seed 0
-        --wiki17-dir "$wiki17_dir"
+        --technical-mini-index
+        --technical-mini-index-dir "$technical_mini_index_dir"
         --tag "${smoke_tag}-${arm_names[$index]}"
     )
     if [[ "${merge_flags[$index]}" == "1" ]]; then

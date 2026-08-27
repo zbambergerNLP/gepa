@@ -86,6 +86,80 @@ def test_prepare_uses_artifact_bm25_settings_without_downloading(monkeypatch, tm
     assert json.loads(retriever.manifest_path.read_text(encoding="utf-8")) == manifest
 
 
+def test_technical_mini_index_uses_all_selected_contexts_and_same_bm25(monkeypatch, tmp_path) -> None:
+    """Build a non-scientific selected-context index with the pinned ranker.
+
+    Args:
+        monkeypatch: Pytest fixture used to replace optional dependencies.
+        tmp_path: Pytest directory used for isolated prepared state.
+    """
+    dependencies = install_fake_dependencies(monkeypatch)
+    index = Mock()
+
+    def save_index(path: Path) -> None:
+        """Materialize the directory created by a BM25S index save.
+
+        Args:
+            path: Temporary index directory selected by the retriever.
+        """
+        Path(path).mkdir(parents=True)
+        (Path(path) / "index.json").write_text("{}", encoding="utf-8")
+
+    index.save.side_effect = save_index
+    dependencies.bm25_factory.return_value = index
+    examples = [
+        {
+            "id": "train-1",
+            "context": {
+                "title": ["Alpha", "Distractor"],
+                "sentences": [["alpha evidence"], ["irrelevant text"]],
+            },
+        },
+        {
+            "id": "validation-1",
+            "context": {
+                "title": ["Alpha", "Bridge"],
+                "sentences": [["duplicate is ignored"], ["bridge evidence"]],
+            },
+        },
+    ]
+    retriever = wiki17_bm25.HotPotQATechnicalMiniBM25Retriever(examples, tmp_path)
+
+    manifest = retriever.prepare()
+
+    rows = [json.loads(line) for line in retriever.corpus_path.read_text(encoding="utf-8").splitlines()]
+    assert [row["title"] for row in rows] == ["Alpha", "Distractor", "Bridge"]
+    assert rows[0]["text"] == ["alpha evidence"]
+    assert manifest["backend"] == "hotpotqa-technical-mini-bm25s"
+    assert manifest["mode"] == "technical-smoke-only"
+    assert manifest["scientific_comparability"] is False
+    assert manifest["contains_benchmark_context"] is True
+    assert manifest["document_count"] == 3
+    assert manifest["corpus_sha256"] == retriever.corpus_sha256
+    dependencies.tokenize.assert_called_once_with(
+        ["Alpha | alpha evidence", "Distractor | irrelevant text", "Bridge | bridge evidence"],
+        stopwords="en",
+        stemmer="english stemmer",
+    )
+    dependencies.bm25_factory.assert_called_once_with(k1=0.9, b=0.4)
+    assert retriever.prepare() == manifest
+    dependencies.bm25_factory.assert_called_once()
+
+
+def test_technical_mini_identity_changes_with_the_selected_records(tmp_path) -> None:
+    """Keep different selected benchmark examples out of the same run identity.
+
+    Args:
+        tmp_path: Pytest directory used to configure the retrievers.
+    """
+    context = {"title": ["Alpha"], "sentences": [["same corpus text"]]}
+    first = wiki17_bm25.HotPotQATechnicalMiniBM25Retriever([{"id": "first", "context": context}], tmp_path)
+    second = wiki17_bm25.HotPotQATechnicalMiniBM25Retriever([{"id": "second", "context": context}], tmp_path)
+
+    assert first.provenance()["corpus_sha256"] == second.provenance()["corpus_sha256"]
+    assert first.provenance()["selection_sha256"] != second.provenance()["selection_sha256"]
+
+
 def test_search_preserves_artifact_order_dedup_threads_and_cache(monkeypatch, tmp_path) -> None:
     """Match artifact ranking semantics and avoid repeating cached retrievals.
 

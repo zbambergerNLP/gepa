@@ -45,7 +45,13 @@ from examples.common.react_v2 import (
     resolve_template_family,
     structured_prompt,
 )
-from examples.common.wiki17_bm25 import DEFAULT_WIKI17_ROOT, GEPA_ARTIFACT_COMMIT, Wiki17BM25Retriever
+from examples.common.wiki17_bm25 import (
+    DEFAULT_HOTPOTQA_TECHNICAL_MINI_ROOT,
+    DEFAULT_WIKI17_ROOT,
+    GEPA_ARTIFACT_COMMIT,
+    HotPotQATechnicalMiniBM25Retriever,
+    Wiki17BM25Retriever,
+)
 from examples.common.wikipedia import WikipediaRetriever
 from examples.hotpotqa.utils import (
     HOTPOTQA_DSPY_COMMIT,
@@ -170,6 +176,10 @@ def build_run_contract(condition: str, args) -> dict:
     reflection_level = args.reflection_level if condition == "react_v2" else 0
     edit_tool_set = args.edit_tool_set if condition == "react_v2" else None
     stateless_semantic = condition in ("random", "action")
+    retrieval_provenance = getattr(args, "retrieval_provenance", None)
+    if retrieval_provenance is None:
+        retrieval_provenance = Wiki17BM25Retriever(args.wiki17_dir).provenance()
+    technical_mini_index = retrieval_provenance["backend"] == "hotpotqa-technical-mini-bm25s"
     merge = None
     if args.merge:
         merge = {
@@ -198,7 +208,7 @@ def build_run_contract(condition: str, args) -> dict:
         }
     return {
         "schema_version": 6,
-        "benchmark": "hotpotqa-fullwiki-wiki17",
+        "benchmark": "hotpotqa-technical-mini" if technical_mini_index else "hotpotqa-fullwiki-wiki17",
         "reference_artifact_commit": GEPA_ARTIFACT_COMMIT,
         "condition": condition,
         "models": {
@@ -272,7 +282,7 @@ def build_run_contract(condition: str, args) -> dict:
                 else {"answer_question": ["answer"]}
             ),
         },
-        "retrieval": Wiki17BM25Retriever(args.wiki17_dir).provenance(),
+        "retrieval": deepcopy(retrieval_provenance),
         "data": args.data_identity,
         "tag": args.tag,
     }
@@ -742,6 +752,20 @@ def main():
         help="Prepared frozen Wiki-2017 corpus and BM25S index directory",
     )
     parser.add_argument(
+        "--technical-mini-index",
+        action="store_true",
+        help=(
+            "Use an explicitly non-scientific BM25 index built from the selected records' contexts; "
+            "intended only to verify the complete code path on a small host"
+        ),
+    )
+    parser.add_argument(
+        "--technical-mini-index-dir",
+        type=Path,
+        default=DEFAULT_HOTPOTQA_TECHNICAL_MINI_ROOT,
+        help="Cache directory for the selected-context technical-mini BM25 index",
+    )
+    parser.add_argument(
         "--retrieval-k", type=int, default=7, help="Wiki-2017 abstracts retrieved per hop (artifact: 7)"
     )
     parser.add_argument("--max-workers", type=int, default=32, help="Parallel evaluator workers (artifact: 32)")
@@ -835,11 +859,25 @@ def main():
     else:
         print("  (GEPA artifact split from hotpot_qa/fullwiki train; paper Table 1: 150/300/300)")
 
-    retriever = Wiki17BM25Retriever(args.wiki17_dir)
-    print(
-        f"  (retrieval: frozen Wiki-2017 BM25S {retriever.provenance()['bm25s_version']}, "
-        f"k1={retriever.provenance()['k1']}, b={retriever.provenance()['b']})"
-    )
+    if args.technical_mini_index:
+        retriever = HotPotQATechnicalMiniBM25Retriever(
+            [*trainset, *valset, *testset],
+            args.technical_mini_index_dir,
+        )
+        retriever.prepare()
+        args.retrieval_provenance = retriever.provenance()
+        print(
+            "  (retrieval: NON-SCIENTIFIC technical-mini BM25S index built from selected benchmark contexts; "
+            f"{args.retrieval_provenance['document_count']} documents, "
+            f"k1={args.retrieval_provenance['k1']}, b={args.retrieval_provenance['b']})"
+        )
+    else:
+        retriever = Wiki17BM25Retriever(args.wiki17_dir)
+        args.retrieval_provenance = retriever.provenance()
+        print(
+            f"  (retrieval: frozen Wiki-2017 BM25S {args.retrieval_provenance['bm25s_version']}, "
+            f"k1={args.retrieval_provenance['k1']}, b={args.retrieval_provenance['b']})"
+        )
     solver_api_base = args.solver_api_base if args.solver_api_base is not None else args.api_base
     reflection_api_base = args.reflection_api_base if args.reflection_api_base is not None else args.api_base
     solver_runtime_model = resolve_experiment_model(args.solver_model, args.api_profile)

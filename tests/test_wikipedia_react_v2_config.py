@@ -197,6 +197,8 @@ def _hotpot_args(**overrides):
         "solver_api_base": "http://localhost:8000/v1",
         "solver_model": QWEN3_8_27B_MODEL,
         "tag": "",
+        "technical_mini_index": False,
+        "technical_mini_index_dir": "/tmp/gepa-hotpotqa-technical-mini",
         "template_family": "auto",
         "test_limit": 300,
         "train_limit": 150,
@@ -218,6 +220,33 @@ def test_material_ablation_axes_get_distinct_resumable_run_keys() -> None:
 
     assert len({broad, minimal, level_one}) == 3
     assert "l2-broad" in broad
+
+
+def test_technical_mini_retrieval_is_non_scientific_and_run_key_isolated() -> None:
+    """Prevent selected-context smoke runs from sharing scientific artifacts."""
+    provenance = {
+        "backend": "hotpotqa-technical-mini-bm25s",
+        "mode": "technical-smoke-only",
+        "scientific_comparability": False,
+        "contains_benchmark_context": True,
+        "selection_sha256": "selected-6-5-2",
+        "corpus_sha256": "mini-corpus",
+        "document_count": 120,
+        "k1": 0.9,
+        "b": 0.4,
+    }
+    args = _hotpot_args(
+        technical_mini_index=True,
+        retrieval_provenance=provenance,
+    )
+
+    contract = build_hotpotqa_run_contract("react_v2", args)
+
+    assert contract["benchmark"] == "hotpotqa-technical-mini"
+    assert contract["retrieval"] == provenance
+    assert contract["retrieval"]["scientific_comparability"] is False
+    assert contract["retrieval"]["contains_benchmark_context"] is True
+    assert hotpotqa_run_key("react_v2", args) != hotpotqa_run_key("react_v2", _hotpot_args())
 
 
 def test_complete_run_keys_cover_budget_seed_retrieval_and_data_identity() -> None:

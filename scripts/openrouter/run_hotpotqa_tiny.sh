@@ -42,7 +42,7 @@ models=(
 )
 conditions=(vanilla react_v2 vanilla react_v2 vanilla react_v2 vanilla react_v2)
 merge_flags=(0 0 0 0 1 1 1 1)
-budgets=(6 6 6 6 28 28 28 28)
+budgets=(16 16 16 16 32 32 32 32)
 
 echo "HotPotQA OpenRouter technical-smoke matrix"
 echo "  fullwiki split: 6 train / 5 validation / 2 test"
@@ -54,6 +54,7 @@ for index in "${!arm_names[@]}"; do
     command=(
         uv run python -m examples.hotpotqa.main
         --api-profile openrouter
+        --runtime-profile technical-smoke
         --solver-model "${models[$index]}"
         --reflection-model "${models[$index]}"
         --condition "${conditions[$index]}"
@@ -186,6 +187,7 @@ for index in "${!arm_names[@]}"; do
     command=(
         uv run python -m examples.hotpotqa.main
         --api-profile openrouter
+        --runtime-profile technical-smoke
         --solver-model "${models[$index]}"
         --reflection-model "${models[$index]}"
         --condition "${conditions[$index]}"

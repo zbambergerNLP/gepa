@@ -30,10 +30,12 @@ from examples.common.react_v2 import (
     structured_prompt,
 )
 from examples.hotpotqa.main import _run_key as hotpotqa_run_key
+from examples.hotpotqa.main import _validated_runtime_profile
 from examples.hotpotqa.main import build_config as build_hotpotqa_config
 from examples.hotpotqa.main import build_run_contract as build_hotpotqa_run_contract
 from examples.hotpotqa.main import dump_candidates as dump_hotpotqa_candidates
 from examples.hotpotqa.main import seed_candidate as hotpotqa_seed_candidate
+from examples.hotpotqa.utils import resolve_hotpotqa_lm_kwargs
 from examples.hover.main import _run_key as hover_run_key
 from examples.hover.main import build_config as build_hover_config
 from examples.hover.main import build_run_contract as build_hover_run_contract
@@ -192,6 +194,7 @@ def _hotpot_args(**overrides):
         "reflection_level": 2,
         "reflection_model": QWEN3_8_27B_MODEL,
         "retrieval_k": 7,
+        "runtime_profile": "scientific",
         "seed": 0,
         "seed_style": "structured",
         "solver_api_base": "http://localhost:8000/v1",
@@ -333,7 +336,8 @@ def test_hotpot_and_hover_contracts_record_exact_model_pair() -> None:
         assert contract["optimizer"]["semantic_action_space"] == SEMANTIC_ACTION_CATALOGS["prompt"]
         assert contract["optimizer"]["semantic_controller_policy"] == CONTROLLER_POLICY_CONTRACT
 
-    assert hotpot["schema_version"] == 6
+    assert hotpot["schema_version"] == 7
+    assert hotpot["models"]["runtime_profile"] == "scientific"
     assert hotpot["retrieval"]["backend"] == "wiki17-bm25s"
     assert hotpot["retrieval"]["k1"] == 0.9
     assert hotpot["retrieval"]["b"] == 0.4
@@ -393,6 +397,7 @@ def test_deepseek_contract_uses_the_deepseek_pair_and_decoding() -> None:
 
     assert contract["models"] == {
         "api_profile": "direct",
+        "runtime_profile": "scientific",
         "solver": DEEPSEEK_V4_FLASH_MODEL,
         "solver_runtime": DEEPSEEK_V4_FLASH_MODEL,
         "solver_api_base": None,
@@ -477,6 +482,106 @@ def test_openrouter_profile_changes_the_resumable_run_key() -> None:
     openrouter = hotpotqa_run_key("react_v2", _hotpot_args(api_profile="openrouter"))
 
     assert direct != openrouter
+
+
+def test_hotpot_technical_runtime_profile_bounds_qwen_without_changing_its_route() -> None:
+    """Make the local Qwen smoke bounded while preserving provider identity."""
+    provenance = {
+        "backend": "hotpotqa-technical-mini-bm25s",
+        "mode": "technical-smoke-only",
+        "scientific_comparability": False,
+        "selection_sha256": "selected-6-5-2",
+        "corpus_sha256": "mini-corpus",
+        "document_count": 120,
+        "k1": 0.9,
+        "b": 0.4,
+    }
+    args = _hotpot_args(
+        api_profile="openrouter",
+        runtime_profile="technical-smoke",
+        technical_mini_index=True,
+        retrieval_provenance=provenance,
+        solver_api_base=None,
+        reflection_api_base=None,
+    )
+    runtime_model = QWEN3_8_27B_OPENROUTER_MODEL
+    reflection_kwargs = resolve_hotpotqa_lm_kwargs(runtime_model, None, "technical-smoke")
+
+    contract = build_hotpotqa_run_contract("react_v2", args)
+    config, _ = build_hotpotqa_config("react_v2", args, reflection_kwargs)
+    strategy = config.reflection.reflection_strategy
+
+    assert contract["models"]["runtime_profile"] == "technical-smoke"
+    assert contract["models"]["solver_decoding"]["max_tokens"] == 4096
+    assert contract["models"]["reflection_decoding"]["max_tokens"] == 4096
+    expected_request = experiment_request_overrides(runtime_model)["extra_body"]
+    solver_request = contract["models"]["solver_request_overrides"]["extra_body"]
+    assert solver_request["provider"] == expected_request["provider"]
+    assert solver_request["reasoning"] == {"effort": "low"}
+    assert config.reflection.skip_perfect_score is False
+    assert strategy is not None
+    assert strategy.base_lm.completion_kwargs["max_tokens"] == 4096
+    assert strategy.base_lm.completion_kwargs["extra_body"]["reasoning"] == {"effort": "low"}
+    assert strategy.manifestor_lm.completion_kwargs["max_tokens"] == 4096
+
+    scientific_args = _hotpot_args(
+        api_profile="openrouter",
+        technical_mini_index=True,
+        retrieval_provenance=provenance,
+        solver_api_base=None,
+        reflection_api_base=None,
+    )
+    assert hotpotqa_run_key("react_v2", args) != hotpotqa_run_key("react_v2", scientific_args)
+
+
+def test_hotpot_technical_runtime_profile_leaves_deepseek_decoding_unchanged() -> None:
+    """Keep the already-bounded DeepSeek route on its scientific settings."""
+    provenance = {
+        "backend": "hotpotqa-technical-mini-bm25s",
+        "mode": "technical-smoke-only",
+        "scientific_comparability": False,
+        "selection_sha256": "selected-6-5-2",
+        "corpus_sha256": "mini-corpus",
+        "document_count": 120,
+        "k1": 0.9,
+        "b": 0.4,
+    }
+    args = _hotpot_args(
+        api_profile="openrouter",
+        runtime_profile="technical-smoke",
+        technical_mini_index=True,
+        retrieval_provenance=provenance,
+        solver_model=DEEPSEEK_V4_FLASH_MODEL,
+        reflection_model=DEEPSEEK_V4_FLASH_MODEL,
+        solver_api_base=None,
+        reflection_api_base=None,
+    )
+
+    contract = build_hotpotqa_run_contract("react_v2", args)
+    runtime_model = DEEPSEEK_V4_FLASH_0731_OPENROUTER_MODEL
+
+    assert contract["models"]["solver_decoding"] == experiment_decoding(runtime_model)
+    assert contract["models"]["reflection_decoding"] == experiment_decoding(runtime_model)
+    assert contract["models"]["solver_request_overrides"] == experiment_request_overrides(runtime_model)
+    assert contract["models"]["reflection_request_overrides"] == experiment_request_overrides(runtime_model)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"api_profile": "direct", "runtime_profile": "technical-smoke", "technical_mini_index": True},
+        {"api_profile": "openrouter", "runtime_profile": "technical-smoke", "technical_mini_index": False},
+        {"runtime_profile": "unknown"},
+    ],
+)
+def test_hotpot_technical_runtime_profile_rejects_unsafe_combinations(overrides: dict[str, object]) -> None:
+    """Reject the bounded profile outside its local OpenRouter mini run.
+
+    Args:
+        overrides: Invalid runtime-profile argument combination.
+    """
+    with pytest.raises(ValueError, match="runtime profile|requires"):
+        _validated_runtime_profile(_hotpot_args(**overrides))
 
 
 def test_openrouter_pin_reaches_react_native_tool_calls(monkeypatch) -> None:
@@ -701,7 +806,7 @@ def test_stateless_action_menu_contract_matches_between_wikipedia_benchmarks() -
     expected = build_hotpotqa_run_contract("random", args)["optimizer"]["stateless_action_menu"]
 
     for build_contract, schema_version in (
-        (build_hotpotqa_run_contract, 6),
+        (build_hotpotqa_run_contract, 7),
         (build_hover_run_contract, 5),
     ):
         contract = build_contract("random", args)

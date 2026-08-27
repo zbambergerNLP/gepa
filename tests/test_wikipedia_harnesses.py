@@ -268,6 +268,31 @@ def test_hover_chain_of_thought_matches_dspy_field_protocol(monkeypatch) -> None
 
 
 @pytest.mark.skipif(hotpot_utils.dspy is None, reason="HotPotQA's locked DSPy group is not installed")
+def test_hotpot_chat_adapter_repairs_only_expected_malformed_field_headers() -> None:
+    """Accept Qwen's missing trailing hashes without weakening field checks."""
+    dspy_module = hotpot_utils.dspy
+    adapter_class = hotpot_utils._HotPotQAChatAdapter
+    assert dspy_module is not None
+    assert adapter_class is not None
+    signature = dspy_module.ensure_signature("question->reasoning,summary")
+    adapter = adapter_class()
+
+    parsed = adapter.parse(
+        signature,
+        "[[ ## reasoning ## ]]\nBecause evidence.\n\n[[ ## summary ]]\nFinal summary.\n\n[[ ## completed ]]",
+    )
+
+    assert parsed == {"reasoning": "Because evidence.", "summary": "Final summary."}
+    canonical = adapter.parse(
+        signature,
+        "[[ ## reasoning ## ]]\nBecause evidence.\n\n[[ ## summary ## ]]\nFinal summary.\n\n[[ ## completed ## ]]",
+    )
+    assert canonical == parsed
+    with pytest.raises(ValueError, match="Expected"):
+        adapter.parse(signature, "[[ ## reasoning ]]\nOnly reasoning.")
+
+
+@pytest.mark.skipif(hotpot_utils.dspy is None, reason="HotPotQA's locked DSPy group is not installed")
 def test_hotpot_chain_of_thought_uses_the_real_dspy_protocol() -> None:
     """Execute the artifact signature through DSPy's real ChatAdapter.
 
@@ -455,8 +480,36 @@ def test_hotpot_dspy_lm_forwards_openrouter_routing(monkeypatch, model: str) -> 
     )
 
 
+def test_hotpot_dspy_lm_accepts_the_resolved_technical_smoke_profile(monkeypatch) -> None:
+    """Forward bounded Qwen settings into the pinned DSPy task client.
+
+    Args:
+        monkeypatch: Pytest fixture used to replace the DSPy LM constructor.
+    """
+    lm_constructor = Mock(return_value=object())
+    monkeypatch.setattr(hotpot_utils, "dspy", SimpleNamespace(LM=lm_constructor))
+    monkeypatch.setattr(hotpot_utils, "package_version", Mock(return_value=hotpot_utils.HOTPOTQA_DSPY_VERSION))
+    monkeypatch.setattr(
+        hotpot_utils,
+        "package_distribution",
+        Mock(
+            return_value=SimpleNamespace(
+                read_text=Mock(return_value=json.dumps({"vcs_info": {"commit_id": hotpot_utils.HOTPOTQA_DSPY_COMMIT}}))
+            )
+        ),
+    )
+    model = QWEN3_8_27B_OPENROUTER_MODEL
+    lm_kwargs = hotpot_utils.resolve_hotpotqa_lm_kwargs(model, None, "technical-smoke")
+
+    hotpot_utils.build_hotpotqa_task_lm(model, None, lm_kwargs)
+
+    assert lm_kwargs["max_tokens"] == 4096
+    assert lm_kwargs["extra_body"]["reasoning"] == {"effort": "low"}
+    lm_constructor.assert_called_once_with(model=model, **lm_kwargs)
+
+
 def test_hotpot_openrouter_launcher_plans_eight_isolated_arms() -> None:
-    """Lock the tiny matrix, data sizes, budgets, and provider profile."""
+    """Lock the tiny matrix, data sizes, budgets, and runtime/provider profiles."""
     script = REPO_ROOT / "scripts" / "openrouter" / "run_hotpotqa_tiny.sh"
 
     result = subprocess.run(
@@ -470,9 +523,10 @@ def test_hotpot_openrouter_launcher_plans_eight_isolated_arms() -> None:
     plans = [line for line in result.stdout.splitlines() if line.startswith("PLAN ")]
     assert len(plans) == 8
     assert sum(" --merge" in line for line in plans) == 4
-    assert sum("--max-metric-calls 6" in line for line in plans) == 4
-    assert sum("--max-metric-calls 28" in line for line in plans) == 4
+    assert sum("--max-metric-calls 16" in line for line in plans) == 4
+    assert sum("--max-metric-calls 32" in line for line in plans) == 4
     assert all("--api-profile openrouter" in line for line in plans)
+    assert all("--runtime-profile technical-smoke" in line for line in plans)
     assert all("--train-limit 6 --val-limit 5 --test-limit 2" in line for line in plans)
     assert all("--max-workers 1" in line for line in plans)
     assert all("--technical-mini-index" in line for line in plans)

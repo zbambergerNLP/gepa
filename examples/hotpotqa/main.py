@@ -56,12 +56,14 @@ from examples.common.wikipedia import WikipediaRetriever
 from examples.hotpotqa.utils import (
     HOTPOTQA_DSPY_COMMIT,
     HOTPOTQA_DSPY_VERSION,
+    HOTPOTQA_RUNTIME_PROFILES,
     artifact_component_records,
     build_hotpotqa_task_lm,
     f1_score,
     hotpotqa_metric,
     load_hotpotqa_dataset,
     normalize_answer,
+    resolve_hotpotqa_lm_kwargs,
     run_single_stage,
     run_two_stage,
 )
@@ -126,6 +128,32 @@ _PAPER_MAX_MERGE_INVOCATIONS = 5
 _PAPER_MERGE_VAL_OVERLAP_FLOOR = 5
 
 
+def _validated_runtime_profile(args) -> str:
+    """Validate and return the selected HotPotQA runtime profile.
+
+    Args:
+        args: Parsed arguments or an equivalent configuration namespace.
+
+    Returns:
+        Validated runtime-profile name.
+
+    Raises:
+        ValueError: The profile is unknown or technical smoke is not paired
+            with both OpenRouter and the non-scientific mini index.
+    """
+    runtime_profile = getattr(args, "runtime_profile", "scientific")
+    if runtime_profile not in HOTPOTQA_RUNTIME_PROFILES:
+        supported = ", ".join(HOTPOTQA_RUNTIME_PROFILES)
+        raise ValueError(f"Unsupported HotPotQA runtime profile {runtime_profile!r}; expected one of: {supported}")
+    if runtime_profile == "technical-smoke" and (
+        not getattr(args, "technical_mini_index", False) or args.api_profile != "openrouter"
+    ):
+        raise ValueError(
+            "--runtime-profile technical-smoke requires --technical-mini-index and --api-profile openrouter"
+        )
+    return runtime_profile
+
+
 def _component_kinds(program: str) -> dict[str, str]:
     """Identify every optimized HotPotQA instruction as a system message.
 
@@ -173,6 +201,13 @@ def build_run_contract(condition: str, args) -> dict:
     reflection_api_base = args.reflection_api_base if args.reflection_api_base is not None else args.api_base
     solver_runtime_model = resolve_experiment_model(args.solver_model, args.api_profile)
     reflection_runtime_model = resolve_experiment_model(args.reflection_model, args.api_profile)
+    runtime_profile = _validated_runtime_profile(args)
+    solver_lm_kwargs = resolve_hotpotqa_lm_kwargs(solver_runtime_model, None, runtime_profile)
+    reflection_lm_kwargs = resolve_hotpotqa_lm_kwargs(reflection_runtime_model, None, runtime_profile)
+    solver_decoding_fields = experiment_decoding(solver_runtime_model)
+    solver_request_fields = experiment_request_overrides(solver_runtime_model)
+    reflection_decoding_fields = experiment_decoding(reflection_runtime_model)
+    reflection_request_fields = experiment_request_overrides(reflection_runtime_model)
     reflection_level = args.reflection_level if condition == "react_v2" else 0
     edit_tool_set = args.edit_tool_set if condition == "react_v2" else None
     stateless_semantic = condition in ("random", "action")
@@ -207,23 +242,28 @@ def build_run_contract(condition: str, args) -> dict:
             ],
         }
     return {
-        "schema_version": 6,
+        "schema_version": 7,
         "benchmark": "hotpotqa-technical-mini" if technical_mini_index else "hotpotqa-fullwiki-wiki17",
         "reference_artifact_commit": GEPA_ARTIFACT_COMMIT,
         "condition": condition,
         "models": {
             "api_profile": args.api_profile,
+            "runtime_profile": runtime_profile,
             "solver": args.solver_model,
             "solver_runtime": solver_runtime_model,
             "solver_api_base": solver_api_base,
-            "solver_decoding": experiment_decoding(args.solver_model),
-            "solver_request_overrides": experiment_request_overrides(solver_runtime_model),
+            "solver_decoding": {field: deepcopy(solver_lm_kwargs[field]) for field in solver_decoding_fields},
+            "solver_request_overrides": {field: deepcopy(solver_lm_kwargs[field]) for field in solver_request_fields},
             "solver_num_retries": EXPERIMENT_NUM_RETRIES,
             "reflection": args.reflection_model,
             "reflection_runtime": reflection_runtime_model,
             "reflection_api_base": reflection_api_base,
-            "reflection_decoding": experiment_decoding(args.reflection_model),
-            "reflection_request_overrides": experiment_request_overrides(reflection_runtime_model),
+            "reflection_decoding": {
+                field: deepcopy(reflection_lm_kwargs[field]) for field in reflection_decoding_fields
+            },
+            "reflection_request_overrides": {
+                field: deepcopy(reflection_lm_kwargs[field]) for field in reflection_request_fields
+            },
             "reflection_num_retries": EXPERIMENT_NUM_RETRIES,
         },
         "optimizer": {
@@ -236,7 +276,7 @@ def build_run_contract(condition: str, args) -> dict:
             "batch_sampler": "epoch_shuffled",
             "reflection_minibatch_size": 3,
             "component_selector": "round_robin",
-            "skip_perfect_score": True,
+            "skip_perfect_score": runtime_profile != "technical-smoke",
             "perfect_score": 1.0,
             "merge": merge,
             "vanilla_reflection_prompt": "canonical_gepa" if condition == "vanilla" else None,
@@ -344,6 +384,7 @@ def run_program(
     retriever: WikipediaRetriever,
     retrieval_k: int,
     task_lm: object | None = None,
+    lm_kwargs: dict[str, object] | None = None,
 ) -> tuple[str | None, str, dict[str, object]]:
     """Run a candidate and retain its complete component trace.
 
@@ -356,6 +397,7 @@ def run_program(
         retriever: Wikipedia passage retriever.
         retrieval_k: Passages requested for each retrieval hop.
         task_lm: Shared DSPy task-model client for the two-stage program.
+        lm_kwargs: Fully resolved solver request settings.
 
     Returns:
         Generated second-hop query when present, final answer, and execution
@@ -363,12 +405,26 @@ def run_program(
     """
     if isinstance(candidate, str):
         answer = run_single_stage(
-            candidate, question, retriever, model=model, api_base=api_base, retrieval_k=retrieval_k
+            candidate,
+            question,
+            retriever,
+            model=model,
+            api_base=api_base,
+            retrieval_k=retrieval_k,
+            lm_kwargs=lm_kwargs,
         )
         return None, answer, {"answer": answer}
     if program == "1stage":
         prompt = candidate.get("answer_question") or next(iter(candidate.values()))
-        answer = run_single_stage(prompt, question, retriever, model=model, api_base=api_base, retrieval_k=retrieval_k)
+        answer = run_single_stage(
+            prompt,
+            question,
+            retriever,
+            model=model,
+            api_base=api_base,
+            retrieval_k=retrieval_k,
+            lm_kwargs=lm_kwargs,
+        )
         return None, answer, {"answer": answer}
     query, answer, trace = run_two_stage(
         candidate.get("summarize1", ""),
@@ -381,6 +437,7 @@ def run_program(
         api_base=api_base,
         retrieval_k=retrieval_k,
         task_lm=task_lm,
+        lm_kwargs=lm_kwargs,
     )
     return query, answer, trace
 
@@ -391,6 +448,7 @@ def make_evaluator(
     api_base: str | None = None,
     program: str = "2stage",
     retrieval_k: int = 7,
+    solver_lm_kwargs: dict[str, object] | None = None,
 ):
     """Create a HotPotQA evaluator closed over solver and retrieval settings.
 
@@ -400,11 +458,12 @@ def make_evaluator(
         api_base: Optional solver API endpoint.
         program: Single-stage or two-stage execution path.
         retrieval_k: Passages requested for each retrieval hop.
+        solver_lm_kwargs: Fully resolved solver request settings.
 
     Returns:
         Evaluator accepted by ``optimize_anything``.
     """
-    task_lm = build_hotpotqa_task_lm(solver_model, api_base) if program == "2stage" else None
+    task_lm = build_hotpotqa_task_lm(solver_model, api_base, solver_lm_kwargs) if program == "2stage" else None
 
     def evaluate(candidate, example: dict) -> tuple[float, SideInfo]:
         """Score one candidate on one question and retain reflection evidence.
@@ -425,6 +484,7 @@ def make_evaluator(
             retriever,
             retrieval_k,
             task_lm,
+            solver_lm_kwargs,
         )
 
         score, feedback = hotpotqa_metric(prediction, example["answer"])
@@ -453,6 +513,7 @@ def evaluate_on_set(
     max_workers: int = 32,
     program: str = "2stage",
     retrieval_k: int = 7,
+    solver_lm_kwargs: dict[str, object] | None = None,
 ) -> tuple[float, float]:
     """Evaluate a candidate on a dataset, returning mean exact match and F1.
 
@@ -465,11 +526,12 @@ def evaluate_on_set(
         max_workers: Maximum concurrent examples.
         program: Single-stage or two-stage execution path.
         retrieval_k: Passages requested for each retrieval hop.
+        solver_lm_kwargs: Fully resolved solver request settings.
 
     Returns:
         Mean exact-match and token-F1 scores, or zeros for an empty dataset.
     """
-    task_lm = build_hotpotqa_task_lm(solver_model, api_base) if program == "2stage" else None
+    task_lm = build_hotpotqa_task_lm(solver_model, api_base, solver_lm_kwargs) if program == "2stage" else None
 
     def score_one(example: dict) -> tuple[float, float]:
         """Run and score one HotPotQA example.
@@ -489,6 +551,7 @@ def evaluate_on_set(
             retriever,
             retrieval_k,
             task_lm,
+            solver_lm_kwargs,
         )
         exact_match = float(normalize_answer(pred) == normalize_answer(example["answer"]))
         return exact_match, f1_score(pred, example["answer"])
@@ -605,6 +668,7 @@ def build_config(condition: str, args, reflection_lm_kwargs: dict, run_dir: str 
     """
     resolved_family = resolve_template_family(args.template_family, args.solver_model)
     reflection_runtime_model = resolve_experiment_model(args.reflection_model, args.api_profile)
+    runtime_profile = _validated_runtime_profile(args)
     template = TEMPLATE_FAMILIES[resolved_family]["system_prompt"]
     action_space = [
         StatelessActionConstraint(spec, section, template) for section in template.sections for spec in SEMANTIC_ACTIONS
@@ -653,7 +717,7 @@ def build_config(condition: str, args, reflection_lm_kwargs: dict, run_dir: str 
             cache_evaluation=True,
         ),
         reflection=ReflectionConfig(
-            skip_perfect_score=True,
+            skip_perfect_score=runtime_profile != "technical-smoke",
             perfect_score=1.0,
             batch_sampler="epoch_shuffled",
             reflection_minibatch_size=3,
@@ -711,7 +775,12 @@ def run_condition(
 
 
 def main():
-    """Parse CLI arguments and run the requested HotPotQA conditions."""
+    """Parse CLI arguments and run the requested HotPotQA conditions.
+
+    The default scientific profile preserves the benchmark configuration. The
+    explicit technical-smoke profile is restricted to OpenRouter and the
+    non-scientific selected-context mini index.
+    """
     parser = argparse.ArgumentParser(description="HotpotQA evaluation for action-conditioned reflection")
     parser.add_argument("--data-path", type=str, default=None, help="Path to HotpotQA JSONL sample (smoke, 14/3/3)")
     parser.add_argument(
@@ -744,6 +813,12 @@ def main():
         choices=["direct", "openrouter"],
         default="direct",
         help="API route for both model roles; OpenRouter uses fixed provider endpoints",
+    )
+    parser.add_argument(
+        "--runtime-profile",
+        choices=HOTPOTQA_RUNTIME_PROFILES,
+        default="scientific",
+        help="Request budget profile; technical-smoke is only for the OpenRouter mini-index integration run",
     )
     parser.add_argument(
         "--wiki17-dir",
@@ -822,6 +897,7 @@ def main():
     args = parser.parse_args()
     try:
         validate_experiment_model_pair(args.solver_model, args.reflection_model)
+        _validated_runtime_profile(args)
     except ValueError as exc:
         parser.error(str(exc))
 
@@ -882,21 +958,24 @@ def main():
     reflection_api_base = args.reflection_api_base if args.reflection_api_base is not None else args.api_base
     solver_runtime_model = resolve_experiment_model(args.solver_model, args.api_profile)
     reflection_runtime_model = resolve_experiment_model(args.reflection_model, args.api_profile)
+    solver_lm_kwargs = resolve_hotpotqa_lm_kwargs(
+        solver_runtime_model,
+        solver_api_base,
+        args.runtime_profile,
+    )
+    reflection_lm_kwargs = resolve_hotpotqa_lm_kwargs(
+        reflection_runtime_model,
+        reflection_api_base,
+        args.runtime_profile,
+    )
     evaluator = make_evaluator(
         solver_runtime_model,
         retriever,
         api_base=solver_api_base,
         program=args.program,
         retrieval_k=args.retrieval_k,
+        solver_lm_kwargs=solver_lm_kwargs,
     )
-
-    reflection_lm_kwargs = {
-        "num_retries": EXPERIMENT_NUM_RETRIES,
-        **experiment_decoding(reflection_runtime_model),
-        **experiment_request_overrides(reflection_runtime_model),
-    }
-    if reflection_api_base is not None:
-        reflection_lm_kwargs["api_base"] = reflection_api_base
 
     if args.condition == "all":
         conditions = ["vanilla", "react_v2", "random", "action"]
@@ -968,6 +1047,7 @@ def main():
             max_workers=args.max_workers,
             program=args.program,
             retrieval_k=args.retrieval_k,
+            solver_lm_kwargs=solver_lm_kwargs,
         )
         diversity = prompt_diversity(result.candidates)
         print(f"[{name}]")

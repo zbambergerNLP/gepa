@@ -6,6 +6,7 @@ import random
 import re
 import string
 from collections import Counter
+from copy import deepcopy
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import distribution as package_distribution
 from importlib.metadata import version as package_version
@@ -20,6 +21,7 @@ except ImportError:
 from examples.common.experiment_models import (
     EXPERIMENT_NUM_RETRIES,
     QWEN3_8_27B_MODEL,
+    QWEN3_8_27B_OPENROUTER_MODEL,
     experiment_decoding,
     experiment_request_overrides,
 )
@@ -34,6 +36,56 @@ DEFAULT_DATA_PATH = os.path.join(
 FINAL_RESPONSE_MARKER = "Final Response:"
 HOTPOTQA_DSPY_VERSION = "2.6.23"
 HOTPOTQA_DSPY_COMMIT = "62dc3b634d7dc0c4889abcf905cb4c391ea6b396"
+HOTPOTQA_RUNTIME_PROFILES = ("scientific", "technical-smoke")
+HOTPOTQA_TECHNICAL_SMOKE_MAX_TOKENS = 4096
+HOTPOTQA_TECHNICAL_SMOKE_REASONING_EFFORT = "low"
+
+
+if dspy is not None:
+
+    class _HotPotQAChatAdapter(dspy.ChatAdapter):
+        """Parse artifact fields after repairing one observed marker near-miss."""
+
+        def parse(self, signature: type, completion: str) -> dict[str, object]:
+            """Repair missing trailing hashes in exact output-field headers.
+
+            Qwen occasionally emits ``[[ ## summary ]]`` while otherwise
+            following DSPy's protocol exactly. Only a whole-line header for an
+            expected output field or ``completed`` is normalized; content and
+            canonical headers remain unchanged before the pinned parser runs.
+
+            Args:
+                signature: DSPy signature containing the expected output fields.
+                completion: Raw assistant completion to parse.
+
+            Returns:
+                Parsed output fields produced by the pinned DSPy ChatAdapter.
+
+            Raises:
+                ValueError: The completion remains invalid after the narrow
+                    marker repair.
+            """
+            try:
+                return super().parse(signature, completion)
+            except ValueError:
+                expected_headers = {*signature.output_fields, "completed"}
+                normalized_lines = []
+                repaired = False
+                for line in completion.splitlines():
+                    stripped = line.strip()
+                    match = re.fullmatch(r"\[\[ ## (\w+) \]\]", stripped)
+                    if match is not None and match.group(1) in expected_headers:
+                        indentation = line[: len(line) - len(line.lstrip())]
+                        line = f"{indentation}[[ ## {match.group(1)} ## ]]"
+                        repaired = True
+                    normalized_lines.append(line)
+                if not repaired:
+                    raise
+                normalized_completion = "\n".join(normalized_lines)
+                return super().parse(signature, normalized_completion)
+
+else:
+    _HotPotQAChatAdapter = None
 
 
 def _render_passages(passages: list[WikipediaPassage]) -> list[str]:
@@ -90,12 +142,61 @@ def validate_hotpotqa_dspy_runtime() -> tuple[str, str]:
     return installed_version, installed_commit
 
 
-def build_hotpotqa_task_lm(model: str, api_base: str | None) -> object:
+def resolve_hotpotqa_lm_kwargs(
+    model: str,
+    api_base: str | None,
+    runtime_profile: str = "scientific",
+) -> dict[str, object]:
+    """Resolve HotPotQA request settings for one runtime profile.
+
+    The scientific profile preserves the shared experiment configuration. The
+    technical-smoke profile changes only OpenRouter Qwen's output-token ceiling
+    and reasoning effort so a local integration run finishes promptly. Its
+    provider pin and fallback policy remain unchanged, and DeepSeek keeps its
+    scientific settings under both profiles.
+
+    Args:
+        model: Exact LiteLLM runtime model identifier.
+        api_base: Optional role-specific API endpoint.
+        runtime_profile: ``"scientific"`` or ``"technical-smoke"``.
+
+    Returns:
+        Independent LM keyword arguments for the requested runtime.
+
+    Raises:
+        ValueError: The runtime profile or model is unsupported.
+    """
+    if runtime_profile not in HOTPOTQA_RUNTIME_PROFILES:
+        supported = ", ".join(HOTPOTQA_RUNTIME_PROFILES)
+        raise ValueError(f"Unsupported HotPotQA runtime profile {runtime_profile!r}; expected one of: {supported}")
+
+    kwargs: dict[str, object] = {
+        "num_retries": EXPERIMENT_NUM_RETRIES,
+        **experiment_decoding(model),
+        **experiment_request_overrides(model),
+    }
+    if runtime_profile == "technical-smoke" and model == QWEN3_8_27B_OPENROUTER_MODEL:
+        kwargs["max_tokens"] = HOTPOTQA_TECHNICAL_SMOKE_MAX_TOKENS
+        extra_body = deepcopy(kwargs["extra_body"])
+        extra_body["reasoning"] = {"effort": HOTPOTQA_TECHNICAL_SMOKE_REASONING_EFFORT}
+        kwargs["extra_body"] = extra_body
+    if api_base is not None:
+        kwargs["api_base"] = api_base
+    return kwargs
+
+
+def build_hotpotqa_task_lm(
+    model: str,
+    api_base: str | None,
+    lm_kwargs: dict[str, object] | None = None,
+) -> object:
     """Build the pinned DSPy task-model client used by HotPotQA.
 
     Args:
         model: LiteLLM model identifier.
         api_base: Optional solver API endpoint.
+        lm_kwargs: Optional fully resolved request settings. When omitted, the
+            scientific profile is used for backward-compatible direct calls.
 
     Returns:
         DSPy language-model client configured with the experiment's fixed
@@ -107,13 +208,10 @@ def build_hotpotqa_task_lm(model: str, api_base: str | None) -> object:
     """
     validate_hotpotqa_dspy_runtime()
 
-    kwargs: dict = {
-        "num_retries": EXPERIMENT_NUM_RETRIES,
-        **experiment_decoding(model),
-        **experiment_request_overrides(model),
-    }
-    if api_base is not None:
-        kwargs["api_base"] = api_base
+    if lm_kwargs is None:
+        kwargs = resolve_hotpotqa_lm_kwargs(model, api_base)
+    else:
+        kwargs = deepcopy(lm_kwargs)
     return dspy.LM(model=model, **kwargs)
 
 
@@ -155,7 +253,8 @@ def _call_chain_of_thought(
     predictor_signature = dspy.ensure_signature(signature).with_instructions(instructions)
     predictor = dspy.ChainOfThought(predictor_signature)
     predictor.set_lm(task_lm)
-    with dspy.context(adapter=dspy.ChatAdapter()):
+    assert _HotPotQAChatAdapter is not None
+    with dspy.context(adapter=_HotPotQAChatAdapter()):
         prediction = predictor(**inputs)
     return str(prediction.reasoning), str(getattr(prediction, output_field))
 
@@ -222,7 +321,13 @@ def _extract_final_response(output: str) -> str:
     return output.strip()
 
 
-def _call_lm(system: str, user: str, model: str, api_base: str | None) -> str:
+def _call_lm(
+    system: str,
+    user: str,
+    model: str,
+    api_base: str | None,
+    lm_kwargs: dict[str, object] | None = None,
+) -> str:
     """Call the solver with the HotPotQA experiment's decoding settings.
 
     Args:
@@ -230,6 +335,8 @@ def _call_lm(system: str, user: str, model: str, api_base: str | None) -> str:
         user: Example-specific user message.
         model: LiteLLM model identifier.
         api_base: Optional solver API endpoint.
+        lm_kwargs: Optional fully resolved request settings. When omitted, the
+            scientific profile is used for backward-compatible direct calls.
 
     Returns:
         Raw message content when it contains non-whitespace text, otherwise raw
@@ -240,17 +347,15 @@ def _call_lm(system: str, user: str, model: str, api_base: str | None) -> str:
     if system.strip():
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": user})
-    kwargs: dict = {
-        "model": model,
-        "messages": messages,
-        "num_retries": EXPERIMENT_NUM_RETRIES,
-        **experiment_decoding(model),
-        **experiment_request_overrides(model),
-    }
-    if api_base is not None:
-        kwargs["api_base"] = api_base
+    if lm_kwargs is None:
+        kwargs = resolve_hotpotqa_lm_kwargs(model, api_base)
+    else:
+        kwargs = deepcopy(lm_kwargs)
+    kwargs["model"] = model
+    kwargs["messages"] = messages
     response = None
-    for max_tokens in (kwargs["max_tokens"], 4096, 1024, 256):
+    max_token_fallbacks = dict.fromkeys((kwargs["max_tokens"], 4096, 1024, 256))
+    for max_tokens in max_token_fallbacks:
         kwargs["max_tokens"] = max_tokens
         try:
             response = litellm.completion(**kwargs)
@@ -274,6 +379,7 @@ def run_single_stage(
     model: str = QWEN3_8_27B_MODEL,
     api_base: str | None = None,
     retrieval_k: int = 7,
+    lm_kwargs: dict[str, object] | None = None,
 ) -> str:
     """Retrieve once and answer with one optimized prompt.
 
@@ -284,13 +390,14 @@ def run_single_stage(
         model: Solver model identifier.
         api_base: Optional solver API endpoint.
         retrieval_k: Maximum passages requested.
+        lm_kwargs: Optional fully resolved solver request settings.
 
     Returns:
         Extracted final answer.
     """
     passages = "\n\n".join(_render_passages(retriever.search(question, retrieval_k)))
     user = f"Question:\n{question}\n\nRetrieved passages:\n{passages}\n\nAnswer:"
-    out = _call_lm(prompt, user, model, api_base)
+    out = _call_lm(prompt, user, model, api_base, lm_kwargs)
     return _extract_final_response(out)
 
 
@@ -305,6 +412,7 @@ def run_two_stage(
     api_base: str | None = None,
     retrieval_k: int = 7,
     task_lm: object | None = None,
+    lm_kwargs: dict[str, object] | None = None,
 ) -> tuple[str, str, dict[str, object]]:
     """Run the GEPA artifact's two-retrieval-hop HotPotQA program.
 
@@ -320,13 +428,15 @@ def run_two_stage(
         retrieval_k: Maximum passages requested per hop.
         task_lm: Optional shared DSPy language-model client. A pinned client is
             created when this function is invoked directly without one.
+        lm_kwargs: Optional fully resolved solver request settings used when a
+            task-model client must be created.
 
     Returns:
         Generated second-hop query, extracted answer, and the complete
         four-component execution trace used for artifact feedback.
     """
     if task_lm is None:
-        task_lm = build_hotpotqa_task_lm(model, api_base)
+        task_lm = build_hotpotqa_task_lm(model, api_base, lm_kwargs)
 
     hop1_documents = retriever.search(question, retrieval_k)
     hop1_passages = _render_passages(hop1_documents)

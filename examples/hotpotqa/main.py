@@ -32,6 +32,8 @@ from examples.common.experiment_models import (
     EXPERIMENT_NUM_RETRIES,
     QWEN3_8_27B_MODEL,
     experiment_decoding,
+    experiment_request_overrides,
+    resolve_experiment_model,
     validate_experiment_model_pair,
 )
 from examples.common.react_v2 import (
@@ -163,6 +165,8 @@ def build_run_contract(condition: str, args) -> dict:
     family = resolve_template_family(args.template_family, args.solver_model)
     solver_api_base = args.solver_api_base if args.solver_api_base is not None else args.api_base
     reflection_api_base = args.reflection_api_base if args.reflection_api_base is not None else args.api_base
+    solver_runtime_model = resolve_experiment_model(args.solver_model, args.api_profile)
+    reflection_runtime_model = resolve_experiment_model(args.reflection_model, args.api_profile)
     reflection_level = args.reflection_level if condition == "react_v2" else 0
     edit_tool_set = args.edit_tool_set if condition == "react_v2" else None
     stateless_semantic = condition in ("random", "action")
@@ -193,18 +197,23 @@ def build_run_contract(condition: str, args) -> dict:
             ],
         }
     return {
-        "schema_version": 5,
+        "schema_version": 6,
         "benchmark": "hotpotqa-fullwiki-wiki17",
         "reference_artifact_commit": GEPA_ARTIFACT_COMMIT,
         "condition": condition,
         "models": {
+            "api_profile": args.api_profile,
             "solver": args.solver_model,
+            "solver_runtime": solver_runtime_model,
             "solver_api_base": solver_api_base,
             "solver_decoding": experiment_decoding(args.solver_model),
+            "solver_request_overrides": experiment_request_overrides(solver_runtime_model),
             "solver_num_retries": EXPERIMENT_NUM_RETRIES,
             "reflection": args.reflection_model,
+            "reflection_runtime": reflection_runtime_model,
             "reflection_api_base": reflection_api_base,
             "reflection_decoding": experiment_decoding(args.reflection_model),
+            "reflection_request_overrides": experiment_request_overrides(reflection_runtime_model),
             "reflection_num_retries": EXPERIMENT_NUM_RETRIES,
         },
         "optimizer": {
@@ -585,6 +594,7 @@ def build_config(condition: str, args, reflection_lm_kwargs: dict, run_dir: str 
         GEPA configuration and the condition's optional action selector.
     """
     resolved_family = resolve_template_family(args.template_family, args.solver_model)
+    reflection_runtime_model = resolve_experiment_model(args.reflection_model, args.api_profile)
     template = TEMPLATE_FAMILIES[resolved_family]["system_prompt"]
     action_space = [
         StatelessActionConstraint(spec, section, template) for section in template.sections for spec in SEMANTIC_ACTIONS
@@ -595,14 +605,15 @@ def build_config(condition: str, args, reflection_lm_kwargs: dict, run_dir: str 
     elif condition == "action":
         action_selector = VerbalizedActionSelector(
             action_space,
-            lm=LM(args.reflection_model, **(reflection_lm_kwargs or {})),
+            lm=LM(reflection_runtime_model, **(reflection_lm_kwargs or {})),
         )
 
     reflection_strategy = None
     if condition == "react_v2":
         reflection_strategy, _ = build_react_v2_strategy(
-            reflection_model=args.reflection_model,
+            reflection_model=reflection_runtime_model,
             task_model=args.solver_model,
+            proposer_model=args.reflection_model,
             lm_kwargs=reflection_lm_kwargs,
             level=args.reflection_level,
             edit_tool_set=args.edit_tool_set,
@@ -637,7 +648,7 @@ def build_config(condition: str, args, reflection_lm_kwargs: dict, run_dir: str 
             batch_sampler="epoch_shuffled",
             reflection_minibatch_size=3,
             module_selector="round_robin",
-            reflection_lm=args.reflection_model,
+            reflection_lm=reflection_runtime_model,
             reflection_lm_kwargs=reflection_lm_kwargs or None,
             reflection_strategy=reflection_strategy,
             reflection_prompt_template=InstructionProposalSignature.default_prompt_template,
@@ -717,6 +728,12 @@ def main():
     parser.add_argument("--solver-api-base", type=str, default=None, help="Base URL used only by the student/solver LM")
     parser.add_argument(
         "--reflection-api-base", type=str, default=None, help="Base URL used only by the reflection/proposer LM"
+    )
+    parser.add_argument(
+        "--api-profile",
+        choices=["direct", "openrouter"],
+        default="direct",
+        help="API route for both model roles; OpenRouter uses fixed provider endpoints",
     )
     parser.add_argument(
         "--wiki17-dir",
@@ -825,15 +842,21 @@ def main():
     )
     solver_api_base = args.solver_api_base if args.solver_api_base is not None else args.api_base
     reflection_api_base = args.reflection_api_base if args.reflection_api_base is not None else args.api_base
+    solver_runtime_model = resolve_experiment_model(args.solver_model, args.api_profile)
+    reflection_runtime_model = resolve_experiment_model(args.reflection_model, args.api_profile)
     evaluator = make_evaluator(
-        args.solver_model,
+        solver_runtime_model,
         retriever,
         api_base=solver_api_base,
         program=args.program,
         retrieval_k=args.retrieval_k,
     )
 
-    reflection_lm_kwargs = {"num_retries": EXPERIMENT_NUM_RETRIES, **experiment_decoding(args.reflection_model)}
+    reflection_lm_kwargs = {
+        "num_retries": EXPERIMENT_NUM_RETRIES,
+        **experiment_decoding(reflection_runtime_model),
+        **experiment_request_overrides(reflection_runtime_model),
+    }
     if reflection_api_base is not None:
         reflection_lm_kwargs["api_base"] = reflection_api_base
 
@@ -901,7 +924,7 @@ def main():
         test_em, test_f1 = evaluate_on_set(
             result.best_candidate,
             testset,
-            args.solver_model,
+            solver_runtime_model,
             retriever,
             api_base=solver_api_base,
             max_workers=args.max_workers,

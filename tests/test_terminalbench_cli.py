@@ -1,20 +1,26 @@
 """Offline tests for the Terminal-Bench experiment CLI contract."""
 
 import argparse
+import json
 import sys
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
 from examples.common.experiment_models import (
+    DEEPSEEK_V4_FLASH_0731_OPENROUTER_MODEL,
     DEEPSEEK_V4_FLASH_MODEL,
     EXPERIMENT_NUM_RETRIES,
     QWEN3_8_27B_MODEL,
     QWEN3_8_27B_MODEL_INFO,
+    QWEN3_8_27B_OPENROUTER_MODEL,
     experiment_decoding,
+    experiment_request_overrides,
 )
+from examples.terminalbench import main as terminalbench_main
 from examples.terminalbench.main import build_parser, build_run_contract, ensure_run_contract, seed_candidate
 from gepa.adapters.terminal_bench_adapter import load_terminalbench_manifest
 from gepa.strategies.document_template import TEMPLATE_FAMILIES
@@ -86,6 +92,7 @@ def test_parser_exposes_react_v2_condition_and_ablation_axes() -> None:
     assert "--reflection-level" in help_text
     assert "--edit-tool-set" in help_text
     assert "--template-family" in help_text
+    assert "--api-profile" in help_text
 
 
 def test_parser_defaults_both_roles_to_qwen3_8_27b(tmp_path: Path) -> None:
@@ -157,10 +164,15 @@ def test_generated_run_contract_records_metric_call_budget(tmp_path: Path) -> No
     )
 
     assert contract["max_metric_calls"] == 400
-    assert contract["schema_version"] == 4
+    assert contract["schema_version"] == 5
+    assert contract["api_profile"] == "direct"
     assert contract["component_kinds"] == {"instruction_prompt": "user_prompt"}
     assert contract["student_model"] == QWEN3_8_27B_MODEL
+    assert contract["student_runtime_model"] == QWEN3_8_27B_MODEL
+    assert contract["student_request_overrides"] == {}
     assert contract["proposer_model"] == QWEN3_8_27B_MODEL
+    assert contract["proposer_runtime_model"] == QWEN3_8_27B_MODEL
+    assert contract["proposer_request_overrides"] == {}
     assert contract["student_decoding"] == experiment_decoding(QWEN3_8_27B_MODEL)
     assert contract["student_model_info"] == QWEN3_8_27B_MODEL_INFO
     assert contract["proposer_decoding"] == experiment_decoding(QWEN3_8_27B_MODEL)
@@ -193,6 +205,93 @@ def test_deepseek_run_contract_uses_the_separate_same_model_condition(tmp_path: 
     assert contract["student_decoding"] == experiment_decoding(DEEPSEEK_V4_FLASH_MODEL)
     assert contract["student_model_info"] is None
     assert contract["proposer_decoding"] == experiment_decoding(DEEPSEEK_V4_FLASH_MODEL)
+
+
+@pytest.mark.parametrize(
+    ("canonical_model", "runtime_model"),
+    [
+        (QWEN3_8_27B_MODEL, QWEN3_8_27B_OPENROUTER_MODEL),
+        (DEEPSEEK_V4_FLASH_MODEL, DEEPSEEK_V4_FLASH_0731_OPENROUTER_MODEL),
+    ],
+)
+def test_openrouter_profile_reaches_terminalbench_student_and_proposer(
+    monkeypatch,
+    tmp_path: Path,
+    canonical_model: str,
+    runtime_model: str,
+) -> None:
+    """Route Harbor and GEPA through the same pinned OpenRouter runtime.
+
+    Args:
+        monkeypatch: Pytest fixture used to replace Harbor and optimization.
+        tmp_path: Pytest directory used for isolated run artifacts.
+        canonical_model: Scientific model identity assigned to both roles.
+        runtime_model: Exact OpenRouter model slug used for completions.
+    """
+    harbor = Mock()
+    harbor_constructor = Mock(return_value=harbor)
+    optimize = Mock()
+    run_dir = tmp_path / "run"
+    monkeypatch.setattr(terminalbench_main, "HarborCLI", harbor_constructor)
+    monkeypatch.setattr(terminalbench_main, "optimize", optimize)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "terminalbench",
+            "--condition",
+            "react_v2",
+            "--api-profile",
+            "openrouter",
+            "--student-model",
+            canonical_model,
+            "--proposer-model",
+            canonical_model,
+            "--max-metric-calls",
+            "6",
+            "--train-limit",
+            "1",
+            "--val-limit",
+            "1",
+            "--manifest",
+            str(MANIFEST_PATH),
+            "--run-dir",
+            str(run_dir),
+            "--harbor-work-dir",
+            str(tmp_path / "harbor"),
+        ],
+    )
+
+    terminalbench_main.main()
+
+    request_overrides = experiment_request_overrides(runtime_model)
+    student_kwargs = harbor_constructor.call_args.kwargs
+    assert student_kwargs["student_model"] == runtime_model
+    assert student_kwargs["student_agent_kwargs"]["llm_kwargs"] == {
+        "num_retries": EXPERIMENT_NUM_RETRIES,
+        **experiment_decoding(runtime_model),
+        **request_overrides,
+    }
+    assert "model_info" not in student_kwargs["student_agent_kwargs"]
+    harbor.check_requirements.assert_called_once_with()
+
+    proposer_kwargs = optimize.call_args.kwargs
+    assert proposer_kwargs["reflection_lm"] == runtime_model
+    assert proposer_kwargs["reflection_lm_kwargs"] == {
+        "num_retries": EXPERIMENT_NUM_RETRIES,
+        **experiment_decoding(runtime_model),
+        **request_overrides,
+    }
+    assert proposer_kwargs["template_model"] == canonical_model
+
+    contract = json.loads((run_dir / terminalbench_main.RUN_CONTRACT_FILENAME).read_text())
+    assert contract["api_profile"] == "openrouter"
+    assert contract["student_model"] == canonical_model
+    assert contract["student_runtime_model"] == runtime_model
+    assert contract["student_request_overrides"] == request_overrides
+    assert contract["proposer_model"] == canonical_model
+    assert contract["proposer_runtime_model"] == runtime_model
+    assert contract["proposer_request_overrides"] == request_overrides
 
 
 def test_run_contract_rejects_a_cross_model_pair(tmp_path: Path) -> None:

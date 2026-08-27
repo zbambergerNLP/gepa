@@ -12,7 +12,12 @@ from typing import Sequence, cast
 
 import litellm  # type: ignore[import-not-found]
 
-from examples.common.experiment_models import EXPERIMENT_NUM_RETRIES, QWEN3_8_27B_MODEL, experiment_decoding
+from examples.common.experiment_models import (
+    EXPERIMENT_NUM_RETRIES,
+    QWEN3_8_27B_MODEL,
+    experiment_decoding,
+    experiment_request_overrides,
+)
 from examples.common.wikipedia import WikipediaPassage, WikipediaRetriever
 
 DATA_DIR = Path(__file__).parent / "data"
@@ -144,6 +149,7 @@ def _call_lm(system: str, user: str, model: str, api_base: str | None) -> str:
         "messages": messages,
         "num_retries": EXPERIMENT_NUM_RETRIES,
         **experiment_decoding(model),
+        **experiment_request_overrides(model),
     }
     if api_base is not None:
         kwargs["api_base"] = api_base

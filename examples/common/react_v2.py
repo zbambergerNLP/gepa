@@ -189,6 +189,7 @@ def build_react_v2_strategy(
     *,
     reflection_model: str,
     task_model: str,
+    proposer_model: str | None = None,
     lm_kwargs: dict[str, Any],
     level: int,
     edit_tool_set: str,
@@ -199,8 +200,10 @@ def build_react_v2_strategy(
     """Build Controller -> Manifestor -> ReAct V2 with deterministic guidance.
 
     Args:
-        reflection_model: Model used by the Controller, Manifestor, and proposer.
+        reflection_model: Runtime model used by the Controller, Manifestor, and proposer.
         task_model: Student model whose provider determines automatic templates.
+        proposer_model: Optional canonical proposer identity recorded separately
+            from its API runtime model.
         lm_kwargs: Shared reflection-model client settings.
         level: Reflection level used to build the Controller menu.
         edit_tool_set: Named edit-operator basis exposed to the proposer.
@@ -221,7 +224,7 @@ def build_react_v2_strategy(
         component_kinds=component_kinds,
         template_family=resolved_family,
         manifestor_lm=LM(reflection_model, **manifestor_kwargs),
-        proposer_model=reflection_model,
+        proposer_model=proposer_model or reflection_model,
         rng=rng,
     )
     return strategy, resolved_family

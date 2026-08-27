@@ -22,6 +22,8 @@ from examples.common.experiment_models import (
     QWEN3_8_27B_MODEL,
     QWEN3_8_27B_MODEL_INFO,
     experiment_decoding,
+    experiment_request_overrides,
+    resolve_experiment_model,
     validate_experiment_model_pair,
 )
 from examples.common.react_v2 import resolve_template_family, structured_prompt
@@ -114,6 +116,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--student-api-base", default=None)
     parser.add_argument("--proposer-api-base", default=None)
+    parser.add_argument(
+        "--api-profile",
+        choices=("direct", "openrouter"),
+        default="direct",
+        help="API route for both model roles; OpenRouter uses fixed provider endpoints",
+    )
     parser.add_argument("--max-metric-calls", type=int, required=True)
     parser.add_argument("--reflection-minibatch-size", type=int, default=3)
     parser.add_argument("--n-concurrent", type=int, default=1)
@@ -174,10 +182,13 @@ def build_run_contract(
         JSON-serializable run contract including exact task identities.
     """
     validate_experiment_model_pair(args.student_model, args.proposer_model)
+    student_runtime_model = resolve_experiment_model(args.student_model, args.api_profile)
+    proposer_runtime_model = resolve_experiment_model(args.proposer_model, args.api_profile)
     operated = condition == "react_v2"
     reflection_level = args.reflection_level if operated else 0
     return {
-        "schema_version": 4,
+        "schema_version": 5,
+        "api_profile": args.api_profile,
         "condition": condition,
         "component_kinds": {"instruction_prompt": "user_prompt"},
         "dataset": manifest.dataset,
@@ -190,6 +201,8 @@ def build_run_contract(
         "proposer_backend": "react_v2" if operated else "stateless",
         "proposer_decoding": experiment_decoding(args.proposer_model),
         "proposer_model": args.proposer_model,
+        "proposer_request_overrides": experiment_request_overrides(proposer_runtime_model),
+        "proposer_runtime_model": proposer_runtime_model,
         "proposer_num_retries": EXPERIMENT_NUM_RETRIES,
         "reflection_level": reflection_level,
         "reflection_minibatch_size": args.reflection_minibatch_size,
@@ -200,8 +213,14 @@ def build_run_contract(
         "student_api_base": args.student_api_base,
         "student_decoding": experiment_decoding(args.student_model),
         "student_model": args.student_model,
-        "student_model_info": dict(QWEN3_8_27B_MODEL_INFO) if args.student_model == QWEN3_8_27B_MODEL else None,
+        "student_model_info": (
+            dict(QWEN3_8_27B_MODEL_INFO)
+            if args.student_model == QWEN3_8_27B_MODEL and args.api_profile == "direct"
+            else None
+        ),
         "student_num_retries": EXPERIMENT_NUM_RETRIES,
+        "student_request_overrides": experiment_request_overrides(student_runtime_model),
+        "student_runtime_model": student_runtime_model,
         "template_family": resolved_family,
         "train_task_ids": [task.task_id for task in trainset],
         "val_task_ids": [task.task_id for task in valset],
@@ -227,18 +246,24 @@ def main() -> None:
         raise ValueError("train and validation selections must both be non-empty")
 
     candidate, resolved_family = seed_candidate(args.student_model, args.template_family)
+    student_runtime_model = resolve_experiment_model(args.student_model, args.api_profile)
+    proposer_runtime_model = resolve_experiment_model(args.proposer_model, args.api_profile)
     condition = "react_v2" if args.condition == "action" else args.condition
     contract = build_run_contract(args, manifest, trainset, valset, condition, resolved_family)
     ensure_run_contract(args.run_dir, contract)
 
     student_agent_kwargs: dict[str, Any] = {
-        "llm_kwargs": {"num_retries": EXPERIMENT_NUM_RETRIES, **experiment_decoding(args.student_model)}
+        "llm_kwargs": {
+            "num_retries": EXPERIMENT_NUM_RETRIES,
+            **experiment_decoding(student_runtime_model),
+            **experiment_request_overrides(student_runtime_model),
+        }
     }
-    if args.student_model == QWEN3_8_27B_MODEL:
+    if args.student_model == QWEN3_8_27B_MODEL and args.api_profile == "direct":
         student_agent_kwargs["model_info"] = dict(QWEN3_8_27B_MODEL_INFO)
 
     harbor = HarborCLI(
-        student_model=args.student_model,
+        student_model=student_runtime_model,
         student_api_base=args.student_api_base,
         work_dir=args.harbor_work_dir,
         agent_python_path=REPO_ROOT,
@@ -253,7 +278,8 @@ def main() -> None:
 
     reflection_lm_kwargs: dict[str, Any] = {
         "num_retries": EXPERIMENT_NUM_RETRIES,
-        **experiment_decoding(args.proposer_model),
+        **experiment_decoding(proposer_runtime_model),
+        **experiment_request_overrides(proposer_runtime_model),
     }
     if args.proposer_api_base is not None:
         reflection_lm_kwargs["api_base"] = args.proposer_api_base
@@ -264,7 +290,7 @@ def main() -> None:
         trainset=trainset,
         valset=valset,
         adapter=adapter,
-        reflection_lm=args.proposer_model,
+        reflection_lm=proposer_runtime_model,
         reflection_lm_kwargs=reflection_lm_kwargs,
         max_metric_calls=args.max_metric_calls,
         reflection_minibatch_size=args.reflection_minibatch_size,

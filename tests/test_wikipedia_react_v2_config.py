@@ -7,15 +7,20 @@ from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
+import litellm
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
 from examples.common.experiment_models import (
+    DEEPSEEK_V4_FLASH_0731_OPENROUTER_MODEL,
     DEEPSEEK_V4_FLASH_MODEL,
     EXPERIMENT_NUM_RETRIES,
     QWEN3_8_27B_MODEL,
+    QWEN3_8_27B_OPENROUTER_MODEL,
     experiment_decoding,
+    experiment_request_overrides,
+    resolve_experiment_model,
     validate_experiment_model_pair,
 )
 from examples.common.react_v2 import (
@@ -171,6 +176,7 @@ def _hotpot_args(**overrides):
         Namespace accepted by both Wikipedia benchmark configuration builders.
     """
     values = {
+        "api_profile": "direct",
         "api_base": None,
         "data_identity": {
             "source": {"type": "huggingface", "dataset": "hotpot_qa", "config": "fullwiki"},
@@ -282,8 +288,11 @@ def test_hotpot_and_hover_contracts_record_exact_model_pair() -> None:
 
     for contract in (hotpot, hover):
         assert contract["models"]["solver"] == QWEN3_8_27B_MODEL
+        assert contract["models"]["api_profile"] == "direct"
+        assert contract["models"]["solver_runtime"] == QWEN3_8_27B_MODEL
         assert contract["models"]["solver_api_base"] == "http://localhost:8000/v1"
         assert contract["models"]["reflection"] == QWEN3_8_27B_MODEL
+        assert contract["models"]["reflection_runtime"] == QWEN3_8_27B_MODEL
         assert contract["models"]["reflection_api_base"] == "http://localhost:8000/v1"
         assert contract["models"]["solver_decoding"] == experiment_decoding(QWEN3_8_27B_MODEL)
         assert contract["models"]["reflection_decoding"] == experiment_decoding(QWEN3_8_27B_MODEL)
@@ -295,7 +304,7 @@ def test_hotpot_and_hover_contracts_record_exact_model_pair() -> None:
         assert contract["optimizer"]["semantic_action_space"] == SEMANTIC_ACTION_CATALOGS["prompt"]
         assert contract["optimizer"]["semantic_controller_policy"] == CONTROLLER_POLICY_CONTRACT
 
-    assert hotpot["schema_version"] == 5
+    assert hotpot["schema_version"] == 6
     assert hotpot["retrieval"]["backend"] == "wiki17-bm25s"
     assert hotpot["retrieval"]["k1"] == 0.9
     assert hotpot["retrieval"]["b"] == 0.4
@@ -313,7 +322,7 @@ def test_hotpot_and_hover_contracts_record_exact_model_pair() -> None:
         "summarize2": ["reasoning", "summary"],
         "final_answer": ["reasoning", "answer"],
     }
-    assert hover["schema_version"] == 4
+    assert hover["schema_version"] == 5
     assert hover["benchmark"] == "hover-train-wiki17"
     assert hover["retrieval"]["backend"] == "wiki17-bm25s"
     assert hover["retrieval"]["k1"] == 0.9
@@ -354,7 +363,9 @@ def test_deepseek_contract_uses_the_deepseek_pair_and_decoding() -> None:
     contract = build_hotpotqa_run_contract("react_v2", args)
 
     assert contract["models"] == {
+        "api_profile": "direct",
         "solver": DEEPSEEK_V4_FLASH_MODEL,
+        "solver_runtime": DEEPSEEK_V4_FLASH_MODEL,
         "solver_api_base": None,
         "solver_decoding": {
             "temperature": 1.0,
@@ -362,8 +373,10 @@ def test_deepseek_contract_uses_the_deepseek_pair_and_decoding() -> None:
             "max_tokens": 16_384,
             "reasoning_effort": "max",
         },
+        "solver_request_overrides": {},
         "solver_num_retries": 0,
         "reflection": DEEPSEEK_V4_FLASH_MODEL,
+        "reflection_runtime": DEEPSEEK_V4_FLASH_MODEL,
         "reflection_api_base": None,
         "reflection_decoding": {
             "temperature": 1.0,
@@ -371,8 +384,115 @@ def test_deepseek_contract_uses_the_deepseek_pair_and_decoding() -> None:
             "max_tokens": 16_384,
             "reasoning_effort": "max",
         },
+        "reflection_request_overrides": {},
         "reflection_num_retries": 0,
     }
+
+
+@pytest.mark.parametrize(
+    ("canonical_model", "runtime_model"),
+    [
+        (QWEN3_8_27B_MODEL, QWEN3_8_27B_OPENROUTER_MODEL),
+        (DEEPSEEK_V4_FLASH_MODEL, DEEPSEEK_V4_FLASH_0731_OPENROUTER_MODEL),
+    ],
+)
+def test_openrouter_profile_separates_experiment_identity_from_runtime(
+    canonical_model: str,
+    runtime_model: str,
+) -> None:
+    """Record canonical roles while routing all three ReAct roles identically.
+
+    Args:
+        canonical_model: Scientific model identity assigned to both roles.
+        runtime_model: Exact OpenRouter model slug used for completions.
+    """
+    args = _hotpot_args(
+        api_profile="openrouter",
+        solver_model=canonical_model,
+        reflection_model=canonical_model,
+        solver_api_base=None,
+        reflection_api_base=None,
+    )
+    reflection_kwargs = {
+        "num_retries": EXPERIMENT_NUM_RETRIES,
+        **experiment_decoding(runtime_model),
+        **experiment_request_overrides(runtime_model),
+    }
+
+    contract = build_hotpotqa_run_contract("react_v2", args)
+    config, _ = build_hotpotqa_config("react_v2", args, reflection_kwargs)
+    strategy = config.reflection.reflection_strategy
+
+    assert resolve_experiment_model(canonical_model, "openrouter") == runtime_model
+    assert contract["models"]["api_profile"] == "openrouter"
+    assert contract["models"]["solver"] == canonical_model
+    assert contract["models"]["solver_runtime"] == runtime_model
+    assert contract["models"]["solver_request_overrides"] == experiment_request_overrides(runtime_model)
+    assert contract["models"]["reflection"] == canonical_model
+    assert contract["models"]["reflection_runtime"] == runtime_model
+    assert config.reflection.reflection_lm == runtime_model
+    assert strategy is not None
+    assert strategy.proposer_model == canonical_model
+    assert strategy.base_lm.model == runtime_model
+    assert strategy.base_lm.completion_kwargs["extra_body"] == experiment_request_overrides(runtime_model)["extra_body"]
+    assert strategy.manifestor_lm.model == runtime_model
+    assert (
+        strategy.manifestor_lm.completion_kwargs["extra_body"]
+        == experiment_request_overrides(runtime_model)["extra_body"]
+    )
+
+
+def test_openrouter_profile_changes_the_resumable_run_key() -> None:
+    """Prevent direct and OpenRouter runs from sharing optimizer state."""
+    direct = hotpotqa_run_key("react_v2", _hotpot_args(api_profile="direct"))
+    openrouter = hotpotqa_run_key("react_v2", _hotpot_args(api_profile="openrouter"))
+
+    assert direct != openrouter
+
+
+def test_openrouter_pin_reaches_react_native_tool_calls(monkeypatch) -> None:
+    """Forward the same endpoint policy through ReAct's tool-call path.
+
+    Args:
+        monkeypatch: Pytest fixture used to replace LiteLLM completion.
+    """
+    runtime_model = QWEN3_8_27B_OPENROUTER_MODEL
+    request_overrides = experiment_request_overrides(runtime_model)
+    strategy, _ = build_react_v2_strategy(
+        reflection_model=runtime_model,
+        task_model=QWEN3_8_27B_MODEL,
+        proposer_model=QWEN3_8_27B_MODEL,
+        lm_kwargs={**experiment_decoding(runtime_model), **request_overrides},
+        level=2,
+        edit_tool_set="broad",
+        template_family="auto",
+        component_kinds={"summarize1": "system_prompt"},
+    )
+    calls = []
+
+    def completion(**kwargs):
+        """Capture a native-tool request and return an empty terminal turn.
+
+        Args:
+            **kwargs: LiteLLM completion arguments under test.
+
+        Returns:
+            Minimal response containing no tool calls.
+        """
+        calls.append(kwargs)
+        message = SimpleNamespace(content="", tool_calls=[])
+        return SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason="stop")])
+
+    monkeypatch.setattr(litellm, "completion", completion)
+
+    strategy.base_lm.complete_with_tools(
+        [{"role": "user", "content": "Edit the section."}],
+        [{"type": "function", "function": {"name": "REPLACE_TEXT", "parameters": {"type": "object"}}}],
+    )
+
+    assert calls[0]["model"] == runtime_model
+    assert calls[0]["extra_body"] == request_overrides["extra_body"]
+    assert calls[0]["tool_choice"] == "auto"
 
 
 def test_experiment_model_pair_rejects_cross_model_runs() -> None:
@@ -552,8 +672,8 @@ def test_stateless_action_menu_contract_matches_between_wikipedia_benchmarks() -
     expected = build_hotpotqa_run_contract("random", args)["optimizer"]["stateless_action_menu"]
 
     for build_contract, schema_version in (
-        (build_hotpotqa_run_contract, 5),
-        (build_hover_run_contract, 4),
+        (build_hotpotqa_run_contract, 6),
+        (build_hover_run_contract, 5),
     ):
         contract = build_contract("random", args)
         assert contract["schema_version"] == schema_version

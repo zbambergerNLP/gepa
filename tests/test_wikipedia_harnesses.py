@@ -1,7 +1,9 @@
 """Tests for the Wikipedia-backed HotPotQA and HOVER runners."""
 
 import json
+import os
 import random
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,14 +11,18 @@ from unittest.mock import Mock, call
 
 import datasets
 import pytest
+from litellm.utils import get_optional_params
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
 from examples.common.experiment_models import (
+    DEEPSEEK_V4_FLASH_0731_OPENROUTER_MODEL,
     DEEPSEEK_V4_FLASH_MODEL,
     EXPERIMENT_NUM_RETRIES,
     QWEN3_8_27B_MODEL,
+    QWEN3_8_27B_OPENROUTER_MODEL,
     experiment_decoding,
+    experiment_request_overrides,
 )
 from examples.common.wikipedia import WikipediaClient, WikipediaPassage
 from examples.hotpotqa import utils as hotpot_utils
@@ -98,6 +104,63 @@ def test_wikipedia_lm_uses_experiment_model_decoding(monkeypatch, module, model:
     }
     assert "seed" not in calls[0]
     assert "extra_body" not in calls[0]
+
+
+@pytest.mark.parametrize("module", [hotpot_utils, hover_utils])
+@pytest.mark.parametrize(
+    "model",
+    [QWEN3_8_27B_OPENROUTER_MODEL, DEEPSEEK_V4_FLASH_0731_OPENROUTER_MODEL],
+)
+def test_wikipedia_lm_keeps_openrouter_routing_on_solver_calls(monkeypatch, module, model: str) -> None:
+    """Attach the exact OpenRouter endpoint policy to every solver request.
+
+    Args:
+        monkeypatch: Pytest fixture used to replace LiteLLM completion.
+        module: Parameterized benchmark utility module.
+        model: Effective OpenRouter runtime model under test.
+    """
+    calls = []
+
+    def completion(**kwargs):
+        """Capture one provider request and return fixed answer content.
+
+        Args:
+            **kwargs: LiteLLM completion arguments under test.
+
+        Returns:
+            Minimal response object containing ``answer``.
+        """
+        calls.append(kwargs)
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="answer"))])
+
+    monkeypatch.setattr(module.litellm, "completion", completion)
+
+    assert module._call_lm("", "question", model, None) == "answer"
+    assert calls[0]["model"] == model
+    assert calls[0]["extra_body"] == experiment_request_overrides(model)["extra_body"]
+
+
+@pytest.mark.parametrize(
+    "model",
+    [QWEN3_8_27B_OPENROUTER_MODEL, DEEPSEEK_V4_FLASH_0731_OPENROUTER_MODEL],
+)
+def test_litellm_preserves_openrouter_routing_and_reasoning(model: str) -> None:
+    """Keep the provider and reasoning objects intact through LiteLLM.
+
+    Args:
+        model: Effective OpenRouter runtime model under test.
+    """
+    request_overrides = experiment_request_overrides(model)
+
+    transformed = get_optional_params(
+        model=model.removeprefix("openrouter/"),
+        custom_llm_provider="openrouter",
+        drop_params=True,
+        **experiment_decoding(model),
+        **request_overrides,
+    )
+
+    assert transformed["extra_body"] == request_overrides["extra_body"]
 
 
 def test_wikipedia_client_orders_and_persists_results(tmp_path) -> None:
@@ -356,6 +419,84 @@ def test_hotpot_dspy_lm_uses_the_selected_experiment_profile(monkeypatch, model:
         num_retries=EXPERIMENT_NUM_RETRIES,
         **experiment_decoding(model),
     )
+
+
+@pytest.mark.parametrize(
+    "model",
+    [QWEN3_8_27B_OPENROUTER_MODEL, DEEPSEEK_V4_FLASH_0731_OPENROUTER_MODEL],
+)
+def test_hotpot_dspy_lm_forwards_openrouter_routing(monkeypatch, model: str) -> None:
+    """Keep the provider pin inside DSPy's forwarded request body.
+
+    Args:
+        monkeypatch: Pytest fixture used to replace the DSPy LM constructor.
+        model: Effective OpenRouter runtime model under test.
+    """
+    lm_constructor = Mock(return_value=object())
+    monkeypatch.setattr(hotpot_utils, "dspy", SimpleNamespace(LM=lm_constructor))
+    monkeypatch.setattr(hotpot_utils, "package_version", Mock(return_value=hotpot_utils.HOTPOTQA_DSPY_VERSION))
+    monkeypatch.setattr(
+        hotpot_utils,
+        "package_distribution",
+        Mock(
+            return_value=SimpleNamespace(
+                read_text=Mock(return_value=json.dumps({"vcs_info": {"commit_id": hotpot_utils.HOTPOTQA_DSPY_COMMIT}}))
+            )
+        ),
+    )
+
+    hotpot_utils.build_hotpotqa_task_lm(model, None)
+
+    lm_constructor.assert_called_once_with(
+        model=model,
+        num_retries=EXPERIMENT_NUM_RETRIES,
+        **experiment_decoding(model),
+        **experiment_request_overrides(model),
+    )
+
+
+def test_hotpot_openrouter_launcher_plans_eight_isolated_arms() -> None:
+    """Lock the tiny matrix, data sizes, budgets, and provider profile."""
+    script = REPO_ROOT / "scripts" / "openrouter" / "run_hotpotqa_tiny.sh"
+
+    result = subprocess.run(
+        [str(script), "--dry-run"],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    plans = [line for line in result.stdout.splitlines() if line.startswith("PLAN ")]
+    assert len(plans) == 8
+    assert sum(" --merge" in line for line in plans) == 4
+    assert sum("--max-metric-calls 6" in line for line in plans) == 4
+    assert sum("--max-metric-calls 28" in line for line in plans) == 4
+    assert all("--api-profile openrouter" in line for line in plans)
+    assert all("--train-limit 6 --val-limit 5 --test-limit 2" in line for line in plans)
+    assert all("--max-workers 1" in line for line in plans)
+    assert all("--condition both" not in line for line in plans)
+    assert all(line.count("--solver-model") == 1 and line.count("--reflection-model") == 1 for line in plans)
+
+
+def test_hotpot_openrouter_launcher_refuses_execution_without_a_key() -> None:
+    """Stop before endpoint checks or paid calls when credentials are absent."""
+    script = REPO_ROOT / "scripts" / "openrouter" / "run_hotpotqa_tiny.sh"
+    environment = dict(os.environ)
+    environment.pop("OPENROUTER_API_KEY", None)
+
+    result = subprocess.run(
+        [str(script), "--execute"],
+        cwd=REPO_ROOT,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "OPENROUTER_API_KEY is required" in result.stderr
+    assert "RUN 1/8" not in result.stdout
 
 
 def test_hotpot_smoke_conversion_retains_gold_context_for_feedback() -> None:

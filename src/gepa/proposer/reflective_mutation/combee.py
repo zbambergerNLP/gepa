@@ -148,6 +148,24 @@ class ComBEEReflectionLM:
         *,
         lm_kwargs: dict[str, Any] | None = None,
     ):
+        """Configure ComBEE's duplicated map/reduce reflection process.
+
+        Args:
+            lm: Reflection model name or callable.
+            reflection_prompt_template: Shared or per-component map template.
+            aggregation_prompt_template: Reduce template, or ``None`` for the
+                canonical default.
+            duplication_factor: Number of augmented copies made per record.
+            rng: Shuffle RNG, or ``None`` until the run RNG is bound.
+            logger: Optional run logger.
+            batch_reflection: Whether batch-capable models execute each map and
+                reduce wave together.
+            lm_kwargs: Completion options used only when ``lm`` is a model name.
+
+        Raises:
+            ValueError: The duplication factor is below one or a configured
+                prompt template lacks required placeholders.
+        """
         self._model_name = lm if isinstance(lm, str) else None
         self._lm_kwargs_explicit = lm_kwargs is not None
         if isinstance(lm, str):
@@ -160,7 +178,12 @@ class ComBEEReflectionLM:
 
             # TrackingLM estimates tokens and deliberately reports zero cost;
             # accepting it for a dollar cap would make the stopper inert.
-            self._cost_tracking_supported = hasattr(lm, "total_cost") and not isinstance(lm, TrackingLM)
+            supports_cost_tracking = getattr(lm, "supports_cost_tracking", None)
+            self._cost_tracking_supported = (
+                bool(supports_cost_tracking())
+                if callable(supports_cost_tracking)
+                else hasattr(lm, "total_cost") and not isinstance(lm, TrackingLM)
+            )
             if not hasattr(lm, "total_cost"):
                 lm = TrackingLM(lm)
         self.lm = lm

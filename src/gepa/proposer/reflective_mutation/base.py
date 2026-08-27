@@ -25,6 +25,12 @@ class ReflectionComponentSelector(Protocol):
 
 
 class LanguageModel(Protocol):
+    """Return answer-only assistant content for each completion.
+
+    Provider reasoning must be separated before this boundary. Endpoints that
+    embed leading ``<think>`` blocks can opt into ``gepa.lm.InlineReasoningLM``.
+    """
+
     def __call__(self, prompt: str | list[dict[str, Any]]) -> str: ...
 
 

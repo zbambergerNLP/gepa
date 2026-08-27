@@ -19,6 +19,7 @@ except ImportError:
     dspy = None  # type: ignore[assignment]
 
 from examples.common.experiment_models import (
+    DEEPSEEK_V4_FLASH_0731_OPENROUTER_MODEL,
     EXPERIMENT_NUM_RETRIES,
     QWEN3_8_27B_MODEL,
     QWEN3_8_27B_OPENROUTER_MODEL,
@@ -150,10 +151,9 @@ def resolve_hotpotqa_lm_kwargs(
     """Resolve HotPotQA request settings for one runtime profile.
 
     The scientific profile preserves the shared experiment configuration. The
-    technical-smoke profile changes only OpenRouter Qwen's output-token ceiling
-    and reasoning effort so a local integration run finishes promptly. Its
-    provider pin and fallback policy remain unchanged, and DeepSeek keeps its
-    scientific settings under both profiles.
+    technical-smoke profile bounds both OpenRouter experiment models' output
+    tokens and reasoning effort so a local integration run finishes promptly.
+    Provider pins and fallback policies remain unchanged.
 
     Args:
         model: Exact LiteLLM runtime model identifier.
@@ -175,7 +175,11 @@ def resolve_hotpotqa_lm_kwargs(
         **experiment_decoding(model),
         **experiment_request_overrides(model),
     }
-    if runtime_profile == "technical-smoke" and model == QWEN3_8_27B_OPENROUTER_MODEL:
+    technical_smoke_models = {
+        QWEN3_8_27B_OPENROUTER_MODEL,
+        DEEPSEEK_V4_FLASH_0731_OPENROUTER_MODEL,
+    }
+    if runtime_profile == "technical-smoke" and model in technical_smoke_models:
         kwargs["max_tokens"] = HOTPOTQA_TECHNICAL_SMOKE_MAX_TOKENS
         extra_body = deepcopy(kwargs["extra_body"])
         extra_body["reasoning"] = {"effort": HOTPOTQA_TECHNICAL_SMOKE_REASONING_EFFORT}

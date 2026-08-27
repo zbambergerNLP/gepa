@@ -534,8 +534,8 @@ def test_hotpot_technical_runtime_profile_bounds_qwen_without_changing_its_route
     assert hotpotqa_run_key("react_v2", args) != hotpotqa_run_key("react_v2", scientific_args)
 
 
-def test_hotpot_technical_runtime_profile_leaves_deepseek_decoding_unchanged() -> None:
-    """Keep the already-bounded DeepSeek route on its scientific settings."""
+def test_hotpot_technical_runtime_profile_bounds_deepseek_without_changing_its_route() -> None:
+    """Bound DeepSeek's smoke-time reasoning while preserving its provider."""
     provenance = {
         "backend": "hotpotqa-technical-mini-bm25s",
         "mode": "technical-smoke-only",
@@ -559,11 +559,13 @@ def test_hotpot_technical_runtime_profile_leaves_deepseek_decoding_unchanged() -
 
     contract = build_hotpotqa_run_contract("react_v2", args)
     runtime_model = DEEPSEEK_V4_FLASH_0731_OPENROUTER_MODEL
+    expected_request = experiment_request_overrides(runtime_model)["extra_body"]
+    solver_request = contract["models"]["solver_request_overrides"]["extra_body"]
 
-    assert contract["models"]["solver_decoding"] == experiment_decoding(runtime_model)
-    assert contract["models"]["reflection_decoding"] == experiment_decoding(runtime_model)
-    assert contract["models"]["solver_request_overrides"] == experiment_request_overrides(runtime_model)
-    assert contract["models"]["reflection_request_overrides"] == experiment_request_overrides(runtime_model)
+    assert contract["models"]["solver_decoding"]["max_tokens"] == 4096
+    assert contract["models"]["reflection_decoding"]["max_tokens"] == 4096
+    assert solver_request["provider"] == expected_request["provider"]
+    assert solver_request["reasoning"] == {"effort": "low"}
 
 
 @pytest.mark.parametrize(

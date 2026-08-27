@@ -2,8 +2,10 @@
 # https://github.com/gepa-ai/gepa
 
 import inspect
+import random
 import traceback
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from typing import Any
 
 from gepa.core.adapter import (
@@ -35,9 +37,12 @@ from gepa.proposer.reflective_mutation.base import (
     LanguageModel,
     ReflectionComponentSelector,
 )
+from gepa.proposer.reflective_mutation.react_v2_proposer import ReActV2ContextError
 from gepa.proposer.reflective_mutation.reflection_lm import ReflectionLM, StatelessReflectionLM
+from gepa.strategies.action_space import ActionSelector
 from gepa.strategies.batch_sampler import BatchSampler
 from gepa.strategies.instruction_proposal import InstructionProposalSignature
+from gepa.strategies.intervention import StatelessActionConstraint
 from gepa.strategies.proposal_sampling import ProposalTask, SamplingStrategy, SingleMutationSampling
 
 
@@ -75,7 +80,35 @@ class ReflectiveMutationProposer:
         callbacks: list[GEPACallback] | None = None,
         sampling_strategy: SamplingStrategy | None = None,
         reflection_strategy: ReflectionLM | None = None,
+        action_selector: ActionSelector[StatelessActionConstraint] | None = None,
     ):
+        """Configure reflective proposal generation and minibatch evaluation.
+
+        Args:
+            logger: Run logger for diagnostics.
+            trainset: Training examples or loader sampled for reflection.
+            adapter: Task adapter used for evaluation and optional proposals.
+            candidate_selector: Policy selecting parent candidates.
+            module_selector: Policy selecting candidate components to mutate.
+            batch_sampler: Policy selecting training examples for each task.
+            perfect_score: Score treated as perfect, or ``None`` if undefined.
+            skip_perfect_score: Whether perfect minibatches skip reflection.
+            experiment_tracker: Tracker receiving proposal diagnostics.
+            reflection_lm: Model used by the default stateless reflector.
+            reflection_prompt_template: Shared or per-component reflection
+                template.
+            custom_candidate_proposer: Optional caller-owned proposal function.
+            callbacks: Proposal lifecycle observers.
+            sampling_strategy: Multi-proposal task sampler, or the single-task
+                default when omitted.
+            reflection_strategy: Optional stateful or custom reflection owner.
+            action_selector: Optional stateless semantic-action selector.
+
+        Raises:
+            ValueError: Prompt templates are invalid or a reflection strategy
+                is supplied while an adapter or custom proposer already owns
+                proposal generation.
+        """
         self.logger = logger
         self.trainset = ensure_loader(trainset)
         self.adapter = adapter
@@ -89,6 +122,7 @@ class ReflectiveMutationProposer:
         self.custom_candidate_proposer = custom_candidate_proposer
         self.callbacks = callbacks
         self.sampling_strategy: SamplingStrategy = sampling_strategy or SingleMutationSampling()
+        self.action_selector = action_selector
 
         self.reflection_prompt_template = reflection_prompt_template
 
@@ -119,7 +153,12 @@ class ReflectiveMutationProposer:
             if callable(_bind_template):
                 _bind_template(reflection_prompt_template)
         self._reflection_lm: ReflectionLM | None = reflection_strategy or (
-            StatelessReflectionLM(reflection_lm, reflection_prompt_template, logger)
+            StatelessReflectionLM(
+                reflection_lm,
+                reflection_prompt_template,
+                logger,
+                action_selector=self.action_selector,
+            )
             if reflection_lm is not None
             else None
         )
@@ -129,6 +168,22 @@ class ReflectiveMutationProposer:
                 "perfect_score must be provided when skip_perfect_score is True. "
                 "If you do not have a perfect target score, set skip_perfect_score=False."
             )
+
+    def bind_reflection_rng(self, rng: random.Random) -> None:
+        """Bind GEPA's seeded run RNG to the effective reflection LM.
+
+        Front doors call this after construction so the default
+        ``StatelessReflectionLM`` (built here, otherwise seeded ``Random(0)``)
+        derives action selection from the run seed. Idempotent for an injected
+        reflection_strategy, which the front door also binds at wiring time.
+
+        Args:
+            rng: The run RNG; forwarded to the reflection LM's ``bind_rng`` when
+                it has one, otherwise ignored.
+        """
+        bind = getattr(self._reflection_lm, "bind_rng", None)
+        if callable(bind):
+            bind(rng)
 
     def propose_new_texts(
         self,
@@ -140,14 +195,19 @@ class ReflectiveMutationProposer:
     ) -> tuple[dict[str, str], dict[str, str | list[dict[str, Any]]], dict[str, str], dict[str, Any]]:
         """Propose new instruction texts for the given components.
 
-        ``metadata`` is an open-ended context dict forwarded to
-        ``custom_candidate_proposer`` when its signature accepts a ``metadata``
-        keyword (or ``**kwargs``); 3-positional-arg proposers are called
-        without it. Keys GEPA currently supplies are both
-        on-disk anchors: ``"iteration_id"`` — this proposal's own slot
-        (``iterations/<iteration_id>/``); and ``"parent_iteration_id"`` — the
-        parent candidate's slot. The adapter-owned ``propose_new_texts`` path
-        keeps its legacy 3-positional signature.
+        ``metadata`` is open-ended parent context. It is forwarded to a custom
+        proposer accepting ``metadata`` and to a ``ReflectionLM.reflect`` method
+        accepting the same keyword; legacy three-argument implementations remain
+        unchanged. GEPA supplies on-disk iteration anchors, the selected
+        ``candidate_idx``, and that candidate's accepted
+        ``branch_edit_history``. The adapter-owned path keeps its legacy
+        three-positional-argument signature.
+
+        Args:
+            candidate: Parent component mapping.
+            reflective_dataset: Per-component feedback and execution evidence.
+            components_to_update: Components selected for mutation.
+            metadata: Open parent-specific context forwarded when supported.
 
         Returns:
             A tuple of (new_texts, prompts, raw_lm_outputs, reflection_metadata)
@@ -155,6 +215,10 @@ class ReflectiveMutationProposer:
             ``reflection_metadata`` is the ReflectionLM's free-form diagnostics
             (empty for single-call reflectors; multi-call strategies such as
             ComBEE record per-call intermediates here).
+
+        Raises:
+            ValueError: No adapter, custom proposer, or reflection model is
+                available to generate the requested texts.
         """
         empty: dict[str, str | list[dict[str, Any]]] = {}
         if self.adapter.propose_new_texts is not None:
@@ -185,7 +249,20 @@ class ReflectiveMutationProposer:
         # return a successor carrying accumulated context; chain it so session
         # state actually persists (stateless implementations return self,
         # making this a no-op).
-        proposal, next_lm = self._reflection_lm.reflect(candidate, reflective_dataset, components_to_update)
+        reflect = self._reflection_lm.reflect
+        try:
+            reflect_signature = inspect.signature(reflect)
+            accepts_metadata = "metadata" in reflect_signature.parameters or any(
+                parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in reflect_signature.parameters.values()
+            )
+        except (TypeError, ValueError):
+            accepts_metadata = False
+        proposal, next_lm = reflect(
+            candidate,
+            reflective_dataset,
+            components_to_update,
+            **({"metadata": metadata} if accepts_metadata else {}),
+        )
         self._reflection_lm = next_lm
         return proposal.new_texts, proposal.prompts, proposal.raw_lm_outputs, proposal.metadata
 
@@ -203,7 +280,19 @@ class ReflectiveMutationProposer:
         proposer or custom proposer owns the call, fall back to one invocation
         per task — their batching, if any, is their concern. ``metadatas`` is
         index-aligned with ``jobs`` and forwarded per task on that fallback
-        path (custom proposers receive it via ``metadata=``).
+        path. Custom proposers receive ``metadata=``; reflection strategies that
+        accept ``metadatas=`` receive the index-aligned context in batch.
+
+        Args:
+            jobs: Candidate, reflective-dataset, and component triples.
+            metadatas: Optional index-aligned parent context for each job.
+
+        Returns:
+            Proposed texts, prompts, raw outputs, and metadata in job order.
+
+        Raises:
+            ValueError: A batched reflection strategy returns a different
+                number of results than jobs.
         """
         mds: list[Mapping[str, Any] | None] = metadatas if metadatas is not None else [None] * len(jobs)
         if (
@@ -225,15 +314,21 @@ class ReflectiveMutationProposer:
 
         reflect_many = getattr(self._reflection_lm, "reflect_many", None)
         if reflect_many is not None:
-            results = list(reflect_many(jobs))
+            try:
+                batch_signature = inspect.signature(reflect_many)
+                accepts_metadatas = "metadatas" in batch_signature.parameters or any(
+                    parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in batch_signature.parameters.values()
+                )
+            except (TypeError, ValueError):
+                accepts_metadatas = False
+            results = list(reflect_many(jobs, **({"metadatas": mds} if accepts_metadatas else {})))
             if len(results) != len(jobs):
                 raise ValueError(f"ReflectionLM.reflect_many returned {len(results)} results for {len(jobs)} jobs")
         else:
-            results = []
-            for cand, refds, comps in jobs:
-                proposal, next_lm = self._reflection_lm.reflect(cand, refds, comps)
-                self._reflection_lm = next_lm  # chain stateful reflectors
-                results.append((proposal, next_lm))
+            return [
+                self.propose_new_texts(cand, refds, comps, metadata=md)
+                for (cand, refds, comps), md in zip(jobs, mds, strict=True)
+            ]
         if results:
             # For batched reflection, chain to the final returned successor.
             self._reflection_lm = results[-1][1]
@@ -251,12 +346,25 @@ class ReflectiveMutationProposer:
 
         Returns ``None`` in the slot of any task whose reflection raised, so one
         bad task (or a failed batch) does not sink the whole iteration.
+
+        Args:
+            jobs: Candidate, reflective-dataset, and component triples.
+            metadatas: Optional index-aligned parent context for each job.
+
+        Returns:
+            Job-aligned proposal payloads with ``None`` for recoverable failures.
+
+        Raises:
+            ReActV2ContextError: Any job exceeds its non-recoverable ReAct
+                context budget.
         """
         if not jobs:
             return []
         mds: list[Mapping[str, Any] | None] = metadatas if metadatas is not None else [None] * len(jobs)
         try:
             return list(self._propose_texts_batch(jobs, mds))
+        except ReActV2ContextError:
+            raise
         except Exception as e:
             self.logger.log(f"Batched reflection failed ({e}); retrying per task.")
             self.logger.log(traceback.format_exc())
@@ -266,6 +374,8 @@ class ReflectiveMutationProposer:
             for (cand, refds, comps), md in zip(jobs, mds, strict=True):
                 try:
                     out.append(self.propose_new_texts(cand, refds, comps, metadata=md))
+                except ReActV2ContextError:
+                    raise
                 except Exception as e2:
                     self.logger.log(f"Per-task reflection failed: {e2}")
                     out.append(None)
@@ -289,7 +399,23 @@ class ReflectiveMutationProposer:
         The proposer generates and minibatch-evaluates candidates; acceptance and
         selection (which to keep) are the engine's job. With the default
         ``SingleMutationSampling`` this returns at most one proposal — identical to
-        the original sequential behavior.
+        the original sequential behavior. A reflection that yields no text
+        updates produces no proposal; when a ReAct attempt was exhausted or
+        otherwise dropped (reported through ``length_capped_dropped`` for
+        callback compatibility), the attempt is persisted and still reported
+        through ``on_proposal_end`` so per-action acceptance rates stay honest.
+
+        Args:
+            state: The current optimization state (candidates, scores, RNG,
+                iteration counter).
+
+        Returns:
+            The evaluated child proposals for this iteration; empty when no task
+            was sampled or every reflection came back empty.
+
+        Raises:
+            ReActV2ContextError: A branch exceeds the configured ReAct context
+                budget.
         """
         i = state.i + 1
 
@@ -507,23 +633,23 @@ class ReflectiveMutationProposer:
 
         # Stage 3b: Reflect across all prepared tasks — one batched LM call when the
         # reflection LM supports it (litellm.batch_completion), else per task.
-        # Each job carries a metadata dict for custom proposers. Both keys are
-        # on-disk anchors (``iterations/<id>/``): ``iteration_id`` is this
-        # proposal's own slot, ``parent_iteration_id`` the parent's. We
-        # forward anchors rather than the internal candidate idx or the
-        # display sequence number — a proposer only needs to know which
-        # directories to read/write, and the sequence isn't unique under
-        # concurrency.
+        # Each job carries parent-specific context. In addition to on-disk
+        # anchors, reflection strategies receive only the branch-local chat
+        # history of the selected parent candidate. Sibling attempts are never
+        # included.
         jobs = [(p[0].parent_candidate, p[3], p[2]) for p in prepared if p is not None]
         job_metadatas: list[Mapping[str, Any] | None] = [
             {
                 "iteration_id": iteration_id,
                 "parent_iteration_id": state.iteration_id_for_candidate_idx(p[0].parent_idx),
+                "candidate_idx": p[0].parent_idx,
+                "branch_edit_history": deepcopy(state.revision_history_by_candidate[p[0].parent_idx]),
             }
             for p in prepared
             if p is not None
         ]
         batch_texts = iter(self._propose_texts_batch_safe(jobs, job_metadatas))
+        batch_contexts = iter(job_metadatas)
 
         # Stage 3c: Build each child candidate from its proposed texts.
         children: list[tuple[ProposalTask, dict[str, str], EvaluationBatch, dict[str, Any]] | None] = []
@@ -532,6 +658,7 @@ class ReflectiveMutationProposer:
                 children.append(None)
                 continue
             task, eval_curr, _predictor_names, _reflective_dataset = p
+            reflection_context = next(batch_contexts)
             texts = next(batch_texts)
             if texts is None:
                 children.append(None)
@@ -539,12 +666,38 @@ class ReflectiveMutationProposer:
             new_texts, prompts, raw_outputs, reflection_metadata = texts
 
             if not new_texts:
-                # Reflection produced no text updates (e.g. every requested
-                # component was missing from the reflective dataset). A child
-                # would be byte-identical to its parent: don't burn minibatch
-                # metric calls evaluating it or emit proposal/rejection events
-                # for a proposal that never happened.
-                self.logger.log(f"Iteration {i}: Reflection returned no text updates; skipping proposal for this task.")
+                # Do not evaluate an unchanged child; retain metadata when an
+                # attempted proposal produced no completed edit.
+                dropped = (reflection_metadata or {}).get("length_capped_dropped")
+                attempt_records = (reflection_metadata or {}).get("attempt_records")
+                if dropped or attempt_records:
+                    state.record_proposal_attempts(
+                        task.parent_idx,
+                        reflection_metadata,
+                        outcome="dropped",
+                        reason="Reflection attempt produced no completed text update.",
+                    )
+                    capped_metadata: dict[str, Any] = {"proposal_id": f"{i}-{len(children)}"}
+                    for meta_key, meta_val in reflection_metadata.items():
+                        if meta_key.startswith(("prompt:", "raw_lm_output:")):
+                            capped_metadata[f"reflection_meta:{meta_key}"] = meta_val
+                        else:
+                            capped_metadata[meta_key] = meta_val
+                    notify_callbacks(
+                        self.callbacks,
+                        "on_proposal_end",
+                        ProposalEndEvent(
+                            iteration=i,
+                            new_instructions={},
+                            prompts=prompts,
+                            raw_lm_outputs=raw_outputs,
+                            metadata=capped_metadata,
+                        ),
+                    )
+                else:
+                    self.logger.log(
+                        f"Iteration {i}: Reflection returned no text updates; skipping proposal for this task."
+                    )
                 children.append(None)
                 continue
 
@@ -553,6 +706,7 @@ class ReflectiveMutationProposer:
             # consumers (run manifests, #346's per-proposal state anchors) can
             # key on this instead of positional inference.
             _lm_metadata["proposal_id"] = f"{i}-{len(children)}"
+            branch_history = reflection_context.get("branch_edit_history", []) if reflection_context else []
             for comp in new_texts:
                 _lm_metadata[f"prompt:{comp}"] = prompts.get(comp, "")
                 _lm_metadata[f"raw_lm_output:{comp}"] = raw_outputs.get(comp, "")
@@ -562,10 +716,11 @@ class ReflectiveMutationProposer:
             # reserved prompt:/raw_lm_output: namespaces are remapped so a
             # reflector cannot inject phantom components into proposal tables.
             for meta_key, meta_val in (reflection_metadata or {}).items():
-                if meta_key.startswith(("prompt:", "raw_lm_output:")):
+                if meta_key == "parent_branch_history_lengths" or meta_key.startswith(("prompt:", "raw_lm_output:")):
                     _lm_metadata[f"reflection_meta:{meta_key}"] = meta_val
                 else:
                     _lm_metadata[meta_key] = meta_val
+            _lm_metadata["parent_branch_history_lengths"] = {str(task.parent_idx): len(branch_history)}
 
             for pname, text in new_texts.items():
                 self.logger.log(f"Iteration {i}: Proposed new text for {pname}: {text}")

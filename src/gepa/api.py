@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 if TYPE_CHECKING:
     from gepa.core.callbacks import GEPACallback
+    from gepa.strategies.action_space import ActionSelector
+    from gepa.strategies.intervention import StatelessActionConstraint
 
 from gepa.adapters.default_adapter.default_adapter import (
     ChatCompletionCallable,
@@ -25,6 +27,7 @@ from gepa.proposer.merge import MergeProposer
 from gepa.proposer.reflective_mutation.base import CandidateSelector, LanguageModel, ReflectionComponentSelector
 from gepa.proposer.reflective_mutation.reflection_lm import ReflectionLM
 from gepa.proposer.reflective_mutation.reflective_mutation import ReflectiveMutationProposer
+from gepa.proposer.reflective_mutation.three_role import ThreeRoleReflectionLM, ensure_reflection_run_contract
 from gepa.strategies.acceptance import AcceptanceCriterion, ImprovementOrEqualAcceptance, StrictImprovementAcceptance
 from gepa.strategies.batch_sampler import BatchSampler, EpochShuffledBatchSampler
 from gepa.strategies.candidate_selector import (
@@ -37,10 +40,42 @@ from gepa.strategies.component_selector import (
     AllReflectionComponentSelector,
     RoundRobinReflectionComponentSelector,
 )
+from gepa.strategies.document_template import MalformedDocumentError, infer_template_family
 from gepa.strategies.eval_policy import EvaluationPolicy, FullEvaluationPolicy
 from gepa.strategies.proposal_sampling import SamplingStrategy
 from gepa.strategies.proposal_selection import SelectionStrategy
 from gepa.utils import FileStopper, StopperProtocol
+
+
+def _template_consumer_model(
+    task_lm: str | ChatCompletionCallable | None,
+    adapter: Any | None,
+    template_model: str | None,
+) -> str | None:
+    """Resolve the model whose provider-specific prompt template should be used.
+
+    Explicit template configuration wins, followed by a string task model and
+    then conventional model attributes exposed by the adapter.
+
+    Args:
+        task_lm: Task-model identifier or custom completion callable.
+        adapter: Task adapter that may expose its consumer model.
+        template_model: Explicit template-model override.
+
+    Returns:
+        Resolved model identifier, or ``None`` when no source identifies one.
+    """
+    if template_model is not None:
+        return template_model
+    if isinstance(task_lm, str):
+        return task_lm
+    if adapter is None:
+        return None
+    for attribute in ("model", "model_name", "student_model", "solver_model"):
+        value = getattr(adapter, attribute, None)
+        if isinstance(value, str):
+            return value
+    return None
 
 
 def optimize(
@@ -101,6 +136,14 @@ def optimize(
     sampling_strategy: SamplingStrategy | None = None,
     selection_strategy: SelectionStrategy | None = None,
     reflection_strategy: ReflectionLM | None = None,
+    # Stateless action-conditioned reflection over canonical semantic bindings.
+    action_selector: "ActionSelector[StatelessActionConstraint] | None" = None,
+    # 3-role reflection (Controller -> Manifestor -> ReAct V2)
+    reflection_level: int = 0,
+    edit_tool_set: Literal["minimal", "broad"] = "broad",
+    component_kinds: dict[str, str] | None = None,
+    template_family: Literal["auto", "generic", "openai", "anthropic", "google", "alibaba"] = "auto",
+    template_model: str | None = None,
 ) -> GEPAResult[RolloutOutput, DataId]:
     """
     GEPA is an evolutionary optimizer that evolves (multiple) text components of a complex system to optimize them towards a given metric.
@@ -137,7 +180,7 @@ def optimize(
     GEPA also tracks the Pareto frontier of performance achieved by different candidates on the validation set. This way, it can leverage candidates that
     work well on a subset of inputs to improve the system's performance on the entire validation set, by evolving from the Pareto frontier.
 
-    Parameters:
+    Configuration details:
     - seed_candidate: The initial candidate to start with.
     - trainset: Training data supplied as an in-memory sequence or a `DataLoader` yielding batches for reflective updates.
     - valset: Validation data source (sequence or `DataLoader`) used for tracking Pareto scores. If not provided, GEPA reuses the trainset.
@@ -150,6 +193,11 @@ def optimize(
     - sampling_strategy: Controls how many (parent, minibatch) proposal tasks are sampled per iteration. One of `SingleMutationSampling` (default; 1 parent, 1 mutation — identical to classic GEPA), `SameParentSampling(n)`, `IndependentSampling(n)`, or `PxNSampling(p, n)`, or any custom `SamplingStrategy`.
     - selection_strategy: Controls which of an iteration's improving proposals enter the candidate pool. One of `AllImprovements` (default), `BestImprovement`, or `TopKImprovements(k)`, or any custom `SelectionStrategy`.
     - reflection_strategy: Advanced: a `ReflectionLM` implementation that owns how reflective mutation calls the reflection model (e.g. stateful sessions or aggregating reflectors). Defaults to the stateless single-call reflector built from `reflection_lm`. Implementations may provide `reflect_many` for batched reflection; otherwise `reflect` is called once per task.
+    - reflection_level: Three-role reflection mode built from `reflection_lm`. Level 0 uses vanilla free-form reflection. Level 1 selects a document region and edits it with ReAct V2. Level 2 also selects an operator-coupled semantic action and adds Manifestor steering as a user message. Candidate history contains only user and assistant messages from that branch. When `reflection_lm` is a model name, level 2 creates a temperature-0 Manifestor copy. An explicit `reflection_strategy` overrides this setting.
+    - edit_tool_set: Tools exposed to ReAct V2 when `reflection_level > 0`. 'minimal' exposes INSERT_TEXT and DELETE_TEXT. 'broad' also exposes REPLACE_TEXT and MOVE_TEXT. With the minimal set, ReAct V2 lowers replace and move into insert/delete calls.
+    - component_kinds: Optional map from component name to 'system_prompt', 'user_prompt', or 'skill'. Components named for one of those roles resolve automatically; other unlisted components default to 'system_prompt'. Each seed component must use its role's canonical `## <Section>` format when `reflection_level > 0`. Empty sections are omitted from rendered text but remain available to the Controller. Use `gepa.strategies.document_template.migrate_document` to convert free-form text.
+    - template_family: Section schema used when `reflection_level > 0`. 'auto' infers the family from `template_model`, a string `task_lm`, or common adapter model attributes and otherwise uses 'generic'. The seed must match the selected schema. Pass 'generic' to disable inference or provide `ThreeRoleReflectionLM(templates=...)` for a custom schema.
+    - template_model: Optional provider/model identifier for `template_family='auto'` when the prompt consumer is hidden behind a custom adapter or callable.
     - candidate_selection_strategy: The strategy to use for selecting the candidate to update. Supported strategies: 'pareto', 'current_best', 'epsilon_greedy'. Defaults to 'pareto'.
     - frontier_type: Strategy for tracking Pareto frontiers. 'instance' tracks per validation example, 'objective' tracks per objective metric, 'hybrid' combines both, 'cartesian' tracks per (example, objective) pair. Defaults to 'instance'.
     - skip_perfect_score: Whether to skip updating the candidate if it achieves a perfect score on the minibatch.
@@ -174,7 +222,7 @@ def optimize(
     # Logging and Callbacks
     - logger: A `LoggerProtocol` instance that is used to log the progress of the optimization.
     - callbacks: Optional list of callback objects for observing optimization progress. Callbacks receive events like on_optimization_start, on_iteration_start, on_candidate_accepted, etc. See `gepa.core.callbacks.GEPACallback` for the full protocol.
-    - run_dir: The directory to save the results to. Optimization state and results will be saved to this directory. If the directory already exists, GEPA will read the state from this directory and resume the optimization from the last saved state. If provided, a FileStopper is automatically created which checks for the presence of "gepa.stop" in this directory, allowing graceful stopping of the optimization process upon its presence.
+    - run_dir: The directory to save the results to. Optimization state and results will be saved to this directory. If the directory already exists, GEPA will read the state from this directory and resume the optimization from the last saved state. Three-role runs also save `reflection-run-contract.json` and reject incompatible resumes. If provided, a FileStopper is automatically created which checks for the presence of "gepa.stop" in this directory, allowing graceful stopping of the optimization process upon its presence.
     - use_wandb: Whether to use Weights and Biases to log the progress of the optimization.
     - wandb_api_key: The API key to use for Weights and Biases.
     - wandb_init_kwargs: Additional keyword arguments to pass to the Weights and Biases initialization.
@@ -204,6 +252,79 @@ def optimize(
     - val_evaluation_policy: Strategy controlling which validation ids to score each iteration and which candidate is currently best. Supported strings: "full_eval" (evaluate every id each time) Passing None defaults to "full_eval".
     - raise_on_exception: Whether to propagate proposer/evaluator exceptions. False suppresses failures only after
       an iteration consumes metric budget; zero-progress failures still propagate.
+
+    Args:
+        seed_candidate: Non-empty initial component mapping.
+        trainset: Training examples or loader used for reflective minibatches.
+        valset: Validation examples or loader; defaults to ``trainset``.
+        adapter: Task-specific evaluation adapter, or ``None`` to construct the
+            default adapter from ``task_lm`` and ``evaluator``.
+        task_lm: Task model for the default adapter; unavailable with a custom
+            adapter.
+        evaluator: Evaluator for the default adapter; unavailable with a custom
+            adapter.
+        reflection_lm: Reflection model name or callable.
+        reflection_lm_kwargs: Completion options used when ``reflection_lm`` is
+            a model name.
+        candidate_selection_strategy: Parent-candidate selector or built-in name.
+        frontier_type: Instance, objective, hybrid, or cartesian frontier.
+        skip_perfect_score: Whether perfect minibatches skip mutation.
+        batch_sampler: Training-example sampler or built-in name.
+        reflection_minibatch_size: Batch size for the default epoch sampler.
+        perfect_score: Score considered perfect.
+        reflection_prompt_template: Shared or per-component reflection template.
+        custom_candidate_proposer: Optional caller-owned proposal function.
+        module_selector: Component-selection policy or built-in name.
+        use_merge: Whether to enable candidate merging.
+        max_merge_invocations: Maximum merge attempts.
+        merge_val_overlap_floor: Minimum shared validation coverage for merging.
+        max_metric_calls: Optional metric-call stopping budget.
+        max_reflection_cost: Optional provider-spend stopping budget.
+        stop_callbacks: Additional stopping condition or conditions.
+        logger: Run logger.
+        run_dir: Optional persistence and resume directory.
+        callbacks: Optimization lifecycle observers.
+        use_wandb: Whether to create or attach W&B tracking.
+        wandb_api_key: Optional W&B credential.
+        wandb_init_kwargs: Additional W&B initialization options.
+        wandb_attach_existing: Whether the caller owns the active W&B run.
+        use_mlflow: Whether to create or attach MLflow tracking.
+        mlflow_tracking_uri: Optional MLflow tracking endpoint.
+        mlflow_experiment_name: Optional MLflow experiment.
+        mlflow_attach_existing: Whether the caller owns the active MLflow run.
+        tracking_key_prefix: Prefix applied to experiment-tracker metric keys.
+        track_best_outputs: Whether to retain outputs on validation frontiers.
+        display_progress_bar: Whether to display metric-call progress.
+        use_cloudpickle: Whether state persistence uses cloudpickle.
+        write_agent_state: Whether to write the agent-readable run tree.
+        cache_evaluation: Whether to cache candidate/example evaluations.
+        seed: Run RNG seed.
+        raise_on_exception: Whether recoverable iteration failures propagate.
+        val_evaluation_policy: Validation policy or ``"full_eval"``.
+        acceptance_criterion: Proposal acceptance policy or built-in name.
+        sampling_strategy: Policy sampling parent/minibatch proposal tasks.
+        selection_strategy: Policy choosing accepted proposals from each batch.
+        reflection_strategy: Optional strategy that owns reflection calls.
+        action_selector: Optional stateless semantic-action selector.
+        reflection_level: Vanilla, region-only, or region/action reflection level.
+        edit_tool_set: Minimal or broad edit-tool basis.
+        component_kinds: Optional component-to-document-kind overrides.
+        template_family: Prompt-template family or automatic inference.
+        template_model: Explicit prompt consumer for family inference.
+
+    Returns:
+        Final optimization result with candidates, lineage, scores, histories,
+        frontiers, and run metadata.
+
+    Raises:
+        AssertionError: Adapter, task-model, evaluator, or reflection-model
+            ownership requirements are violated.
+        TypeError: Candidate-selection or acceptance policy has an unsupported
+            type.
+        ValueError: The seed, stopping conditions, named policies, reflection
+            configuration, or template migration requirements are invalid.
+        MalformedDocumentError: Automatic provider templates do not parse the
+            structured seed candidate.
     """
     # Validate seed_candidate is not None or empty
     if seed_candidate is None or not seed_candidate:
@@ -416,7 +537,57 @@ def optimize(
     if cache_evaluation:
         evaluation_cache = EvaluationCache[RolloutOutput, DataId]()
 
+    # 3-role reflection: construct the strategy from the base reflection LM when
+    # reflection_level > 0 and no explicit strategy was supplied. Level 0 is the
+    # untouched free-form baseline, so it needs no strategy. An explicit
+    # reflection_strategy always wins (seam preserved).
+    if reflection_level > 0 and reflection_strategy is None:
+        if reflection_lm_callable is None:
+            raise ValueError("reflection_level > 0 requires reflection_lm (the base LM the 3-role reflection reuses).")
+        # POSIT manifests deterministically. A model name lets us build a
+        # temperature-0 sibling for the Manifestor; a caller-supplied LM
+        # instance is reused as-is (pass ThreeRoleReflectionLM(manifestor_lm=...)
+        # as reflection_strategy to control it).
+        manifestor_lm: LanguageModel | None = None
+        if reflection_level == 2 and isinstance(reflection_lm, str):
+            from gepa.lm import LM
+
+            manifestor_lm = LM(reflection_lm, **{**(reflection_lm_kwargs or {}), "temperature": 0.0})
+        # The template family follows the task model (the prompt's consumer),
+        # not the reflection model. Adapter-backed systems can expose a common
+        # model-name attribute or pass template_model explicitly.
+        consumer_model = _template_consumer_model(task_lm, active_adapter, template_model)
+        resolved_family = infer_template_family(consumer_model) if template_family == "auto" else template_family
+        reflection_strategy = ThreeRoleReflectionLM(
+            base_lm=reflection_lm_callable,
+            level=reflection_level,
+            edit_tool_set=edit_tool_set,
+            component_kinds=component_kinds,
+            template_family=resolved_family,
+            reflection_prompt_template=reflection_prompt_template,
+            manifestor_lm=manifestor_lm,
+            proposer_model=reflection_lm if isinstance(reflection_lm, str) else None,
+        )
+        # Fail before any evaluation is spent: the roles address sections by
+        # name, so the seed must already be in the canonical section format.
+        # When the family was auto-inferred, name it and the way out -- the
+        # underlying error only knows the section names it expected.
+        try:
+            reflection_strategy.validate_candidate(seed_candidate)
+        except MalformedDocumentError as exc:
+            if template_family == "auto" and resolved_family != "generic":
+                raise MalformedDocumentError(
+                    f"The seed candidate does not parse under the {resolved_family!r} template family "
+                    f"auto-inferred from task_lm={task_lm!r}. Write the seed in that family's section format "
+                    "(see gepa.strategies.document_template.TEMPLATE_FAMILIES) or pass "
+                    "template_family='generic'."
+                ) from exc
+            raise
+
     if reflection_strategy is not None:
+        _validate_candidate = getattr(reflection_strategy, "validate_candidate", None)
+        if callable(_validate_candidate):
+            _validate_candidate(seed_candidate)
         _bind_rng = getattr(reflection_strategy, "bind_rng", None)
         if callable(_bind_rng):
             # Preserve #307's shared-stream semantics for ComBEE and any other
@@ -429,6 +600,9 @@ def optimize(
         _bind_lm_kwargs = getattr(reflection_strategy, "bind_lm_kwargs", None)
         if callable(_bind_lm_kwargs):
             _bind_lm_kwargs(reflection_lm_kwargs)
+        _run_contract = getattr(reflection_strategy, "run_contract", None)
+        if run_dir is not None and callable(_run_contract):
+            ensure_reflection_run_contract(run_dir, cast(dict[str, Any], _run_contract(seed_candidate)))
 
     reflective_proposer = ReflectiveMutationProposer(
         logger=logger,
@@ -446,7 +620,11 @@ def optimize(
         callbacks=callbacks,
         sampling_strategy=sampling_strategy,
         reflection_strategy=reflection_strategy,
+        action_selector=action_selector,
     )
+    # Seed the default reflection LM (and thus action selection) from the run
+    # RNG; injected strategies were already bound above.
+    reflective_proposer.bind_reflection_rng(rng)
 
     def evaluator_fn(
         inputs: list[DataInst], prog: dict[str, str]

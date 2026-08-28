@@ -474,18 +474,34 @@ def make_evaluator(
 
         Returns:
             Primary score and execution details used for reflection.
+
+        Raises:
+            ValueError: Candidate execution fails for a reason other than
+                DSPy's pinned output-field parser rejecting the task response.
+            RuntimeError: Candidate execution encounters a systemic task,
+                retrieval, or model-provider failure.
         """
-        _query, prediction, trace = run_program(
-            candidate,
-            example["question"],
-            program,
-            solver_model,
-            api_base,
-            retriever,
-            retrieval_k,
-            task_lm,
-            solver_lm_kwargs,
-        )
+        try:
+            _query, prediction, trace = run_program(
+                candidate,
+                example["question"],
+                program,
+                solver_model,
+                api_base,
+                retriever,
+                retrieval_k,
+                task_lm,
+                solver_lm_kwargs,
+            )
+        except ValueError as exc:
+            if not exc.args or not str(exc.args[0]).startswith("Failed to parse response as per signature"):
+                raise
+            return 0.0, {
+                "evaluation_error": {
+                    "type": "task_output_parse_error",
+                    "message": "Task-model output omitted DSPy's required structured fields; this example scored 0.",
+                }
+            }
 
         score, feedback = hotpotqa_metric(prediction, example["answer"])
         if program == "1stage":

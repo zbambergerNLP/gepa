@@ -25,6 +25,7 @@ from examples.common.experiment_models import (
     experiment_request_overrides,
 )
 from examples.common.wikipedia import WikipediaClient, WikipediaPassage
+from examples.hotpotqa import main as hotpot_main
 from examples.hotpotqa import utils as hotpot_utils
 from examples.hover import utils as hover_utils
 from examples.hover.main import make_evaluator as make_hover_evaluator
@@ -290,6 +291,45 @@ def test_hotpot_chat_adapter_repairs_only_expected_malformed_field_headers() -> 
     assert canonical == parsed
     with pytest.raises(ValueError, match="Expected"):
         adapter.parse(signature, "[[ ## reasoning ]]\nOnly reasoning.")
+
+
+def test_hotpot_evaluator_scores_only_dspy_task_parse_failures_as_zero(monkeypatch) -> None:
+    """Reject malformed candidate output without hiding systemic failures.
+
+    Args:
+        monkeypatch: Pytest fixture used to isolate task-program execution.
+    """
+    monkeypatch.setattr(hotpot_main, "build_hotpotqa_task_lm", Mock(return_value=object()))
+    evaluator = hotpot_main.make_evaluator(
+        QWEN3_8_27B_MODEL,
+        FakeRetriever({}),
+        program="2stage",
+    )
+    parse_error = ValueError(
+        "Failed to parse response as per signature from original completion with input and num present and expected"
+    )
+    monkeypatch.setattr(hotpot_main, "run_program", Mock(side_effect=parse_error))
+
+    score, side_info = evaluator(
+        {"summarize1": "candidate"},
+        {"question": "question", "answer": "answer"},
+    )
+
+    assert score == 0.0
+    assert side_info == {
+        "evaluation_error": {
+            "type": "task_output_parse_error",
+            "message": "Task-model output omitted DSPy's required structured fields; this example scored 0.",
+        }
+    }
+
+    for systemic_error in (ValueError("unrelated candidate bug"), RuntimeError("provider unavailable")):
+        monkeypatch.setattr(hotpot_main, "run_program", Mock(side_effect=systemic_error))
+        with pytest.raises(type(systemic_error), match=str(systemic_error)):
+            evaluator(
+                {"summarize1": "candidate"},
+                {"question": "question", "answer": "answer"},
+            )
 
 
 @pytest.mark.skipif(hotpot_utils.dspy is None, reason="HotPotQA's locked DSPy group is not installed")

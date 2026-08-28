@@ -317,6 +317,40 @@ def test_hotpotqa_merge_is_an_opt_in_axis_shared_by_every_condition() -> None:
     assert hotpotqa_run_key("vanilla", merge_args).startswith("merge-")
 
 
+@pytest.mark.parametrize(
+    ("config_builder", "contract_builder", "extra_args"),
+    [
+        (build_hotpotqa_config, build_hotpotqa_run_contract, {}),
+        (build_hover_config, build_hover_run_contract, {"final_retrieval_k": 10}),
+    ],
+)
+def test_every_condition_uses_the_same_within_run_example_concurrency(
+    config_builder,
+    contract_builder,
+    extra_args: dict,
+) -> None:
+    """Propagate one evaluator width through every comparable method.
+
+    Args:
+        config_builder: Benchmark-specific GEPA configuration builder.
+        contract_builder: Benchmark-specific persisted-contract builder.
+        extra_args: Benchmark-specific argument overrides.
+    """
+    args = _hotpot_args(max_workers=47, **extra_args)
+    reflection_kwargs = {
+        "num_retries": EXPERIMENT_NUM_RETRIES,
+        **experiment_decoding(args.reflection_model),
+    }
+
+    for condition in ("vanilla", "random", "action", "react_v2_random", "react_v2"):
+        config, _ = config_builder(condition, args, reflection_kwargs)
+        contract = contract_builder(condition, args)
+
+        assert config.engine.parallel is True
+        assert config.engine.max_workers == 47
+        assert contract["program"]["parallel_workers"] == 47
+
+
 def test_hotpot_and_hover_contracts_record_exact_model_pair() -> None:
     """Record the same experiment model and endpoint for both roles."""
     hotpot = build_hotpotqa_run_contract("react_v2", _hotpot_args())

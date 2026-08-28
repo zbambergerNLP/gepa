@@ -9,10 +9,12 @@
 # Prerequisites: POSIT repo, GEPA venv, HoVer release, and Wiki-2017 index
 # prepared on scratch by scripts/della/build_env.sh.
 #
-# Qwen3.8-27B run:
-#   sbatch --export=ALL,MODEL_PROFILE=qwen3.8-27b examples/hover/run_hover.sbatch
-# DeepSeek V4 Flash run:
-#   sbatch --export=ALL,MODEL_PROFILE=deepseek-v4-flash examples/hover/run_hover.sbatch
+# Qwen3.8-27B direct run (the laptop submit wrapper requests the full H200 node):
+#   sbatch --partition=ailab --gres=gpu:1 --cpus-per-task=8 --mem=128G \
+#       --export=ALL,MODEL_PROFILE=qwen3.8-27b examples/hover/run_hover.sbatch
+# DeepSeek V4 Flash direct run (no GPU is needed):
+#   sbatch --cpus-per-task=32 --mem=64G \
+#       --export=ALL,MODEL_PROFILE=deepseek-v4-flash examples/hover/run_hover.sbatch
 #
 # Scaled run (48h, like ifbench scaled):
 #   sbatch --time=48:00:00 --export=ALL,MAX_METRIC_CALLS=7051 examples/hover/run_hover.sbatch
@@ -26,9 +28,8 @@
 #SBATCH --job-name=gepa-hover
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=32
-#SBATCH --mem=64G
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=128G
 #SBATCH --time=24:00:00
 #SBATCH --output=gepa-hover-%j.log
 
@@ -56,8 +57,12 @@ EXPERIMENT_SEED="${EXPERIMENT_SEED:-0}"
 MAX_WORKERS="${MAX_WORKERS:-32}"
 RETRIEVAL_K="${RETRIEVAL_K:-7}"
 FINAL_RETRIEVAL_K="${FINAL_RETRIEVAL_K:-10}"
-GEN_GMU="${GEN_GMU:-0.90}"
+GEN_GMU="${GEN_GMU:-0.92}"
 GEN_MAX_LEN="${GEN_MAX_LEN:-32768}"
+VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-1}"
+VLLM_API_SERVER_COUNT="${VLLM_API_SERVER_COUNT:-${VLLM_DATA_PARALLEL_SIZE}}"
+VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-64}"
+VLLM_MAX_NUM_BATCHED_TOKENS="${VLLM_MAX_NUM_BATCHED_TOKENS:-16384}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-1800}"
 # POSIT repo location (for its vLLM install).
 POSIT_DIR="${POSIT_DIR:-/home/${USER}/posit}"
@@ -96,6 +101,7 @@ WIKI17_DIR="${WIKI17_DIR:-${SCRATCH_BASE}/.cache/gepa/wiki17}"
 HOVER_DATA_DIR="${HOVER_DATA_DIR:-${SCRATCH_BASE}/.cache/gepa/hover}"
 export XDG_CACHE_HOME="${SCRATCH_BASE}/.cache"
 export HF_HOME="${SCRATCH_BASE}/.cache/huggingface"
+export DSPY_CACHEDIR="${SCRATCH_BASE}/.cache/dspy"
 export VLLM_CACHE_ROOT="${SCRATCH_BASE}/.cache/vllm"
 export TORCHINDUCTOR_CACHE_DIR="${SCRATCH_BASE}/.cache/torchinductor"
 export TRITON_CACHE_DIR="${SCRATCH_BASE}/.cache/triton"
@@ -106,7 +112,7 @@ export VLLM_LOGGING_LEVEL=WARNING
 export VLLM_USE_FLASHINFER_SAMPLER=0
 
 LOG_DIR="${SCRATCH_BASE}/logs"
-mkdir -p "${XDG_CACHE_HOME}" "${HF_HOME}" "${VLLM_CACHE_ROOT}" \
+mkdir -p "${XDG_CACHE_HOME}" "${HF_HOME}" "${DSPY_CACHEDIR}" "${VLLM_CACHE_ROOT}" \
     "${TORCHINDUCTOR_CACHE_DIR}" "${TRITON_CACHE_DIR}" "${LOG_DIR}" "${HOVER_DATA_DIR}"
 
 # --- Verify both venvs exist ----------------------------------------------
@@ -138,7 +144,8 @@ fi
 
 if [[ "${LOCAL_SOLVER}" == "1" ]]; then
     GEN_LOG="${LOG_DIR}/gen-${SLURM_JOB_ID:-local}.log"
-    echo "==> serving solver ${SOLVER_MODEL_PATH} as ${SOLVER_SERVED_NAME} on :${GEN_PORT} (GPU 0, util ${GEN_GMU}); log: ${GEN_LOG}"
+    echo "==> serving solver ${SOLVER_MODEL_PATH} as ${SOLVER_SERVED_NAME} on :${GEN_PORT}; log: ${GEN_LOG}"
+    echo "==> vLLM: dp=${VLLM_DATA_PARALLEL_SIZE} api_servers=${VLLM_API_SERVER_COUNT} max_num_seqs=${VLLM_MAX_NUM_SEQS}/rank max_batched_tokens=${VLLM_MAX_NUM_BATCHED_TOKENS} util=${GEN_GMU}"
 
     export PATH="${POSIT_DIR}/src/.venv/bin:${PATH}"
     CUDA_TAG="$(${POSIT_DIR}/src/.venv/bin/python -c 'import torch; print(torch.version.cuda)' 2>/dev/null || echo 13.0)"
@@ -146,14 +153,56 @@ if [[ "${LOCAL_SOLVER}" == "1" ]]; then
     module load "cudatoolkit/${CUDA_TAG}" 2>/dev/null \
         || module load cudatoolkit/13.0 2>/dev/null || true
 
-    env CUDA_VISIBLE_DEVICES=0 "${VLLM_BIN}" serve "${SOLVER_MODEL_PATH}" \
+    for numeric_setting in \
+        "${VLLM_DATA_PARALLEL_SIZE}" \
+        "${VLLM_API_SERVER_COUNT}" \
+        "${VLLM_MAX_NUM_SEQS}" \
+        "${VLLM_MAX_NUM_BATCHED_TOKENS}"
+    do
+        if [[ ! "${numeric_setting}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "ERROR: vLLM concurrency settings must be positive integers" >&2
+            exit 1
+        fi
+    done
+    VISIBLE_GPU_COUNT="$(${POSIT_DIR}/src/.venv/bin/python -c 'import torch; print(torch.cuda.device_count())')"
+    if (( VISIBLE_GPU_COUNT < VLLM_DATA_PARALLEL_SIZE )); then
+        echo "ERROR: vLLM data parallel size ${VLLM_DATA_PARALLEL_SIZE} exceeds ${VISIBLE_GPU_COUNT} allocated GPU(s)" >&2
+        exit 1
+    fi
+    VLLM_HELP="$("${VLLM_BIN}" serve --help 2>&1)"
+    for required_option in \
+        --api-server-count \
+        --data-parallel-size \
+        --enable-prefix-caching \
+        --language-model-only \
+        --max-num-batched-tokens
+    do
+        if [[ "${VLLM_HELP}" != *"${required_option}"* ]]; then
+            echo "ERROR: ${VLLM_BIN} does not support ${required_option}; update the POSIT vLLM environment" >&2
+            exit 1
+        fi
+    done
+
+    env \
+        -u OMP_NUM_THREADS \
+        -u MKL_NUM_THREADS \
+        -u OPENBLAS_NUM_THREADS \
+        -u NUMEXPR_NUM_THREADS \
+        -u TOKENIZERS_PARALLELISM \
+        "${VLLM_BIN}" serve "${SOLVER_MODEL_PATH}" \
         --served-model-name "${SOLVER_SERVED_NAME}" \
         --reasoning-parser qwen3 \
         --host 0.0.0.0 \
         --port "${GEN_PORT}" \
+        --tensor-parallel-size 1 \
+        --data-parallel-size "${VLLM_DATA_PARALLEL_SIZE}" \
+        --api-server-count "${VLLM_API_SERVER_COUNT}" \
         --gpu-memory-utilization "${GEN_GMU}" \
         --max-model-len "${GEN_MAX_LEN}" \
-        --max-num-seqs 32 \
+        --max-num-seqs "${VLLM_MAX_NUM_SEQS}" \
+        --max-num-batched-tokens "${VLLM_MAX_NUM_BATCHED_TOKENS}" \
+        --enable-prefix-caching \
+        --language-model-only \
         > "${GEN_LOG}" 2>&1 &
     GEN_PID=$!
 
@@ -188,6 +237,13 @@ export OPENAI_API_KEY="${OPENAI_API_KEY:-EMPTY}"
 export DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-}"
 # Flush python output line-by-line so the SLURM log shows live progress.
 export PYTHONUNBUFFERED=1
+# The vLLM process is already running, so these limits apply only to the
+# evaluator and prevent its per-example threads from spawning nested CPU pools.
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
+export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
+export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"
+export NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-1}"
+export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 LIMIT_ARGS=()
 [[ -n "${TRAIN_LIMIT}" ]] && LIMIT_ARGS+=(--train-limit "${TRAIN_LIMIT}")
 [[ -n "${VAL_LIMIT}" ]] && LIMIT_ARGS+=(--val-limit "${VAL_LIMIT}")
@@ -203,7 +259,7 @@ echo "==> running GEPA HoVer experiment: condition=${CONDITION} program=${PROGRA
 echo "==> limits: train=${TRAIN_LIMIT:-full} val=${VAL_LIMIT:-full} test=${TEST_LIMIT:-full}"
 echo "==> solver=${SOLVER_MODEL} solver_api_base=${SOLVER_API_BASE:-provider-default}"
 echo "==> reflection=${REFLECTION_MODEL} reflection_api_base=${REFLECTION_API_BASE:-provider-default}"
-echo "==> retrieval=Wiki-2017/BM25 k=${RETRIEVAL_K}/${RETRIEVAL_K}/${FINAL_RETRIEVAL_K} workers=${MAX_WORKERS} root=${WIKI17_DIR}"
+echo "==> retrieval=Wiki-2017/BM25 k=${RETRIEVAL_K}/${RETRIEVAL_K}/${FINAL_RETRIEVAL_K} concurrent_examples=${MAX_WORKERS} root=${WIKI17_DIR}"
 
 "${PY}" -m examples.hover.main \
     --solver-model "${SOLVER_MODEL}" \

@@ -82,8 +82,8 @@ class Wiki17BM25Retriever:
             f"Run `python -m examples.common.wiki17_bm25 prepare --root {self.root}` on an Internet-enabled host."
         )
         self._initialize_lock = threading.Lock()
+        self._thread_local = threading.local()
         self._retriever: Any | None = None
-        self._stemmer: Any | None = None
         self._corpus: list[str] | None = None
         self._cache: Any | None = None
 
@@ -157,9 +157,13 @@ class Wiki17BM25Retriever:
             return [WikipediaPassage(title=title, text=text) for title, text in cached]
 
         assert self._retriever is not None
-        assert self._stemmer is not None
         assert self._corpus is not None
-        query_tokens = bm25s.tokenize(query, stopwords="en", stemmer=self._stemmer, show_progress=False)
+        stemmer = getattr(self._thread_local, "stemmer", None)
+        if stemmer is None:
+            assert Stemmer is not None
+            stemmer = Stemmer.Stemmer("english")
+            self._thread_local.stemmer = stemmer
+        query_tokens = bm25s.tokenize(query, stopwords="en", stemmer=stemmer, show_progress=False)
         results, scores = self._retriever.retrieve(
             query_tokens,
             k=limit,
@@ -206,7 +210,7 @@ class Wiki17BM25Retriever:
         }
 
     def _initialize(self) -> None:
-        """Load the verified index, corpus strings, stemmer, and query cache.
+        """Load the verified index, corpus strings, and query cache.
 
         Raises:
             Wiki17PreparationError: The prepared state is absent or invalid.
@@ -225,7 +229,6 @@ class Wiki17BM25Retriever:
                     f"{self.preparation_label} is not prepared under {self.root}. {self.preparation_hint}"
                 )
             retriever = bm25s.BM25.load(self.index_path)
-            stemmer = Stemmer.Stemmer("english")
             corpus = self._load_corpus()
             expected_document_count = getattr(self, "expected_document_count", WIKI17_DOCUMENT_COUNT)
             if len(corpus) != expected_document_count:
@@ -234,7 +237,6 @@ class Wiki17BM25Retriever:
                     f"found {len(corpus)} in {self.corpus_path}."
                 )
             self._retriever = retriever
-            self._stemmer = stemmer
             self._corpus = corpus
             self._cache = Cache(str(self.cache_path))
 

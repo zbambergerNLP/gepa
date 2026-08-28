@@ -1212,7 +1212,7 @@ def test_hover_sbatch_defaults_are_compatible_with_react_v2() -> None:
     assert 'MODEL_PROFILE="${MODEL_PROFILE:-qwen3.8-27b}"' in script
     assert 'MODEL="${MODEL:-Qwen3.8-27B}"' in script
     assert 'SOLVER_MODEL="hosted_vllm/Qwen/Qwen3.8-27B"' in script
-    assert "--cpus-per-task=32" in script
+    assert "#SBATCH --cpus-per-task=8" in script
     assert "export JAX_PLATFORMS=cpu" in script
     assert '--data-dir "${HOVER_DATA_DIR}"' in script
     assert '--wiki17-dir "${WIKI17_DIR}"' in script
@@ -1255,6 +1255,115 @@ def test_wikipedia_sbatch_exposes_both_homogeneous_model_profiles(benchmark: str
     assert 'export DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-}"' in script
 
 
+@pytest.mark.parametrize("benchmark", ["hotpotqa", "hover"])
+def test_wikipedia_della_submit_scales_resources_by_model_profile(benchmark: str) -> None:
+    """Request a full H200 node for Qwen and CPU-only capacity for DeepSeek.
+
+    Args:
+        benchmark: Wikipedia benchmark whose Della wrapper is inspected.
+    """
+    submit = (REPO_ROOT / "scripts" / "della" / f"submit_{benchmark}.sh").read_text()
+
+    assert 'DELLA_GPUS="${DELLA_GPUS:-}"' in submit
+    assert 'DELLA_CPUS_PER_TASK="${DELLA_CPUS_PER_TASK:-}"' in submit
+    assert 'DELLA_MEMORY="${DELLA_MEMORY:-}"' in submit
+    assert 'DELLA_GPUS="${DELLA_GPUS:-8}"' in submit
+    assert 'DELLA_CPUS_PER_TASK="${DELLA_CPUS_PER_TASK:-64}"' in submit
+    assert 'DELLA_MEMORY="${DELLA_MEMORY:-768G}"' in submit
+    assert 'JOB_PARTITION="${GPU_PARTITION}"' in submit
+    assert 'MAX_WORKERS="${MAX_WORKERS:-128}"' in submit
+    assert 'VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-${DELLA_GPUS}}"' in submit
+    assert 'VLLM_API_SERVER_COUNT="${VLLM_API_SERVER_COUNT:-${VLLM_DATA_PARALLEL_SIZE}}"' in submit
+    assert "DELLA_GPUS=0" in submit
+    assert 'DELLA_MEMORY="${DELLA_MEMORY:-128G}"' in submit
+    assert 'JOB_PARTITION="${CPU_PARTITION:-}"' in submit
+    assert 'MAX_WORKERS="${MAX_WORKERS:-64}"' in submit
+    assert "VLLM_DATA_PARALLEL_SIZE=1" in submit
+    assert "VLLM_API_SERVER_COUNT=1" in submit
+    assert '"--cpus-per-task=${DELLA_CPUS_PER_TASK}"' in submit
+    assert '"--mem=${DELLA_MEMORY}"' in submit
+    assert 'if [[ -n "${JOB_PARTITION}" ]]; then' in submit
+    assert 'SBATCH_RESOURCE_ARGS+=("--partition=${JOB_PARTITION}")' in submit
+    assert "if (( DELLA_GPUS > 0 )); then" in submit
+    assert 'SBATCH_RESOURCE_ARGS+=("--gres=gpu:${DELLA_GPUS}")' in submit
+    assert "sbatch${SBATCH_RESOURCE_COMMAND}" in submit
+
+
+@pytest.mark.parametrize("benchmark", ["hotpotqa", "hover"])
+def test_wikipedia_sbatch_configures_within_run_vllm_throughput(benchmark: str) -> None:
+    """Batch independent examples across data-parallel Qwen replicas.
+
+    Args:
+        benchmark: Wikipedia benchmark whose batch script is inspected.
+    """
+    script = (REPO_ROOT / "examples" / benchmark / f"run_{benchmark}.sbatch").read_text()
+
+    assert "#SBATCH --cpus-per-task=8" in script
+    assert "#SBATCH --mem=128G" in script
+    assert "#SBATCH --gres" not in script
+    assert 'VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-1}"' in script
+    assert (
+        'VLLM_API_SERVER_COUNT="${VLLM_API_SERVER_COUNT:-${VLLM_DATA_PARALLEL_SIZE}}"'
+        in script
+    )
+    assert 'VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-64}"' in script
+    assert 'VLLM_MAX_NUM_BATCHED_TOKENS="${VLLM_MAX_NUM_BATCHED_TOKENS:-16384}"' in script
+    assert "--tensor-parallel-size 1" in script
+    assert '--data-parallel-size "${VLLM_DATA_PARALLEL_SIZE}"' in script
+    assert '--api-server-count "${VLLM_API_SERVER_COUNT}"' in script
+    assert '--max-num-seqs "${VLLM_MAX_NUM_SEQS}"' in script
+    assert '--max-num-batched-tokens "${VLLM_MAX_NUM_BATCHED_TOKENS}"' in script
+    assert "--enable-prefix-caching" in script
+    assert "--language-model-only" in script
+
+
+@pytest.mark.parametrize("benchmark", ["hotpotqa", "hover"])
+def test_wikipedia_sbatch_limits_nested_cpu_threads_after_vllm_starts(benchmark: str) -> None:
+    """Apply CPU thread caps to evaluators without throttling the vLLM server.
+
+    Args:
+        benchmark: Wikipedia benchmark whose batch script is inspected.
+    """
+    script = (REPO_ROOT / "examples" / benchmark / f"run_{benchmark}.sbatch").read_text()
+    vllm_start = script.index('"${VLLM_BIN}" serve "${SOLVER_MODEL_PATH}"')
+    evaluator_start = script.index(f'"${{PY}}" -m examples.{benchmark}.main')
+
+    for variable, default in (
+        ("OMP_NUM_THREADS", "1"),
+        ("MKL_NUM_THREADS", "1"),
+        ("OPENBLAS_NUM_THREADS", "1"),
+        ("NUMEXPR_NUM_THREADS", "1"),
+        ("TOKENIZERS_PARALLELISM", "false"),
+    ):
+        export = f'export {variable}="${{{variable}:-{default}}}"'
+        assert f"-u {variable}" in script[vllm_start - 300 : vllm_start]
+        assert script.count(export) == 1
+        assert vllm_start < script.index(export) < evaluator_start
+
+
+@pytest.mark.parametrize(
+    "script_path",
+    [
+        "scripts/della/submit_hotpotqa.sh",
+        "scripts/della/submit_hover.sh",
+        "examples/hotpotqa/run_hotpotqa.sbatch",
+        "examples/hover/run_hover.sbatch",
+    ],
+)
+def test_wikipedia_della_launch_scripts_have_valid_bash_syntax(script_path: str) -> None:
+    """Parse every Wikipedia Della launcher with Bash.
+
+    Args:
+        script_path: Repository-relative launcher path.
+    """
+    subprocess.run(
+        ["bash", "-n", str(REPO_ROOT / script_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
 def test_hotpotqa_della_submit_preserves_homogeneous_model_pairs() -> None:
     """Expose homogeneous model profiles and the eight-arm merge-off matrix."""
     submit = (REPO_ROOT / "scripts" / "della" / "submit_hotpotqa.sh").read_text()
@@ -1266,7 +1375,7 @@ def test_hotpotqa_della_submit_preserves_homogeneous_model_pairs() -> None:
     assert 'MAX_METRIC_CALLS="${MAX_METRIC_CALLS:-6871}"' in submit
     assert 'CONDITION="${CONDITION:-all}"' in submit
     assert 'MERGE="${MERGE:-0}"' in submit
-    assert 'MAX_WORKERS="${MAX_WORKERS:-32}"' in submit
+    assert 'MAX_WORKERS="${MAX_WORKERS:-}"' in submit
     assert 'RETRIEVAL_K="${RETRIEVAL_K:-7}"' in submit
     assert 'MODEL="${MODEL:-Qwen3.8-27B}"' in submit
     assert 'SOLVER_MODEL="hosted_vllm/Qwen/Qwen3.8-27B"' in submit
@@ -1274,7 +1383,7 @@ def test_hotpotqa_della_submit_preserves_homogeneous_model_pairs() -> None:
     assert 'REFLECTION_MODEL="${SOLVER_MODEL}"' in submit
     assert "DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}" in submit
     assert "MERGE=${MERGE}" in submit
-    assert "--cpus-per-task=32" in sbatch
+    assert "#SBATCH --cpus-per-task=8" in sbatch
     assert '--wiki17-dir "${WIKI17_DIR}"' in sbatch
     assert '--max-workers "${MAX_WORKERS}"' in sbatch
     assert '--seed "${EXPERIMENT_SEED}"' in sbatch
@@ -1295,7 +1404,7 @@ def test_hover_della_submit_preserves_artifact_methodology() -> None:
 
     assert 'MAX_METRIC_CALLS="${MAX_METRIC_CALLS:-7051}"' in submit
     assert 'EXPERIMENT_SEED="${EXPERIMENT_SEED:-0}"' in submit
-    assert 'MAX_WORKERS="${MAX_WORKERS:-32}"' in submit
+    assert 'MAX_WORKERS="${MAX_WORKERS:-}"' in submit
     assert 'RETRIEVAL_K="${RETRIEVAL_K:-7}"' in submit
     assert 'FINAL_RETRIEVAL_K="${FINAL_RETRIEVAL_K:-10}"' in submit
     assert 'MODEL="${MODEL:-Qwen3.8-27B}"' in submit

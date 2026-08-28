@@ -2,6 +2,8 @@
 
 import json
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -210,6 +212,103 @@ def test_search_preserves_artifact_order_dedup_threads_and_cache(monkeypatch, tm
         ("two hop question", 3),
         [("Alpha", "first abstract"), ("Beta", "second abstract")],
     )
+
+
+def test_search_uses_one_stemmer_per_concurrent_evaluator_thread(monkeypatch, tmp_path) -> None:
+    """Give each evaluator thread one private, reusable PyStemmer instance.
+
+    Args:
+        monkeypatch: Pytest fixture used to replace optional dependencies.
+        tmp_path: Pytest directory used for isolated prepared state.
+    """
+    dependencies = install_fake_dependencies(monkeypatch)
+    corpus_rows = [{"title": "Alpha", "text": ["first abstract"]}]
+    corpus_text = "".join(json.dumps(row) + "\n" for row in corpus_rows)
+    retriever = wiki17_bm25.Wiki17BM25Retriever(tmp_path)
+    retriever.corpus_path.write_text(corpus_text, encoding="utf-8")
+    retriever.index_path.mkdir()
+    (retriever.index_path / "index.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(wiki17_bm25, "WIKI17_CORPUS_SIZE", retriever.corpus_path.stat().st_size)
+    monkeypatch.setattr(wiki17_bm25, "WIKI17_DOCUMENT_COUNT", len(corpus_rows))
+    retriever.manifest_path.write_text(json.dumps(retriever._expected_manifest()), encoding="utf-8")
+
+    index = Mock()
+    index.retrieve.return_value = ([[0]], [[1.0]])
+    dependencies.bm25_factory.load.return_value = index
+    cache = Mock()
+    cache.get.return_value = None
+    dependencies.cache_factory.return_value = cache
+
+    worker_count = 4
+    tokenize_barrier = threading.Barrier(worker_count)
+    observation_lock = threading.Lock()
+    stemmers_by_thread: dict[int, list[object]] = {}
+
+    def make_stemmer(language: str) -> object:
+        """Create a distinguishable fake stemmer for one evaluator thread.
+
+        Args:
+            language: Stemmer language requested by the retriever.
+
+        Returns:
+            A unique object representing the new stemmer instance.
+        """
+        assert language == "english"
+        return object()
+
+    def tokenize_query(
+        query: str,
+        *,
+        stopwords: str,
+        stemmer: object,
+        show_progress: bool,
+    ) -> str:
+        """Record the calling thread and synchronize concurrent tokenization.
+
+        Args:
+            query: Query text supplied by the evaluator thread.
+            stopwords: Stopword set selected by the retriever.
+            stemmer: Thread-local fake stemmer used for this query.
+            show_progress: Whether BM25S progress output is enabled.
+
+        Returns:
+            The query text as a lightweight fake token sequence.
+        """
+        assert stopwords == "en"
+        assert show_progress is False
+        thread_id = threading.get_ident()
+        with observation_lock:
+            stemmers_by_thread.setdefault(thread_id, []).append(stemmer)
+        tokenize_barrier.wait(timeout=5)
+        return query
+
+    def search_twice(worker_id: int) -> tuple[list[wiki17_bm25.WikipediaPassage], ...]:
+        """Run two uncached searches from the same evaluator thread.
+
+        Args:
+            worker_id: Identifier used to make both cache keys unique.
+
+        Returns:
+            Both ranked passage lists returned to the evaluator.
+        """
+        first = retriever.search(f"question {worker_id} first", 1)
+        second = retriever.search(f"question {worker_id} second", 1)
+        return first, second
+
+    dependencies.stemmer_factory.side_effect = make_stemmer
+    dependencies.tokenize.side_effect = tokenize_query
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        search_results = list(executor.map(search_twice, range(worker_count)))
+
+    expected = [("Alpha", "first abstract")]
+    for worker_results in search_results:
+        for passages in worker_results:
+            assert [(passage.title, passage.text) for passage in passages] == expected
+    assert len(stemmers_by_thread) == worker_count
+    assert dependencies.stemmer_factory.call_count == worker_count
+    assert len({id(stemmers[0]) for stemmers in stemmers_by_thread.values()}) == worker_count
+    assert all(len(stemmers) == 2 and stemmers[0] is stemmers[1] for stemmers in stemmers_by_thread.values())
+    assert index.retrieve.call_count == worker_count * 2
 
 
 def test_prepared_state_requires_exact_manifest_index_and_corpus_size(monkeypatch, tmp_path) -> None:

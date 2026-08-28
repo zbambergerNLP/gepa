@@ -8,20 +8,22 @@
 #   1. POSIT repo built on della at /home/${USER}/posit (with vLLM in its venv)
 #   2. GEPA repo synced and venv built via scripts/della/build_env.sh
 #
-# Qwen3.8-27B four-condition run:
-#   sbatch --export=ALL,MODEL_PROFILE=qwen3.8-27b examples/hotpotqa/run_hotpotqa.sbatch
-# DeepSeek V4 Flash four-condition run:
-#   sbatch --export=ALL,MODEL_PROFILE=deepseek-v4-flash examples/hotpotqa/run_hotpotqa.sbatch
+# Qwen3.8-27B direct run (the laptop submit wrapper requests the full H200 node):
+#   sbatch --partition=ailab --gres=gpu:1 --cpus-per-task=8 --mem=128G \
+#       --export=ALL,MODEL_PROFILE=qwen3.8-27b examples/hotpotqa/run_hotpotqa.sbatch
+# DeepSeek V4 Flash direct run (no GPU is needed):
+#   sbatch --cpus-per-task=32 --mem=64G \
+#       --export=ALL,MODEL_PROFILE=deepseek-v4-flash examples/hotpotqa/run_hotpotqa.sbatch
 #
-# The default run uses the paper's 6,871-call budget, two-hop program, seven
-# documents per hop, seed 0, 32 evaluator workers, and merge disabled.
+# The direct-run defaults use the paper's 6,871-call budget, two-hop program,
+# seven documents per hop, seed 0, 32 evaluator workers, and merge disabled.
+# The submit wrapper raises within-run concurrency to match its Della profile.
 
 #SBATCH --job-name=gepa-hotpotqa
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=32
-#SBATCH --mem=64G
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=128G
 #SBATCH --time=24:00:00
 #SBATCH --output=gepa-hotpotqa-%j.log
 
@@ -44,8 +46,12 @@ SEED_STYLE="${SEED_STYLE:-structured}"
 EXPERIMENT_SEED="${EXPERIMENT_SEED:-0}"
 MAX_WORKERS="${MAX_WORKERS:-32}"
 RETRIEVAL_K="${RETRIEVAL_K:-7}"
-GEN_GMU="${GEN_GMU:-0.90}"
+GEN_GMU="${GEN_GMU:-0.92}"
 GEN_MAX_LEN="${GEN_MAX_LEN:-32768}"
+VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-1}"
+VLLM_API_SERVER_COUNT="${VLLM_API_SERVER_COUNT:-${VLLM_DATA_PARALLEL_SIZE}}"
+VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-64}"
+VLLM_MAX_NUM_BATCHED_TOKENS="${VLLM_MAX_NUM_BATCHED_TOKENS:-16384}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-1800}"
 # POSIT repo location (for its vLLM install).
 POSIT_DIR="${POSIT_DIR:-/home/${USER}/posit}"
@@ -114,7 +120,8 @@ fi
 
 if [[ "${LOCAL_SOLVER}" == "1" ]]; then
     GEN_LOG="${LOG_DIR}/gen-${SLURM_JOB_ID:-local}.log"
-    echo "==> serving solver ${SOLVER_MODEL_PATH} as ${SOLVER_SERVED_NAME} on :${GEN_PORT} (GPU 0, util ${GEN_GMU}); log: ${GEN_LOG}"
+    echo "==> serving solver ${SOLVER_MODEL_PATH} as ${SOLVER_SERVED_NAME} on :${GEN_PORT}; log: ${GEN_LOG}"
+    echo "==> vLLM: dp=${VLLM_DATA_PARALLEL_SIZE} api_servers=${VLLM_API_SERVER_COUNT} max_num_seqs=${VLLM_MAX_NUM_SEQS}/rank max_batched_tokens=${VLLM_MAX_NUM_BATCHED_TOKENS} util=${GEN_GMU}"
 
     export PATH="${POSIT_DIR}/src/.venv/bin:${PATH}"
     CUDA_TAG="$(${POSIT_DIR}/src/.venv/bin/python -c 'import torch; print(torch.version.cuda)' 2>/dev/null || echo 13.0)"
@@ -122,14 +129,56 @@ if [[ "${LOCAL_SOLVER}" == "1" ]]; then
     module load "cudatoolkit/${CUDA_TAG}" 2>/dev/null \
         || module load cudatoolkit/13.0 2>/dev/null || true
 
-    env CUDA_VISIBLE_DEVICES=0 "${VLLM_BIN}" serve "${SOLVER_MODEL_PATH}" \
+    for numeric_setting in \
+        "${VLLM_DATA_PARALLEL_SIZE}" \
+        "${VLLM_API_SERVER_COUNT}" \
+        "${VLLM_MAX_NUM_SEQS}" \
+        "${VLLM_MAX_NUM_BATCHED_TOKENS}"
+    do
+        if [[ ! "${numeric_setting}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "ERROR: vLLM concurrency settings must be positive integers" >&2
+            exit 1
+        fi
+    done
+    VISIBLE_GPU_COUNT="$(${POSIT_DIR}/src/.venv/bin/python -c 'import torch; print(torch.cuda.device_count())')"
+    if (( VISIBLE_GPU_COUNT < VLLM_DATA_PARALLEL_SIZE )); then
+        echo "ERROR: vLLM data parallel size ${VLLM_DATA_PARALLEL_SIZE} exceeds ${VISIBLE_GPU_COUNT} allocated GPU(s)" >&2
+        exit 1
+    fi
+    VLLM_HELP="$("${VLLM_BIN}" serve --help 2>&1)"
+    for required_option in \
+        --api-server-count \
+        --data-parallel-size \
+        --enable-prefix-caching \
+        --language-model-only \
+        --max-num-batched-tokens
+    do
+        if [[ "${VLLM_HELP}" != *"${required_option}"* ]]; then
+            echo "ERROR: ${VLLM_BIN} does not support ${required_option}; update the POSIT vLLM environment" >&2
+            exit 1
+        fi
+    done
+
+    env \
+        -u OMP_NUM_THREADS \
+        -u MKL_NUM_THREADS \
+        -u OPENBLAS_NUM_THREADS \
+        -u NUMEXPR_NUM_THREADS \
+        -u TOKENIZERS_PARALLELISM \
+        "${VLLM_BIN}" serve "${SOLVER_MODEL_PATH}" \
         --served-model-name "${SOLVER_SERVED_NAME}" \
         --reasoning-parser qwen3 \
         --host 0.0.0.0 \
         --port "${GEN_PORT}" \
+        --tensor-parallel-size 1 \
+        --data-parallel-size "${VLLM_DATA_PARALLEL_SIZE}" \
+        --api-server-count "${VLLM_API_SERVER_COUNT}" \
         --gpu-memory-utilization "${GEN_GMU}" \
         --max-model-len "${GEN_MAX_LEN}" \
-        --max-num-seqs 16 \
+        --max-num-seqs "${VLLM_MAX_NUM_SEQS}" \
+        --max-num-batched-tokens "${VLLM_MAX_NUM_BATCHED_TOKENS}" \
+        --enable-prefix-caching \
+        --language-model-only \
         > "${GEN_LOG}" 2>&1 &
     GEN_PID=$!
 
@@ -162,6 +211,14 @@ if [[ "${MODEL_PROFILE}" == "deepseek-v4-flash" && -z "${DEEPSEEK_API_KEY:-}" ]]
 fi
 export OPENAI_API_KEY="${OPENAI_API_KEY:-EMPTY}"
 export DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-}"
+export PYTHONUNBUFFERED=1
+# The vLLM process is already running, so these limits apply only to the
+# evaluator and prevent its per-example threads from spawning nested CPU pools.
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
+export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
+export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"
+export NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-1}"
+export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 DATA_PATH_ARG=()
 [[ -n "${DATA_PATH}" ]] && DATA_PATH_ARG=(--data-path "${DATA_PATH}")
 SOLVER_API_ARG=()
@@ -181,7 +238,7 @@ esac
 echo "==> running GEPA experiment: condition=${CONDITION} merge=${MERGE} max_metric_calls=${MAX_METRIC_CALLS} seed=${EXPERIMENT_SEED}"
 echo "==> solver=${SOLVER_MODEL} solver_api_base=${SOLVER_API_BASE:-provider-default}"
 echo "==> reflection=${REFLECTION_MODEL} reflection_api_base=${REFLECTION_API_BASE:-provider-default}"
-echo "==> retrieval=Wiki-2017/BM25 k=${RETRIEVAL_K} workers=${MAX_WORKERS} root=${WIKI17_DIR}"
+echo "==> retrieval=Wiki-2017/BM25 k=${RETRIEVAL_K} concurrent_examples=${MAX_WORKERS} root=${WIKI17_DIR}"
 
 "${PY}" -m examples.hotpotqa.main \
     --solver-model "${SOLVER_MODEL}" \

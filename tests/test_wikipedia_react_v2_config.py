@@ -557,15 +557,21 @@ def test_hotpot_technical_runtime_profile_bounds_deepseek_without_changing_its_r
         reflection_api_base=None,
     )
 
-    contract = build_hotpotqa_run_contract("react_v2", args)
     runtime_model = DEEPSEEK_V4_FLASH_0731_OPENROUTER_MODEL
+    reflection_kwargs = resolve_hotpotqa_lm_kwargs(runtime_model, None, "technical-smoke")
+    contract = build_hotpotqa_run_contract("react_v2", args)
+    config, _ = build_hotpotqa_config("react_v2", args, reflection_kwargs)
+    strategy = config.reflection.reflection_strategy
     expected_request = experiment_request_overrides(runtime_model)["extra_body"]
     solver_request = contract["models"]["solver_request_overrides"]["extra_body"]
 
-    assert contract["models"]["solver_decoding"]["max_tokens"] == 8192
-    assert contract["models"]["reflection_decoding"]["max_tokens"] == 8192
+    assert contract["models"]["solver_decoding"]["max_tokens"] == 16_384
+    assert contract["models"]["reflection_decoding"]["max_tokens"] == 16_384
     assert solver_request["provider"] == expected_request["provider"]
     assert solver_request["reasoning"] == {"effort": "low"}
+    assert strategy is not None
+    assert strategy.base_lm.completion_kwargs["max_tokens"] == 16_384
+    assert strategy.manifestor_lm.completion_kwargs["max_tokens"] == 16_384
 
 
 @pytest.mark.parametrize(

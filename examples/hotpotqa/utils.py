@@ -39,7 +39,7 @@ HOTPOTQA_DSPY_VERSION = "2.6.23"
 HOTPOTQA_DSPY_COMMIT = "62dc3b634d7dc0c4889abcf905cb4c391ea6b396"
 HOTPOTQA_RUNTIME_PROFILES = ("scientific", "technical-smoke")
 HOTPOTQA_TECHNICAL_SMOKE_QWEN_MAX_TOKENS = 16_384
-HOTPOTQA_TECHNICAL_SMOKE_DEEPSEEK_MAX_TOKENS = 8192
+HOTPOTQA_TECHNICAL_SMOKE_DEEPSEEK_MAX_TOKENS = 16_384
 HOTPOTQA_TECHNICAL_SMOKE_REASONING_EFFORT = "low"
 
 
@@ -153,9 +153,9 @@ def resolve_hotpotqa_lm_kwargs(
 
     The scientific profile preserves the shared experiment configuration. The
     technical-smoke profile uses low reasoning for both OpenRouter experiment
-    models. DeepSeek's output is capped at 8192 tokens; Qwen retains the 16K
-    space its native ReAct tool path needs. Provider pins, fallback policies,
-    and every scientific setting remain unchanged.
+    models. Both models retain the 16K space needed for the level-2 Controller
+    distribution and ReAct tool path. Provider pins, fallback policies, and
+    every scientific setting remain unchanged.
 
     Args:
         model: Exact LiteLLM runtime model identifier.

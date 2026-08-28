@@ -81,11 +81,26 @@ gskill = [
     "pyyaml",
 ]
 
+wiki17 = [
+    "bm25s==0.2.12; python_version < '3.14'",
+    "PyStemmer==2.2.0.3; python_version < '3.14'",
+    "diskcache; python_version < '3.14'",
+    "jax[cpu]==0.6.0; python_version < '3.14'",
+]
+
 langchain = [
     "langchain>=1.0",
     "langchain-core>=1.0",
     "tqdm>=4.66",
 ]
+
+[dependency-groups]
+hotpotqa-task-program = [
+    "dspy==2.6.23",
+]
+
+[tool.uv.sources]
+dspy = { git = "https://github.com/gepa-ai/dspy.git", rev = "62dc3b634d7dc0c4889abcf905cb4c391ea6b396" }
 
 [project.urls]
 "Homepage" = "https://github.com/gepa-ai/gepa"

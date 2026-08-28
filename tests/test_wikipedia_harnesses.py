@@ -503,8 +503,8 @@ def test_hotpot_dspy_lm_accepts_the_resolved_technical_smoke_profile(monkeypatch
 
     hotpot_utils.build_hotpotqa_task_lm(model, None, lm_kwargs)
 
-    assert lm_kwargs["max_tokens"] == 8192
-    assert lm_kwargs["extra_body"]["reasoning"] == {"effort": "none"}
+    assert lm_kwargs["max_tokens"] == 16_384
+    assert lm_kwargs["extra_body"]["reasoning"] == {"effort": "low"}
     lm_constructor.assert_called_once_with(model=model, **lm_kwargs)
 
 

@@ -38,9 +38,9 @@ FINAL_RESPONSE_MARKER = "Final Response:"
 HOTPOTQA_DSPY_VERSION = "2.6.23"
 HOTPOTQA_DSPY_COMMIT = "62dc3b634d7dc0c4889abcf905cb4c391ea6b396"
 HOTPOTQA_RUNTIME_PROFILES = ("scientific", "technical-smoke")
-HOTPOTQA_TECHNICAL_SMOKE_MAX_TOKENS = 8192
-HOTPOTQA_TECHNICAL_SMOKE_QWEN_REASONING_EFFORT = "none"
-HOTPOTQA_TECHNICAL_SMOKE_DEEPSEEK_REASONING_EFFORT = "low"
+HOTPOTQA_TECHNICAL_SMOKE_QWEN_MAX_TOKENS = 16_384
+HOTPOTQA_TECHNICAL_SMOKE_DEEPSEEK_MAX_TOKENS = 8192
+HOTPOTQA_TECHNICAL_SMOKE_REASONING_EFFORT = "low"
 
 
 if dspy is not None:
@@ -152,10 +152,10 @@ def resolve_hotpotqa_lm_kwargs(
     """Resolve HotPotQA request settings for one runtime profile.
 
     The scientific profile preserves the shared experiment configuration. The
-    technical-smoke profile bounds both OpenRouter experiment models' output
-    tokens. It disables Qwen's optional hidden reasoning and uses DeepSeek's
-    low effort so local integration runs finish promptly. Provider pins and
-    fallback policies remain unchanged.
+    technical-smoke profile uses low reasoning for both OpenRouter experiment
+    models. DeepSeek's output is capped at 8192 tokens; Qwen retains the 16K
+    space its native ReAct tool path needs. Provider pins, fallback policies,
+    and every scientific setting remain unchanged.
 
     Args:
         model: Exact LiteLLM runtime model identifier.
@@ -182,13 +182,12 @@ def resolve_hotpotqa_lm_kwargs(
         DEEPSEEK_V4_FLASH_0731_OPENROUTER_MODEL,
     }
     if runtime_profile == "technical-smoke" and model in technical_smoke_models:
-        kwargs["max_tokens"] = HOTPOTQA_TECHNICAL_SMOKE_MAX_TOKENS
         if model == QWEN3_8_27B_OPENROUTER_MODEL:
-            reasoning_effort = HOTPOTQA_TECHNICAL_SMOKE_QWEN_REASONING_EFFORT
+            kwargs["max_tokens"] = HOTPOTQA_TECHNICAL_SMOKE_QWEN_MAX_TOKENS
         else:
-            reasoning_effort = HOTPOTQA_TECHNICAL_SMOKE_DEEPSEEK_REASONING_EFFORT
+            kwargs["max_tokens"] = HOTPOTQA_TECHNICAL_SMOKE_DEEPSEEK_MAX_TOKENS
         extra_body = deepcopy(kwargs["extra_body"])
-        extra_body["reasoning"] = {"effort": reasoning_effort}
+        extra_body["reasoning"] = {"effort": HOTPOTQA_TECHNICAL_SMOKE_REASONING_EFFORT}
         kwargs["extra_body"] = extra_body
     if api_base is not None:
         kwargs["api_base"] = api_base

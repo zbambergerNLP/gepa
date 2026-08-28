@@ -512,17 +512,17 @@ def test_hotpot_technical_runtime_profile_bounds_qwen_without_changing_its_route
     strategy = config.reflection.reflection_strategy
 
     assert contract["models"]["runtime_profile"] == "technical-smoke"
-    assert contract["models"]["solver_decoding"]["max_tokens"] == 8192
-    assert contract["models"]["reflection_decoding"]["max_tokens"] == 8192
+    assert contract["models"]["solver_decoding"]["max_tokens"] == 16_384
+    assert contract["models"]["reflection_decoding"]["max_tokens"] == 16_384
     expected_request = experiment_request_overrides(runtime_model)["extra_body"]
     solver_request = contract["models"]["solver_request_overrides"]["extra_body"]
     assert solver_request["provider"] == expected_request["provider"]
-    assert solver_request["reasoning"] == {"effort": "none"}
+    assert solver_request["reasoning"] == {"effort": "low"}
     assert config.reflection.skip_perfect_score is False
     assert strategy is not None
-    assert strategy.base_lm.completion_kwargs["max_tokens"] == 8192
-    assert strategy.base_lm.completion_kwargs["extra_body"]["reasoning"] == {"effort": "none"}
-    assert strategy.manifestor_lm.completion_kwargs["max_tokens"] == 8192
+    assert strategy.base_lm.completion_kwargs["max_tokens"] == 16_384
+    assert strategy.base_lm.completion_kwargs["extra_body"]["reasoning"] == {"effort": "low"}
+    assert strategy.manifestor_lm.completion_kwargs["max_tokens"] == 16_384
 
     scientific_args = _hotpot_args(
         api_profile="openrouter",

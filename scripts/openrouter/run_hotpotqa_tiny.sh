@@ -168,10 +168,10 @@ if ! jq -e '
     any(
         .data[];
         .id == "qwen/qwen3.8-27b"
-        and .reasoning.mandatory == false
+        and ((.reasoning.supported_efforts // []) | index("low")) != null
     )
 ' >/dev/null <<<"$model_catalog"; then
-    echo "Qwen3.8-27B no longer permits disabling hidden reasoning for the technical smoke run." >&2
+    echo "Qwen3.8-27B no longer exposes low reasoning for the technical smoke run." >&2
     exit 1
 fi
 
@@ -189,7 +189,7 @@ if ! jq -e '
     echo "DeepSeek's V4 Flash 0731 endpoint is missing, unhealthy, incompatible, or above the pinned price." >&2
     exit 1
 fi
-echo "OpenRouter endpoint preflight: AkashML BF16, Qwen optional reasoning, and official DeepSeek verified"
+echo "OpenRouter endpoint preflight: AkashML BF16, Qwen low reasoning, and official DeepSeek verified"
 
 if ! key_json="$(
     curl -fsS --config - <<CURL_CONFIG

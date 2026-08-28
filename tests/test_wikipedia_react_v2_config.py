@@ -53,6 +53,7 @@ from gepa.strategies.intervention import (
     SEMANTIC_ACTION_CATALOGS,
     SEMANTIC_ACTIONS,
     STATELESS_ACTION_MENU_VERSION,
+    UNIFORM_RANDOM_CONTROLLER_POLICY_CONTRACT,
     StatelessActionConstraint,
 )
 
@@ -303,7 +304,7 @@ def test_hotpotqa_merge_is_an_opt_in_axis_shared_by_every_condition() -> None:
         "max_merge_invocations": 5,
         "merge_val_overlap_floor": 5,
     }
-    for condition in ("vanilla", "random", "action", "react_v2"):
+    for condition in ("vanilla", "random", "action", "react_v2_random", "react_v2"):
         contract = build_hotpotqa_run_contract(condition, merge_args)
         config, _ = build_hotpotqa_config(condition, merge_args, {})
 
@@ -714,6 +715,77 @@ def test_hover_vanilla_and_react_v2_isolate_only_the_proposal_strategy() -> None
         react["optimizer"].pop(field)
 
     assert vanilla == react
+
+
+@pytest.mark.parametrize(
+    ("contract_builder", "config_builder", "args"),
+    [
+        pytest.param(
+            build_hotpotqa_run_contract,
+            build_hotpotqa_config,
+            _hotpot_args(),
+            id="hotpotqa",
+        ),
+        pytest.param(
+            build_hover_run_contract,
+            build_hover_config,
+            _hotpot_args(final_retrieval_k=10),
+            id="hover",
+        ),
+    ],
+)
+def test_random_controller_react_v2_changes_only_controller_selection(
+    contract_builder,
+    config_builder,
+    args: SimpleNamespace,
+) -> None:
+    """Keep the three-role treatment fixed while replacing Controller ranking.
+
+    Args:
+        contract_builder: Benchmark run-contract factory under test.
+        config_builder: Benchmark optimizer-configuration factory under test.
+        args: Complete benchmark argument namespace.
+    """
+    verbalized_contract = deepcopy(contract_builder("react_v2", args))
+    random_contract = deepcopy(contract_builder("react_v2_random", args))
+    verbalized_config, verbalized_selector = config_builder("react_v2", args, {})
+    random_config, random_selector = config_builder("react_v2_random", args, {})
+    verbalized_strategy = verbalized_config.reflection.reflection_strategy
+    random_strategy = random_config.reflection.reflection_strategy
+
+    assert verbalized_selector is None
+    assert random_selector is None
+    assert verbalized_config.reflection.action_selector is None
+    assert random_config.reflection.action_selector is None
+    assert verbalized_strategy is not None
+    assert random_strategy is not None
+    assert verbalized_strategy.controller_selection == "verbalized"
+    assert random_strategy.controller_selection == "uniform_random"
+    assert verbalized_strategy.level == random_strategy.level == 2
+    assert verbalized_strategy.edit_tool_set == random_strategy.edit_tool_set == "broad"
+    assert verbalized_strategy.component_kinds == random_strategy.component_kinds
+    assert verbalized_strategy.template_family == random_strategy.template_family
+    assert verbalized_strategy.rng.getstate() == random_strategy.rng.getstate() == random.Random(args.seed).getstate()
+    assert verbalized_contract["optimizer"]["semantic_controller_policy"] == CONTROLLER_POLICY_CONTRACT
+    assert (
+        random_contract["optimizer"]["semantic_controller_policy"]
+        == UNIFORM_RANDOM_CONTROLLER_POLICY_CONTRACT
+    )
+    assert random_contract["optimizer"]["stateless_action_menu"] is None
+    assert random_contract["optimizer"]["stateless_selector_policy"] is None
+
+    verbalized_contract.pop("condition")
+    random_contract.pop("condition")
+    verbalized_contract["optimizer"].pop("semantic_controller_policy")
+    random_contract["optimizer"].pop("semantic_controller_policy")
+    assert verbalized_contract == random_contract
+
+    if contract_builder is build_hotpotqa_run_contract:
+        assert hotpotqa_run_key("react_v2", args) != hotpotqa_run_key("react_v2_random", args)
+        assert "l2-broad" in hotpotqa_run_key("react_v2_random", args)
+    else:
+        assert hover_run_key("react_v2", args) != hover_run_key("react_v2_random", args)
+        assert "l2-broad" in hover_run_key("react_v2_random", args)
 
 
 def test_hover_react_v2_uses_an_experiment_seeded_controller_rng() -> None:

@@ -104,7 +104,7 @@ def experiment_run_key(
     }
     digest = hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:10]
     axes = template_family
-    if condition == "react_v2":
+    if condition in {"react_v2", "react_v2_random"}:
         axes = f"{axes}-l{reflection_level}-{edit_tool_set}"
     return f"{axes}-{digest}"
 
@@ -195,12 +195,14 @@ def build_react_v2_strategy(
     edit_tool_set: str,
     template_family: str,
     component_kinds: dict[str, str] | None = None,
+    controller_selection: str = "verbalized",
     rng: random.Random | None = None,
 ) -> tuple[ThreeRoleReflectionLM, str]:
     """Build Controller -> Manifestor -> ReAct V2 with deterministic guidance.
 
     Args:
-        reflection_model: Runtime model used by the Controller, Manifestor, and proposer.
+        reflection_model: Runtime model used by Manifestor and proposer, plus
+            verbalized Controller selection when enabled.
         task_model: Student model whose provider determines automatic templates.
         proposer_model: Optional canonical proposer identity recorded separately
             from its API runtime model.
@@ -209,6 +211,7 @@ def build_react_v2_strategy(
         edit_tool_set: Named edit-operator basis exposed to the proposer.
         template_family: Explicit provider family or ``"auto"``.
         component_kinds: Optional message role for each optimized component.
+        controller_selection: ``"verbalized"`` or ``"uniform_random"``.
         rng: Optional Controller RNG kept separate from GEPA's engine RNG.
 
     Returns:
@@ -223,6 +226,7 @@ def build_react_v2_strategy(
         edit_tool_set=edit_tool_set,
         component_kinds=component_kinds,
         template_family=resolved_family,
+        controller_selection=controller_selection,
         manifestor_lm=LM(reflection_model, **manifestor_kwargs),
         proposer_model=proposer_model or reflection_model,
         rng=rng,

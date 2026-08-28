@@ -117,6 +117,17 @@ CONTROLLER_POLICY_CONTRACT: dict[str, Any] = {
     "max_menu": None,
 }
 
+UNIFORM_RANDOM_CONTROLLER_POLICY_CONTRACT: dict[str, Any] = {
+    "version": 1,
+    "factorization": "P(region, action)",
+    "candidates": "all cataloged region/action pairs",
+    "selection": "uniform_random",
+    "sampling": "uniform over all candidates",
+    "context": "none",
+    "distribution_failure": None,
+    "max_menu": None,
+}
+
 # Every action belongs to the general catalog, but an action is applicable only
 # when the current section supports its precondition. For example, text with no
 # supporting background cannot be pruned, and one indivisible span cannot be

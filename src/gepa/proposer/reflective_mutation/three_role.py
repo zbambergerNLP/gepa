@@ -13,6 +13,7 @@ the Manifestor to steer ReAct V2.
 from __future__ import annotations
 
 import json
+import math
 import os
 import random
 from collections.abc import Mapping, Sequence
@@ -37,6 +38,7 @@ from gepa.strategies.edit_tools import EDIT_TOOL_SETS
 from gepa.strategies.intervention import (
     CONTROLLER_POLICY_CONTRACT,
     SEMANTIC_ACTION_CATALOGS,
+    UNIFORM_RANDOM_CONTROLLER_POLICY_CONTRACT,
     Controller,
     ControllerChoice,
     build_controller_menu,
@@ -47,6 +49,7 @@ MAX_HISTORY_TEXT_CHARS = 2000
 MAX_HISTORY_STEPS = 16
 MAX_HISTORY_EDIT_ENTRIES = 32
 REFLECTION_RUN_CONTRACT_FILENAME = "reflection-run-contract.json"
+_CONTROLLER_SELECTIONS = ("verbalized", "uniform_random")
 _SENSITIVE_CONFIG_KEYS = {
     "access_token",
     "api_key",
@@ -261,6 +264,50 @@ def _joint_controller_sampling_record(history: Mapping[str, Any]) -> dict[str, A
     }
 
 
+def _uniform_controller_sampling_record(
+    menu: Sequence[ControllerChoice],
+    action: ControllerChoice,
+    level: int,
+) -> dict[str, Any]:
+    """Persist a uniform Controller draw over the complete visible menu.
+
+    Args:
+        menu: Controller choices available for this component.
+        action: Choice drawn from ``menu`` by the strategy RNG.
+        level: Reflection level that determines the policy label.
+
+    Returns:
+        Full uniform distribution, sampled propensity, and policy identity.
+
+    Raises:
+        ValueError: ``menu`` is empty or ``action`` is not one of its choices.
+    """
+    if not menu:
+        raise ValueError("Uniform Controller selection requires a non-empty menu.")
+    if action not in menu:
+        raise ValueError("The sampled Controller action must belong to the visible menu.")
+    probability = 1.0 / len(menu)
+    probabilities = {choice.menu_id: probability for choice in menu}
+    record = {
+        "probs": probabilities,
+        "sampling_probs": dict(probabilities),
+        "sampled": [action.menu_id],
+        "sampled_probabilities": [probability],
+        "fallback": False,
+        "n_parsed_entries": 0,
+        "tail_mass": 0.0,
+        "tau": 0.0,
+        "sampling_policy": "uniform",
+        "exploration_epsilon": 0.0,
+        "used_full_fallback": False,
+        "entropy_bits": math.log2(len(menu)),
+        "policy": "joint_region_action_uniform_v1" if level >= 2 else "region_uniform_v1",
+    }
+    if level >= 2:
+        record["joint_sampling_probability"] = probability
+    return record
+
+
 def _summarize_traces(entries: Sequence[Mapping[str, Any]]) -> str:
     """Flatten reflective rows into the execution evidence shown to the roles.
 
@@ -340,7 +387,8 @@ class ThreeRoleReflectionLM:
     """Controller/Manifestor reflection with a ReAct V2 proposer.
 
     Args:
-        base_lm: Reflection model reused by the Controller and ReAct V2.
+        base_lm: Reflection model used by ReAct V2 and by verbalized Controller
+            selection.
         level: ``0`` vanilla GEPA, ``1`` region plus edit basis, or ``2`` region
             plus semantic action and Manifestor steering.
         edit_tool_set: ``"minimal"`` for insert/delete or ``"broad"`` for all
@@ -354,6 +402,8 @@ class ThreeRoleReflectionLM:
         k: Verbalized-sampling distribution size at level 1. Level 2 scores
             every joint region/action option in one Controller call.
         tau: Tail-sampling threshold.
+        controller_selection: ``"verbalized"`` for LM-ranked selection or
+            ``"uniform_random"`` for the clean random-Controller ablation.
         rng: Seeded random stream. When omitted, GEPA binds the engine RNG.
             An explicit RNG remains independent of engine sampling.
         logger: Optional run logger shared by all roles.
@@ -388,6 +438,7 @@ class ThreeRoleReflectionLM:
         templates: Mapping[str, DocumentTemplate] | None = None,
         k: int = 5,
         tau: float | None = None,
+        controller_selection: str = "verbalized",
         rng: random.Random | None = None,
         logger: Any | None = None,
         reflection_prompt_template: str | dict[str, str] | None = None,
@@ -404,7 +455,7 @@ class ThreeRoleReflectionLM:
         """Validate and store the complete three-role strategy configuration.
 
         Args:
-            base_lm: Shared Controller and proposer model.
+            base_lm: ReAct V2 model, also used for verbalized Controller selection.
             level: Reflection level: vanilla, region-only, or region/action.
             edit_tool_set: Named atomic or broad execution basis.
             component_kinds: Optional component-to-template-kind overrides.
@@ -412,6 +463,9 @@ class ThreeRoleReflectionLM:
             templates: Template-kind overrides merged into the family defaults.
             k: Number of Controller samples below level 2.
             tau: Optional verbalized-sampling tail-mass threshold.
+            controller_selection: Controller selection policy. Uniform random
+                selection draws once from the same section/action menu and does
+                not call the Controller LM.
             rng: Seeded strategy RNG. When ``None``, GEPA replaces the
                 deterministic default with the engine RNG at wiring time.
             logger: Optional run logger shared by all roles.
@@ -430,13 +484,19 @@ class ThreeRoleReflectionLM:
             react_max_tool_calls: Maximum valid calls in an atomic ReAct path.
 
         Raises:
-            ValueError: A level, tool set, template family, or component kind
-                is invalid.
+            ValueError: A level, tool set, Controller selection, template
+                family, or component kind is invalid.
         """
         if level not in (0, 1, 2):
             raise ValueError(f"reflection level must be 0, 1, or 2; got {level}")
         if edit_tool_set not in EDIT_TOOL_SETS:
             raise ValueError(f"edit_tool_set must be one of {sorted(EDIT_TOOL_SETS)}; got {edit_tool_set!r}")
+        if controller_selection not in _CONTROLLER_SELECTIONS:
+            raise ValueError(
+                f"controller_selection must be one of {list(_CONTROLLER_SELECTIONS)}; got {controller_selection!r}"
+            )
+        if level == 0 and controller_selection != "verbalized":
+            raise ValueError("controller_selection must be 'verbalized' when reflection level is 0")
         if template_family not in TEMPLATE_FAMILIES:
             raise ValueError(f"template_family must be one of {sorted(TEMPLATE_FAMILIES)}; got {template_family!r}")
         self.templates: dict[str, DocumentTemplate] = {**TEMPLATE_FAMILIES[template_family], **(templates or {})}
@@ -452,6 +512,7 @@ class ThreeRoleReflectionLM:
         self.template_family = template_family
         self.k = k
         self.tau = tau
+        self.controller_selection = controller_selection
         self._rng_explicit = rng is not None
         self.rng = rng if rng is not None else random.Random(0)
         self.logger = logger
@@ -519,10 +580,24 @@ class ThreeRoleReflectionLM:
             for kind in active_kinds
         }
         controller: dict[str, Any]
-        if self.level >= 2:
+        if self.level >= 2 and self.controller_selection == "uniform_random":
+            controller = {
+                **UNIFORM_RANDOM_CONTROLLER_POLICY_CONTRACT,
+                "max_menu": self.max_menu,
+            }
+        elif self.level >= 2:
             controller = {
                 **CONTROLLER_POLICY_CONTRACT,
                 "tau": self.tau,
+                "max_menu": self.max_menu,
+            }
+        elif self.controller_selection == "uniform_random":
+            controller = {
+                "version": 1,
+                "factorization": "region_only",
+                "selection": "uniform_random",
+                "sampling": "uniform over all candidates",
+                "context": "none",
                 "max_menu": self.max_menu,
             }
         else:
@@ -781,32 +856,36 @@ class ThreeRoleReflectionLM:
                 rng=self.rng,
                 max_menu=self.max_menu,
             )
-            controller = Controller(
-                menu,
-                self.base_lm,
-                k=len(menu) if self.level >= 2 else self.k,
-                tau=self.tau,
-                rng=self.rng,
-                require_full_support=self.level >= 2,
-            )
-            try:
-                action = controller.select(
-                    1,
-                    self.rng,
-                    candidate=controller_candidate,
-                    feedback_summary=feedback,
-                )[0]
-            except IncompleteActionDistributionError as exc:
-                error = _bounded_history_text(exc) or "Controller action distribution failed."
-                controller_failures.append({"component": name, "error": error})
-                dropped.append(name)
-                if self.logger is not None:
-                    self.logger.log(f"Component {name!r} dropped after Controller failure: {error}")
-                continue
-            if self.level >= 2:
-                controller_sampling = _joint_controller_sampling_record(controller.history[-1])
+            if self.controller_selection == "uniform_random":
+                action = self.rng.choice(menu)
+                controller_sampling = _uniform_controller_sampling_record(menu, action, self.level)
             else:
-                controller_sampling = _controller_sampling_record(controller.history[-1])
+                controller = Controller(
+                    menu,
+                    self.base_lm,
+                    k=len(menu) if self.level >= 2 else self.k,
+                    tau=self.tau,
+                    rng=self.rng,
+                    require_full_support=self.level >= 2,
+                )
+                try:
+                    action = controller.select(
+                        1,
+                        self.rng,
+                        candidate=controller_candidate,
+                        feedback_summary=feedback,
+                    )[0]
+                except IncompleteActionDistributionError as exc:
+                    error = _bounded_history_text(exc) or "Controller action distribution failed."
+                    controller_failures.append({"component": name, "error": error})
+                    dropped.append(name)
+                    if self.logger is not None:
+                        self.logger.log(f"Component {name!r} dropped after Controller failure: {error}")
+                    continue
+                if self.level >= 2:
+                    controller_sampling = _joint_controller_sampling_record(controller.history[-1])
+                else:
+                    controller_sampling = _controller_sampling_record(controller.history[-1])
             preferred_edit_tool = action.edit_tool.value if action.edit_tool is not None else None
             semantic_action = action.semantic_action.name if action.semantic_action else None
 

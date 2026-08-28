@@ -6,8 +6,8 @@
 #
 # Use MODEL_PROFILE=qwen3.8-27b or MODEL_PROFILE=deepseek-v4-flash. Each
 # profile uses the same model for the student and proposer. The default runs
-# vanilla, uniform stateless, verbalized stateless, and ReAct V2 with merge
-# disabled.
+# vanilla, uniform stateless, verbalized stateless, random-Controller ReAct V2,
+# and verbalized-Controller ReAct V2 with merge disabled.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

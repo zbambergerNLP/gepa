@@ -17,7 +17,8 @@ from gepa.proposer.reflective_mutation.reflection_lm import ReflectionProposal, 
 from gepa.proposer.reflective_mutation.reflective_mutation import ReflectiveMutationProposer
 from gepa.proposer.reflective_mutation.three_role import ThreeRoleReflectionLM, ensure_reflection_run_contract
 from gepa.strategies.document_template import TEMPLATE_FAMILIES, TEMPLATES, DocumentTemplate, MalformedDocumentError
-from gepa.strategies.edit_tools import EditTool
+from gepa.strategies.edit_tools import EDIT_TOOL_SETS, EditTool
+from gepa.strategies.intervention import build_controller_menu
 
 PROMPT = TEMPLATES["system_prompt"].render({"Role": "helper", "Rules": "- be nice\n- be brief"})
 SKILL = TEMPLATES["skill"].render(
@@ -277,6 +278,8 @@ def make_reflective_proposer(reflection_strategy: ThreeRoleReflectionLM) -> Refl
     [
         pytest.param({"level": 3}, id="invalid_level"),
         pytest.param({"level": 1, "edit_tool_set": "huge"}, id="invalid_tool_set"),
+        pytest.param({"level": 1, "controller_selection": "weighted_coin"}, id="invalid_controller_selection"),
+        pytest.param({"level": 0, "controller_selection": "uniform_random"}, id="level_zero_random_controller"),
         pytest.param({"level": 1, "template_family": "meta"}, id="invalid_template_family"),
         pytest.param(
             {"level": 1, "component_kinds": {"sys": "memo"}},
@@ -507,6 +510,108 @@ def test_level2_selects_semantic_action_manifests_and_executes_one_direct_call()
     assert sampling["joint_sampling_probability"] == pytest.approx(sampling["sampled_probabilities"][0])
     assert sampling["joint_sampling_probability"] > 0
     assert record["controller_sampling"] == sampling
+
+
+def test_level2_uniform_random_controller_draws_once_from_the_complete_menu() -> None:
+    """Replace only Controller ranking with one seeded full-menu uniform draw."""
+    seed = 73
+    expected_rng = random.Random(seed)
+    expected_menu = build_controller_menu(
+        TEMPLATES["system_prompt"],
+        "sys",
+        EDIT_TOOL_SETS["broad"],
+        2,
+        rng=expected_rng,
+        max_menu=999,
+    )
+    expected_action = expected_rng.choice(expected_menu)
+    lm = ThreeRoleLM(list(DIRECT_REEXPRESS_REPLIES))
+    strat = ThreeRoleReflectionLM(
+        lm,
+        level=2,
+        controller_selection="uniform_random",
+        rng=random.Random(seed),
+        max_menu=999,
+        base_lm_run_identity={"test_lm": "ThreeRoleLM"},
+    )
+
+    proposal, _ = strat.reflect({"sys": PROMPT}, deepcopy(SYS_REFLECTIVE_DATASET), ["sys"])
+
+    assert len(expected_menu) == 70
+    assert expected_action.menu_id == "reexpress@Rules/REPLACE_TEXT"
+    assert strat.rng.getstate() == expected_rng.getstate()
+    assert lm.roles == ["manifestor", "react_v2"]
+    assert proposal.new_texts["sys"] != PROMPT
+    assert proposal.metadata["action_choice"] == expected_action.menu_id
+    assert proposal.metadata["action_operator"] == expected_action.edit_tool.value
+    assert proposal.metadata["action_target_section"] == expected_action.edit_target.section
+    sampling = proposal.metadata["controller_sampling"]
+    probability = 1.0 / len(expected_menu)
+    assert set(sampling["sampling_probs"]) == {choice.menu_id for choice in expected_menu}
+    assert all(value == pytest.approx(probability) for value in sampling["sampling_probs"].values())
+    assert sampling["sampled"] == [expected_action.menu_id]
+    assert sampling["sampled_probabilities"] == pytest.approx([probability])
+    assert sampling["sampling_policy"] == "uniform"
+    assert sampling["policy"] == "joint_region_action_uniform_v1"
+    assert sampling["joint_sampling_probability"] == pytest.approx(probability)
+
+
+def test_uniform_random_controller_preserves_target_scoped_branch_history() -> None:
+    """Keep Manifestor, ReAct V2, and user/assistant branch history unchanged."""
+    history = [
+        {"role": "assistant", "content": "<tool_call>this-parent-only</tool_call>"},
+        {
+            "role": "user",
+            "content": "Optimizer result: accepted; the branch now contains this edit. Edit target: sys:Rules.",
+        },
+    ]
+    lm = ThreeRoleLM(list(DIRECT_REEXPRESS_REPLIES))
+    strat = ThreeRoleReflectionLM(
+        lm,
+        level=2,
+        controller_selection="uniform_random",
+        rng=random.Random(73),
+        max_menu=999,
+        base_lm_run_identity={"test_lm": "ThreeRoleLM"},
+    )
+
+    proposal, _ = strat.reflect(
+        {"sys": PROMPT},
+        deepcopy(SYS_REFLECTIVE_DATASET),
+        ["sys"],
+        metadata={"branch_edit_history": history},
+    )
+
+    assert lm.roles == ["manifestor", "react_v2"]
+    assert lm.react_calls[0][1:3] == history
+    assert proposal.metadata["branch_history_length"] == len(history)
+
+
+def test_uniform_random_controller_policy_is_part_of_the_resume_contract(tmp_path: Path) -> None:
+    """Reject resume when only the Controller selection policy changes.
+
+    Args:
+        tmp_path: Temporary run directory supplied by pytest.
+    """
+    verbalized, _ = strategy(2)
+    uniform, _ = strategy(2, controller_selection="uniform_random")
+    verbalized_contract = verbalized.run_contract({"sys": PROMPT})
+    uniform_contract = uniform.run_contract({"sys": PROMPT})
+
+    assert uniform_contract["controller"] == {
+        "version": 1,
+        "factorization": "P(region, action)",
+        "candidates": "all cataloged region/action pairs",
+        "selection": "uniform_random",
+        "sampling": "uniform over all candidates",
+        "context": "none",
+        "distribution_failure": None,
+        "max_menu": 999,
+    }
+    assert verbalized_contract["controller"]["version"] == 4
+    ensure_reflection_run_contract(str(tmp_path), uniform_contract)
+    with pytest.raises(ValueError, match="different reflection strategy contract"):
+        ensure_reflection_run_contract(str(tmp_path), verbalized_contract)
 
 
 def test_controller_sees_omitted_sections_as_empty_without_rendering_them() -> None:

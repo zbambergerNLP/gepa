@@ -9,13 +9,14 @@ retrieval, with supporting-document recall reported separately. The default budg
 of 7051 metric calls matches the paper.
 
 Conditions:
-    vanilla  - stock GEPA reflective mutation
-    react_v2 - section/action Controller, Manifestor configured for the model provider, ReAct V2 proposer
-    random   - action-conditioned reflection, actions picked uniformly at random
-    action   - action-conditioned reflection with verbalized sampling
+    vanilla         - stock GEPA reflective mutation
+    react_v2        - verbalized section/action Controller, Manifestor, ReAct V2 proposer
+    react_v2_random - uniform-random section/action selection, Manifestor, ReAct V2 proposer
+    random          - stateless action-conditioned reflection with uniform-random actions
+    action          - stateless action-conditioned reflection with verbalized sampling
 
 Usage:
-    uv run python -m examples.hover.main [--condition vanilla|react_v2|random|action|all|both]
+    uv run python -m examples.hover.main [--condition vanilla|react_v2|react_v2_random|random|action|all|both]
         [--max-metric-calls N] [--train-limit N] [--val-limit N] [--test-limit N]
 """
 
@@ -81,6 +82,7 @@ from gepa.strategies.intervention import (
     SEMANTIC_ACTION_CATALOGS,
     SEMANTIC_ACTIONS,
     STATELESS_ACTION_MENU_VERSION,
+    UNIFORM_RANDOM_CONTROLLER_POLICY_CONTRACT,
     StatelessActionConstraint,
 )
 
@@ -100,9 +102,13 @@ SEED_CANDIDATE_1STAGE = {
 _CONDITION_DIR_NAMES = {
     "vanilla": "hover_vanilla",
     "react_v2": "hover_react_v2",
+    "react_v2_random": "hover_react_v2_random",
     "random": "hover_random_action",
     "action": "hover_verbalized_action",
 }
+
+_REACT_V2_CONDITIONS = {"react_v2", "react_v2_random"}
+_SEMANTIC_CONDITIONS = {"react_v2", "react_v2_random", "random", "action"}
 
 
 def _component_kinds(program: str) -> dict[str, str]:
@@ -152,7 +158,7 @@ def build_run_contract(condition: str, args) -> dict:
     reflection_api_base = args.reflection_api_base if args.reflection_api_base is not None else args.api_base
     solver_runtime_model = resolve_experiment_model(args.solver_model, args.api_profile)
     reflection_runtime_model = resolve_experiment_model(args.reflection_model, args.api_profile)
-    operated = condition == "react_v2"
+    operated = condition in _REACT_V2_CONDITIONS
     reflection_level = args.reflection_level if operated else 0
     edit_tool_set = args.edit_tool_set if operated else None
     stateless_semantic = condition in ("random", "action")
@@ -176,6 +182,12 @@ def build_run_contract(condition: str, args) -> dict:
                 for spec in SEMANTIC_ACTIONS
             ],
         }
+    semantic_controller_policy = None
+    if reflection_level == 2:
+        if condition == "react_v2_random":
+            semantic_controller_policy = deepcopy(UNIFORM_RANDOM_CONTROLLER_POLICY_CONTRACT)
+        else:
+            semantic_controller_policy = deepcopy(CONTROLLER_POLICY_CONTRACT)
     return {
         "schema_version": 5,
         "benchmark": "hover-train-wiki17",
@@ -220,7 +232,7 @@ def build_run_contract(condition: str, args) -> dict:
             "semantic_action_space": (
                 deepcopy(SEMANTIC_ACTION_CATALOGS["prompt"]) if reflection_level == 2 or stateless_semantic else None
             ),
-            "semantic_controller_policy": deepcopy(CONTROLLER_POLICY_CONTRACT) if reflection_level == 2 else None,
+            "semantic_controller_policy": semantic_controller_policy,
             "stateless_action_menu": stateless_action_menu,
             "stateless_selector_policy": (
                 stateless_selector_policy_contract("random" if condition == "random" else "verbalized")
@@ -579,7 +591,7 @@ def build_config(condition: str, args, reflection_lm_kwargs: dict, run_dir: str 
         )
 
     reflection_strategy = None
-    if condition == "react_v2":
+    if condition in _REACT_V2_CONDITIONS:
         reflection_strategy, _ = build_react_v2_strategy(
             reflection_model=reflection_runtime_model,
             task_model=args.solver_model,
@@ -589,6 +601,7 @@ def build_config(condition: str, args, reflection_lm_kwargs: dict, run_dir: str 
             edit_tool_set=args.edit_tool_set,
             template_family=args.template_family,
             component_kinds=_component_kinds(args.program),
+            controller_selection="uniform_random" if condition == "react_v2_random" else "verbalized",
             rng=random.Random(args.seed),
         )
 
@@ -722,7 +735,7 @@ def main():
         "--condition",
         type=str,
         default="both",
-        choices=["vanilla", "react_v2", "random", "action", "all", "both"],
+        choices=["vanilla", "react_v2", "react_v2_random", "random", "action", "all", "both"],
         help="Optimization condition to run",
     )
     parser.add_argument(
@@ -822,14 +835,14 @@ def main():
         reflection_lm_kwargs["api_base"] = reflection_api_base
 
     if args.condition == "all":
-        conditions = ["vanilla", "react_v2", "random", "action"]
+        conditions = ["vanilla", "react_v2_random", "react_v2", "random", "action"]
     elif args.condition == "both":
         conditions = ["vanilla", "react_v2"]
     else:
         conditions = [args.condition]
 
     resolved_family = resolve_template_family(args.template_family, args.solver_model)
-    semantic_conditions = {"react_v2", "random", "action"}.intersection(conditions)
+    semantic_conditions = _SEMANTIC_CONDITIONS.intersection(conditions)
     if semantic_conditions and args.seed_style != "structured":
         parser.error(f"--condition {', '.join(sorted(semantic_conditions))} requires --seed-style structured")
     results = {}
@@ -840,7 +853,7 @@ def main():
         ensure_wikipedia_run_contract(run_dir, run_contract)
         config, selector = build_config(condition, args, reflection_lm_kwargs, run_dir=run_dir)
         callbacks = None
-        if condition in ("react_v2", "random", "action"):
+        if condition in _SEMANTIC_CONDITIONS:
             trackers[condition] = ActionDiversityCallback()
             callbacks = [trackers[condition]]
         results[condition] = run_condition(

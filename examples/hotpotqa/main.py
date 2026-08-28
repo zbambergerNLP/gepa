@@ -7,13 +7,14 @@ configurable, and all conditions receive the same model assignments and task
 evidence.
 
 Conditions:
-    vanilla  - stock GEPA reflective mutation
-    react_v2 - section/action Controller, Manifestor configured for the model provider, ReAct V2 proposer
-    random   - action-conditioned reflection, actions picked uniformly at random
-    action   - action-conditioned reflection with verbalized sampling
+    vanilla         - stock GEPA reflective mutation
+    react_v2        - verbalized section/action Controller, Manifestor, ReAct V2 proposer
+    react_v2_random - uniform-random section/action selection, Manifestor, ReAct V2 proposer
+    random          - stateless action-conditioned reflection with uniform-random actions
+    action          - stateless action-conditioned reflection with verbalized sampling
 
 Usage:
-    uv run python -m examples.hotpotqa.main [--condition vanilla|random|action|react_v2|all]
+    uv run python -m examples.hotpotqa.main [--condition vanilla|random|action|react_v2|react_v2_random|all]
         [--max-metric-calls N] [--train-limit N] [--val-limit N] [--test-limit N]
     # Smoke (20 ex, 14/3/3):
     uv run python -m examples.hotpotqa.main --data-path examples/hotpotqa/data/hotpotqa_distractor_sample.jsonl --max-metric-calls 200 --condition both
@@ -89,6 +90,7 @@ from gepa.strategies.intervention import (
     SEMANTIC_ACTION_CATALOGS,
     SEMANTIC_ACTIONS,
     STATELESS_ACTION_MENU_VERSION,
+    UNIFORM_RANDOM_CONTROLLER_POLICY_CONTRACT,
     StatelessActionConstraint,
 )
 
@@ -113,6 +115,7 @@ _INITIAL_PROMPT = SEED_CANDIDATE_1STAGE["answer_question"]
 _CONDITION_DIR_NAMES = {
     "vanilla": "hotpotqa_vanilla",
     "react_v2": "hotpotqa_react_v2",
+    "react_v2_random": "hotpotqa_react_v2_random",
     "random": "hotpotqa_random_action",
     "action": "hotpotqa_verbalized_action",
 }
@@ -120,12 +123,15 @@ _CONDITION_DIR_NAMES = {
 _CONDITION_LABELS = {
     "vanilla": "GEPA",
     "react_v2": "ReAct V2",
+    "react_v2_random": "Random-Controller ReAct V2",
     "random": "Random-action GEPA",
     "action": "Verbalized-action GEPA",
 }
 
 _PAPER_MAX_MERGE_INVOCATIONS = 5
 _PAPER_MERGE_VAL_OVERLAP_FLOOR = 5
+_REACT_V2_CONDITIONS = {"react_v2", "react_v2_random"}
+_SEMANTIC_CONDITIONS = {"react_v2", "react_v2_random", "random", "action"}
 
 
 def _validated_runtime_profile(args) -> str:
@@ -208,8 +214,8 @@ def build_run_contract(condition: str, args) -> dict:
     solver_request_fields = experiment_request_overrides(solver_runtime_model)
     reflection_decoding_fields = experiment_decoding(reflection_runtime_model)
     reflection_request_fields = experiment_request_overrides(reflection_runtime_model)
-    reflection_level = args.reflection_level if condition == "react_v2" else 0
-    edit_tool_set = args.edit_tool_set if condition == "react_v2" else None
+    reflection_level = args.reflection_level if condition in _REACT_V2_CONDITIONS else 0
+    edit_tool_set = args.edit_tool_set if condition in _REACT_V2_CONDITIONS else None
     stateless_semantic = condition in ("random", "action")
     retrieval_provenance = getattr(args, "retrieval_provenance", None)
     if retrieval_provenance is None:
@@ -241,6 +247,12 @@ def build_run_contract(condition: str, args) -> dict:
                 for spec in SEMANTIC_ACTIONS
             ],
         }
+    semantic_controller_policy = None
+    if reflection_level == 2:
+        if condition == "react_v2_random":
+            semantic_controller_policy = deepcopy(UNIFORM_RANDOM_CONTROLLER_POLICY_CONTRACT)
+        else:
+            semantic_controller_policy = deepcopy(CONTROLLER_POLICY_CONTRACT)
     return {
         "schema_version": 7,
         "benchmark": "hotpotqa-technical-mini" if technical_mini_index else "hotpotqa-fullwiki-wiki17",
@@ -290,7 +302,7 @@ def build_run_contract(condition: str, args) -> dict:
             "semantic_action_space": (
                 deepcopy(SEMANTIC_ACTION_CATALOGS["prompt"]) if reflection_level == 2 or stateless_semantic else None
             ),
-            "semantic_controller_policy": deepcopy(CONTROLLER_POLICY_CONTRACT) if reflection_level == 2 else None,
+            "semantic_controller_policy": semantic_controller_policy,
             "stateless_action_menu": stateless_action_menu,
             "stateless_selector_policy": (
                 stateless_selector_policy_contract("random" if condition == "random" else "verbalized")
@@ -699,7 +711,7 @@ def build_config(condition: str, args, reflection_lm_kwargs: dict, run_dir: str 
         )
 
     reflection_strategy = None
-    if condition == "react_v2":
+    if condition in _REACT_V2_CONDITIONS:
         reflection_strategy, _ = build_react_v2_strategy(
             reflection_model=reflection_runtime_model,
             task_model=args.solver_model,
@@ -709,6 +721,7 @@ def build_config(condition: str, args, reflection_lm_kwargs: dict, run_dir: str 
             edit_tool_set=args.edit_tool_set,
             template_family=args.template_family,
             component_kinds=_component_kinds(args.program),
+            controller_selection="uniform_random" if condition == "react_v2_random" else "verbalized",
             rng=random.Random(args.seed),
         )
 
@@ -875,7 +888,7 @@ def main():
         "--condition",
         type=str,
         default="both",
-        choices=["vanilla", "react_v2", "random", "action", "all", "both"],
+        choices=["vanilla", "react_v2", "react_v2_random", "random", "action", "all", "both"],
         help="Which condition(s) to run",
     )
     parser.add_argument(
@@ -994,14 +1007,14 @@ def main():
     )
 
     if args.condition == "all":
-        conditions = ["vanilla", "random", "action", "react_v2"]
+        conditions = ["vanilla", "random", "action", "react_v2_random", "react_v2"]
     elif args.condition == "both":
         conditions = ["vanilla", "react_v2"]
     else:
         conditions = [args.condition]
 
     resolved_family = resolve_template_family(args.template_family, args.solver_model)
-    semantic_conditions = {"react_v2", "random", "action"}.intersection(conditions)
+    semantic_conditions = _SEMANTIC_CONDITIONS.intersection(conditions)
     if semantic_conditions and args.seed_style != "structured":
         parser.error(f"--condition {', '.join(sorted(semantic_conditions))} requires --seed-style structured")
 
@@ -1013,7 +1026,7 @@ def main():
         ensure_wikipedia_run_contract(run_dir, run_contract)
         config, selector = build_config(condition, args, reflection_lm_kwargs, run_dir=run_dir)
         callbacks = None
-        if condition in ("react_v2", "random", "action"):
+        if condition in _SEMANTIC_CONDITIONS:
             trackers[condition] = ActionDiversityCallback()
             callbacks = [trackers[condition]]
         seed = seed_candidate(args.program, args.seed_style, resolved_family)

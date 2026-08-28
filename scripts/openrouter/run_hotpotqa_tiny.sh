@@ -31,6 +31,8 @@ arm_names=(
     qwen-random-stateless-no-merge
     qwen-verbalized-stateless-no-merge
     qwen-react-v2-no-merge
+    deepseek-react-v2-random-controller-no-merge
+    qwen-react-v2-random-controller-no-merge
 )
 models=(
     deepseek/deepseek-v4-flash
@@ -41,9 +43,11 @@ models=(
     hosted_vllm/Qwen/Qwen3.8-27B
     hosted_vllm/Qwen/Qwen3.8-27B
     hosted_vllm/Qwen/Qwen3.8-27B
+    deepseek/deepseek-v4-flash
+    hosted_vllm/Qwen/Qwen3.8-27B
 )
-conditions=(vanilla random action react_v2 vanilla random action react_v2)
-budgets=(16 16 16 16 16 16 16 16)
+conditions=(vanilla random action react_v2 vanilla random action react_v2 react_v2_random react_v2_random)
+budgets=(16 16 16 16 16 16 16 16 16 16)
 arm_count="${#arm_names[@]}"
 
 if ! [[ "$smoke_start_arm" =~ ^[0-9]+$ ]] || (( smoke_start_arm < 1 || smoke_start_arm > arm_count )); then

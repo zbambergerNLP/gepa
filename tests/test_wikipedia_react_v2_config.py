@@ -41,7 +41,11 @@ from examples.hover.main import build_config as build_hover_config
 from examples.hover.main import build_run_contract as build_hover_run_contract
 from examples.hover.main import dump_candidates as dump_hover_candidates
 from examples.hover.main import seed_candidate as hover_seed_candidate
-from gepa.strategies.action_space import stateless_selector_policy_contract
+from gepa.strategies.action_space import (
+    RandomActionSelector,
+    VerbalizedActionSelector,
+    stateless_selector_policy_contract,
+)
 from gepa.strategies.document_template import TEMPLATE_FAMILIES
 from gepa.strategies.instruction_proposal import InstructionProposalSignature
 from gepa.strategies.intervention import (
@@ -572,6 +576,42 @@ def test_hotpot_technical_runtime_profile_bounds_deepseek_without_changing_its_r
     assert strategy is not None
     assert strategy.base_lm.completion_kwargs["max_tokens"] == 16_384
     assert strategy.manifestor_lm.completion_kwargs["max_tokens"] == 16_384
+
+
+def test_hotpot_technical_openrouter_settings_reach_stateless_selectors() -> None:
+    """Route the new stateless smoke arms without giving random selection an LM."""
+    provenance = {
+        "backend": "hotpotqa-technical-mini-bm25s",
+        "mode": "technical-smoke-only",
+        "scientific_comparability": False,
+        "selection_sha256": "selected-6-5-2",
+        "corpus_sha256": "mini-corpus",
+        "document_count": 120,
+        "k1": 0.9,
+        "b": 0.4,
+    }
+    args = _hotpot_args(
+        api_profile="openrouter",
+        runtime_profile="technical-smoke",
+        technical_mini_index=True,
+        retrieval_provenance=provenance,
+        solver_api_base=None,
+        reflection_api_base=None,
+    )
+    runtime_model = QWEN3_8_27B_OPENROUTER_MODEL
+    reflection_kwargs = resolve_hotpotqa_lm_kwargs(runtime_model, None, "technical-smoke")
+
+    action_config, action_selector = build_hotpotqa_config("action", args, reflection_kwargs)
+    random_config, random_selector = build_hotpotqa_config("random", args, reflection_kwargs)
+
+    assert isinstance(action_selector, VerbalizedActionSelector)
+    assert action_selector.lm.model == runtime_model
+    assert action_selector.lm.completion_kwargs["max_tokens"] == 16_384
+    assert action_selector.lm.completion_kwargs["extra_body"]["reasoning"] == {"effort": "low"}
+    assert action_config.reflection.reflection_strategy is None
+    assert isinstance(random_selector, RandomActionSelector)
+    assert not hasattr(random_selector, "lm")
+    assert random_config.reflection.reflection_strategy is None
 
 
 @pytest.mark.parametrize(

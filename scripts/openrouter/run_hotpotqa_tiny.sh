@@ -22,8 +22,49 @@ smoke_tag="${configured_smoke_tag:-openrouter-tiny-$(date -u +%Y%m%dT%H%M%SZ)}"
 smoke_key_limit_usd="${OPENROUTER_SMOKE_KEY_LIMIT_USD:-25}"
 smoke_start_arm="${OPENROUTER_SMOKE_START_ARM:-1}"
 
-if ! [[ "$smoke_start_arm" =~ ^[1-8]$ ]]; then
-    echo "OPENROUTER_SMOKE_START_ARM must be an integer from 1 through 8." >&2
+arm_names=(
+    deepseek-vanilla-no-merge
+    deepseek-random-stateless-no-merge
+    deepseek-verbalized-stateless-no-merge
+    deepseek-react-v2-no-merge
+    qwen-vanilla-no-merge
+    qwen-random-stateless-no-merge
+    qwen-verbalized-stateless-no-merge
+    qwen-react-v2-no-merge
+    deepseek-vanilla-merge
+    deepseek-random-stateless-merge
+    deepseek-verbalized-stateless-merge
+    deepseek-react-v2-merge
+    qwen-vanilla-merge
+    qwen-random-stateless-merge
+    qwen-verbalized-stateless-merge
+    qwen-react-v2-merge
+)
+models=(
+    deepseek/deepseek-v4-flash
+    deepseek/deepseek-v4-flash
+    deepseek/deepseek-v4-flash
+    deepseek/deepseek-v4-flash
+    hosted_vllm/Qwen/Qwen3.8-27B
+    hosted_vllm/Qwen/Qwen3.8-27B
+    hosted_vllm/Qwen/Qwen3.8-27B
+    hosted_vllm/Qwen/Qwen3.8-27B
+    deepseek/deepseek-v4-flash
+    deepseek/deepseek-v4-flash
+    deepseek/deepseek-v4-flash
+    deepseek/deepseek-v4-flash
+    hosted_vllm/Qwen/Qwen3.8-27B
+    hosted_vllm/Qwen/Qwen3.8-27B
+    hosted_vllm/Qwen/Qwen3.8-27B
+    hosted_vllm/Qwen/Qwen3.8-27B
+)
+conditions=(vanilla random action react_v2 vanilla random action react_v2 vanilla random action react_v2 vanilla random action react_v2)
+merge_flags=(0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1)
+budgets=(16 16 16 16 16 16 16 16 32 32 32 32 32 32 32 32)
+arm_count="${#arm_names[@]}"
+
+if ! [[ "$smoke_start_arm" =~ ^[0-9]+$ ]] || (( smoke_start_arm < 1 || smoke_start_arm > arm_count )); then
+    echo "OPENROUTER_SMOKE_START_ARM must be an integer from 1 through ${arm_count}." >&2
     exit 2
 fi
 if [[ "$smoke_start_arm" != "1" && -z "$configured_smoke_tag" ]]; then
@@ -31,29 +72,6 @@ if [[ "$smoke_start_arm" != "1" && -z "$configured_smoke_tag" ]]; then
     exit 2
 fi
 
-arm_names=(
-    deepseek-vanilla-no-merge
-    deepseek-react-v2-no-merge
-    qwen-vanilla-no-merge
-    qwen-react-v2-no-merge
-    deepseek-vanilla-merge
-    deepseek-react-v2-merge
-    qwen-vanilla-merge
-    qwen-react-v2-merge
-)
-models=(
-    deepseek/deepseek-v4-flash
-    deepseek/deepseek-v4-flash
-    hosted_vllm/Qwen/Qwen3.8-27B
-    hosted_vllm/Qwen/Qwen3.8-27B
-    deepseek/deepseek-v4-flash
-    deepseek/deepseek-v4-flash
-    hosted_vllm/Qwen/Qwen3.8-27B
-    hosted_vllm/Qwen/Qwen3.8-27B
-)
-conditions=(vanilla react_v2 vanilla react_v2 vanilla react_v2 vanilla react_v2)
-merge_flags=(0 0 0 0 1 1 1 1)
-budgets=(16 16 16 16 32 32 32 32)
 selected_indexes=()
 for ((index = smoke_start_arm - 1; index < ${#arm_names[@]}; index++)); do
     selected_indexes+=("$index")
@@ -62,7 +80,7 @@ done
 echo "HotPotQA OpenRouter technical-smoke matrix"
 echo "  fullwiki split: 6 train / 5 validation / 2 test"
 echo "  retrieval: NON-SCIENTIFIC selected-context technical-mini BM25 index"
-echo "  arms: ${smoke_start_arm}-8 selected; budgets are scheduling thresholds, not hard spend caps"
+echo "  arms: ${smoke_start_arm}-${arm_count} selected; budgets are scheduling thresholds, not hard spend caps"
 if [[ "$smoke_start_arm" != "1" ]]; then
     echo "  resume: arms 1-$((smoke_start_arm - 1)) are skipped and not revalidated"
 fi
@@ -95,7 +113,7 @@ for index in "${selected_indexes[@]}"; do
     if [[ "${merge_flags[$index]}" == "1" ]]; then
         command+=(--merge)
     fi
-    printf 'PLAN %d/8 %-32s' "$((index + 1))" "${arm_names[$index]}"
+    printf 'PLAN %d/%d %-42s' "$((index + 1))" "$arm_count" "${arm_names[$index]}"
     printf ' %q' "${command[@]}"
     printf '\n'
 done
@@ -253,7 +271,7 @@ CURL_CONFIG
     arm_usage_start="$(jq -r '.data.usage' <<<"$arm_key_before")"
     arm_cache_dir="outputs/openrouter_tiny_cache/${smoke_tag}/${arm_names[$index]}"
     mkdir -p "$arm_cache_dir"
-    echo "RUN $((index + 1))/8 ${arm_names[$index]}"
+    echo "RUN $((index + 1))/${arm_count} ${arm_names[$index]}"
     if ! DSPY_CACHEDIR="$arm_cache_dir" "${command[@]}"; then
         echo "FAILED ${arm_names[$index]}; stopping before later arms." >&2
         exit 1
@@ -284,7 +302,7 @@ fi
 matrix_usage_end="$(jq -r '.data.usage' <<<"$final_key_json")"
 matrix_usage_delta="$(awk -v start="$matrix_usage_start" -v finish="$matrix_usage_end" 'BEGIN {printf "%.6f", finish - start}')"
 if [[ "$smoke_start_arm" == "1" ]]; then
-    echo "All eight HotPotQA smoke arms passed. OpenRouter usage delta: \$$matrix_usage_delta"
+    echo "All ${arm_count} HotPotQA smoke arms passed. OpenRouter usage delta: \$$matrix_usage_delta"
 else
-    echo "HotPotQA smoke arms ${smoke_start_arm}-8 passed. Invocation usage delta: \$$matrix_usage_delta"
+    echo "HotPotQA smoke arms ${smoke_start_arm}-${arm_count} passed. Invocation usage delta: \$$matrix_usage_delta"
 fi

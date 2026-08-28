@@ -31,14 +31,6 @@ arm_names=(
     qwen-random-stateless-no-merge
     qwen-verbalized-stateless-no-merge
     qwen-react-v2-no-merge
-    deepseek-vanilla-merge
-    deepseek-random-stateless-merge
-    deepseek-verbalized-stateless-merge
-    deepseek-react-v2-merge
-    qwen-vanilla-merge
-    qwen-random-stateless-merge
-    qwen-verbalized-stateless-merge
-    qwen-react-v2-merge
 )
 models=(
     deepseek/deepseek-v4-flash
@@ -49,18 +41,9 @@ models=(
     hosted_vllm/Qwen/Qwen3.8-27B
     hosted_vllm/Qwen/Qwen3.8-27B
     hosted_vllm/Qwen/Qwen3.8-27B
-    deepseek/deepseek-v4-flash
-    deepseek/deepseek-v4-flash
-    deepseek/deepseek-v4-flash
-    deepseek/deepseek-v4-flash
-    hosted_vllm/Qwen/Qwen3.8-27B
-    hosted_vllm/Qwen/Qwen3.8-27B
-    hosted_vllm/Qwen/Qwen3.8-27B
-    hosted_vllm/Qwen/Qwen3.8-27B
 )
-conditions=(vanilla random action react_v2 vanilla random action react_v2 vanilla random action react_v2 vanilla random action react_v2)
-merge_flags=(0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1)
-budgets=(16 16 16 16 16 16 16 16 32 32 32 32 32 32 32 32)
+conditions=(vanilla random action react_v2 vanilla random action react_v2)
+budgets=(16 16 16 16 16 16 16 16)
 arm_count="${#arm_names[@]}"
 
 if ! [[ "$smoke_start_arm" =~ ^[0-9]+$ ]] || (( smoke_start_arm < 1 || smoke_start_arm > arm_count )); then
@@ -110,9 +93,6 @@ for index in "${selected_indexes[@]}"; do
         --technical-mini-index-dir "$technical_mini_index_dir"
         --tag "${smoke_tag}-${arm_names[$index]}"
     )
-    if [[ "${merge_flags[$index]}" == "1" ]]; then
-        command+=(--merge)
-    fi
     printf 'PLAN %d/%d %-42s' "$((index + 1))" "$arm_count" "${arm_names[$index]}"
     printf ' %q' "${command[@]}"
     printf '\n'
@@ -255,10 +235,6 @@ for index in "${selected_indexes[@]}"; do
         --technical-mini-index-dir "$technical_mini_index_dir"
         --tag "${smoke_tag}-${arm_names[$index]}"
     )
-    if [[ "${merge_flags[$index]}" == "1" ]]; then
-        command+=(--merge)
-    fi
-
     if ! arm_key_before="$(
         curl -fsS --config - <<CURL_CONFIG
 url = "https://openrouter.ai/api/v1/key"

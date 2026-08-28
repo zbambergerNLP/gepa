@@ -548,7 +548,7 @@ def test_hotpot_dspy_lm_accepts_the_resolved_technical_smoke_profile(monkeypatch
     lm_constructor.assert_called_once_with(model=model, **lm_kwargs)
 
 
-def test_hotpot_openrouter_launcher_plans_sixteen_isolated_arms() -> None:
+def test_hotpot_openrouter_launcher_plans_eight_merge_off_arms() -> None:
     """Lock the tiny matrix, data sizes, budgets, and runtime/provider profiles."""
     script = REPO_ROOT / "scripts" / "openrouter" / "run_hotpotqa_tiny.sh"
     environment = dict(os.environ)
@@ -564,13 +564,12 @@ def test_hotpot_openrouter_launcher_plans_sixteen_isolated_arms() -> None:
     )
 
     plans = [line for line in result.stdout.splitlines() if line.startswith("PLAN ")]
-    assert len(plans) == 16
-    assert sum(" --merge" in line for line in plans) == 8
+    assert len(plans) == 8
+    assert all(" --merge" not in line for line in plans)
     assert sum("--max-metric-calls 16" in line for line in plans) == 8
-    assert sum("--max-metric-calls 32" in line for line in plans) == 8
-    assert all(sum(f"--condition {condition}" in line for line in plans) == 4 for condition in ("vanilla", "random", "action", "react_v2"))
-    assert sum("--solver-model deepseek/deepseek-v4-flash" in line for line in plans) == 8
-    assert sum("--solver-model hosted_vllm/Qwen/Qwen3.8-27B" in line for line in plans) == 8
+    assert all(sum(f"--condition {condition}" in line for line in plans) == 2 for condition in ("vanilla", "random", "action", "react_v2"))
+    assert sum("--solver-model deepseek/deepseek-v4-flash" in line for line in plans) == 4
+    assert sum("--solver-model hosted_vllm/Qwen/Qwen3.8-27B" in line for line in plans) == 4
     assert all("--api-profile openrouter" in line for line in plans)
     assert all("--runtime-profile technical-smoke" in line for line in plans)
     assert all("--train-limit 6 --val-limit 5 --test-limit 2" in line for line in plans)
@@ -588,7 +587,7 @@ def test_hotpot_openrouter_launcher_resumes_from_an_explicit_arm() -> None:
     """Skip completed paid arms only under an explicit stable run tag."""
     script = REPO_ROOT / "scripts" / "openrouter" / "run_hotpotqa_tiny.sh"
     environment = dict(os.environ)
-    environment["OPENROUTER_SMOKE_START_ARM"] = "8"
+    environment["OPENROUTER_SMOKE_START_ARM"] = "4"
     environment["SMOKE_TAG"] = "resume-test"
 
     result = subprocess.run(
@@ -601,13 +600,13 @@ def test_hotpot_openrouter_launcher_resumes_from_an_explicit_arm() -> None:
     )
 
     plans = [line for line in result.stdout.splitlines() if line.startswith("PLAN ")]
-    assert len(plans) == 9
-    assert plans[0].startswith("PLAN 8/16 qwen-react-v2-no-merge")
-    assert plans[-1].startswith("PLAN 16/16 qwen-react-v2-merge")
-    assert "resume: arms 1-7 are skipped and not revalidated" in result.stdout
+    assert len(plans) == 5
+    assert plans[0].startswith("PLAN 4/8 deepseek-react-v2-no-merge")
+    assert plans[-1].startswith("PLAN 8/8 qwen-react-v2-no-merge")
+    assert "resume: arms 1-3 are skipped and not revalidated" in result.stdout
 
 
-@pytest.mark.parametrize("start_arm", ["0", "17", "not-an-arm"])
+@pytest.mark.parametrize("start_arm", ["0", "9", "not-an-arm"])
 def test_hotpot_openrouter_launcher_rejects_invalid_resume_arms(start_arm: str) -> None:
     """Reject invalid resume bounds before planning or paid requests.
 
@@ -636,7 +635,7 @@ def test_hotpot_openrouter_launcher_requires_a_stable_tag_when_resuming() -> Non
     """Prevent a partial resume from silently receiving a new run identity."""
     script = REPO_ROOT / "scripts" / "openrouter" / "run_hotpotqa_tiny.sh"
     environment = dict(os.environ)
-    environment["OPENROUTER_SMOKE_START_ARM"] = "8"
+    environment["OPENROUTER_SMOKE_START_ARM"] = "4"
     environment.pop("SMOKE_TAG", None)
 
     result = subprocess.run(
@@ -671,7 +670,7 @@ def test_hotpot_openrouter_launcher_refuses_execution_without_a_key() -> None:
 
     assert result.returncode == 1
     assert "OPENROUTER_API_KEY is required" in result.stderr
-    assert "RUN 1/16" not in result.stdout
+    assert "RUN 1/8" not in result.stdout
 
 
 def test_hotpot_smoke_conversion_retains_gold_context_for_feedback() -> None:

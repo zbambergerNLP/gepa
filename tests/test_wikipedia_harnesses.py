@@ -291,6 +291,8 @@ def test_hotpot_chat_adapter_repairs_only_expected_malformed_field_headers() -> 
     assert canonical == parsed
     with pytest.raises(ValueError, match="Expected"):
         adapter.parse(signature, "[[ ## reasoning ]]\nOnly reasoning.")
+    with pytest.raises(ValueError, match="Failed to parse response as per signature"):
+        adapter.parse(signature, None)
 
 
 def test_hotpot_evaluator_scores_only_dspy_task_parse_failures_as_zero(monkeypatch) -> None:

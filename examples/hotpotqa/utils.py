@@ -48,7 +48,7 @@ if dspy is not None:
     class _HotPotQAChatAdapter(dspy.ChatAdapter):
         """Parse artifact fields after repairing one observed marker near-miss."""
 
-        def parse(self, signature: type, completion: str) -> dict[str, object]:
+        def parse(self, signature: type, completion: str | None) -> dict[str, object]:
             """Repair missing trailing hashes in exact output-field headers.
 
             Qwen occasionally emits ``[[ ## summary ]]`` while otherwise
@@ -58,15 +58,20 @@ if dspy is not None:
 
             Args:
                 signature: DSPy signature containing the expected output fields.
-                completion: Raw assistant completion to parse.
+                completion: Raw assistant completion to parse, or ``None`` when
+                    the provider returns no text.
 
             Returns:
                 Parsed output fields produced by the pinned DSPy ChatAdapter.
 
             Raises:
-                ValueError: The completion remains invalid after the narrow
-                    marker repair.
+                ValueError: The provider returns no completion text or the
+                    completion remains invalid after the narrow marker repair.
             """
+            if completion is None:
+                raise ValueError(
+                    "Failed to parse response as per signature: provider returned no completion text."
+                )
             try:
                 return super().parse(signature, completion)
             except ValueError:

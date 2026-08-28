@@ -410,7 +410,7 @@ def test_three_role_run_contract_blocks_catalog_or_policy_drift(tmp_path: Path) 
     contract = strat.run_contract({"sys": PROMPT})
     assert contract["schema_version"] == 3
     assert contract["component_kinds"] == {"sys": "system_prompt"}
-    assert contract["controller"]["version"] == 2
+    assert contract["controller"]["version"] == 3
     assert contract["controller"]["factorization"] == "P(region, action)"
     assert len(contract["semantic_action_spaces"]["system_prompt"]["actions"]) == 10
     assert contract["semantic_action_spaces"]["system_prompt"]["kind"] == "prompt"
@@ -501,12 +501,26 @@ def test_level2_selects_semantic_action_manifests_and_executes_one_direct_call()
     assert len(sampling["probs"]) == 70
     assert sampling["probs"]["reexpress@Rules/REPLACE_TEXT"] == pytest.approx(0.99)
     assert sampling["fallback"] is False
-    assert sampling["policy"] == "joint_region_action_v2"
-    assert sampling["sampling_policy"] == "full_distribution_uniform_mixture"
+    assert sampling["policy"] == "joint_region_action_v3"
+    assert sampling["sampling_policy"] == "positive_support_uniform_mixture"
     assert sampling["exploration_epsilon"] == pytest.approx(0.1)
     assert sampling["joint_sampling_probability"] == pytest.approx(sampling["sampled_probabilities"][0])
     assert sampling["joint_sampling_probability"] > 0
     assert record["controller_sampling"] == sampling
+
+
+def test_controller_sees_omitted_sections_as_empty_without_rendering_them() -> None:
+    """Expose sparse section occupancy only to the Controller selection call."""
+    strat, lm = strategy(2)
+
+    strat.reflect({"sys": PROMPT}, deepcopy(SYS_REFLECTIVE_DATASET), ["sys"])
+
+    controller_prompt = next(prompt for prompt in lm.string_calls if "Choose edit actions that address" in prompt)
+    assert "## Role\nhelper" in controller_prompt
+    assert "## Rules\n- be nice\n- be brief" in controller_prompt
+    for section in ("Task", "Context", "Reasoning", "Examples", "Output Format"):
+        assert f"## {section}\n[EMPTY SECTION]" in controller_prompt
+        assert f"## {section}" not in PROMPT
 
 
 def test_level2_minimal_basis_uses_a_deeper_delete_insert_trajectory() -> None:
@@ -782,6 +796,24 @@ def test_controller_uniform_fallback_provenance_is_persisted() -> None:
     assert sampling["used_full_fallback"] is False
     assert sampling["n_parsed_entries"] == len(sampling["probs"])
     assert proposal.metadata["attempt_records"][0]["controller_sampling"] == sampling
+
+
+def test_level2_drops_after_two_incomplete_controller_distributions() -> None:
+    """Do not invent a region/action pair when the Controller never scores the menu."""
+    lm = FallbackControllerLM([])
+    strat, _ = strategy(2, lm=lm)
+
+    proposal, _ = strat.reflect({"sys": PROMPT}, deepcopy(SYS_REFLECTIVE_DATASET), ["sys"])
+
+    assert proposal.new_texts == {}
+    assert lm.roles == ["controller", "controller"]
+    assert proposal.metadata["react_v2_dropped"] == ["sys"]
+    assert proposal.metadata["controller_failures"] == [
+        {
+            "component": "sys",
+            "error": "Controller did not return a complete action distribution after two attempts.",
+        }
+    ]
 
 
 def test_reflection_metadata_keeps_action_and_react_diagnostics() -> None:

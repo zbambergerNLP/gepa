@@ -53,8 +53,8 @@ def stateless_selector_policy_contract(
             action instead of sharing one batch-level action.
         k: Number of candidates requested from the verbalized selector.
         tau: Explicit tail-sampling threshold; ``None`` resolves to ``1 / k``.
-        require_full_support: Whether verbalized sampling mixes the complete
-            distribution with uniform exploration.
+        require_full_support: Whether verbalized sampling scores the complete
+            menu and mixes uniform exploration within positive support.
 
     Returns:
         JSON-serializable policy fields used for reproducible runs.
@@ -79,7 +79,7 @@ def stateless_selector_policy_contract(
         "selector": selector,
         "selection_granularity": selection_granularity,
         "context": "per_job" if per_job_action_selection else "first_parent_and_aggregated_feedback",
-        "sampling": "full_distribution_uniform_mixture" if require_full_support else "tail",
+        "sampling": "positive_support_uniform_mixture" if require_full_support else "tail",
         "k": k,
         "tau": resolved_tau,
         "require_full_support": require_full_support,
@@ -221,6 +221,10 @@ class ActionDistribution(Generic[SelectableItemT]):
     is_fallback: bool = False  # True when parsing failed and a uniform fallback was used
 
 
+class IncompleteActionDistributionError(RuntimeError):
+    """A full-support selector could not obtain one complete model distribution."""
+
+
 @dataclass(frozen=True)
 class TailSampleStats:
     """Diagnostics for one ``_sample_from_tails`` call, recorded in selector history.
@@ -313,9 +317,9 @@ class VerbalizedActionSelector(Generic[SelectableItemT]):
             ``None`` defaults to ``1 / k`` so the threshold scales with ``k``.
         rng: RNG for tail sampling; ``random.Random(0)`` when ``None``.
         require_full_support: Whether the LM must score every configured action
-            exactly once and sampling must retain nonzero support for all of
-            them through a uniform-exploration mixture. Invalid output falls
-            back to the uniform full menu.
+            exactly once and sampling mixes uniform exploration among choices
+            the LM assigns positive probability. Invalid output is retried once
+            before selection fails.
 
     Raises:
         ValueError: The menu is empty or contains an empty, padded, or
@@ -342,7 +346,8 @@ class VerbalizedActionSelector(Generic[SelectableItemT]):
             rng: Default RNG for sampling; a seed-zero RNG is created when
                 omitted.
             require_full_support: Whether model output must score every action
-                and sampling mixes in uniform exploration.
+                and sampling mixes uniform exploration among positive-probability
+                choices.
 
         Raises:
             ValueError: The menu is empty or contains an empty, padded, or
@@ -389,6 +394,10 @@ class VerbalizedActionSelector(Generic[SelectableItemT]):
             The sampled actions in draw order. When either context argument is
             omitted, the draw is uniform over the menu, no LM call is made, and
             nothing is recorded in :attr:`history`.
+
+        Raises:
+            IncompleteActionDistributionError: Two full-support responses fail
+                to score every declared action exactly once.
         """
         rng = rng if rng is not None else self.rng
         if candidate is None or feedback_summary is None:
@@ -400,8 +409,11 @@ class VerbalizedActionSelector(Generic[SelectableItemT]):
             epsilon = FULL_SUPPORT_EXPLORATION_EPSILON
             actions = [action for action, _, _ in distribution.entries]
             probabilities = [probability for _, probability, _ in distribution.entries]
+            positive_count = sum(probability > 0 for probability in probabilities)
+            assert positive_count > 0
             mixed_probabilities = [
-                (1.0 - epsilon) * probability + epsilon / len(actions) for probability in probabilities
+                (1.0 - epsilon) * probability + (epsilon / positive_count if probability > 0 else 0.0)
+                for probability in probabilities
             ]
             result = rng.choices(actions, weights=mixed_probabilities, k=n)
             sampled_probability_by_id = {
@@ -417,7 +429,7 @@ class VerbalizedActionSelector(Generic[SelectableItemT]):
                     probability * math.log2(probability) for probability in probabilities if probability > 0
                 ),
             )
-            sampling_policy = "full_distribution_uniform_mixture"
+            sampling_policy = "positive_support_uniform_mixture"
         else:
             epsilon = 0.0
             result, stats = _sample_from_tails(distribution, n, self.tau, rng)
@@ -486,6 +498,10 @@ class VerbalizedActionSelector(Generic[SelectableItemT]):
 
         Returns:
             Parsed and normalized action distribution.
+
+        Raises:
+            IncompleteActionDistributionError: Two full-support responses fail
+                to score every declared action exactly once.
         """
         action_menu = "\n".join(
             f"- {cast(Any, action).menu_id}: {cast(Any, action).menu_description}" for action in self.actions
@@ -500,14 +516,28 @@ class VerbalizedActionSelector(Generic[SelectableItemT]):
             support_rule=(
                 "Score every available action exactly once; do not omit or repeat an action. Assign probability 0 "
                 "when an action's stated precondition is not supported by the region and feedback; the sampler "
-                "reserves a small uniform exploration probability. This is the sole applicability judgment; "
+                "reserves a small uniform exploration probability only among choices with positive probability. "
+                "This is the sole applicability judgment; "
                 "downstream roles realize whichever action is sampled without reclassifying it."
                 if self.require_full_support
                 else ""
             ),
         )
         raw_output = self.lm(prompt)
-        return self._parse_distribution(raw_output, rng)
+        distribution = self._parse_distribution(raw_output, rng)
+        if self.require_full_support and distribution.is_fallback:
+            retry_prompt = (
+                f"{prompt}\n\n"
+                "Your previous response was incomplete or malformed. Return one complete <response> now, "
+                "with every available action exactly once and probabilities summing to 1.0."
+            )
+            retry_output = self.lm(retry_prompt)
+            distribution = self._parse_distribution(retry_output, rng)
+            if distribution.is_fallback:
+                raise IncompleteActionDistributionError(
+                    "Controller did not return a complete action distribution after two attempts."
+                )
+        return distribution
 
     def _parse_distribution(self, raw_output: str, rng: random.Random) -> ActionDistribution[SelectableItemT]:
         """Parse and normalize an XML-formatted action distribution.

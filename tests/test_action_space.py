@@ -21,6 +21,7 @@ from gepa.proposer.reflective_mutation.reflection_lm import (
 from gepa.proposer.reflective_mutation.reflective_mutation import ReflectiveMutationProposer
 from gepa.strategies.action_space import (
     ActionDistribution,
+    IncompleteActionDistributionError,
     RandomActionSelector,
     VerbalizedActionSelector,
     _sample_from_tails,
@@ -787,6 +788,40 @@ class TestVerbalizedActionSelector:
         assert len(dist.entries) == len(TEST_ACTIONS)
         assert len({action.menu_id for action, _, _ in dist.entries}) == len(TEST_ACTIONS)
 
+    def test_required_full_support_retries_an_incomplete_model_response(self) -> None:
+        """Use a complete second distribution instead of sampling the parser fallback."""
+        probability = 1.0 / len(TEST_ACTIONS)
+        complete_output = (
+            "<response>"
+            + "".join(
+                "<candidate>"
+                f"<action>{action.menu_id}</action><reasoning>test</reasoning>"
+                f"<probability>{probability}</probability>"
+                "</candidate>"
+                for action in TEST_ACTIONS
+            )
+            + "</response>"
+        )
+        lm = MagicMock(side_effect=["not a distribution", complete_output])
+        selector = VerbalizedActionSelector(TEST_ACTIONS, lm=lm, require_full_support=True)
+
+        selected = selector.select(1, candidate="component", feedback_summary="feedback")
+
+        assert len(selected) == 1
+        assert lm.call_count == 2
+        assert selector.history[0]["fallback"] is False
+
+    def test_required_full_support_rejects_two_incomplete_model_responses(self) -> None:
+        """Leave selection unresolved when the model never supplies its judgment."""
+        lm = MagicMock(return_value="not a distribution")
+        selector = VerbalizedActionSelector(TEST_ACTIONS, lm=lm, require_full_support=True)
+
+        with pytest.raises(IncompleteActionDistributionError, match="after two attempts"):
+            selector.select(1, candidate="component", feedback_summary="feedback")
+
+        assert lm.call_count == 2
+        assert selector.history == []
+
     @pytest.mark.parametrize("probability", ["nan", "inf", "-0.1"])
     def test_invalid_numeric_probability_falls_back_uniformly(self, probability: str) -> None:
         """Reject non-finite and negative weights before sampling or logging.
@@ -1109,8 +1144,8 @@ class TestVerbalizedHistory:
         assert record["sampling_policy"] == "tail"
         assert record["exploration_epsilon"] == 0.0
 
-    def test_full_support_policy_mixes_verbalized_and_uniform_probabilities(self) -> None:
-        """Give every declared action a logged nonzero sampling propensity."""
+    def test_full_support_policy_preserves_controller_zero_probabilities(self) -> None:
+        """Explore within the Controller's positive support without reviving rejected actions."""
         actions = TEST_ACTIONS[:3]
         output = (
             "<response>"
@@ -1128,18 +1163,20 @@ class TestVerbalizedHistory:
             rng=random.Random(0),
             require_full_support=True,
         )
-        selector.select(1, candidate="component", feedback_summary="feedback")
+        selected = selector.select(100, candidate="component", feedback_summary="feedback")
 
         record = selector.history[0]
-        assert record["sampling_policy"] == "full_distribution_uniform_mixture"
+        assert record["sampling_policy"] == "positive_support_uniform_mixture"
         assert record["exploration_epsilon"] == pytest.approx(0.1)
         assert record["sampling_probs"] == pytest.approx(
             {
-                actions[0].menu_id: 0.9 + 0.1 / 3,
-                actions[1].menu_id: 0.1 / 3,
-                actions[2].menu_id: 0.1 / 3,
+                actions[0].menu_id: 1.0,
+                actions[1].menu_id: 0.0,
+                actions[2].menu_id: 0.0,
             }
         )
+        assert set(record["probs"]) == {action.menu_id for action in actions}
+        assert {action.menu_id for action in selected} == {actions[0].menu_id}
         assert sum(record["sampling_probs"].values()) == pytest.approx(1.0)
 
     def test_history_records_tail_sample_stats(self) -> None:

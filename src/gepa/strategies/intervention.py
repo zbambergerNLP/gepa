@@ -103,7 +103,7 @@ class ControllerChoice:
 
 
 SEMANTIC_ACTION_CATALOG_VERSION = 2
-CONTROLLER_POLICY_VERSION = 2
+CONTROLLER_POLICY_VERSION = 3
 STATELESS_ACTION_MENU_VERSION = 1
 
 CONTROLLER_POLICY_CONTRACT: dict[str, Any] = {
@@ -111,8 +111,9 @@ CONTROLLER_POLICY_CONTRACT: dict[str, Any] = {
     "factorization": "P(region, action)",
     "candidates": "all cataloged region/action pairs",
     "verbalized_candidates": "all",
-    "sampling": "verbalized distribution mixed with uniform exploration",
+    "sampling": "verbalized positive support mixed with uniform exploration",
     "exploration_epsilon": FULL_SUPPORT_EXPLORATION_EPSILON,
+    "distribution_failure": "retry_once_then_drop",
     "max_menu": None,
 }
 
@@ -476,8 +477,8 @@ class Controller(VerbalizedActionSelector[ControllerChoice]):
         k: Number of options assigned probabilities.
         tau: Tail-sampling threshold, or ``None`` for ``1 / k``.
         rng: Seeded sampling RNG.
-        require_full_support: Require every option exactly once and mix the
-            verbalized distribution with uniform exploration.
+        require_full_support: Require every option exactly once and mix uniform
+            exploration among positive-probability choices.
     """
 
 def summarize_feedback(reflective_entries: Any, max_chars: int = SOFT_PROMPT_CHAR_BUDGET) -> str:

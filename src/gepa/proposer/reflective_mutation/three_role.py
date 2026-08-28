@@ -31,7 +31,7 @@ from gepa.proposer.reflective_mutation.reflection_lm import (
     ReflectionProposal,
     StatelessReflectionLM,
 )
-from gepa.strategies.action_space import MAX_PROPOSAL_CHARS
+from gepa.strategies.action_space import MAX_PROPOSAL_CHARS, IncompleteActionDistributionError
 from gepa.strategies.document_template import TEMPLATE_FAMILIES, DocumentTemplate, MalformedDocumentError
 from gepa.strategies.edit_tools import EDIT_TOOL_SETS
 from gepa.strategies.intervention import (
@@ -256,7 +256,7 @@ def _joint_controller_sampling_record(history: Mapping[str, Any]) -> dict[str, A
     record = _controller_sampling_record(history)
     return {
         **record,
-        "policy": "joint_region_action_v2",
+        "policy": "joint_region_action_v3",
         "joint_sampling_probability": record["sampled_probabilities"][0],
     }
 
@@ -747,6 +747,7 @@ class ThreeRoleReflectionLM:
         proposal = ReflectionProposal(new_texts={}, prompts={}, raw_lm_outputs={}, metadata={})
         records: list[dict[str, Any]] = []
         accepted_revisions: list[dict[str, Any]] = []
+        controller_failures: list[dict[str, str]] = []
         dropped: list[str] = []
 
         for name in components_to_update:
@@ -760,6 +761,16 @@ class ThreeRoleReflectionLM:
             text = candidate[name]
             feedback = summarize_feedback(entries)
             traces = _summarize_traces(entries)
+            section_bodies = template.parse(text)
+            # Sparse rendering keeps empty sections out of task-model messages.
+            # The Controller still needs their occupancy to judge which semantic
+            # actions have the text required by their coupled operators.
+            controller_candidate = (
+                "Controller-only section inventory. [EMPTY SECTION] is metadata, not document text.\n\n"
+                + "\n\n".join(
+                    f"## {section}\n{body if body else '[EMPTY SECTION]'}" for section, body in section_bodies.items()
+                )
+            )
             menu = build_controller_menu(
                 template,
                 name,
@@ -776,12 +787,20 @@ class ThreeRoleReflectionLM:
                 rng=self.rng,
                 require_full_support=self.level >= 2,
             )
-            action = controller.select(
-                1,
-                self.rng,
-                candidate=text,
-                feedback_summary=feedback,
-            )[0]
+            try:
+                action = controller.select(
+                    1,
+                    self.rng,
+                    candidate=controller_candidate,
+                    feedback_summary=feedback,
+                )[0]
+            except IncompleteActionDistributionError as exc:
+                error = _bounded_history_text(exc) or "Controller action distribution failed."
+                controller_failures.append({"component": name, "error": error})
+                dropped.append(name)
+                if self.logger is not None:
+                    self.logger.log(f"Component {name!r} dropped after Controller failure: {error}")
+                continue
             if self.level >= 2:
                 controller_sampling = _joint_controller_sampling_record(controller.history[-1])
             else:
@@ -790,7 +809,7 @@ class ThreeRoleReflectionLM:
             semantic_action = action.semantic_action.name if action.semantic_action else None
 
             section = action.edit_target.section
-            region_text = template.parse(text)[section]
+            region_text = section_bodies[section]
             history = _branch_history(metadata, action.edit_target.label)
             steering_message = None
             if self.level >= 2:
@@ -951,6 +970,8 @@ class ThreeRoleReflectionLM:
                     "revision_records": accepted_revisions,
                 }
             )
+        if controller_failures:
+            proposal.metadata["controller_failures"] = controller_failures
         if dropped:
             proposal.metadata["react_v2_dropped"] = dropped
             proposal.metadata["length_capped_dropped"] = dropped

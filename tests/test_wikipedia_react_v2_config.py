@@ -249,8 +249,8 @@ def test_complete_run_keys_cover_budget_seed_retrieval_and_data_identity() -> No
     assert level_one_contract["optimizer"]["semantic_controller_policy"] is None
 
 
-def test_hotpotqa_merge_is_an_opt_in_axis_shared_by_both_primary_conditions() -> None:
-    """Keep the paper merge policy orthogonal to the reflection strategy."""
+def test_hotpotqa_merge_is_an_opt_in_axis_shared_by_every_condition() -> None:
+    """Keep the paper merge policy orthogonal to every reflection strategy."""
     no_merge_args = _hotpot_args()
     merge_args = _hotpot_args(merge=True)
 
@@ -261,7 +261,7 @@ def test_hotpotqa_merge_is_an_opt_in_axis_shared_by_both_primary_conditions() ->
         "max_merge_invocations": 5,
         "merge_val_overlap_floor": 5,
     }
-    for condition in ("vanilla", "react_v2"):
+    for condition in ("vanilla", "random", "action", "react_v2"):
         contract = build_hotpotqa_run_contract(condition, merge_args)
         config, _ = build_hotpotqa_config(condition, merge_args, {})
 

@@ -8,13 +8,13 @@
 #   1. POSIT repo built on della at /home/${USER}/posit (with vLLM in its venv)
 #   2. GEPA repo synced and venv built via scripts/della/build_env.sh
 #
-# Qwen3.8-27B run:
+# Qwen3.8-27B four-condition run:
 #   sbatch --export=ALL,MODEL_PROFILE=qwen3.8-27b examples/hotpotqa/run_hotpotqa.sbatch
-# Qwen3.8-27B merge-on pair:
+# Qwen3.8-27B four-condition merge-on run:
 #   sbatch --export=ALL,MODEL_PROFILE=qwen3.8-27b,MERGE=1 examples/hotpotqa/run_hotpotqa.sbatch
-# DeepSeek V4 Flash run:
+# DeepSeek V4 Flash four-condition run:
 #   sbatch --export=ALL,MODEL_PROFILE=deepseek-v4-flash examples/hotpotqa/run_hotpotqa.sbatch
-# DeepSeek V4 Flash merge-on pair:
+# DeepSeek V4 Flash four-condition merge-on run:
 #   sbatch --export=ALL,MODEL_PROFILE=deepseek-v4-flash,MERGE=1 examples/hotpotqa/run_hotpotqa.sbatch
 #
 # The default run uses the paper's 6,871-call budget, two-hop program, seven
@@ -41,7 +41,7 @@ SOLVER_MODEL_PATH="${SOLVER_MODEL_PATH:-}"
 # share a node; a fixed port makes co-located jobs cross-talk and cross-kill.
 GEN_PORT="${GEN_PORT:-$((10000 + ${SLURM_JOB_ID:-0} % 5000))}"
 MAX_METRIC_CALLS="${MAX_METRIC_CALLS:-6871}"
-CONDITION="${CONDITION:-both}"
+CONDITION="${CONDITION:-all}"
 MERGE="${MERGE:-0}"
 PROGRAM="${PROGRAM:-2stage}"
 SEED_STYLE="${SEED_STYLE:-structured}"

@@ -936,7 +936,7 @@ def test_wikipedia_sbatch_exposes_both_homogeneous_model_profiles(benchmark: str
 
 
 def test_hotpotqa_della_submit_preserves_homogeneous_model_pairs() -> None:
-    """Expose both homogeneous model profiles and paper-scale defaults."""
+    """Expose homogeneous model profiles and the complete paper-scale matrix."""
     submit = (REPO_ROOT / "scripts" / "della" / "submit_hotpotqa.sh").read_text()
     sbatch = (REPO_ROOT / "examples" / "hotpotqa" / "run_hotpotqa.sbatch").read_text()
     build = (REPO_ROOT / "scripts" / "della" / "build_env.sh").read_text()
@@ -944,6 +944,7 @@ def test_hotpotqa_della_submit_preserves_homogeneous_model_pairs() -> None:
     assert "REFLECTION_API_BASE" in submit
     assert "MODEL_PROFILE" in submit
     assert 'MAX_METRIC_CALLS="${MAX_METRIC_CALLS:-6871}"' in submit
+    assert 'CONDITION="${CONDITION:-all}"' in submit
     assert 'MERGE="${MERGE:-0}"' in submit
     assert 'MAX_WORKERS="${MAX_WORKERS:-32}"' in submit
     assert 'RETRIEVAL_K="${RETRIEVAL_K:-7}"' in submit
@@ -958,6 +959,7 @@ def test_hotpotqa_della_submit_preserves_homogeneous_model_pairs() -> None:
     assert '--max-workers "${MAX_WORKERS}"' in sbatch
     assert '--seed "${EXPERIMENT_SEED}"' in sbatch
     assert 'MERGE="${MERGE:-0}"' in sbatch
+    assert 'CONDITION="${CONDITION:-all}"' in sbatch
     assert "MERGE_ARG=(--merge)" in sbatch
     assert '"${MERGE_ARG[@]}"' in sbatch
     assert 'export DSPY_CACHEDIR="${SCRATCH_BASE}/.cache/dspy"' in sbatch

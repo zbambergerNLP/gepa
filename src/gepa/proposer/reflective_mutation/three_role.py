@@ -256,7 +256,7 @@ def _joint_controller_sampling_record(history: Mapping[str, Any]) -> dict[str, A
     record = _controller_sampling_record(history)
     return {
         **record,
-        "policy": "joint_region_action_v3",
+        "policy": "joint_region_action_v4",
         "joint_sampling_probability": record["sampled_probabilities"][0],
     }
 
@@ -766,7 +766,9 @@ class ThreeRoleReflectionLM:
             # The Controller still needs their occupancy to judge which semantic
             # actions have the text required by their coupled operators.
             controller_candidate = (
-                "Controller-only section inventory. [EMPTY SECTION] is metadata, not document text.\n\n"
+                "Controller-only section inventory. [EMPTY SECTION] is metadata, not document text. "
+                "An empty region has no target bytes: assign probability 0 to its DELETE_TEXT, REPLACE_TEXT, and "
+                "MOVE_TEXT choices. Judge its INSERT_TEXT choices by their semantic fit.\n\n"
                 + "\n\n".join(
                     f"## {section}\n{body if body else '[EMPTY SECTION]'}" for section, body in section_bodies.items()
                 )

@@ -410,7 +410,7 @@ def test_three_role_run_contract_blocks_catalog_or_policy_drift(tmp_path: Path) 
     contract = strat.run_contract({"sys": PROMPT})
     assert contract["schema_version"] == 3
     assert contract["component_kinds"] == {"sys": "system_prompt"}
-    assert contract["controller"]["version"] == 3
+    assert contract["controller"]["version"] == 4
     assert contract["controller"]["factorization"] == "P(region, action)"
     assert len(contract["semantic_action_spaces"]["system_prompt"]["actions"]) == 10
     assert contract["semantic_action_spaces"]["system_prompt"]["kind"] == "prompt"
@@ -501,7 +501,7 @@ def test_level2_selects_semantic_action_manifests_and_executes_one_direct_call()
     assert len(sampling["probs"]) == 70
     assert sampling["probs"]["reexpress@Rules/REPLACE_TEXT"] == pytest.approx(0.99)
     assert sampling["fallback"] is False
-    assert sampling["policy"] == "joint_region_action_v3"
+    assert sampling["policy"] == "joint_region_action_v4"
     assert sampling["sampling_policy"] == "positive_support_uniform_mixture"
     assert sampling["exploration_epsilon"] == pytest.approx(0.1)
     assert sampling["joint_sampling_probability"] == pytest.approx(sampling["sampled_probabilities"][0])
@@ -516,6 +516,10 @@ def test_controller_sees_omitted_sections_as_empty_without_rendering_them() -> N
     strat.reflect({"sys": PROMPT}, deepcopy(SYS_REFLECTIVE_DATASET), ["sys"])
 
     controller_prompt = next(prompt for prompt in lm.string_calls if "Choose edit actions that address" in prompt)
+    assert (
+        "An empty region has no target bytes: assign probability 0 to its DELETE_TEXT, REPLACE_TEXT, and "
+        "MOVE_TEXT choices. Judge its INSERT_TEXT choices by their semantic fit."
+    ) in controller_prompt
     assert "## Role\nhelper" in controller_prompt
     assert "## Rules\n- be nice\n- be brief" in controller_prompt
     for section in ("Task", "Context", "Reasoning", "Examples", "Output Format"):

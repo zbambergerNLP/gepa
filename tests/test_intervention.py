@@ -135,7 +135,7 @@ def test_semantic_action_catalog_persists_the_full_ordered_contract() -> None:
     assert SEMANTIC_ACTION_CATALOGS["skill"]["actions"] == catalog["actions"]
     assert CONTROLLER_POLICY_CONTRACT["factorization"] == "P(region, action)"
     assert CONTROLLER_POLICY_CONTRACT["candidates"] == "all cataloged region/action pairs"
-    assert CONTROLLER_POLICY_CONTRACT["version"] == 3
+    assert CONTROLLER_POLICY_CONTRACT["version"] == 4
     assert CONTROLLER_POLICY_CONTRACT["sampling"] == "verbalized positive support mixed with uniform exploration"
     assert CONTROLLER_POLICY_CONTRACT["distribution_failure"] == "retry_once_then_drop"
     assert CONTROLLER_POLICY_CONTRACT["exploration_epsilon"] == pytest.approx(0.1)

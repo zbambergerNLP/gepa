@@ -39,7 +39,8 @@ HOTPOTQA_DSPY_VERSION = "2.6.23"
 HOTPOTQA_DSPY_COMMIT = "62dc3b634d7dc0c4889abcf905cb4c391ea6b396"
 HOTPOTQA_RUNTIME_PROFILES = ("scientific", "technical-smoke")
 HOTPOTQA_TECHNICAL_SMOKE_MAX_TOKENS = 8192
-HOTPOTQA_TECHNICAL_SMOKE_REASONING_EFFORT = "low"
+HOTPOTQA_TECHNICAL_SMOKE_QWEN_REASONING_EFFORT = "none"
+HOTPOTQA_TECHNICAL_SMOKE_DEEPSEEK_REASONING_EFFORT = "low"
 
 
 if dspy is not None:
@@ -152,8 +153,9 @@ def resolve_hotpotqa_lm_kwargs(
 
     The scientific profile preserves the shared experiment configuration. The
     technical-smoke profile bounds both OpenRouter experiment models' output
-    tokens and reasoning effort so a local integration run finishes promptly.
-    Provider pins and fallback policies remain unchanged.
+    tokens. It disables Qwen's optional hidden reasoning and uses DeepSeek's
+    low effort so local integration runs finish promptly. Provider pins and
+    fallback policies remain unchanged.
 
     Args:
         model: Exact LiteLLM runtime model identifier.
@@ -181,8 +183,12 @@ def resolve_hotpotqa_lm_kwargs(
     }
     if runtime_profile == "technical-smoke" and model in technical_smoke_models:
         kwargs["max_tokens"] = HOTPOTQA_TECHNICAL_SMOKE_MAX_TOKENS
+        if model == QWEN3_8_27B_OPENROUTER_MODEL:
+            reasoning_effort = HOTPOTQA_TECHNICAL_SMOKE_QWEN_REASONING_EFFORT
+        else:
+            reasoning_effort = HOTPOTQA_TECHNICAL_SMOKE_DEEPSEEK_REASONING_EFFORT
         extra_body = deepcopy(kwargs["extra_body"])
-        extra_body["reasoning"] = {"effort": HOTPOTQA_TECHNICAL_SMOKE_REASONING_EFFORT}
+        extra_body["reasoning"] = {"effort": reasoning_effort}
         kwargs["extra_body"] = extra_body
     if api_base is not None:
         kwargs["api_base"] = api_base

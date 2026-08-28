@@ -504,13 +504,15 @@ def test_hotpot_dspy_lm_accepts_the_resolved_technical_smoke_profile(monkeypatch
     hotpot_utils.build_hotpotqa_task_lm(model, None, lm_kwargs)
 
     assert lm_kwargs["max_tokens"] == 8192
-    assert lm_kwargs["extra_body"]["reasoning"] == {"effort": "low"}
+    assert lm_kwargs["extra_body"]["reasoning"] == {"effort": "none"}
     lm_constructor.assert_called_once_with(model=model, **lm_kwargs)
 
 
 def test_hotpot_openrouter_launcher_plans_eight_isolated_arms() -> None:
     """Lock the tiny matrix, data sizes, budgets, and runtime/provider profiles."""
     script = REPO_ROOT / "scripts" / "openrouter" / "run_hotpotqa_tiny.sh"
+    environment = dict(os.environ)
+    environment.pop("OPENROUTER_SMOKE_START_ARM", None)
 
     result = subprocess.run(
         [str(script), "--dry-run"],
@@ -518,6 +520,7 @@ def test_hotpot_openrouter_launcher_plans_eight_isolated_arms() -> None:
         check=True,
         capture_output=True,
         text=True,
+        env=environment,
     )
 
     plans = [line for line in result.stdout.splitlines() if line.startswith("PLAN ")]
@@ -538,11 +541,81 @@ def test_hotpot_openrouter_launcher_plans_eight_isolated_arms() -> None:
     assert "48 GiB" not in script.read_text(encoding="utf-8")
 
 
+def test_hotpot_openrouter_launcher_resumes_from_an_explicit_arm() -> None:
+    """Skip completed paid arms only under an explicit stable run tag."""
+    script = REPO_ROOT / "scripts" / "openrouter" / "run_hotpotqa_tiny.sh"
+    environment = dict(os.environ)
+    environment["OPENROUTER_SMOKE_START_ARM"] = "4"
+    environment["SMOKE_TAG"] = "resume-test"
+
+    result = subprocess.run(
+        [str(script), "--dry-run"],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    plans = [line for line in result.stdout.splitlines() if line.startswith("PLAN ")]
+    assert len(plans) == 5
+    assert plans[0].startswith("PLAN 4/8 qwen-react-v2-no-merge")
+    assert plans[-1].startswith("PLAN 8/8 qwen-react-v2-merge")
+    assert "resume: arms 1-3 are skipped and not revalidated" in result.stdout
+
+
+@pytest.mark.parametrize("start_arm", ["0", "9", "not-an-arm"])
+def test_hotpot_openrouter_launcher_rejects_invalid_resume_arms(start_arm: str) -> None:
+    """Reject invalid resume bounds before planning or paid requests.
+
+    Args:
+        start_arm: Invalid one-based arm index.
+    """
+    script = REPO_ROOT / "scripts" / "openrouter" / "run_hotpotqa_tiny.sh"
+    environment = dict(os.environ)
+    environment["OPENROUTER_SMOKE_START_ARM"] = start_arm
+    environment["SMOKE_TAG"] = "resume-test"
+
+    result = subprocess.run(
+        [str(script), "--dry-run"],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert result.returncode == 2
+    assert "PLAN " not in result.stdout
+
+
+def test_hotpot_openrouter_launcher_requires_a_stable_tag_when_resuming() -> None:
+    """Prevent a partial resume from silently receiving a new run identity."""
+    script = REPO_ROOT / "scripts" / "openrouter" / "run_hotpotqa_tiny.sh"
+    environment = dict(os.environ)
+    environment["OPENROUTER_SMOKE_START_ARM"] = "4"
+    environment.pop("SMOKE_TAG", None)
+
+    result = subprocess.run(
+        [str(script), "--dry-run"],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert result.returncode == 2
+    assert "SMOKE_TAG is required" in result.stderr
+    assert "PLAN " not in result.stdout
+
+
 def test_hotpot_openrouter_launcher_refuses_execution_without_a_key() -> None:
     """Stop before endpoint checks or paid calls when credentials are absent."""
     script = REPO_ROOT / "scripts" / "openrouter" / "run_hotpotqa_tiny.sh"
     environment = dict(os.environ)
     environment.pop("OPENROUTER_API_KEY", None)
+    environment.pop("OPENROUTER_SMOKE_START_ARM", None)
 
     result = subprocess.run(
         [str(script), "--execute"],

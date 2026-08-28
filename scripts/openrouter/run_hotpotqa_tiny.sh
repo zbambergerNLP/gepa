@@ -17,8 +17,19 @@ fi
 
 cache_base="${XDG_CACHE_HOME:-${HOME}/.cache}"
 technical_mini_index_dir="${HOTPOTQA_TECHNICAL_MINI_INDEX_DIR:-${cache_base}/gepa/hotpotqa-technical-mini}"
-smoke_tag="${SMOKE_TAG:-openrouter-tiny-$(date -u +%Y%m%dT%H%M%SZ)}"
+configured_smoke_tag="${SMOKE_TAG:-}"
+smoke_tag="${configured_smoke_tag:-openrouter-tiny-$(date -u +%Y%m%dT%H%M%SZ)}"
 smoke_key_limit_usd="${OPENROUTER_SMOKE_KEY_LIMIT_USD:-25}"
+smoke_start_arm="${OPENROUTER_SMOKE_START_ARM:-1}"
+
+if ! [[ "$smoke_start_arm" =~ ^[1-8]$ ]]; then
+    echo "OPENROUTER_SMOKE_START_ARM must be an integer from 1 through 8." >&2
+    exit 2
+fi
+if [[ "$smoke_start_arm" != "1" && -z "$configured_smoke_tag" ]]; then
+    echo "SMOKE_TAG is required when OPENROUTER_SMOKE_START_ARM is greater than 1." >&2
+    exit 2
+fi
 
 arm_names=(
     deepseek-vanilla-no-merge
@@ -43,14 +54,21 @@ models=(
 conditions=(vanilla react_v2 vanilla react_v2 vanilla react_v2 vanilla react_v2)
 merge_flags=(0 0 0 0 1 1 1 1)
 budgets=(16 16 16 16 32 32 32 32)
+selected_indexes=()
+for ((index = smoke_start_arm - 1; index < ${#arm_names[@]}; index++)); do
+    selected_indexes+=("$index")
+done
 
 echo "HotPotQA OpenRouter technical-smoke matrix"
 echo "  fullwiki split: 6 train / 5 validation / 2 test"
 echo "  retrieval: NON-SCIENTIFIC selected-context technical-mini BM25 index"
-echo "  arms: 8 isolated processes; budgets are scheduling thresholds, not hard spend caps"
+echo "  arms: ${smoke_start_arm}-8 selected; budgets are scheduling thresholds, not hard spend caps"
+if [[ "$smoke_start_arm" != "1" ]]; then
+    echo "  resume: arms 1-$((smoke_start_arm - 1)) are skipped and not revalidated"
+fi
 echo "  tag: $smoke_tag"
 
-for index in "${!arm_names[@]}"; do
+for index in "${selected_indexes[@]}"; do
     command=(
         uv run python -m examples.hotpotqa.main
         --api-profile openrouter
@@ -145,6 +163,18 @@ if ! jq -e '
     exit 1
 fi
 
+model_catalog="$(curl -fsS https://openrouter.ai/api/v1/models)"
+if ! jq -e '
+    any(
+        .data[];
+        .id == "qwen/qwen3.8-27b"
+        and .reasoning.mandatory == false
+    )
+' >/dev/null <<<"$model_catalog"; then
+    echo "Qwen3.8-27B no longer permits disabling hidden reasoning for the technical smoke run." >&2
+    exit 1
+fi
+
 deepseek_endpoints="$(curl -fsS https://openrouter.ai/api/v1/models/deepseek/deepseek-v4-flash-0731/endpoints)"
 if ! jq -e '
     any(
@@ -159,7 +189,7 @@ if ! jq -e '
     echo "DeepSeek's V4 Flash 0731 endpoint is missing, unhealthy, incompatible, or above the pinned price." >&2
     exit 1
 fi
-echo "OpenRouter endpoint preflight: AkashML BF16 and official DeepSeek routes verified"
+echo "OpenRouter endpoint preflight: AkashML BF16, Qwen optional reasoning, and official DeepSeek verified"
 
 if ! key_json="$(
     curl -fsS --config - <<CURL_CONFIG
@@ -183,7 +213,7 @@ fi
 matrix_usage_start="$(jq -r '.data.usage' <<<"$key_json")"
 jq -r '"OpenRouter key preflight: limit=$\(.data.limit), remaining=$\(.data.limit_remaining), usage=$\(.data.usage)"' <<<"$key_json"
 
-for index in "${!arm_names[@]}"; do
+for index in "${selected_indexes[@]}"; do
     command=(
         uv run python -m examples.hotpotqa.main
         --api-profile openrouter
@@ -248,9 +278,13 @@ url = "https://openrouter.ai/api/v1/key"
 header = "Authorization: Bearer ${OPENROUTER_API_KEY}"
 CURL_CONFIG
 )"; then
-    echo "All arms passed, but final OpenRouter usage could not be read." >&2
+    echo "Selected arms passed, but final OpenRouter usage could not be read." >&2
     exit 1
 fi
 matrix_usage_end="$(jq -r '.data.usage' <<<"$final_key_json")"
 matrix_usage_delta="$(awk -v start="$matrix_usage_start" -v finish="$matrix_usage_end" 'BEGIN {printf "%.6f", finish - start}')"
-echo "All eight HotPotQA smoke arms passed. OpenRouter usage delta: \$$matrix_usage_delta"
+if [[ "$smoke_start_arm" == "1" ]]; then
+    echo "All eight HotPotQA smoke arms passed. OpenRouter usage delta: \$$matrix_usage_delta"
+else
+    echo "HotPotQA smoke arms ${smoke_start_arm}-8 passed. Invocation usage delta: \$$matrix_usage_delta"
+fi

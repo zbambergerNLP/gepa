@@ -1,9 +1,9 @@
-"""HotPotQA evaluation: vanilla GEPA versus ReAct V2.
+"""Run vanilla and action-conditioned GEPA variants on HotPotQA.
 
 The default benchmark path follows the GEPA paper artifact's data split,
 frozen Wiki-2017 BM25 retrieval, two-hop four-component program, component
 feedback, exact-match objective, and 6,871-call budget. Model identities remain
-configurable, and both conditions receive the same model assignments and task
+configurable, and all conditions receive the same model assignments and task
 evidence.
 
 Conditions:
@@ -13,7 +13,7 @@ Conditions:
     action   - action-conditioned reflection with verbalized sampling
 
 Usage:
-    uv run python -m examples.hotpotqa.main [--condition vanilla|react_v2|both]
+    uv run python -m examples.hotpotqa.main [--condition vanilla|random|action|react_v2|all]
         [--max-metric-calls N] [--train-limit N] [--val-limit N] [--test-limit N]
     # Smoke (20 ex, 14/3/3):
     uv run python -m examples.hotpotqa.main --data-path examples/hotpotqa/data/hotpotqa_distractor_sample.jsonl --max-metric-calls 200 --condition both
@@ -994,7 +994,7 @@ def main():
     )
 
     if args.condition == "all":
-        conditions = ["vanilla", "react_v2", "random", "action"]
+        conditions = ["vanilla", "random", "action", "react_v2"]
     elif args.condition == "both":
         conditions = ["vanilla", "react_v2"]
     else:

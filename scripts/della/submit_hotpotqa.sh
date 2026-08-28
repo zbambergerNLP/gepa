@@ -5,8 +5,9 @@
 #   scripts/della/submit_hotpotqa.sh
 #
 # Use MODEL_PROFILE=qwen3.8-27b or MODEL_PROFILE=deepseek-v4-flash. Each
-# profile uses the same model for the student and proposer. Set MERGE=1 to
-# submit the paired GEPA+Merge and ReAct V2+Merge conditions.
+# profile uses the same model for the student and proposer. The default runs
+# vanilla, uniform stateless, verbalized stateless, and ReAct V2 conditions.
+# Set MERGE=1 to run the same four conditions with merge enabled.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -25,7 +26,7 @@ MODEL="${MODEL:-}"
 SOLVER_MODEL_PATH="${SOLVER_MODEL_PATH:-}"
 DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-}"
 MAX_METRIC_CALLS="${MAX_METRIC_CALLS:-6871}"
-CONDITION="${CONDITION:-both}"
+CONDITION="${CONDITION:-all}"
 MERGE="${MERGE:-0}"
 EXPERIMENT_SEED="${EXPERIMENT_SEED:-0}"
 MAX_WORKERS="${MAX_WORKERS:-32}"

@@ -10,15 +10,11 @@
 #
 # Qwen3.8-27B four-condition run:
 #   sbatch --export=ALL,MODEL_PROFILE=qwen3.8-27b examples/hotpotqa/run_hotpotqa.sbatch
-# Qwen3.8-27B four-condition merge-on run:
-#   sbatch --export=ALL,MODEL_PROFILE=qwen3.8-27b,MERGE=1 examples/hotpotqa/run_hotpotqa.sbatch
 # DeepSeek V4 Flash four-condition run:
 #   sbatch --export=ALL,MODEL_PROFILE=deepseek-v4-flash examples/hotpotqa/run_hotpotqa.sbatch
-# DeepSeek V4 Flash four-condition merge-on run:
-#   sbatch --export=ALL,MODEL_PROFILE=deepseek-v4-flash,MERGE=1 examples/hotpotqa/run_hotpotqa.sbatch
 #
 # The default run uses the paper's 6,871-call budget, two-hop program, seven
-# documents per hop, seed 0, and 32 evaluator workers.
+# documents per hop, seed 0, 32 evaluator workers, and merge disabled.
 
 #SBATCH --job-name=gepa-hotpotqa
 #SBATCH --nodes=1

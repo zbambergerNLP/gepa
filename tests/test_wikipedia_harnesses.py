@@ -936,7 +936,7 @@ def test_wikipedia_sbatch_exposes_both_homogeneous_model_profiles(benchmark: str
 
 
 def test_hotpotqa_della_submit_preserves_homogeneous_model_pairs() -> None:
-    """Expose homogeneous model profiles and the complete paper-scale matrix."""
+    """Expose homogeneous model profiles and the eight-arm merge-off matrix."""
     submit = (REPO_ROOT / "scripts" / "della" / "submit_hotpotqa.sh").read_text()
     sbatch = (REPO_ROOT / "examples" / "hotpotqa" / "run_hotpotqa.sbatch").read_text()
     build = (REPO_ROOT / "scripts" / "della" / "build_env.sh").read_text()

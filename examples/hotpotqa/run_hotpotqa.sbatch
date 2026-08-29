@@ -12,7 +12,7 @@
 # model-specific resource request and is the only supported production entry.
 #
 # The production path fixes every scientific setting. BUDGET_PROFILE identifies
-# the standard 6,871-call or expanded 15,000-call search budget for one approved
+# the standard 6,871-call or two-times 13,742-call search budget for one approved
 # campaign cell. Throughput settings may change scheduling, but not prompts,
 # data, retrieval, decoding, candidate budgets, or evaluation order.
 
@@ -151,7 +151,7 @@ case "${BUDGET_PROFILE}" in
         EXPECTED_MAX_METRIC_CALLS=6871
         ;;
     expanded)
-        EXPECTED_MAX_METRIC_CALLS=15000
+        EXPECTED_MAX_METRIC_CALLS=13742
         ;;
     *)
         echo "ERROR: BUDGET_PROFILE must be standard or expanded" >&2

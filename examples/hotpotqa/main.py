@@ -4,7 +4,7 @@ The default benchmark path follows the GEPA paper artifact's data split,
 frozen Wiki-2017 BM25 retrieval, two-hop four-component program, component
 feedback, exact-match objective, and 6,871-call budget. The locked production
 campaign runs four methods at that standard budget and only the headline
-vanilla/ReAct V2 pair at the 15,000-call expanded budget. Model identities
+vanilla/ReAct V2 pair at the 13,742-call two-times budget. Model identities
 remain configurable, and all conditions receive the same model assignments and
 task evidence.
 
@@ -148,7 +148,7 @@ _PAPER_MAX_MERGE_INVOCATIONS = 5
 _PAPER_MERGE_VAL_OVERLAP_FLOOR = 5
 _SCIENTIFIC_CONDITIONS_BY_BUDGET = {
     6_871: ("vanilla", "react_v2", "react_v2_random", "action"),
-    15_000: ("vanilla", "react_v2"),
+    13_742: ("vanilla", "react_v2"),
 }
 _SCIENTIFIC_METRIC_CALL_BUDGETS = set(_SCIENTIFIC_CONDITIONS_BY_BUDGET)
 _SCIENTIFIC_PYTHON_VERSION = "3.11.13"
@@ -208,7 +208,7 @@ def _validated_runtime_profile(args) -> str:
             changed_axes.append("--merge must be omitted")
         max_metric_calls = getattr(args, "max_metric_calls", 6_871)
         if max_metric_calls not in _SCIENTIFIC_METRIC_CALL_BUDGETS:
-            changed_axes.append("--max-metric-calls must be 6871 or 15000")
+            changed_axes.append("--max-metric-calls must be 6871 or 13742")
         else:
             requested_condition = getattr(args, "condition", "both")
             approved_conditions = _SCIENTIFIC_CONDITIONS_BY_BUDGET[max_metric_calls]
@@ -1323,7 +1323,7 @@ def main():
         "--max-metric-calls",
         type=int,
         default=6871,
-        help="Budget per condition (paper: 6871, smoke: 200, scaled Wave B: 15000)",
+        help="Budget per condition (paper: 6871, smoke: 200, two-times compute: 13742)",
     )
     parser.add_argument(
         "--solver-model",

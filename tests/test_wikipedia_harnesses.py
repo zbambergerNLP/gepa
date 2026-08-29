@@ -1576,7 +1576,7 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert 'HOTPOTQA_CAMPAIGN_ID="${HOTPOTQA_CAMPAIGN_ID:-hotpotqa-final-v1}"' in submit
     assert "MAX_METRIC_CALLS=6871" in submit
     assert 'STANDARD_TIME="${STANDARD_TIME:-${TIME:-72:00:00}}"' in submit
-    assert "MAX_METRIC_CALLS=15000" in submit
+    assert "MAX_METRIC_CALLS=13742" in submit
     assert 'EXPANDED_TIME="${EXPANDED_TIME:-${TIME:-144:00:00}}"' in submit
     assert 'CONDITION="${CONDITION:-all}"' in submit
     assert 'MAX_WORKERS="${MAX_WORKERS:-}"' in submit
@@ -1647,7 +1647,7 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert "SUBMIT_CONDITIONS=(vanilla react_v2)" in submit
     assert r'RUN_BUDGET_PROFILE="\${SUBMIT_BUDGET_PROFILES[\${CELL_INDEX}]}"' in submit
     assert "RUN_MAX_METRIC_CALLS=6871" in submit
-    assert "RUN_MAX_METRIC_CALLS=15000" in submit
+    assert "RUN_MAX_METRIC_CALLS=13742" in submit
     assert 'RUN_TIME="${STANDARD_TIME}"' in submit
     assert 'RUN_TIME="${EXPANDED_TIME}"' in submit
     assert 'DEPENDENCY_ARGS+=("--dependency=afterok:\\${PREVIOUS_JOB_ID}")' in submit
@@ -1688,7 +1688,7 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert "#SBATCH --cpus-per-task=8" in sbatch
     assert 'BUDGET_PROFILE="${BUDGET_PROFILE:-standard}"' in sbatch
     assert "EXPECTED_MAX_METRIC_CALLS=6871" in sbatch
-    assert "EXPECTED_MAX_METRIC_CALLS=15000" in sbatch
+    assert "EXPECTED_MAX_METRIC_CALLS=13742" in sbatch
     assert 'MODEL="Qwen3.8-27B"' in sbatch
     assert 'SOLVER_MODEL_PATH="${MODEL_STORAGE}/${MODEL}"' in sbatch
     assert 'QWEN_REVISION="1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"' in sbatch

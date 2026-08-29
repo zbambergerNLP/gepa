@@ -319,8 +319,8 @@ def test_experiment_model_version_rejects_unknown_models() -> None:
         (6_871, "react_v2"),
         (6_871, "react_v2_random"),
         (6_871, "action"),
-        (15_000, "vanilla"),
-        (15_000, "react_v2"),
+        (13_742, "vanilla"),
+        (13_742, "react_v2"),
     ],
 )
 def test_hotpot_scientific_contract_accepts_only_the_pinned_qwen_runtime(
@@ -380,8 +380,9 @@ def test_hotpot_scientific_campaign_contains_only_the_six_approved_cells() -> No
     """Lock the six comparisons and their shared classic GEPA topology."""
     assert _SCIENTIFIC_CONDITIONS_BY_BUDGET == {
         6_871: ("vanilla", "react_v2", "react_v2_random", "action"),
-        15_000: ("vanilla", "react_v2"),
+        13_742: ("vanilla", "react_v2"),
     }
+    assert 13_742 == 2 * 6_871
     assert sum(len(conditions) for conditions in _SCIENTIFIC_CONDITIONS_BY_BUDGET.values()) == 6
     for max_metric_calls, conditions in _SCIENTIFIC_CONDITIONS_BY_BUDGET.items():
         for condition in conditions:
@@ -415,7 +416,7 @@ def test_hotpot_scientific_contract_accepts_the_pinned_deepseek_runtime(monkeypa
     args = _hotpot_args(
         condition="react_v2",
         enforce_scientific_contract=True,
-        max_metric_calls=15_000,
+        max_metric_calls=13_742,
         solver_model=DEEPSEEK_V4_FLASH_MODEL,
         reflection_model=DEEPSEEK_V4_FLASH_MODEL,
         solver_api_base=DEEPSEEK_API_BASE,
@@ -463,7 +464,7 @@ def test_hotpot_scientific_contract_requires_both_deepseek_response_fields(
         monkeypatch.setenv(name, value)
     args = _hotpot_args(
         enforce_scientific_contract=True,
-        max_metric_calls=15_000,
+        max_metric_calls=13_742,
         solver_model=DEEPSEEK_V4_FLASH_MODEL,
         reflection_model=DEEPSEEK_V4_FLASH_MODEL,
         solver_api_base=DEEPSEEK_API_BASE,
@@ -513,7 +514,7 @@ def test_hotpot_scientific_contract_rejects_deepseek_endpoint_drift(
     monkeypatch.setenv("HOTPOTQA_GEPA_ENV_SHA256", "2" * 64)
     values = {
         "enforce_scientific_contract": True,
-        "max_metric_calls": 15_000,
+        "max_metric_calls": 13_742,
         "solver_model": DEEPSEEK_V4_FLASH_MODEL,
         "reflection_model": DEEPSEEK_V4_FLASH_MODEL,
         "solver_api_base": DEEPSEEK_API_BASE,
@@ -549,8 +550,8 @@ def test_hotpot_scientific_contract_rejects_deepseek_endpoint_drift(
         ({"merge": True}, "--merge"),
         ({"max_metric_calls": 6_870}, "--max-metric-calls"),
         ({"condition": "random"}, "--condition"),
-        ({"condition": "action", "max_metric_calls": 15_000}, "--condition"),
-        ({"condition": "react_v2_random", "max_metric_calls": 15_000}, "--condition"),
+        ({"condition": "action", "max_metric_calls": 13_742}, "--condition"),
+        ({"condition": "react_v2_random", "max_metric_calls": 13_742}, "--condition"),
         ({"max_workers": 0}, "--max-workers"),
     ],
 )

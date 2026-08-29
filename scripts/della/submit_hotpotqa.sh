@@ -8,7 +8,7 @@
 # profile uses the same model for the student and proposer. The default
 # BUDGET_PROFILE=campaign submits exactly six serial jobs: vanilla, ReAct V2,
 # random-Controller ReAct V2, and selected-action GEPA at 6,871 calls, followed
-# by vanilla and ReAct V2 at 15,000 calls. BUDGET_PROFILE=standard or expanded
+# by vanilla and ReAct V2 at 13,742 calls. BUDGET_PROFILE=standard or expanded
 # resubmits only the approved cells at one budget.
 set -euo pipefail
 
@@ -88,7 +88,7 @@ fi
 
 case "${BUDGET_PROFILE}" in
     campaign)
-        CAMPAIGN_BUDGET_LABEL="6871+15000"
+        CAMPAIGN_BUDGET_LABEL="6871+13742"
         if [[ "${CONDITION}" != "all" ]]; then
             echo "ERROR: BUDGET_PROFILE=campaign requires CONDITION=all" >&2
             exit 1
@@ -105,7 +105,7 @@ case "${BUDGET_PROFILE}" in
         esac
         ;;
     expanded)
-        CAMPAIGN_BUDGET_LABEL="15000"
+        CAMPAIGN_BUDGET_LABEL="13742"
         case "${CONDITION}" in
             vanilla|react_v2|all) ;;
             *)
@@ -399,7 +399,7 @@ for CELL_INDEX in "\${!SUBMIT_CONDITIONS[@]}"; do
             RUN_TIME="${STANDARD_TIME}"
             ;;
         expanded)
-            RUN_MAX_METRIC_CALLS=15000
+            RUN_MAX_METRIC_CALLS=13742
             RUN_TIME="${EXPANDED_TIME}"
             ;;
         *)

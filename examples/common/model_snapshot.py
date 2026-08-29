@@ -1,4 +1,4 @@
-"""Prepare and verify the exact Qwen checkpoint used by HotPotQA."""
+"""Prepare and verify exact local checkpoints used by benchmark campaigns."""
 
 from __future__ import annotations
 
@@ -9,9 +9,19 @@ from pathlib import Path
 
 from huggingface_hub import HfApi, snapshot_download  # type: ignore[import-not-found]
 
-from examples.common.experiment_models import QWEN3_8_27B_REVISION
+from examples.common.experiment_models import (
+    GLM_5_3_FLASH_REPO,
+    GLM_5_3_FLASH_REVISION,
+    QWEN3_8_27B_REPO,
+    QWEN3_8_27B_REVISION,
+)
 
-QWEN3_8_27B_REPO = "Qwen/Qwen3.8-27B"
+QWEN3_8_27B_PROFILE = "qwen3.8-27b"
+GLM_5_3_FLASH_PROFILE = "glm-5.3-flash"
+MODEL_SNAPSHOT_SPECS = {
+    QWEN3_8_27B_PROFILE: (QWEN3_8_27B_REPO, QWEN3_8_27B_REVISION),
+    GLM_5_3_FLASH_PROFILE: (GLM_5_3_FLASH_REPO, GLM_5_3_FLASH_REVISION),
+}
 MODEL_INTEGRITY_NAME = ".gepa-model-integrity.json"
 
 
@@ -77,21 +87,35 @@ def _snapshot_content_paths(root: Path) -> set[str]:
     return paths
 
 
-def _build_manifest(root: Path, repo_files: list[dict[str, object]]) -> dict[str, object]:
+def _build_manifest(
+    root: Path,
+    repo_files: list[dict[str, object]],
+    model_profile: str,
+) -> dict[str, object]:
     """Build byte-level identity for the pinned repository file list.
 
     Args:
         root: Local snapshot directory.
         repo_files: Authoritative paths, sizes, and content identifiers returned
             by Hugging Face for the pinned revision.
+        model_profile: Named experiment profile whose repository is being
+            materialized.
 
     Returns:
         Repository identity and ordered per-file size and SHA-256 records.
 
     Raises:
-        ModelSnapshotError: A repository file is absent, duplicated, is not
-            regular, or an unpinned extra file is present.
+        ModelSnapshotError: The model profile is unknown, a repository file is
+            absent or duplicated, a path is not regular, or an unpinned extra
+            file is present.
     """
+    try:
+        repository, revision = MODEL_SNAPSHOT_SPECS[model_profile]
+    except KeyError as exc:
+        supported = ", ".join(MODEL_SNAPSHOT_SPECS)
+        raise ModelSnapshotError(
+            f"Unsupported model snapshot profile {model_profile!r}; expected one of: {supported}"
+        ) from exc
     if not repo_files:
         raise ModelSnapshotError("Pinned model repository metadata contains no files.")
     expected_paths = {str(record["path"]) for record in repo_files}
@@ -134,38 +158,47 @@ def _build_manifest(root: Path, repo_files: list[dict[str, object]]) -> dict[str
             }
         )
     return {
-        "schema_version": 2,
-        "repository": QWEN3_8_27B_REPO,
-        "revision": QWEN3_8_27B_REVISION,
+        "schema_version": 3,
+        "model_profile": model_profile,
+        "repository": repository,
+        "revision": revision,
         "files": files,
     }
 
 
-def prepare_qwen_snapshot(root: str | Path) -> dict[str, object]:
-    """Download and hash the pinned Qwen3.8-27B snapshot.
+def prepare_model_snapshot(root: str | Path, model_profile: str) -> dict[str, object]:
+    """Download and hash one pinned experiment-model snapshot.
 
     Args:
-        root: Local directory served by vLLM.
+        root: Local directory served by the selected inference runtime.
+        model_profile: Exact profile name in :data:`MODEL_SNAPSHOT_SPECS`.
 
     Returns:
         Persisted byte-level model manifest.
 
     Raises:
-        ModelSnapshotError: Hugging Face does not materialize the exact pinned
-            repository contents.
+        ModelSnapshotError: The profile is unknown or Hugging Face does not
+            materialize the exact pinned repository contents.
     """
+    try:
+        repository, revision = MODEL_SNAPSHOT_SPECS[model_profile]
+    except KeyError as exc:
+        supported = ", ".join(MODEL_SNAPSHOT_SPECS)
+        raise ModelSnapshotError(
+            f"Unsupported model snapshot profile {model_profile!r}; expected one of: {supported}"
+        ) from exc
     snapshot_root = Path(root).expanduser().resolve()
     snapshot_root.mkdir(parents=True, exist_ok=True)
     try:
         snapshot_download(
-            repo_id=QWEN3_8_27B_REPO,
-            revision=QWEN3_8_27B_REVISION,
+            repo_id=repository,
+            revision=revision,
             local_dir=snapshot_root,
         )
         repo_files = []
         for entry in HfApi().list_repo_tree(
-            repo_id=QWEN3_8_27B_REPO,
-            revision=QWEN3_8_27B_REVISION,
+            repo_id=repository,
+            revision=revision,
             recursive=True,
             expand=True,
         ):
@@ -186,8 +219,8 @@ def prepare_qwen_snapshot(root: str | Path) -> dict[str, object]:
                 }
             )
     except Exception as exc:
-        raise ModelSnapshotError(f"Could not prepare {QWEN3_8_27B_REPO}@{QWEN3_8_27B_REVISION}: {exc}") from exc
-    manifest = _build_manifest(snapshot_root, repo_files)
+        raise ModelSnapshotError(f"Could not prepare {repository}@{revision}: {exc}") from exc
+    manifest = _build_manifest(snapshot_root, repo_files, model_profile)
     manifest_path = snapshot_root / MODEL_INTEGRITY_NAME
     temporary_path = manifest_path.with_suffix(".json.part")
     temporary_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -195,19 +228,27 @@ def prepare_qwen_snapshot(root: str | Path) -> dict[str, object]:
     return manifest
 
 
-def verify_qwen_snapshot(root: str | Path) -> dict[str, object]:
-    """Verify every pinned Qwen3.8-27B snapshot byte without network access.
+def verify_model_snapshot(root: str | Path, model_profile: str) -> dict[str, object]:
+    """Verify every byte in one pinned snapshot without network access.
 
     Args:
-        root: Local directory served by vLLM.
+        root: Local directory served by the selected inference runtime.
+        model_profile: Exact profile name in :data:`MODEL_SNAPSHOT_SPECS`.
 
     Returns:
         Verified byte-level model manifest.
 
     Raises:
-        ModelSnapshotError: The manifest is missing, malformed, identifies a
-            different revision, or any file differs in size or digest.
+        ModelSnapshotError: The profile is unknown; the manifest is missing or
+            malformed; or any identity, size, or digest differs from the pin.
     """
+    try:
+        repository, revision = MODEL_SNAPSHOT_SPECS[model_profile]
+    except KeyError as exc:
+        supported = ", ".join(MODEL_SNAPSHOT_SPECS)
+        raise ModelSnapshotError(
+            f"Unsupported model snapshot profile {model_profile!r}; expected one of: {supported}"
+        ) from exc
     snapshot_root = Path(root).expanduser().resolve()
     manifest_path = snapshot_root / MODEL_INTEGRITY_NAME
     try:
@@ -215,13 +256,12 @@ def verify_qwen_snapshot(root: str | Path) -> dict[str, object]:
     except (OSError, json.JSONDecodeError) as exc:
         raise ModelSnapshotError(f"Pinned model integrity manifest is unreadable at {manifest_path}: {exc}") from exc
     if (
-        manifest.get("schema_version") != 2
-        or manifest.get("repository") != QWEN3_8_27B_REPO
-        or manifest.get("revision") != QWEN3_8_27B_REVISION
+        manifest.get("schema_version") != 3
+        or manifest.get("model_profile") != model_profile
+        or manifest.get("repository") != repository
+        or manifest.get("revision") != revision
     ):
-        raise ModelSnapshotError(
-            f"Model snapshot must be {QWEN3_8_27B_REPO}@{QWEN3_8_27B_REVISION}."
-        )
+        raise ModelSnapshotError(f"Model snapshot must be {repository}@{revision} for {model_profile!r}.")
     files = manifest.get("files")
     if not isinstance(files, list) or not files:
         raise ModelSnapshotError("Pinned model integrity manifest contains no files.")
@@ -261,20 +301,21 @@ def verify_qwen_snapshot(root: str | Path) -> dict[str, object]:
 
 
 def main() -> None:
-    """Prepare or verify the pinned Qwen checkpoint from the command line.
+    """Prepare or verify one pinned checkpoint from the command line.
 
     Raises:
         ModelSnapshotError: The requested snapshot operation cannot establish
             the pinned checkpoint identity.
     """
-    parser = argparse.ArgumentParser(description="Prepare or verify the pinned Qwen3.8-27B checkpoint")
+    parser = argparse.ArgumentParser(description="Prepare or verify a pinned experiment-model checkpoint")
     parser.add_argument("command", choices=["prepare", "verify"])
+    parser.add_argument("--model-profile", choices=tuple(MODEL_SNAPSHOT_SPECS), required=True)
     parser.add_argument("--root", type=Path, required=True)
     args = parser.parse_args()
     if args.command == "prepare":
-        manifest = prepare_qwen_snapshot(args.root)
+        manifest = prepare_model_snapshot(args.root, args.model_profile)
     else:
-        manifest = verify_qwen_snapshot(args.root)
+        manifest = verify_model_snapshot(args.root, args.model_profile)
     print(json.dumps(manifest, indent=2, sort_keys=True))
 
 

@@ -11,9 +11,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
 from examples.common.experiment_models import (
-    DEEPSEEK_V4_FLASH_0731_OPENROUTER_MODEL,
-    DEEPSEEK_V4_FLASH_MODEL,
     EXPERIMENT_NUM_RETRIES,
+    GLM_5_3_FLASH_MODEL,
+    GLM_5_3_FLASH_OPENROUTER_MODEL,
     QWEN3_8_27B_MODEL,
     QWEN3_8_27B_MODEL_INFO,
     QWEN3_8_27B_OPENROUTER_MODEL,
@@ -72,9 +72,9 @@ def test_qwen_student_uses_alibaba_user_prompt_template() -> None:
     assert [line for line in prompt.splitlines() if line.startswith("## ")] == ["## Objective"]
 
 
-def test_deepseek_student_uses_generic_user_prompt_template() -> None:
-    """Render the DeepSeek seed as a sparse generic user prompt."""
-    candidate, family = seed_candidate(DEEPSEEK_V4_FLASH_MODEL, "auto")
+def test_glm_student_uses_generic_user_prompt_template() -> None:
+    """Render the GLM seed as a sparse generic user prompt."""
+    candidate, family = seed_candidate(GLM_5_3_FLASH_MODEL, "auto")
     prompt = candidate["instruction_prompt"]
     bodies = TEMPLATE_FAMILIES[family]["user_prompt"].parse(prompt)
 
@@ -182,13 +182,13 @@ def test_generated_run_contract_records_metric_call_budget(tmp_path: Path) -> No
     assert contract["semantic_controller_policy"] == CONTROLLER_POLICY_CONTRACT
 
 
-def test_deepseek_run_contract_uses_the_separate_same_model_condition(tmp_path: Path) -> None:
-    """Record DeepSeek V4 Flash in both roles with its fixed decoding.
+def test_glm_run_contract_uses_the_separate_same_model_condition(tmp_path: Path) -> None:
+    """Record GLM-5.3-Flash in both roles with its fixed decoding.
 
     Args:
         tmp_path: Pytest directory used for parsed output paths.
     """
-    args = _model_args(tmp_path, DEEPSEEK_V4_FLASH_MODEL, DEEPSEEK_V4_FLASH_MODEL)
+    args = _model_args(tmp_path, GLM_5_3_FLASH_MODEL, GLM_5_3_FLASH_MODEL)
     manifest = load_terminalbench_manifest(MANIFEST_PATH)
 
     contract = build_run_contract(
@@ -200,18 +200,18 @@ def test_deepseek_run_contract_uses_the_separate_same_model_condition(tmp_path: 
         "generic",
     )
 
-    assert contract["student_model"] == DEEPSEEK_V4_FLASH_MODEL
-    assert contract["proposer_model"] == DEEPSEEK_V4_FLASH_MODEL
-    assert contract["student_decoding"] == experiment_decoding(DEEPSEEK_V4_FLASH_MODEL)
+    assert contract["student_model"] == GLM_5_3_FLASH_MODEL
+    assert contract["proposer_model"] == GLM_5_3_FLASH_MODEL
+    assert contract["student_decoding"] == experiment_decoding(GLM_5_3_FLASH_MODEL)
     assert contract["student_model_info"] is None
-    assert contract["proposer_decoding"] == experiment_decoding(DEEPSEEK_V4_FLASH_MODEL)
+    assert contract["proposer_decoding"] == experiment_decoding(GLM_5_3_FLASH_MODEL)
 
 
 @pytest.mark.parametrize(
     ("canonical_model", "runtime_model"),
     [
         (QWEN3_8_27B_MODEL, QWEN3_8_27B_OPENROUTER_MODEL),
-        (DEEPSEEK_V4_FLASH_MODEL, DEEPSEEK_V4_FLASH_0731_OPENROUTER_MODEL),
+        (GLM_5_3_FLASH_MODEL, GLM_5_3_FLASH_OPENROUTER_MODEL),
     ],
 )
 def test_openrouter_profile_reaches_terminalbench_student_and_proposer(
@@ -295,12 +295,12 @@ def test_openrouter_profile_reaches_terminalbench_student_and_proposer(
 
 
 def test_run_contract_rejects_a_cross_model_pair(tmp_path: Path) -> None:
-    """Reject a Qwen student paired with the DeepSeek proposer.
+    """Reject a Qwen student paired with the GLM proposer.
 
     Args:
         tmp_path: Pytest directory used for parsed output paths.
     """
-    args = _model_args(tmp_path, QWEN3_8_27B_MODEL, DEEPSEEK_V4_FLASH_MODEL)
+    args = _model_args(tmp_path, QWEN3_8_27B_MODEL, GLM_5_3_FLASH_MODEL)
     manifest = load_terminalbench_manifest(MANIFEST_PATH)
 
     with pytest.raises(ValueError, match="same model"):

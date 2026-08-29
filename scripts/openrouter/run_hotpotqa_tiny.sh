@@ -23,31 +23,35 @@ smoke_key_limit_usd="${OPENROUTER_SMOKE_KEY_LIMIT_USD:-25}"
 smoke_start_arm="${OPENROUTER_SMOKE_START_ARM:-1}"
 
 arm_names=(
-    deepseek-vanilla-no-merge
-    deepseek-random-stateless-no-merge
-    deepseek-verbalized-stateless-no-merge
-    deepseek-react-v2-no-merge
-    qwen-vanilla-no-merge
-    qwen-random-stateless-no-merge
-    qwen-verbalized-stateless-no-merge
-    qwen-react-v2-no-merge
-    deepseek-react-v2-random-controller-no-merge
-    qwen-react-v2-random-controller-no-merge
+    glm-standard-vanilla
+    glm-standard-react-v2
+    glm-standard-react-v2-random
+    glm-standard-action
+    glm-expanded-vanilla
+    glm-expanded-react-v2
+    qwen-standard-vanilla
+    qwen-standard-react-v2
+    qwen-standard-react-v2-random
+    qwen-standard-action
+    qwen-expanded-vanilla
+    qwen-expanded-react-v2
 )
 models=(
-    deepseek/deepseek-v4-flash
-    deepseek/deepseek-v4-flash
-    deepseek/deepseek-v4-flash
-    deepseek/deepseek-v4-flash
+    hosted_vllm/zai-org/GLM-5.3-Flash
+    hosted_vllm/zai-org/GLM-5.3-Flash
+    hosted_vllm/zai-org/GLM-5.3-Flash
+    hosted_vllm/zai-org/GLM-5.3-Flash
+    hosted_vllm/zai-org/GLM-5.3-Flash
+    hosted_vllm/zai-org/GLM-5.3-Flash
     hosted_vllm/Qwen/Qwen3.8-27B
     hosted_vllm/Qwen/Qwen3.8-27B
     hosted_vllm/Qwen/Qwen3.8-27B
     hosted_vllm/Qwen/Qwen3.8-27B
-    deepseek/deepseek-v4-flash
+    hosted_vllm/Qwen/Qwen3.8-27B
     hosted_vllm/Qwen/Qwen3.8-27B
 )
-conditions=(vanilla random action react_v2 vanilla random action react_v2 react_v2_random react_v2_random)
-budgets=(16 16 16 16 16 16 16 16 16 16)
+conditions=(vanilla react_v2 react_v2_random action vanilla react_v2 vanilla react_v2 react_v2_random action vanilla react_v2)
+budgets=(16 16 16 16 32 32 16 16 16 16 32 32)
 arm_count="${#arm_names[@]}"
 
 if ! [[ "$smoke_start_arm" =~ ^[0-9]+$ ]] || (( smoke_start_arm < 1 || smoke_start_arm > arm_count )); then
@@ -177,21 +181,20 @@ if ! jq -e '
     exit 1
 fi
 
-deepseek_endpoints="$(curl -fsS https://openrouter.ai/api/v1/models/deepseek/deepseek-v4-flash-0731/endpoints)"
+glm_endpoints="$(curl -fsS https://openrouter.ai/api/v1/models/z-ai/glm-5.3-flash/endpoints)"
 if ! jq -e '
     any(
         .data.endpoints[];
-        .tag == "deepseek"
+        .tag == "z-ai/fp8"
         and .status == 0
-        and (["tools", "tool_choice", "reasoning", "reasoning_effort"] - .supported_parameters | length == 0)
-        and ([.pricing.prompt, .pricing.overrides[]?.prompt] | map(tonumber) | max) <= 0.00000044
-        and ([.pricing.completion, .pricing.overrides[]?.completion] | map(tonumber) | max) <= 0.00000132
+        and .quantization == "fp8"
+        and (["tools", "tool_choice", "reasoning", "reasoning_effort", "temperature", "top_p"] - .supported_parameters | length == 0)
     )
-' >/dev/null <<<"$deepseek_endpoints"; then
-    echo "DeepSeek's V4 Flash 0731 endpoint is missing, unhealthy, incompatible, or above the pinned price." >&2
+' >/dev/null <<<"$glm_endpoints"; then
+    echo "Z.AI's GLM-5.3-Flash FP8 endpoint is missing, unhealthy, or incompatible." >&2
     exit 1
 fi
-echo "OpenRouter endpoint preflight: AkashML BF16, Qwen low reasoning, and official DeepSeek verified"
+echo "OpenRouter endpoint preflight: AkashML Qwen BF16 and Z.AI GLM FP8 verified"
 
 if ! key_json="$(
     curl -fsS --config - <<CURL_CONFIG

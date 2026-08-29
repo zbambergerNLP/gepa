@@ -20,16 +20,15 @@ except ImportError:
     dspy = None  # type: ignore[assignment]
 
 from examples.common.experiment_models import (
-    DEEPSEEK_V4_FLASH_0731_OPENROUTER_MODEL,
-    DEEPSEEK_V4_FLASH_MODEL,
     EXPERIMENT_NUM_RETRIES,
+    GLM_5_3_FLASH_MODEL,
+    GLM_5_3_FLASH_OPENROUTER_MODEL,
     QWEN3_8_27B_MODEL,
     QWEN3_8_27B_OPENROUTER_MODEL,
     experiment_decoding,
     experiment_request_overrides,
 )
 from examples.common.wikipedia import WikipediaPassage, WikipediaRetriever
-from gepa.lm import validate_provider_response_identity
 
 DEFAULT_DATA_PATH = os.path.join(
     os.path.dirname(__file__),
@@ -49,94 +48,11 @@ HOTPOTQA_SCIENTIFIC_SPLIT_SHA256 = {
 HOTPOTQA_RUNTIME_PROFILES = ("scientific", "technical-smoke")
 HOTPOTQA_SCIENTIFIC_REQUEST_SEED = 0
 HOTPOTQA_TECHNICAL_SMOKE_QWEN_MAX_TOKENS = 16_384
-HOTPOTQA_TECHNICAL_SMOKE_DEEPSEEK_MAX_TOKENS = 16_384
+HOTPOTQA_TECHNICAL_SMOKE_GLM_MAX_TOKENS = 16_384
 HOTPOTQA_TECHNICAL_SMOKE_REASONING_EFFORT = "low"
-HOTPOTQA_DEEPSEEK_RESPONSE_MODEL_ENV = "HOTPOTQA_DEEPSEEK_RESPONSE_MODEL"
-HOTPOTQA_DEEPSEEK_SYSTEM_FINGERPRINT_ENV = "HOTPOTQA_DEEPSEEK_SYSTEM_FINGERPRINT"
 
 
 if dspy is not None:
-
-    class _IdentityPinnedHotPotQALM(dspy.LM):
-        """Require every DSPy completion to retain one provider identity."""
-
-        def __init__(
-            self,
-            *args: object,
-            expected_response_model: str,
-            expected_system_fingerprint: str,
-            **kwargs: object,
-        ) -> None:
-            """Configure DSPy with a launch-time provider identity pin.
-
-            Args:
-                *args: Positional arguments forwarded to ``dspy.LM``.
-                expected_response_model: Provider-returned model captured by
-                    the production preflight.
-                expected_system_fingerprint: Provider fingerprint captured by
-                    the production preflight.
-                **kwargs: Keyword arguments forwarded to ``dspy.LM``.
-            """
-            super().__init__(*args, **kwargs)
-            self.expected_response_model = expected_response_model
-            self.expected_system_fingerprint = expected_system_fingerprint
-
-        def forward(
-            self,
-            prompt: str | None = None,
-            messages: list[dict[str, object]] | None = None,
-            **kwargs: object,
-        ) -> object:
-            """Run and validate one synchronous DSPy completion.
-
-            Args:
-                prompt: Optional plain prompt forwarded to DSPy.
-                messages: Optional provider-ready conversation.
-                **kwargs: Per-request DSPy overrides.
-
-            Returns:
-                DSPy's validated LiteLLM response.
-
-            Raises:
-                ProviderIdentityMismatchError: The provider model or system
-                    fingerprint differs from the launch preflight.
-            """
-            response = super().forward(prompt=prompt, messages=messages, **kwargs)
-            validate_provider_response_identity(
-                response,
-                self.expected_response_model,
-                self.expected_system_fingerprint,
-            )
-            return response
-
-        async def aforward(
-            self,
-            prompt: str | None = None,
-            messages: list[dict[str, object]] | None = None,
-            **kwargs: object,
-        ) -> object:
-            """Run and validate one asynchronous DSPy completion.
-
-            Args:
-                prompt: Optional plain prompt forwarded to DSPy.
-                messages: Optional provider-ready conversation.
-                **kwargs: Per-request DSPy overrides.
-
-            Returns:
-                DSPy's validated LiteLLM response.
-
-            Raises:
-                ProviderIdentityMismatchError: The provider model or system
-                    fingerprint differs from the launch preflight.
-            """
-            response = await super().aforward(prompt=prompt, messages=messages, **kwargs)
-            validate_provider_response_identity(
-                response,
-                self.expected_response_model,
-                self.expected_system_fingerprint,
-            )
-            return response
-
     class _HotPotQAChatAdapter(dspy.ChatAdapter):
         """Parse artifact fields after repairing one observed marker near-miss."""
 
@@ -184,30 +100,7 @@ if dspy is not None:
                 return super().parse(signature, normalized_completion)
 
 else:
-    _IdentityPinnedHotPotQALM = None
     _HotPotQAChatAdapter = None
-
-
-def _deepseek_expected_response_identity() -> tuple[str, str] | None:
-    """Read the direct DeepSeek identity captured by production preflight.
-
-    Returns:
-        Provider-returned model and system fingerprint, or ``None`` when no
-        production identity has been installed.
-
-    Raises:
-        ValueError: Only one identity field is present.
-    """
-    response_model = os.environ.get(HOTPOTQA_DEEPSEEK_RESPONSE_MODEL_ENV, "")
-    system_fingerprint = os.environ.get(HOTPOTQA_DEEPSEEK_SYSTEM_FINGERPRINT_ENV, "")
-    if bool(response_model) != bool(system_fingerprint):
-        raise ValueError(
-            f"{HOTPOTQA_DEEPSEEK_RESPONSE_MODEL_ENV} and "
-            f"{HOTPOTQA_DEEPSEEK_SYSTEM_FINGERPRINT_ENV} must be provided together."
-        )
-    if not response_model:
-        return None
-    return response_model, system_fingerprint
 
 
 def _render_passages(passages: list[WikipediaPassage]) -> list[str]:
@@ -286,8 +179,7 @@ def resolve_hotpotqa_lm_kwargs(
         Independent LM keyword arguments for the requested runtime.
 
     Raises:
-        ValueError: The runtime profile or model is unsupported, or only one
-            direct DeepSeek response-identity field is configured.
+        ValueError: The runtime profile or model is unsupported.
     """
     if runtime_profile not in HOTPOTQA_RUNTIME_PROFILES:
         supported = ", ".join(HOTPOTQA_RUNTIME_PROFILES)
@@ -298,22 +190,17 @@ def resolve_hotpotqa_lm_kwargs(
         **experiment_decoding(model),
         **experiment_request_overrides(model),
     }
-    if model == DEEPSEEK_V4_FLASH_MODEL:
-        expected_identity = _deepseek_expected_response_identity()
-        if expected_identity is not None:
-            kwargs["expected_response_model"] = expected_identity[0]
-            kwargs["expected_system_fingerprint"] = expected_identity[1]
-    if runtime_profile == "scientific" and model == QWEN3_8_27B_MODEL:
+    if runtime_profile == "scientific" and model in {QWEN3_8_27B_MODEL, GLM_5_3_FLASH_MODEL}:
         kwargs["seed"] = HOTPOTQA_SCIENTIFIC_REQUEST_SEED
     technical_smoke_models = {
         QWEN3_8_27B_OPENROUTER_MODEL,
-        DEEPSEEK_V4_FLASH_0731_OPENROUTER_MODEL,
+        GLM_5_3_FLASH_OPENROUTER_MODEL,
     }
     if runtime_profile == "technical-smoke" and model in technical_smoke_models:
         if model == QWEN3_8_27B_OPENROUTER_MODEL:
             kwargs["max_tokens"] = HOTPOTQA_TECHNICAL_SMOKE_QWEN_MAX_TOKENS
         else:
-            kwargs["max_tokens"] = HOTPOTQA_TECHNICAL_SMOKE_DEEPSEEK_MAX_TOKENS
+            kwargs["max_tokens"] = HOTPOTQA_TECHNICAL_SMOKE_GLM_MAX_TOKENS
         extra_body = deepcopy(kwargs["extra_body"])
         extra_body["reasoning"] = {"effort": HOTPOTQA_TECHNICAL_SMOKE_REASONING_EFFORT}
         kwargs["extra_body"] = extra_body
@@ -342,7 +229,6 @@ def build_hotpotqa_task_lm(
     Raises:
         RuntimeError: DSPy is missing or does not match the artifact fork's
             pinned version and commit.
-        ValueError: A configured direct DeepSeek identity is incomplete.
     """
     validate_hotpotqa_dspy_runtime()
 
@@ -352,20 +238,7 @@ def build_hotpotqa_task_lm(
         kwargs = deepcopy(lm_kwargs)
     dspy.settings.configure(disable_history=True)
     kwargs["cache_in_memory"] = False
-    expected_response_model = kwargs.pop("expected_response_model", None)
-    expected_system_fingerprint = kwargs.pop("expected_system_fingerprint", None)
-    if expected_response_model is None and expected_system_fingerprint is None:
-        return dspy.LM(model=model, **kwargs)
-    if not isinstance(expected_response_model, str) or not isinstance(expected_system_fingerprint, str):
-        raise ValueError("Direct DeepSeek task-model identity fields must be non-empty strings.")
-    if _IdentityPinnedHotPotQALM is None:
-        raise RuntimeError("The identity-pinned HotPotQA task model requires DSPy.")
-    return _IdentityPinnedHotPotQALM(
-        model=model,
-        expected_response_model=expected_response_model,
-        expected_system_fingerprint=expected_system_fingerprint,
-        **kwargs,
-    )
+    return dspy.LM(model=model, **kwargs)
 
 
 def _call_chain_of_thought(
@@ -489,11 +362,6 @@ def _call_lm(
         Raw message content when it contains non-whitespace text, otherwise raw
         reasoning content when available. Returns an empty string when every
         context-window retry fails or the response contains neither field.
-
-    Raises:
-        ValueError: A configured direct DeepSeek identity is incomplete.
-        ProviderIdentityMismatchError: The response model or system fingerprint
-            differs from the launch preflight.
     """
     messages = []
     if system.strip():
@@ -503,10 +371,6 @@ def _call_lm(
         kwargs = resolve_hotpotqa_lm_kwargs(model, api_base)
     else:
         kwargs = deepcopy(lm_kwargs)
-    expected_response_model = kwargs.pop("expected_response_model", None)
-    expected_system_fingerprint = kwargs.pop("expected_system_fingerprint", None)
-    if (expected_response_model is None) != (expected_system_fingerprint is None):
-        raise ValueError("Direct DeepSeek response identity fields must be provided together.")
     kwargs["model"] = model
     kwargs["messages"] = messages
     response = None
@@ -521,12 +385,6 @@ def _call_lm(
     if response is None:
         print(f"WARNING: input exceeds model context (prompt {len(system) + len(user)} chars); scoring 0.")
         return ""
-    if isinstance(expected_response_model, str) and isinstance(expected_system_fingerprint, str):
-        validate_provider_response_identity(
-            response,
-            expected_response_model,
-            expected_system_fingerprint,
-        )
     message = response.choices[0].message
     content = message.content or ""
     if not content.strip():

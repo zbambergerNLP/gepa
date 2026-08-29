@@ -35,10 +35,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from examples.common.experiment_models import (
-    DEEPSEEK_API_BASE,
-    DEEPSEEK_V4_FLASH_0731_OPENROUTER_MODEL,
-    DEEPSEEK_V4_FLASH_MODEL,
     EXPERIMENT_NUM_RETRIES,
+    GLM_5_3_FLASH_MODEL,
     QWEN3_8_27B_MODEL,
     experiment_decoding,
     experiment_model_version,
@@ -64,8 +62,6 @@ from examples.common.wiki17_bm25 import (
 )
 from examples.common.wikipedia import WikipediaRetriever
 from examples.hotpotqa.utils import (
-    HOTPOTQA_DEEPSEEK_RESPONSE_MODEL_ENV,
-    HOTPOTQA_DEEPSEEK_SYSTEM_FINGERPRINT_ENV,
     HOTPOTQA_DSPY_COMMIT,
     HOTPOTQA_DSPY_VERSION,
     HOTPOTQA_HF_REVISION,
@@ -156,6 +152,10 @@ _SCIENTIFIC_UV_VERSION = "0.9.13"
 _SCIENTIFIC_SPLIT_COUNTS = {"train": 150, "val": 300, "test": 300}
 _REACT_V2_CONDITIONS = {"react_v2", "react_v2_random"}
 _SEMANTIC_CONDITIONS = {"react_v2", "react_v2_random", "random", "action"}
+_GLM_SGLANG_IMAGE_URI = (
+    "docker://lmsysorg/sglang@"
+    "sha256:0836f0160fa785e424e68d13ef88ddd548f87e6e11ad9f0e4de982e4f9188aaf"
+)
 
 
 def _validated_runtime_profile(args) -> str:
@@ -254,27 +254,60 @@ def _validated_runtime_profile(args) -> str:
         reflection_api_base = (
             args.reflection_api_base if args.reflection_api_base is not None else args.api_base
         )
-        if args.solver_model == QWEN3_8_27B_MODEL:
-            for role, api_base in (("solver", solver_api_base), ("reflection", reflection_api_base)):
-                parsed_api_base = urlsplit(api_base or "")
-                try:
-                    valid_loopback = (
-                        parsed_api_base.scheme == "http"
-                        and parsed_api_base.hostname in {"localhost", "127.0.0.1", "::1"}
-                        and parsed_api_base.port is not None
-                        and parsed_api_base.path.rstrip("/") == "/v1"
-                        and not parsed_api_base.query
-                        and not parsed_api_base.fragment
-                    )
-                except ValueError:
-                    valid_loopback = False
-                if not valid_loopback:
-                    changed_axes.append(f"--{role}-api-base must identify the local vLLM /v1 endpoint")
-            model_integrity = os.environ.get("HOTPOTQA_MODEL_INTEGRITY_SHA256", "")
-            if len(model_integrity) != 64 or any(
-                character not in "0123456789abcdef" for character in model_integrity
+        for role, api_base in (("solver", solver_api_base), ("reflection", reflection_api_base)):
+            parsed_api_base = urlsplit(api_base or "")
+            try:
+                valid_loopback = (
+                    parsed_api_base.scheme == "http"
+                    and parsed_api_base.hostname in {"localhost", "127.0.0.1", "::1"}
+                    and parsed_api_base.port is not None
+                    and parsed_api_base.path.rstrip("/") == "/v1"
+                    and not parsed_api_base.query
+                    and not parsed_api_base.fragment
+                )
+            except ValueError:
+                valid_loopback = False
+            if not valid_loopback:
+                changed_axes.append(f"--{role}-api-base must identify the local serving /v1 endpoint")
+        model_integrity = os.environ.get("HOTPOTQA_MODEL_INTEGRITY_SHA256", "")
+        if len(model_integrity) != 64 or any(
+            character not in "0123456789abcdef" for character in model_integrity
+        ):
+            changed_axes.append("HOTPOTQA_MODEL_INTEGRITY_SHA256 must identify the verified checkpoint bytes")
+        if not os.environ.get("HOTPOTQA_TRANSFORMERS_VERSION"):
+            changed_axes.append("HOTPOTQA_TRANSFORMERS_VERSION must identify the serving runtime")
+        gpu_runtime_text = os.environ.get("HOTPOTQA_GPU_RUNTIME", "")
+        try:
+            gpu_runtime = json.loads(gpu_runtime_text)
+        except json.JSONDecodeError:
+            gpu_runtime = None
+        if not isinstance(gpu_runtime, dict):
+            changed_axes.append("HOTPOTQA_GPU_RUNTIME must identify the allocated H200 runtime")
+        else:
+            gpu_count = gpu_runtime.get("count")
+            gpu_names = gpu_runtime.get("names")
+            gpu_capabilities = gpu_runtime.get("compute_capabilities")
+            driver_version = gpu_runtime.get("driver_version")
+            canonical_runtime = json.dumps(gpu_runtime, sort_keys=True, separators=(",", ":"))
+            if (
+                gpu_count != 8
+                or not isinstance(gpu_names, list)
+                or len(gpu_names) != gpu_count
+                or not all(isinstance(name, str) and "H200" in name.upper() for name in gpu_names)
+                or not isinstance(gpu_capabilities, list)
+                or gpu_capabilities != ["9.0"] * gpu_count
+                or not isinstance(driver_version, str)
+                or not driver_version
+                or canonical_runtime != gpu_runtime_text
             ):
-                changed_axes.append("HOTPOTQA_MODEL_INTEGRITY_SHA256 must identify the verified checkpoint bytes")
+                changed_axes.append(
+                    "HOTPOTQA_GPU_RUNTIME must record only H200 devices with compute capability 9.0 "
+                    "and one NVIDIA driver version"
+                )
+        serve_arguments = os.environ.get("HOTPOTQA_SERVE_ARGUMENTS", "")
+        if args.solver_model == QWEN3_8_27B_MODEL:
+            if os.environ.get("HOTPOTQA_SERVING_ENGINE") != "vllm":
+                changed_axes.append("HOTPOTQA_SERVING_ENGINE must be 'vllm' for Qwen3.8-27B")
             if os.environ.get("HOTPOTQA_WEIGHT_DTYPE") != "bfloat16":
                 changed_axes.append("HOTPOTQA_WEIGHT_DTYPE must be 'bfloat16'")
             if os.environ.get("HOTPOTQA_KV_CACHE_DTYPE") != "auto":
@@ -285,8 +318,6 @@ def _validated_runtime_profile(args) -> str:
                 changed_axes.append("HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS must be 'true'")
             if not os.environ.get("HOTPOTQA_VLLM_VERSION"):
                 changed_axes.append("HOTPOTQA_VLLM_VERSION must identify the serving runtime")
-            if not os.environ.get("HOTPOTQA_TRANSFORMERS_VERSION"):
-                changed_axes.append("HOTPOTQA_TRANSFORMERS_VERSION must identify the serving runtime")
             posit_commit = os.environ.get("HOTPOTQA_POSIT_COMMIT", "")
             if len(posit_commit) != 40 or any(character not in "0123456789abcdef" for character in posit_commit):
                 changed_axes.append("HOTPOTQA_POSIT_COMMIT must identify the exact serving source")
@@ -297,35 +328,6 @@ def _validated_runtime_profile(args) -> str:
                 changed_axes.append(
                     "HOTPOTQA_POSIT_ENV_SHA256 must identify the frozen serving environment"
                 )
-            gpu_runtime_text = os.environ.get("HOTPOTQA_GPU_RUNTIME", "")
-            try:
-                gpu_runtime = json.loads(gpu_runtime_text)
-            except json.JSONDecodeError:
-                gpu_runtime = None
-            if not isinstance(gpu_runtime, dict):
-                changed_axes.append("HOTPOTQA_GPU_RUNTIME must identify the allocated H200 runtime")
-            else:
-                gpu_count = gpu_runtime.get("count")
-                gpu_names = gpu_runtime.get("names")
-                gpu_capabilities = gpu_runtime.get("compute_capabilities")
-                driver_version = gpu_runtime.get("driver_version")
-                canonical_runtime = json.dumps(gpu_runtime, sort_keys=True, separators=(",", ":"))
-                if (
-                    gpu_count != 8
-                    or not isinstance(gpu_names, list)
-                    or len(gpu_names) != gpu_count
-                    or not all(isinstance(name, str) and "H200" in name.upper() for name in gpu_names)
-                    or not isinstance(gpu_capabilities, list)
-                    or gpu_capabilities != ["9.0"] * gpu_count
-                    or not isinstance(driver_version, str)
-                    or not driver_version
-                    or canonical_runtime != gpu_runtime_text
-                ):
-                    changed_axes.append(
-                        "HOTPOTQA_GPU_RUNTIME must record only H200 devices with compute capability 9.0 "
-                        "and one NVIDIA driver version"
-                    )
-            serve_arguments = os.environ.get("HOTPOTQA_VLLM_SERVE_ARGUMENTS", "")
             required_serve_settings = (
                 "tp=1",
                 "gpu_memory_utilization=0.92",
@@ -344,19 +346,44 @@ def _validated_runtime_profile(args) -> str:
             )
             for setting in required_serve_settings:
                 if setting not in serve_arguments.split(";"):
-                    changed_axes.append(f"HOTPOTQA_VLLM_SERVE_ARGUMENTS must include {setting!r}")
-        elif args.solver_model == DEEPSEEK_V4_FLASH_MODEL:
-            for role, api_base in (("solver", solver_api_base), ("reflection", reflection_api_base)):
-                if api_base != DEEPSEEK_API_BASE:
-                    changed_axes.append(f"--{role}-api-base must be {DEEPSEEK_API_BASE!r}")
-            if not os.environ.get(HOTPOTQA_DEEPSEEK_RESPONSE_MODEL_ENV):
+                    changed_axes.append(f"HOTPOTQA_SERVE_ARGUMENTS must include {setting!r}")
+        elif args.solver_model == GLM_5_3_FLASH_MODEL:
+            if os.environ.get("HOTPOTQA_SERVING_ENGINE") != "sglang":
+                changed_axes.append("HOTPOTQA_SERVING_ENGINE must be 'sglang' for GLM-5.3-Flash")
+            if os.environ.get("HOTPOTQA_WEIGHT_DTYPE") != "fp8":
+                changed_axes.append("HOTPOTQA_WEIGHT_DTYPE must be 'fp8'")
+            if os.environ.get("HOTPOTQA_KV_CACHE_DTYPE") != "bfloat16":
+                changed_axes.append("HOTPOTQA_KV_CACHE_DTYPE must be 'bfloat16'")
+            if not os.environ.get("HOTPOTQA_SGLANG_VERSION"):
+                changed_axes.append("HOTPOTQA_SGLANG_VERSION must identify the serving runtime")
+            if os.environ.get("HOTPOTQA_SERVING_IMAGE_URI") != _GLM_SGLANG_IMAGE_URI:
                 changed_axes.append(
-                    f"{HOTPOTQA_DEEPSEEK_RESPONSE_MODEL_ENV} must identify the provider response model"
+                    f"HOTPOTQA_SERVING_IMAGE_URI must be {_GLM_SGLANG_IMAGE_URI!r}"
                 )
-            if not os.environ.get(HOTPOTQA_DEEPSEEK_SYSTEM_FINGERPRINT_ENV):
+            serving_image_sha256 = os.environ.get("HOTPOTQA_SERVING_IMAGE_SHA256", "")
+            if len(serving_image_sha256) != 64 or any(
+                character not in "0123456789abcdef" for character in serving_image_sha256
+            ):
                 changed_axes.append(
-                    f"{HOTPOTQA_DEEPSEEK_SYSTEM_FINGERPRINT_ENV} must identify the provider runtime"
+                    "HOTPOTQA_SERVING_IMAGE_SHA256 must identify the exact SGLang image bytes"
                 )
+            required_serve_settings = (
+                "tp=8",
+                "ep=8",
+                "context_length=262144",
+                "max_running_requests=8",
+                "kv_cache_dtype=bfloat16",
+                "dsa_prefill_backend=tilelang",
+                "dsa_decode_backend=tilelang",
+                "moe_runner_backend=deep_gemm",
+                "reasoning_parser=glm45",
+                "tool_parser=glm47",
+                "speculative_decoding=false",
+                "dp_attention=false",
+            )
+            for setting in required_serve_settings:
+                if setting not in serve_arguments.split(";"):
+                    changed_axes.append(f"HOTPOTQA_SERVE_ARGUMENTS must include {setting!r}")
         if changed_axes:
             details = "; ".join(changed_axes)
             raise ValueError(f"The enforced HotPotQA scientific contract rejected changed methodology: {details}.")
@@ -426,7 +453,7 @@ def condition_run_dir(condition: str, program: str, tag: str = "", run_key: str 
 def _contract_api_base(api_base: str | None, *, scientific_contract: bool) -> str | None:
     """Remove an ephemeral loopback port from scientific run identity.
 
-    Della assigns the local vLLM process a port derived from the Slurm job ID.
+    Della assigns the local serving process a port derived from the Slurm job ID.
     That transport detail must not prevent an interrupted production run from
     finding its existing output and held-out checkpoints. External endpoints
     remain material because they may identify a different serving deployment.
@@ -487,12 +514,6 @@ def build_run_contract(condition: str, args) -> dict:
     if condition in _REACT_V2_CONDITIONS:
         manifestor_decoding = deepcopy(reflection_decoding)
         manifestor_decoding["temperature"] = 0
-        ignored_manifestor_fields = []
-        if reflection_runtime_model in {
-            DEEPSEEK_V4_FLASH_MODEL,
-            DEEPSEEK_V4_FLASH_0731_OPENROUTER_MODEL,
-        }:
-            ignored_manifestor_fields = ["temperature"]
         reflection_role_decoding = {
             "controller": (
                 {
@@ -505,7 +526,7 @@ def build_run_contract(condition: str, args) -> dict:
             "manifestor": (
                 {
                     "requested": manifestor_decoding,
-                    "provider_ignored_fields": ignored_manifestor_fields,
+                    "provider_ignored_fields": [],
                 }
                 if reflection_level >= 2
                 else None
@@ -515,15 +536,6 @@ def build_run_contract(condition: str, args) -> dict:
                 "provider_ignored_fields": [],
             },
         }
-    provider_response_identity = None
-    if args.api_profile == "direct" and args.solver_model == DEEPSEEK_V4_FLASH_MODEL:
-        response_model = os.environ.get(HOTPOTQA_DEEPSEEK_RESPONSE_MODEL_ENV)
-        system_fingerprint = os.environ.get(HOTPOTQA_DEEPSEEK_SYSTEM_FINGERPRINT_ENV)
-        if response_model and system_fingerprint:
-            provider_response_identity = {
-                "model": response_model,
-                "system_fingerprint": system_fingerprint,
-            }
     edit_tool_set = args.edit_tool_set if condition in _REACT_V2_CONDITIONS else None
     stateless_semantic = condition in ("random", "action")
     retrieval_provenance = getattr(args, "retrieval_provenance", None)
@@ -563,7 +575,7 @@ def build_run_contract(condition: str, args) -> dict:
         else:
             semantic_controller_policy = deepcopy(CONTROLLER_POLICY_CONTRACT)
     return {
-        "schema_version": 14,
+        "schema_version": 15,
         "benchmark": "hotpotqa-technical-mini" if technical_mini_index else "hotpotqa-fullwiki-wiki17",
         "reference_artifact_commit": GEPA_ARTIFACT_COMMIT,
         "scientific_contract_enforced": scientific_contract,
@@ -575,7 +587,6 @@ def build_run_contract(condition: str, args) -> dict:
             "solver_runtime": solver_runtime_model,
             "solver_version": experiment_model_version(solver_runtime_model),
             "solver_api_base": solver_api_identity,
-            "solver_provider_response_identity": deepcopy(provider_response_identity),
             "solver_decoding": {field: deepcopy(solver_lm_kwargs[field]) for field in solver_decoding_fields},
             "solver_request_overrides": {field: deepcopy(solver_lm_kwargs[field]) for field in solver_request_fields},
             "solver_num_retries": EXPERIMENT_NUM_RETRIES,
@@ -583,7 +594,6 @@ def build_run_contract(condition: str, args) -> dict:
             "reflection_runtime": reflection_runtime_model,
             "reflection_version": experiment_model_version(reflection_runtime_model),
             "reflection_api_base": reflection_api_identity,
-            "reflection_provider_response_identity": deepcopy(provider_response_identity),
             "reflection_decoding": reflection_decoding,
             "reflection_role_decoding": reflection_role_decoding,
             "reflection_request_overrides": {
@@ -638,8 +648,7 @@ def build_run_contract(condition: str, args) -> dict:
             "branch_history": (
                 {
                     "storage": "target_scoped_user_assistant_messages",
-                    "direct_deepseek_native_delivery": "quoted_user_context",
-                    "other_delivery": "provider_chat_messages",
+                    "delivery": "provider_chat_messages",
                 }
                 if condition in _REACT_V2_CONDITIONS
                 else None
@@ -683,6 +692,9 @@ def build_run_contract(condition: str, args) -> dict:
             "uv_sha256": os.environ.get("HOTPOTQA_UV_SHA256"),
             "env_spec_sha256": os.environ.get("HOTPOTQA_ENV_SPEC_SHA256"),
             "gepa_env_sha256": os.environ.get("HOTPOTQA_GEPA_ENV_SHA256"),
+            "serving_engine": os.environ.get("HOTPOTQA_SERVING_ENGINE"),
+            "serving_image_uri": os.environ.get("HOTPOTQA_SERVING_IMAGE_URI"),
+            "serving_image_sha256": os.environ.get("HOTPOTQA_SERVING_IMAGE_SHA256"),
             "posit_commit": os.environ.get("HOTPOTQA_POSIT_COMMIT"),
             "posit_env_sha256": os.environ.get("HOTPOTQA_POSIT_ENV_SHA256"),
             "gpu_runtime": (
@@ -691,6 +703,7 @@ def build_run_contract(condition: str, args) -> dict:
                 else None
             ),
             "vllm_version": os.environ.get("HOTPOTQA_VLLM_VERSION"),
+            "sglang_version": os.environ.get("HOTPOTQA_SGLANG_VERSION"),
             "torch_version": os.environ.get("HOTPOTQA_TORCH_VERSION"),
             "cuda_version": os.environ.get("HOTPOTQA_CUDA_VERSION"),
             "cuda_module": os.environ.get("HOTPOTQA_CUDA_MODULE"),
@@ -698,13 +711,9 @@ def build_run_contract(condition: str, args) -> dict:
             "litellm_version": os.environ.get("HOTPOTQA_LITELLM_VERSION"),
             "model_revision": os.environ.get("HOTPOTQA_MODEL_REVISION"),
             "model_integrity_sha256": os.environ.get("HOTPOTQA_MODEL_INTEGRITY_SHA256"),
-            "deepseek_response_model": os.environ.get(HOTPOTQA_DEEPSEEK_RESPONSE_MODEL_ENV),
-            "deepseek_system_fingerprint": os.environ.get(
-                HOTPOTQA_DEEPSEEK_SYSTEM_FINGERPRINT_ENV
-            ),
             "weight_dtype": os.environ.get("HOTPOTQA_WEIGHT_DTYPE"),
             "kv_cache_dtype": os.environ.get("HOTPOTQA_KV_CACHE_DTYPE"),
-            "vllm_serve_arguments": os.environ.get("HOTPOTQA_VLLM_SERVE_ARGUMENTS"),
+            "serve_arguments": os.environ.get("HOTPOTQA_SERVE_ARGUMENTS"),
             "vllm_batch_invariant": os.environ.get("HOTPOTQA_VLLM_BATCH_INVARIANT"),
             "vllm_single_sequence_replicas": os.environ.get(
                 "HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS"
@@ -1338,7 +1347,10 @@ def main():
         help="Proposer model; use the same supported model as --solver-model",
     )
     parser.add_argument(
-        "--api-base", type=str, default=None, help="Base URL for vLLM server (e.g. http://localhost:8000/v1)"
+        "--api-base",
+        type=str,
+        default=None,
+        help="Base URL for the local OpenAI-compatible server (e.g. http://localhost:8000/v1)",
     )
     parser.add_argument("--solver-api-base", type=str, default=None, help="Base URL used only by the student/solver LM")
     parser.add_argument(

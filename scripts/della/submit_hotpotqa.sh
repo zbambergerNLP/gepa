@@ -4,7 +4,7 @@
 # Usage:
 #   scripts/della/submit_hotpotqa.sh
 #
-# Use MODEL_PROFILE=qwen3.8-27b or MODEL_PROFILE=deepseek-v4-flash. Each
+# Use MODEL_PROFILE=qwen3.8-27b or MODEL_PROFILE=glm-5.3-flash. Each
 # profile uses the same model for the student and proposer. The default
 # BUDGET_PROFILE=campaign submits exactly six serial jobs: vanilla, ReAct V2,
 # random-Controller ReAct V2, and selected-action GEPA at 6,871 calls, followed
@@ -38,7 +38,6 @@ if [[ ! "${ENV_MODE}" =~ ^[0-7]{3,4}$ ]] || (( (8#${ENV_MODE} & 8#077) != 0 )); 
 fi
 
 source "${ENV_FILE}"
-export -n DEEPSEEK_API_KEY 2>/dev/null || true
 
 if [[ -n "$(git -C "${REPO_ROOT}" status --porcelain --untracked-files=normal)" ]]; then
     echo "ERROR: commit the complete experiment source before a production submission" >&2
@@ -58,7 +57,6 @@ trap cleanup_local_files EXIT
 
 # Tunable knobs (env overrides).
 MODEL_PROFILE="${MODEL_PROFILE:-qwen3.8-27b}"
-DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-}"
 BUDGET_PROFILE="${BUDGET_PROFILE:-campaign}"
 CONDITION="${CONDITION:-all}"
 HOTPOTQA_CAMPAIGN_ID="${HOTPOTQA_CAMPAIGN_ID:-hotpotqa-final-v1}"
@@ -68,7 +66,8 @@ GEN_GMU=0.92
 GEN_MAX_LEN=262144
 VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-}"
 VLLM_API_SERVER_COUNT="${VLLM_API_SERVER_COUNT:-}"
-VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-1}"
+VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-}"
+VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-}"
 VLLM_MAX_NUM_BATCHED_TOKENS="${VLLM_MAX_NUM_BATCHED_TOKENS:-16384}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-1800}"
 POSIT_DIR="${POSIT_DIR:-/home/${REMOTE_USER}/posit}"
@@ -79,6 +78,9 @@ TIME="${TIME:-}"
 STANDARD_TIME="${STANDARD_TIME:-}"
 EXPANDED_TIME="${EXPANDED_TIME:-}"
 MODEL_STORAGE="${MODEL_STORAGE:-/projects/BSTEWART/model_storage}"
+GLM_SGLANG_IMAGE_DIGEST="sha256:0836f0160fa785e424e68d13ef88ddd548f87e6e11ad9f0e4de982e4f9188aaf"
+GLM_SGLANG_IMAGE_URI="docker://lmsysorg/sglang@${GLM_SGLANG_IMAGE_DIGEST}"
+GLM_SGLANG_IMAGE="${MODEL_STORAGE}/runtimes/sglang-glm-5.3-flash-x86_64.sif"
 HOTPOTQA_PYTHON_VERSION="3.11.13"
 
 if [[ ! "${HOTPOTQA_CAMPAIGN_ID}" =~ ^[A-Za-z0-9._-]+$ ]]; then
@@ -122,7 +124,6 @@ esac
 
 case "${MODEL_PROFILE}" in
     qwen3.8-27b)
-        DEEPSEEK_API_KEY=""
         if [[ "${GPU_PARTITION}" != "ailab" ]]; then
             echo "ERROR: Qwen3.8-27B production runs require GPU_PARTITION=ailab" >&2
             exit 1
@@ -132,8 +133,10 @@ case "${MODEL_PROFILE}" in
         DELLA_MEMORY="${DELLA_MEMORY:-768G}"
         JOB_PARTITION="${GPU_PARTITION}"
         MAX_WORKERS="${MAX_WORKERS:-128}"
+        VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-1}"
         VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-${DELLA_GPUS}}"
         VLLM_API_SERVER_COUNT="${VLLM_API_SERVER_COUNT:-${VLLM_DATA_PARALLEL_SIZE}}"
+        VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-1}"
         if [[ "${DELLA_GPUS}" != "8" \
             || "${VLLM_DATA_PARALLEL_SIZE}" != "8" \
             || "${VLLM_API_SERVER_COUNT}" != "8" ]]; then
@@ -153,38 +156,89 @@ case "${MODEL_PROFILE}" in
         STANDARD_TIME="${STANDARD_TIME:-${TIME:-72:00:00}}"
         EXPANDED_TIME="${EXPANDED_TIME:-${TIME:-144:00:00}}"
         ;;
-    deepseek-v4-flash)
-        DELLA_GPUS=0
+    glm-5.3-flash)
+        if [[ "${GPU_PARTITION}" != "ailab" ]]; then
+            echo "ERROR: GLM-5.3-Flash production runs require GPU_PARTITION=ailab" >&2
+            exit 1
+        fi
+        DELLA_GPUS="${DELLA_GPUS:-8}"
         DELLA_CPUS_PER_TASK="${DELLA_CPUS_PER_TASK:-64}"
-        DELLA_MEMORY="${DELLA_MEMORY:-128G}"
-        JOB_PARTITION="${CPU_PARTITION:-}"
-        MAX_WORKERS="${MAX_WORKERS:-64}"
-        VLLM_DATA_PARALLEL_SIZE=1
-        VLLM_API_SERVER_COUNT=1
-        MODEL=""
-        SOLVER_MODEL_PATH=""
-        SOLVER_SERVED_NAME=""
+        DELLA_MEMORY="${DELLA_MEMORY:-768G}"
+        JOB_PARTITION="${GPU_PARTITION}"
+        MAX_WORKERS="${MAX_WORKERS:-8}"
+        VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-8}"
+        VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-1}"
+        VLLM_API_SERVER_COUNT="${VLLM_API_SERVER_COUNT:-1}"
+        VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-8}"
+        MODEL="GLM-5.3-Flash"
+        SOLVER_MODEL_PATH="${MODEL_STORAGE}/${MODEL}"
+        SOLVER_SERVED_NAME="zai-org/GLM-5.3-Flash"
+        SOLVER_MODEL="hosted_vllm/zai-org/GLM-5.3-Flash"
         SOLVER_API_BASE=""
         REFLECTION_API_BASE=""
-        [[ -n "${DEEPSEEK_API_KEY}" ]] || {
-            echo "ERROR: set DEEPSEEK_API_KEY for the DeepSeek V4 Flash run" >&2
+        if [[ "${DELLA_GPUS}" != "8" \
+            || "${VLLM_TENSOR_PARALLEL_SIZE}" != "8" \
+            || "${VLLM_DATA_PARALLEL_SIZE}" != "1" \
+            || "${VLLM_API_SERVER_COUNT}" != "1" \
+            || "${VLLM_MAX_NUM_SEQS}" != "8" ]]; then
+            echo "ERROR: scientific GLM runs require one TP8 replica on one eight-H200 node" >&2
             exit 1
-        }
-        SOLVER_MODEL="deepseek/deepseek-v4-flash"
-        STANDARD_TIME="${STANDARD_TIME:-${TIME:-36:00:00}}"
-        EXPANDED_TIME="${EXPANDED_TIME:-${TIME:-72:00:00}}"
+        fi
+        STANDARD_TIME="${STANDARD_TIME:-${TIME:-144:00:00}}"
+        EXPANDED_TIME="${EXPANDED_TIME:-${TIME:-144:00:00}}"
         ;;
     *)
-        echo "ERROR: MODEL_PROFILE must be qwen3.8-27b or deepseek-v4-flash" >&2
+        echo "ERROR: MODEL_PROFILE must be qwen3.8-27b or glm-5.3-flash" >&2
         exit 1
         ;;
 esac
 REFLECTION_MODEL="${SOLVER_MODEL}"
 REFLECTION_API_BASE="${SOLVER_API_BASE}"
 
+validate_della_wall_time() {
+    local wall_time="$1"
+    local label="$2"
+    local days=0
+    local hours=0
+    local minutes=0
+    local seconds=0
+    local total_seconds=0
+
+    if [[ "${wall_time}" =~ ^([0-9]+)-([0-9]{1,2}):([0-9]{2}):([0-9]{2})$ ]]; then
+        days=$((10#${BASH_REMATCH[1]}))
+        hours=$((10#${BASH_REMATCH[2]}))
+        minutes=$((10#${BASH_REMATCH[3]}))
+        seconds=$((10#${BASH_REMATCH[4]}))
+        if (( hours > 23 )); then
+            echo "ERROR: ${label} has an invalid hour field: ${wall_time}" >&2
+            exit 1
+        fi
+    elif [[ "${wall_time}" =~ ^([0-9]+):([0-9]{2}):([0-9]{2})$ ]]; then
+        hours=$((10#${BASH_REMATCH[1]}))
+        minutes=$((10#${BASH_REMATCH[2]}))
+        seconds=$((10#${BASH_REMATCH[3]}))
+    else
+        echo "ERROR: ${label} must use Slurm HH:MM:SS or D-HH:MM:SS format" >&2
+        exit 1
+    fi
+    if (( minutes > 59 || seconds > 59 )); then
+        echo "ERROR: ${label} has an invalid minute or second field: ${wall_time}" >&2
+        exit 1
+    fi
+    total_seconds=$((days * 86400 + hours * 3600 + minutes * 60 + seconds))
+    if (( total_seconds < 1 || total_seconds > 518400 )); then
+        echo "ERROR: ${label} must be positive and no longer than Della's 144-hour limit" >&2
+        exit 1
+    fi
+}
+
+validate_della_wall_time "${STANDARD_TIME}" "STANDARD_TIME"
+validate_della_wall_time "${EXPANDED_TIME}" "EXPANDED_TIME"
+
 for positive_integer in \
     "${DELLA_CPUS_PER_TASK}" \
     "${MAX_WORKERS}" \
+    "${VLLM_TENSOR_PARALLEL_SIZE}" \
     "${VLLM_DATA_PARALLEL_SIZE}" \
     "${VLLM_API_SERVER_COUNT}" \
     "${VLLM_MAX_NUM_SEQS}" \
@@ -195,19 +249,23 @@ do
         exit 1
     fi
 done
+if [[ "${DELLA_GPUS}" != "8" ]]; then
+    echo "ERROR: DELLA_GPUS must be 8 for either scientific model profile" >&2
+    exit 1
+fi
+if (( DELLA_CPUS_PER_TASK > DELLA_GPUS * 8 )); then
+    echo "ERROR: Della permits at most 8 CPU cores per AI Lab H200" >&2
+    exit 1
+fi
 if [[ "${MODEL_PROFILE}" == "qwen3.8-27b" ]]; then
-    if [[ "${DELLA_GPUS}" != "8" ]]; then
-        echo "ERROR: DELLA_GPUS must be 8 for the scientific Qwen run" >&2
-        exit 1
-    fi
-    if (( DELLA_CPUS_PER_TASK > DELLA_GPUS * 8 )); then
-        echo "ERROR: Della permits at most 8 CPU cores per AI Lab H200" >&2
-        exit 1
-    fi
     if (( VLLM_DATA_PARALLEL_SIZE > DELLA_GPUS )); then
         echo "ERROR: VLLM_DATA_PARALLEL_SIZE cannot exceed DELLA_GPUS" >&2
         exit 1
     fi
+fi
+if (( VLLM_TENSOR_PARALLEL_SIZE * VLLM_DATA_PARALLEL_SIZE != DELLA_GPUS )); then
+    echo "ERROR: tensor-parallel size times data-parallel size must use all eight allocated GPUs" >&2
+    exit 1
 fi
 
 SBATCH_RESOURCE_ARGS=(
@@ -242,7 +300,9 @@ echo "==> scientific contract: budget_profile=${BUDGET_PROFILE} budget=${CAMPAIG
 echo "==> method: frozen Wiki-2017/BM25 k=7 seed=0 workers=${MAX_WORKERS} two-stage structured prompts"
 echo "==> Della resources: partition=${JOB_PARTITION:-cluster-default} gpus=${DELLA_GPUS} cpus=${DELLA_CPUS_PER_TASK} memory=${DELLA_MEMORY}"
 if [[ "${MODEL_PROFILE}" == "qwen3.8-27b" ]]; then
-    echo "==> vLLM throughput: dp=${VLLM_DATA_PARALLEL_SIZE} api_servers=${VLLM_API_SERVER_COUNT} max_num_seqs=${VLLM_MAX_NUM_SEQS}/rank max_batched_tokens=${VLLM_MAX_NUM_BATCHED_TOKENS}"
+    echo "==> Qwen POSIT/vLLM: tp=1 dp=8 api_servers=8 max_num_seqs=1/replica max_batched_tokens=${VLLM_MAX_NUM_BATCHED_TOKENS}"
+else
+    echo "==> GLM SGLang: tp=8 ep=8 max_running_requests=8 BF16-KV TileLang-DSA deep_gemm no-speculation no-DP-attention"
 fi
 
 ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
@@ -328,6 +388,7 @@ if [[ ! "\${HOTPOTQA_GEPA_ENV_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
 fi
 
 HOTPOTQA_POSIT_ENV_SHA256=""
+HOTPOTQA_SGLANG_IMAGE_SHA256=""
 if [[ "${MODEL_PROFILE}" == "qwen3.8-27b" ]]; then
     VLLM_PY="${POSIT_DIR}/src/.venv/bin/python"
     if [[ ! -x "\${VLLM_PY}" ]]; then
@@ -353,6 +414,24 @@ if [[ "${MODEL_PROFILE}" == "qwen3.8-27b" ]]; then
         echo "ERROR: POSIT serving environment is not frozen; run scripts/della/build_env.sh" >&2
         exit 1
     fi
+else
+    APPTAINER_BIN="\$(command -v apptainer || true)"
+    GLM_IMAGE_SOURCE_PATH="${GLM_SGLANG_IMAGE}.source"
+    GLM_IMAGE_SHA_PATH="${GLM_SGLANG_IMAGE}.sha256"
+    if [[ -z "\${APPTAINER_BIN}" \
+        || ! -f "${GLM_SGLANG_IMAGE}" \
+        || ! -f "\${GLM_IMAGE_SOURCE_PATH}" \
+        || "\$(tr -d '\n' < "\${GLM_IMAGE_SOURCE_PATH}")" != "${GLM_SGLANG_IMAGE_URI}" \
+        || ! -f "\${GLM_IMAGE_SHA_PATH}" ]]; then
+        echo "ERROR: pinned GLM SGLang runtime is absent; run scripts/della/build_env.sh" >&2
+        exit 1
+    fi
+    HOTPOTQA_SGLANG_IMAGE_SHA256="\$(sha256sum "${GLM_SGLANG_IMAGE}" | cut -d' ' -f1)"
+    if [[ "\${HOTPOTQA_SGLANG_IMAGE_SHA256}" != "\$(tr -d '\n' < "\${GLM_IMAGE_SHA_PATH}")" ]]; then
+        echo "ERROR: GLM SGLang image differs from its frozen digest" >&2
+        exit 1
+    fi
+    "\${APPTAINER_BIN}" inspect "${GLM_SGLANG_IMAGE}" >/dev/null
 fi
 
 SBATCH_BIN="\$(command -v sbatch)"
@@ -389,35 +468,26 @@ cleanup_export_file() {
     fi
 }
 trap cleanup_export_file EXIT
-PREVIOUS_JOB_ID=""
-for CELL_INDEX in "\${!SUBMIT_CONDITIONS[@]}"; do
-    RUN_BUDGET_PROFILE="\${SUBMIT_BUDGET_PROFILES[\${CELL_INDEX}]}"
-    RUN_CONDITION="\${SUBMIT_CONDITIONS[\${CELL_INDEX}]}"
-    case "\${RUN_BUDGET_PROFILE}" in
-        standard)
-            RUN_MAX_METRIC_CALLS=6871
-            RUN_TIME="${STANDARD_TIME}"
-            ;;
-        expanded)
-            RUN_MAX_METRIC_CALLS=13742
-            RUN_TIME="${EXPANDED_TIME}"
-            ;;
-        *)
-            echo "ERROR: generated an unsupported HotPotQA budget profile: \${RUN_BUDGET_PROFILE}" >&2
-            exit 1
-            ;;
-    esac
+
+write_sbatch_export_file() {
+    local run_budget_profile="$1"
+    local run_max_metric_calls="$2"
+    local run_condition="$3"
+    local canary_only="$4"
+
     SBATCH_EXPORT_FILE="\$(mktemp)"
     printf '%s\0' \
         "MODEL_PROFILE=${MODEL_PROFILE}" \
-        "BUDGET_PROFILE=\${RUN_BUDGET_PROFILE}" \
-        "MAX_METRIC_CALLS=\${RUN_MAX_METRIC_CALLS}" \
-        "CONDITION=\${RUN_CONDITION}" \
+        "BUDGET_PROFILE=\${run_budget_profile}" \
+        "MAX_METRIC_CALLS=\${run_max_metric_calls}" \
+        "CONDITION=\${run_condition}" \
+        "HOTPOTQA_CANARY_ONLY=\${canary_only}" \
         "HOTPOTQA_CAMPAIGN_ID=${HOTPOTQA_CAMPAIGN_ID}" \
         "MAX_WORKERS=${MAX_WORKERS}" \
         "WIKI17_DIR=${WIKI17_DIR}" \
         "GEN_GMU=${GEN_GMU}" \
         "GEN_MAX_LEN=${GEN_MAX_LEN}" \
+        "VLLM_TENSOR_PARALLEL_SIZE=${VLLM_TENSOR_PARALLEL_SIZE}" \
         "VLLM_DATA_PARALLEL_SIZE=${VLLM_DATA_PARALLEL_SIZE}" \
         "VLLM_API_SERVER_COUNT=${VLLM_API_SERVER_COUNT}" \
         "VLLM_MAX_NUM_SEQS=${VLLM_MAX_NUM_SEQS}" \
@@ -425,6 +495,9 @@ for CELL_INDEX in "\${!SUBMIT_CONDITIONS[@]}"; do
         "HEALTH_TIMEOUT=${HEALTH_TIMEOUT}" \
         "POSIT_DIR=${POSIT_DIR}" \
         "MODEL_STORAGE=${MODEL_STORAGE}" \
+        "GLM_SGLANG_IMAGE=${GLM_SGLANG_IMAGE}" \
+        "GLM_SGLANG_IMAGE_URI=${GLM_SGLANG_IMAGE_URI}" \
+        "HOTPOTQA_SGLANG_IMAGE_SHA256=\${HOTPOTQA_SGLANG_IMAGE_SHA256}" \
         "SCRATCH_BASE=${SCRATCH_BASE}" \
         "GEPA_VENV_DIR=${GEPA_VENV_DIR}" \
         "HOME=\${HOME}" \
@@ -443,9 +516,55 @@ for CELL_INDEX in "\${!SUBMIT_CONDITIONS[@]}"; do
         "HOTPOTQA_POSIT_ENV_SHA256=\${HOTPOTQA_POSIT_ENV_SHA256}" \
         "HOTPOTQA_PRODUCTION_LAUNCH=1" \
         > "\${SBATCH_EXPORT_FILE}"
-    if [[ "${MODEL_PROFILE}" == "deepseek-v4-flash" ]]; then
-        printf '%s\0' "DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}" >> "\${SBATCH_EXPORT_FILE}"
+}
+
+PREVIOUS_JOB_ID=""
+if [[ "${MODEL_PROFILE}" == "glm-5.3-flash" ]]; then
+    write_sbatch_export_file standard 6871 react_v2 1
+    SBATCH_OUTPUT="\$(
+        env -i \
+            HOME="\${HOME}" \
+            USER="${REMOTE_USER}" \
+            PATH="\${PATH}" \
+            LANG=C.UTF-8 \
+            LC_ALL=C.UTF-8 \
+            "\${SBATCH_BIN}"${SBATCH_RESOURCE_COMMAND} \
+            --parsable \
+            --job-name="gepa-hp-glm-canary" \
+            --output="${SCRATCH_BASE}/logs/hotpotqa-%x-%j.log" \
+            --time="04:00:00" \
+            --export=ALL \
+            --export-file="\${SBATCH_EXPORT_FILE}" \
+            examples/hotpotqa/run_hotpotqa.sbatch
+    )"
+    PREVIOUS_JOB_ID="\${SBATCH_OUTPUT%%;*}"
+    if [[ ! "\${PREVIOUS_JOB_ID}" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: sbatch returned an invalid GLM canary job id: \${SBATCH_OUTPUT}" >&2
+        exit 1
     fi
+    rm -f -- "\${SBATCH_EXPORT_FILE}"
+    SBATCH_EXPORT_FILE=""
+    echo "==> submitted pinned GLM four-tool canary: job \${PREVIOUS_JOB_ID}"
+fi
+
+for CELL_INDEX in "\${!SUBMIT_CONDITIONS[@]}"; do
+    RUN_BUDGET_PROFILE="\${SUBMIT_BUDGET_PROFILES[\${CELL_INDEX}]}"
+    RUN_CONDITION="\${SUBMIT_CONDITIONS[\${CELL_INDEX}]}"
+    case "\${RUN_BUDGET_PROFILE}" in
+        standard)
+            RUN_MAX_METRIC_CALLS=6871
+            RUN_TIME="${STANDARD_TIME}"
+            ;;
+        expanded)
+            RUN_MAX_METRIC_CALLS=13742
+            RUN_TIME="${EXPANDED_TIME}"
+            ;;
+        *)
+            echo "ERROR: generated an unsupported HotPotQA budget profile: \${RUN_BUDGET_PROFILE}" >&2
+            exit 1
+            ;;
+    esac
+    write_sbatch_export_file "\${RUN_BUDGET_PROFILE}" "\${RUN_MAX_METRIC_CALLS}" "\${RUN_CONDITION}" 0
 
     DEPENDENCY_ARGS=()
     if [[ -n "\${PREVIOUS_JOB_ID}" ]]; then

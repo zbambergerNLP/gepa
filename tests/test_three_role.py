@@ -411,7 +411,7 @@ def test_three_role_run_contract_blocks_catalog_or_policy_drift(tmp_path: Path) 
     """
     strat, _ = strategy(2)
     contract = strat.run_contract({"sys": PROMPT})
-    assert contract["schema_version"] == 3
+    assert contract["schema_version"] == 4
     assert contract["component_kinds"] == {"sys": "system_prompt"}
     assert contract["controller"]["version"] == 4
     assert contract["controller"]["factorization"] == "P(region, action)"
@@ -420,6 +420,11 @@ def test_three_role_run_contract_blocks_catalog_or_policy_drift(tmp_path: Path) 
     assert contract["reflection_prompt_template"] is None
     assert contract["controller_react_lm"]["configuration_source"] == "explicit"
     assert contract["manifestor_lm"]["configuration_source"] == "explicit"
+    assert contract["branch_history"] == {
+        "storage": "target_scoped_user_assistant_messages",
+        "direct_deepseek_native_delivery": "quoted_user_context",
+        "other_delivery": "provider_chat_messages",
+    }
 
     path = Path(ensure_reflection_run_contract(str(tmp_path), contract))
     assert path.name == "reflection-run-contract.json"
@@ -471,6 +476,39 @@ def test_three_role_run_contract_identifies_role_lm_configuration_without_creden
     assert contract["manifestor_lm"]["model"] == "openai/manifestor-model"
     assert contract["manifestor_lm"]["completion_kwargs"]["temperature"] == 0.0
     assert contract["manifestor_lm"]["completion_kwargs"]["api_key"] == "<redacted>"
+
+
+def test_three_role_run_contract_normalizes_only_ephemeral_loopback_ports(tmp_path: Path) -> None:
+    """Resume across local ports while rejecting a different external endpoint.
+
+    Args:
+        tmp_path: Temporary run directory supplied by pytest.
+    """
+
+    def contract_for(api_base: str) -> dict[str, Any]:
+        """Build one otherwise-identical three-role contract.
+
+        Args:
+            api_base: Endpoint assigned to both runtime language models.
+
+        Returns:
+            Public reflection contract.
+        """
+        base_lm = LM("hosted_vllm/model", api_base=api_base)
+        manifestor_lm = LM("hosted_vllm/model", api_base=api_base, temperature=0.0)
+        strategy = ThreeRoleReflectionLM(base_lm, 2, manifestor_lm=manifestor_lm)
+        return strategy.run_contract({"sys": PROMPT})
+
+    first = contract_for("http://127.0.0.1:31001/v1")
+    resumed = contract_for("http://127.0.0.1:41999/v1")
+    external = contract_for("https://different-provider.test/v1")
+
+    assert first == resumed
+    assert first["controller_react_lm"]["completion_kwargs"]["api_base"] == "http://127.0.0.1/v1"
+    ensure_reflection_run_contract(str(tmp_path), first)
+    assert ensure_reflection_run_contract(str(tmp_path), resumed)
+    with pytest.raises(ValueError, match="different reflection strategy contract"):
+        ensure_reflection_run_contract(str(tmp_path), external)
 
 
 def test_three_role_run_contract_requires_identity_for_custom_lm() -> None:
@@ -1073,3 +1111,27 @@ def test_default_strategy_rng_binds_to_engine_sampling() -> None:
     strat.bind_rng(engine_rng)
 
     assert strat.rng is engine_rng
+
+
+@pytest.mark.parametrize("controller_selection", ["verbalized", "uniform_random"])
+def test_strategy_rng_checkpoint_replays_controller_choices(controller_selection: str) -> None:
+    """Resume both ReAct V2 Controller policies at the exact next random choice."""
+    uninterrupted = ThreeRoleReflectionLM(
+        ThreeRoleLM([]),
+        level=2,
+        controller_selection=controller_selection,
+        rng=random.Random(31),
+    )
+    uninterrupted.rng.choices(range(50), k=4)
+    checkpoint = uninterrupted.get_state()
+    expected = uninterrupted.rng.choices(range(50), k=20)
+
+    resumed = ThreeRoleReflectionLM(
+        ThreeRoleLM([]),
+        level=2,
+        controller_selection=controller_selection,
+        rng=random.Random(999),
+    )
+    resumed.set_state(checkpoint)
+
+    assert resumed.rng.choices(range(50), k=20) == expected

@@ -32,6 +32,7 @@ from gepa.proposer.reflective_mutation.reflection_lm import (
     ReflectionProposal,
     StatelessReflectionLM,
 )
+from gepa.response_journal import stable_api_base_identity
 from gepa.strategies.action_space import MAX_PROPOSAL_CHARS, IncompleteActionDistributionError
 from gepa.strategies.document_template import TEMPLATE_FAMILIES, DocumentTemplate, MalformedDocumentError
 from gepa.strategies.edit_tools import EDIT_TOOL_SETS
@@ -99,7 +100,12 @@ def _public_run_identity_value(value: Any) -> Any:
         public: dict[str, Any] = {}
         for raw_key, item in value.items():
             key = str(raw_key)
-            public[key] = "<redacted>" if _is_sensitive_config_key(key) else _public_run_identity_value(item)
+            if _is_sensitive_config_key(key):
+                public[key] = "<redacted>"
+            elif key == "api_base" and isinstance(item, str):
+                public[key] = stable_api_base_identity(item)
+            else:
+                public[key] = _public_run_identity_value(item)
         return public
     if isinstance(value, Sequence) and not isinstance(value, str | bytes):
         return [_public_run_identity_value(item) for item in value]
@@ -629,7 +635,7 @@ class ThreeRoleReflectionLM:
                 "manifestor_lm_run_identity when constructing ThreeRoleReflectionLM with custom callables."
             )
         return {
-            "schema_version": 3,
+            "schema_version": 4,
             "strategy": "three_role_reflection",
             "reflection_level": self.level,
             "edit_tool_set": self.edit_tool_set,
@@ -650,6 +656,11 @@ class ThreeRoleReflectionLM:
             "max_chars": self.max_chars,
             "manifestor_traces_chars": self.manifestor_traces_chars,
             "manifestor_delivery": "user_message",
+            "branch_history": {
+                "storage": "target_scoped_user_assistant_messages",
+                "direct_deepseek_native_delivery": "quoted_user_context",
+                "other_delivery": "provider_chat_messages",
+            },
             "proposer_model": self.proposer_model,
             "proposer_backend": "react_v2",
             "controller_react_lm": controller_lm_identity,
@@ -702,6 +713,82 @@ class ThreeRoleReflectionLM:
             self.rng = rng
             if self._stateless is not None:
                 self._stateless.bind_rng(rng)
+
+    def get_state(self) -> dict[str, Any]:
+        """Return the private Controller RNG state for exact resume.
+
+        Returns:
+            Serializable RNG snapshot. Branch-local user and assistant history
+            remains in :class:`GEPAState` rather than this strategy object.
+        """
+        state = {"rng_state": self.rng.getstate()}
+        return state
+
+    def get_batch_retry_state(self) -> dict[str, Any]:
+        """Snapshot role-local state before a batched reflection attempt.
+
+        Returns:
+            Controller RNG state and response-journal cursors for the shared
+            Controller/ReAct model and the Manifestor model.
+        """
+        if self._stateless is not None:
+            return self._stateless.get_batch_retry_state()
+        state: dict[str, Any] = {"rng_state": self.rng.getstate()}
+        base_cursor = getattr(self.base_lm, "response_journal_cursor_state", None)
+        if callable(base_cursor):
+            state["base_lm_cursor"] = base_cursor()
+        if self.manifestor_lm is not self.base_lm:
+            manifestor_cursor = getattr(self.manifestor_lm, "response_journal_cursor_state", None)
+            if callable(manifestor_cursor):
+                state["manifestor_lm_cursor"] = manifestor_cursor()
+        return state
+
+    def set_batch_retry_state(self, state: Mapping[str, Any]) -> None:
+        """Restore role-local state before per-task reflection fallback.
+
+        Args:
+            state: Snapshot returned by :meth:`get_batch_retry_state`.
+
+        Raises:
+            TypeError: The RNG snapshot is malformed or a role cannot restore
+                a recorded journal cursor.
+        """
+        if self._stateless is not None:
+            self._stateless.set_batch_retry_state(state)
+            return
+        rng_state = state.get("rng_state")
+        if not isinstance(rng_state, tuple):
+            raise TypeError("ThreeRoleReflectionLM retry rng_state must be a tuple.")
+        self.rng.setstate(rng_state)
+        base_cursor = state.get("base_lm_cursor")
+        if base_cursor is not None:
+            restore = getattr(self.base_lm, "restore_response_journal_cursor_state", None)
+            if not callable(restore):
+                raise TypeError("Controller/ReAct LM cannot restore its response-journal cursor.")
+            restore(base_cursor)
+        manifestor_cursor = state.get("manifestor_lm_cursor")
+        if manifestor_cursor is not None:
+            restore = getattr(self.manifestor_lm, "restore_response_journal_cursor_state", None)
+            if not callable(restore):
+                raise TypeError("Manifestor LM cannot restore its response-journal cursor.")
+            restore(manifestor_cursor)
+
+    def set_state(self, state: Mapping[str, Any]) -> None:
+        """Restore the Controller RNG from a durable optimizer checkpoint.
+
+        Args:
+            state: Snapshot previously returned by :meth:`get_state`.
+
+        Raises:
+            TypeError: ``rng_state`` is not a tuple accepted by
+                :class:`random.Random`.
+        """
+        rng_state = state.get("rng_state")
+        if not isinstance(rng_state, tuple):
+            raise TypeError("Persisted ThreeRoleReflectionLM rng_state must be a tuple")
+        self.rng.setstate(rng_state)
+        if self._stateless is not None:
+            self._stateless.bind_rng(self.rng)
 
     def bind_logger(self, logger: Any) -> None:
         """Bind the logger shared by every role.

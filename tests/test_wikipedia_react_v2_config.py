@@ -6,6 +6,7 @@ import sys
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import litellm
 import pytest
@@ -13,12 +14,17 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
 from examples.common.experiment_models import (
+    DEEPSEEK_API_BASE,
     DEEPSEEK_V4_FLASH_0731_OPENROUTER_MODEL,
+    DEEPSEEK_V4_FLASH_0731_VERSION,
+    DEEPSEEK_V4_FLASH_DIRECT_ALIAS,
     DEEPSEEK_V4_FLASH_MODEL,
     EXPERIMENT_NUM_RETRIES,
     QWEN3_8_27B_MODEL,
     QWEN3_8_27B_OPENROUTER_MODEL,
+    QWEN3_8_27B_REVISION,
     experiment_decoding,
+    experiment_model_version,
     experiment_request_overrides,
     resolve_experiment_model,
     validate_experiment_model_pair,
@@ -26,16 +32,25 @@ from examples.common.experiment_models import (
 from examples.common.react_v2 import (
     build_react_v2_strategy,
     ensure_wikipedia_run_contract,
+    file_sha256,
     resolve_template_family,
     structured_prompt,
 )
 from examples.hotpotqa.main import _run_key as hotpotqa_run_key
-from examples.hotpotqa.main import _validated_runtime_profile
+from examples.hotpotqa.main import (
+    _validate_scientific_data_identity,
+    _validated_runtime_profile,
+    _verify_scientific_retriever_integrity,
+)
 from examples.hotpotqa.main import build_config as build_hotpotqa_config
 from examples.hotpotqa.main import build_run_contract as build_hotpotqa_run_contract
 from examples.hotpotqa.main import dump_candidates as dump_hotpotqa_candidates
 from examples.hotpotqa.main import seed_candidate as hotpotqa_seed_candidate
-from examples.hotpotqa.utils import resolve_hotpotqa_lm_kwargs
+from examples.hotpotqa.utils import (
+    HOTPOTQA_HF_REVISION,
+    HOTPOTQA_SCIENTIFIC_SPLIT_SHA256,
+    resolve_hotpotqa_lm_kwargs,
+)
 from examples.hover.main import _run_key as hover_run_key
 from examples.hover.main import build_config as build_hover_config
 from examples.hover.main import build_run_contract as build_hover_run_contract
@@ -55,6 +70,17 @@ from gepa.strategies.intervention import (
     STATELESS_ACTION_MENU_VERSION,
     UNIFORM_RANDOM_CONTROLLER_POLICY_CONTRACT,
     StatelessActionConstraint,
+)
+
+H200_GPU_RUNTIME = json.dumps(
+    {
+        "compute_capabilities": ["9.0"] * 8,
+        "count": 8,
+        "driver_version": "580.82",
+        "names": ["NVIDIA H200"] * 8,
+    },
+    sort_keys=True,
+    separators=(",", ":"),
 )
 
 
@@ -191,6 +217,7 @@ def _hotpot_args(**overrides):
         },
         "data_path": None,
         "edit_tool_set": "broad",
+        "enforce_scientific_contract": False,
         "max_workers": 32,
         "max_metric_calls": 100,
         "merge": False,
@@ -218,6 +245,494 @@ def _hotpot_args(**overrides):
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def _scientific_data_identity() -> dict[str, object]:
+    """Build the exact pinned identity accepted by scientific HotPotQA runs.
+
+    Returns:
+        Source revision, selected-record counts, and ordered content digests.
+    """
+    identity = {
+        "source": {
+            "type": "huggingface",
+            "dataset": "hotpot_qa",
+            "config": "fullwiki",
+            "revision": HOTPOTQA_HF_REVISION,
+        },
+        "splits": {
+            split_name: {
+                "count": count,
+                "sha256": HOTPOTQA_SCIENTIFIC_SPLIT_SHA256[split_name],
+            }
+            for split_name, count in (("train", 150), ("val", 300), ("test", 300))
+        },
+    }
+    return identity
+
+
+@pytest.mark.parametrize(
+    ("model", "expected_version"),
+    [
+        (QWEN3_8_27B_MODEL, QWEN3_8_27B_REVISION),
+        (QWEN3_8_27B_OPENROUTER_MODEL, QWEN3_8_27B_REVISION),
+        (DEEPSEEK_V4_FLASH_MODEL, DEEPSEEK_V4_FLASH_DIRECT_ALIAS),
+        (DEEPSEEK_V4_FLASH_0731_OPENROUTER_MODEL, DEEPSEEK_V4_FLASH_0731_VERSION),
+    ],
+)
+def test_experiment_models_resolve_to_declared_runtime_identities(model: str, expected_version: str) -> None:
+    """Map each transport to its checkpoint, version, or rolling alias.
+
+    Args:
+        model: Canonical or OpenRouter runtime model identifier.
+        expected_version: Checkpoint revision, dated version, or direct alias.
+    """
+    actual_version = experiment_model_version(model)
+    assert actual_version == expected_version
+
+
+def test_experiment_model_version_rejects_unknown_models() -> None:
+    """Refuse to give unapproved model names a scientific version identity."""
+    unknown_model = "provider/unknown"
+    with pytest.raises(ValueError, match="Unsupported experiment model"):
+        experiment_model_version(unknown_model)
+
+
+def test_hotpot_scientific_contract_accepts_only_the_pinned_qwen_runtime(monkeypatch) -> None:
+    """Accept the full paper-aligned Qwen method with immutable runtime pins.
+
+    Args:
+        monkeypatch: Pytest fixture used to install recorded runtime metadata.
+    """
+    monkeypatch.setenv("HOTPOTQA_MODEL_REVISION", QWEN3_8_27B_REVISION)
+    monkeypatch.setenv("HOTPOTQA_MODEL_INTEGRITY_SHA256", "c" * 64)
+    monkeypatch.setenv("HOTPOTQA_WEIGHT_DTYPE", "bfloat16")
+    monkeypatch.setenv("HOTPOTQA_KV_CACHE_DTYPE", "auto")
+    monkeypatch.setenv("HOTPOTQA_VLLM_BATCH_INVARIANT", "false")
+    monkeypatch.setenv("HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS", "true")
+    monkeypatch.setenv("HOTPOTQA_VLLM_VERSION", "0.17.0")
+    monkeypatch.setenv("HOTPOTQA_TRANSFORMERS_VERSION", "5.8.0")
+    monkeypatch.setenv("HOTPOTQA_POSIT_COMMIT", "b" * 40)
+    monkeypatch.setenv("HOTPOTQA_POSIT_ENV_SHA256", "1" * 64)
+    monkeypatch.setenv("HOTPOTQA_GPU_RUNTIME", H200_GPU_RUNTIME)
+    monkeypatch.setenv("HOTPOTQA_SOURCE_COMMIT", "a" * 40)
+    monkeypatch.setenv("HOTPOTQA_SOURCE_MANIFEST_SHA256", "e" * 64)
+    monkeypatch.setenv("HOTPOTQA_PYTHON_VERSION", "3.11.13")
+    monkeypatch.setenv("HOTPOTQA_UV_VERSION", "0.9.13")
+    monkeypatch.setenv("HOTPOTQA_UV_SHA256", "f" * 64)
+    monkeypatch.setenv("HOTPOTQA_LITELLM_VERSION", "1.80.0")
+    monkeypatch.setenv("HOTPOTQA_CAMPAIGN_ID", "hotpotqa-final-v1")
+    monkeypatch.setenv("HOTPOTQA_ENV_SPEC_SHA256", "d" * 64)
+    monkeypatch.setenv("HOTPOTQA_GEPA_ENV_SHA256", "2" * 64)
+    monkeypatch.setenv(
+        "HOTPOTQA_VLLM_SERVE_ARGUMENTS",
+        "tp=1;gpu_memory_utilization=0.92;max_model_len=262144;rope_scaling=none;max_num_seqs=1;dtype=bfloat16;"
+        "kv_cache_dtype=auto;"
+        "prefix_caching=false;reasoning_parser=qwen3;auto_tool_choice=true;tool_parser=qwen3_coder;"
+        "seed=0;batch_invariant=false;single_sequence_replicas=true",
+    )
+    args = _hotpot_args(
+        enforce_scientific_contract=True,
+        max_metric_calls=6_871,
+        train_limit=None,
+        val_limit=None,
+        test_limit=None,
+        data_identity=_scientific_data_identity(),
+    )
+
+    assert _validated_runtime_profile(args) == "scientific"
+    _validate_scientific_data_identity(args)
+
+
+def test_hotpot_scientific_contract_accepts_the_pinned_deepseek_runtime(monkeypatch) -> None:
+    """Accept the method under one preflight-captured DeepSeek runtime.
+
+    Args:
+        monkeypatch: Pytest fixture used to install recorded provider metadata.
+    """
+    monkeypatch.setenv("HOTPOTQA_MODEL_REVISION", DEEPSEEK_V4_FLASH_DIRECT_ALIAS)
+    monkeypatch.setenv("HOTPOTQA_DEEPSEEK_RESPONSE_MODEL", "deepseek-v4-flash-runtime")
+    monkeypatch.setenv("HOTPOTQA_DEEPSEEK_SYSTEM_FINGERPRINT", "fp_deepseek_test")
+    monkeypatch.setenv("HOTPOTQA_SOURCE_COMMIT", "a" * 40)
+    monkeypatch.setenv("HOTPOTQA_SOURCE_MANIFEST_SHA256", "e" * 64)
+    monkeypatch.setenv("HOTPOTQA_PYTHON_VERSION", "3.11.13")
+    monkeypatch.setenv("HOTPOTQA_UV_VERSION", "0.9.13")
+    monkeypatch.setenv("HOTPOTQA_UV_SHA256", "f" * 64)
+    monkeypatch.setenv("HOTPOTQA_LITELLM_VERSION", "1.80.0")
+    monkeypatch.setenv("HOTPOTQA_CAMPAIGN_ID", "hotpotqa-final-v1")
+    monkeypatch.setenv("HOTPOTQA_ENV_SPEC_SHA256", "d" * 64)
+    monkeypatch.setenv("HOTPOTQA_GEPA_ENV_SHA256", "2" * 64)
+    args = _hotpot_args(
+        enforce_scientific_contract=True,
+        max_metric_calls=15_000,
+        solver_model=DEEPSEEK_V4_FLASH_MODEL,
+        reflection_model=DEEPSEEK_V4_FLASH_MODEL,
+        solver_api_base=DEEPSEEK_API_BASE,
+        reflection_api_base=DEEPSEEK_API_BASE,
+        train_limit=None,
+        val_limit=None,
+        test_limit=None,
+        data_identity=_scientific_data_identity(),
+    )
+
+    assert _validated_runtime_profile(args) == "scientific"
+    _validate_scientific_data_identity(args)
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    ["HOTPOTQA_DEEPSEEK_RESPONSE_MODEL", "HOTPOTQA_DEEPSEEK_SYSTEM_FINGERPRINT"],
+)
+def test_hotpot_scientific_contract_requires_both_deepseek_response_fields(
+    monkeypatch,
+    missing_field: str,
+) -> None:
+    """Reject direct DeepSeek runs without a complete preflight identity.
+
+    Args:
+        monkeypatch: Pytest fixture used to install all other runtime metadata.
+        missing_field: Provider response field deliberately omitted.
+    """
+    runtime = {
+        "HOTPOTQA_MODEL_REVISION": DEEPSEEK_V4_FLASH_DIRECT_ALIAS,
+        "HOTPOTQA_DEEPSEEK_RESPONSE_MODEL": "deepseek-v4-flash-runtime",
+        "HOTPOTQA_DEEPSEEK_SYSTEM_FINGERPRINT": "fp_deepseek_test",
+        "HOTPOTQA_SOURCE_COMMIT": "a" * 40,
+        "HOTPOTQA_SOURCE_MANIFEST_SHA256": "e" * 64,
+        "HOTPOTQA_PYTHON_VERSION": "3.11.13",
+        "HOTPOTQA_UV_VERSION": "0.9.13",
+        "HOTPOTQA_UV_SHA256": "f" * 64,
+        "HOTPOTQA_LITELLM_VERSION": "1.80.0",
+        "HOTPOTQA_CAMPAIGN_ID": "hotpotqa-final-v1",
+        "HOTPOTQA_ENV_SPEC_SHA256": "d" * 64,
+        "HOTPOTQA_GEPA_ENV_SHA256": "2" * 64,
+    }
+    runtime.pop(missing_field)
+    for name, value in runtime.items():
+        monkeypatch.setenv(name, value)
+    args = _hotpot_args(
+        enforce_scientific_contract=True,
+        max_metric_calls=15_000,
+        solver_model=DEEPSEEK_V4_FLASH_MODEL,
+        reflection_model=DEEPSEEK_V4_FLASH_MODEL,
+        solver_api_base=DEEPSEEK_API_BASE,
+        reflection_api_base=DEEPSEEK_API_BASE,
+        train_limit=None,
+        val_limit=None,
+        test_limit=None,
+        data_identity=_scientific_data_identity(),
+    )
+
+    with pytest.raises(ValueError, match=missing_field):
+        _validated_runtime_profile(args)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("solver_api_base", None),
+        ("solver_api_base", "https://api.deepseek.com/beta"),
+        ("reflection_api_base", None),
+        ("reflection_api_base", "https://api.deepseek.com/beta"),
+    ],
+)
+def test_hotpot_scientific_contract_rejects_deepseek_endpoint_drift(
+    monkeypatch,
+    field: str,
+    value: str | None,
+) -> None:
+    """Reject provider defaults and beta routes for a direct DeepSeek run.
+
+    Args:
+        monkeypatch: Pytest fixture used to install recorded provider metadata.
+        field: Student or proposer endpoint changed by the test.
+        value: Missing or non-production endpoint value.
+    """
+    monkeypatch.setenv("HOTPOTQA_MODEL_REVISION", DEEPSEEK_V4_FLASH_DIRECT_ALIAS)
+    monkeypatch.setenv("HOTPOTQA_DEEPSEEK_RESPONSE_MODEL", "deepseek-v4-flash-runtime")
+    monkeypatch.setenv("HOTPOTQA_DEEPSEEK_SYSTEM_FINGERPRINT", "fp_deepseek_test")
+    monkeypatch.setenv("HOTPOTQA_SOURCE_COMMIT", "a" * 40)
+    monkeypatch.setenv("HOTPOTQA_SOURCE_MANIFEST_SHA256", "e" * 64)
+    monkeypatch.setenv("HOTPOTQA_PYTHON_VERSION", "3.11.13")
+    monkeypatch.setenv("HOTPOTQA_UV_VERSION", "0.9.13")
+    monkeypatch.setenv("HOTPOTQA_UV_SHA256", "f" * 64)
+    monkeypatch.setenv("HOTPOTQA_LITELLM_VERSION", "1.80.0")
+    monkeypatch.setenv("HOTPOTQA_CAMPAIGN_ID", "hotpotqa-final-v1")
+    monkeypatch.setenv("HOTPOTQA_ENV_SPEC_SHA256", "d" * 64)
+    monkeypatch.setenv("HOTPOTQA_GEPA_ENV_SHA256", "2" * 64)
+    values = {
+        "enforce_scientific_contract": True,
+        "max_metric_calls": 15_000,
+        "solver_model": DEEPSEEK_V4_FLASH_MODEL,
+        "reflection_model": DEEPSEEK_V4_FLASH_MODEL,
+        "solver_api_base": DEEPSEEK_API_BASE,
+        "reflection_api_base": DEEPSEEK_API_BASE,
+        "train_limit": None,
+        "val_limit": None,
+        "test_limit": None,
+        "data_identity": _scientific_data_identity(),
+    }
+    values[field] = value
+    args = _hotpot_args(**values)
+
+    with pytest.raises(ValueError, match=field.replace("_", "-")):
+        _validated_runtime_profile(args)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"api_profile": "openrouter"}, "--api-profile"),
+        ({"program": "1stage"}, "--program"),
+        ({"seed_style": "plain"}, "--seed-style"),
+        ({"seed": 1}, "--seed"),
+        ({"retrieval_k": 8}, "--retrieval-k"),
+        ({"reflection_level": 1}, "--reflection-level"),
+        ({"edit_tool_set": "minimal"}, "--edit-tool-set"),
+        ({"template_family": "generic"}, "--template-family"),
+        ({"data_path": "/tmp/custom.jsonl"}, "--data-path"),
+        ({"technical_mini_index": True}, "--technical-mini-index"),
+        ({"train_limit": 149}, "--train-limit"),
+        ({"val_limit": 299}, "--val-limit"),
+        ({"test_limit": 299}, "--test-limit"),
+        ({"merge": True}, "--merge"),
+        ({"max_metric_calls": 6_870}, "--max-metric-calls"),
+        ({"max_workers": 0}, "--max-workers"),
+    ],
+)
+def test_hotpot_scientific_contract_rejects_methodology_drift(
+    monkeypatch,
+    overrides: dict[str, object],
+    message: str,
+) -> None:
+    """Fail closed when any quality-relevant production axis changes.
+
+    Args:
+        monkeypatch: Pytest fixture used to install recorded runtime metadata.
+        overrides: One disallowed methodology change.
+        message: Rejected command-line axis expected in the error.
+    """
+    monkeypatch.setenv("HOTPOTQA_MODEL_REVISION", QWEN3_8_27B_REVISION)
+    monkeypatch.setenv("HOTPOTQA_MODEL_INTEGRITY_SHA256", "c" * 64)
+    monkeypatch.setenv("HOTPOTQA_WEIGHT_DTYPE", "bfloat16")
+    monkeypatch.setenv("HOTPOTQA_KV_CACHE_DTYPE", "auto")
+    monkeypatch.setenv("HOTPOTQA_VLLM_BATCH_INVARIANT", "false")
+    monkeypatch.setenv("HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS", "true")
+    monkeypatch.setenv("HOTPOTQA_VLLM_VERSION", "0.17.0")
+    monkeypatch.setenv("HOTPOTQA_TRANSFORMERS_VERSION", "5.8.0")
+    monkeypatch.setenv("HOTPOTQA_POSIT_COMMIT", "b" * 40)
+    monkeypatch.setenv("HOTPOTQA_POSIT_ENV_SHA256", "1" * 64)
+    monkeypatch.setenv("HOTPOTQA_GPU_RUNTIME", H200_GPU_RUNTIME)
+    monkeypatch.setenv("HOTPOTQA_SOURCE_COMMIT", "a" * 40)
+    monkeypatch.setenv("HOTPOTQA_SOURCE_MANIFEST_SHA256", "e" * 64)
+    monkeypatch.setenv("HOTPOTQA_PYTHON_VERSION", "3.11.13")
+    monkeypatch.setenv("HOTPOTQA_UV_VERSION", "0.9.13")
+    monkeypatch.setenv("HOTPOTQA_UV_SHA256", "f" * 64)
+    monkeypatch.setenv("HOTPOTQA_LITELLM_VERSION", "1.80.0")
+    monkeypatch.setenv("HOTPOTQA_CAMPAIGN_ID", "hotpotqa-final-v1")
+    monkeypatch.setenv("HOTPOTQA_ENV_SPEC_SHA256", "d" * 64)
+    monkeypatch.setenv("HOTPOTQA_GEPA_ENV_SHA256", "2" * 64)
+    monkeypatch.setenv(
+        "HOTPOTQA_VLLM_SERVE_ARGUMENTS",
+        "tp=1;gpu_memory_utilization=0.92;max_model_len=262144;rope_scaling=none;max_num_seqs=1;dtype=bfloat16;"
+        "kv_cache_dtype=auto;"
+        "prefix_caching=false;reasoning_parser=qwen3;auto_tool_choice=true;tool_parser=qwen3_coder;"
+        "seed=0;batch_invariant=false;single_sequence_replicas=true",
+    )
+    scientific_values = {
+        "enforce_scientific_contract": True,
+        "max_metric_calls": 6_871,
+        "train_limit": None,
+        "val_limit": None,
+        "test_limit": None,
+        "data_identity": _scientific_data_identity(),
+    }
+    scientific_values.update(overrides)
+    args = _hotpot_args(**scientific_values)
+
+    with pytest.raises(ValueError, match=message):
+        _validated_runtime_profile(args)
+
+
+@pytest.mark.parametrize(
+    ("environment", "message"),
+    [
+        ({"HOTPOTQA_MODEL_REVISION": "moving-main"}, "HOTPOTQA_MODEL_REVISION"),
+        ({"HOTPOTQA_MODEL_INTEGRITY_SHA256": "moving-manifest"}, "HOTPOTQA_MODEL_INTEGRITY_SHA256"),
+        ({"HOTPOTQA_WEIGHT_DTYPE": "float16"}, "HOTPOTQA_WEIGHT_DTYPE"),
+        ({"HOTPOTQA_KV_CACHE_DTYPE": "fp8"}, "HOTPOTQA_KV_CACHE_DTYPE"),
+        ({"HOTPOTQA_VLLM_BATCH_INVARIANT": "true"}, "HOTPOTQA_VLLM_BATCH_INVARIANT"),
+        (
+            {"HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS": "false"},
+            "HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS",
+        ),
+        ({"HOTPOTQA_VLLM_VERSION": ""}, "HOTPOTQA_VLLM_VERSION"),
+        ({"HOTPOTQA_TRANSFORMERS_VERSION": ""}, "HOTPOTQA_TRANSFORMERS_VERSION"),
+        ({"HOTPOTQA_POSIT_COMMIT": "moving-main"}, "HOTPOTQA_POSIT_COMMIT"),
+        ({"HOTPOTQA_POSIT_ENV_SHA256": "moving-environment"}, "HOTPOTQA_POSIT_ENV_SHA256"),
+        ({"HOTPOTQA_GPU_RUNTIME": "{}"}, "HOTPOTQA_GPU_RUNTIME"),
+        ({"HOTPOTQA_SOURCE_COMMIT": "moving-main"}, "HOTPOTQA_SOURCE_COMMIT"),
+        ({"HOTPOTQA_SOURCE_MANIFEST_SHA256": "moving-manifest"}, "HOTPOTQA_SOURCE_MANIFEST_SHA256"),
+        ({"HOTPOTQA_PYTHON_VERSION": "3.11.14"}, "HOTPOTQA_PYTHON_VERSION"),
+        ({"HOTPOTQA_UV_VERSION": "0.9.14"}, "HOTPOTQA_UV_VERSION"),
+        ({"HOTPOTQA_UV_SHA256": "moving-uv"}, "HOTPOTQA_UV_SHA256"),
+        ({"HOTPOTQA_LITELLM_VERSION": ""}, "HOTPOTQA_LITELLM_VERSION"),
+        ({"HOTPOTQA_CAMPAIGN_ID": ""}, "HOTPOTQA_CAMPAIGN_ID"),
+        ({"HOTPOTQA_ENV_SPEC_SHA256": "moving-lock"}, "HOTPOTQA_ENV_SPEC_SHA256"),
+        ({"HOTPOTQA_GEPA_ENV_SHA256": "moving-environment"}, "HOTPOTQA_GEPA_ENV_SHA256"),
+        ({"HOTPOTQA_VLLM_SERVE_ARGUMENTS": "tp=1"}, "HOTPOTQA_VLLM_SERVE_ARGUMENTS"),
+    ],
+)
+def test_hotpot_scientific_contract_rejects_qwen_runtime_drift(
+    monkeypatch,
+    environment: dict[str, str],
+    message: str,
+) -> None:
+    """Fail closed when checkpoint or exact-quality serving metadata drifts.
+
+    Args:
+        monkeypatch: Pytest fixture used to install runtime metadata.
+        environment: One altered Qwen runtime field.
+        message: Runtime field expected in the rejection.
+    """
+    baseline = {
+        "HOTPOTQA_MODEL_REVISION": QWEN3_8_27B_REVISION,
+        "HOTPOTQA_MODEL_INTEGRITY_SHA256": "c" * 64,
+        "HOTPOTQA_WEIGHT_DTYPE": "bfloat16",
+        "HOTPOTQA_KV_CACHE_DTYPE": "auto",
+        "HOTPOTQA_VLLM_BATCH_INVARIANT": "false",
+        "HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS": "true",
+        "HOTPOTQA_VLLM_VERSION": "0.17.0",
+        "HOTPOTQA_TRANSFORMERS_VERSION": "5.8.0",
+        "HOTPOTQA_POSIT_COMMIT": "b" * 40,
+        "HOTPOTQA_POSIT_ENV_SHA256": "1" * 64,
+        "HOTPOTQA_GPU_RUNTIME": H200_GPU_RUNTIME,
+        "HOTPOTQA_SOURCE_COMMIT": "a" * 40,
+        "HOTPOTQA_SOURCE_MANIFEST_SHA256": "e" * 64,
+        "HOTPOTQA_PYTHON_VERSION": "3.11.13",
+        "HOTPOTQA_UV_VERSION": "0.9.13",
+        "HOTPOTQA_UV_SHA256": "f" * 64,
+        "HOTPOTQA_LITELLM_VERSION": "1.80.0",
+        "HOTPOTQA_CAMPAIGN_ID": "hotpotqa-final-v1",
+        "HOTPOTQA_ENV_SPEC_SHA256": "d" * 64,
+        "HOTPOTQA_GEPA_ENV_SHA256": "2" * 64,
+        "HOTPOTQA_VLLM_SERVE_ARGUMENTS": (
+            "tp=1;gpu_memory_utilization=0.92;max_model_len=262144;rope_scaling=none;max_num_seqs=1;dtype=bfloat16;"
+            "kv_cache_dtype=auto;"
+            "prefix_caching=false;reasoning_parser=qwen3;auto_tool_choice=true;tool_parser=qwen3_coder;"
+            "seed=0;batch_invariant=false;single_sequence_replicas=true"
+        ),
+    }
+    for name, value in {**baseline, **environment}.items():
+        monkeypatch.setenv(name, value)
+    args = _hotpot_args(
+        enforce_scientific_contract=True,
+        max_metric_calls=6_871,
+        train_limit=None,
+        val_limit=None,
+        test_limit=None,
+        data_identity=_scientific_data_identity(),
+    )
+
+    with pytest.raises(ValueError, match=message):
+        _validated_runtime_profile(args)
+
+
+@pytest.mark.parametrize(
+    ("changed_field", "message"),
+    [
+        ("revision", "revision"),
+        ("train_count", "train split"),
+        ("val_digest", "val split"),
+    ],
+)
+def test_hotpot_scientific_data_identity_rejects_split_drift(changed_field: str, message: str) -> None:
+    """Reject source, count, and ordered-record changes before optimization.
+
+    Args:
+        changed_field: Source, count, or digest field changed by the test.
+        message: Rejected source or split expected in the error.
+    """
+    identity = _scientific_data_identity()
+    if changed_field == "revision":
+        identity["source"]["revision"] = "moving-main"
+    elif changed_field == "train_count":
+        identity["splits"]["train"]["count"] = 149
+    else:
+        identity["splits"]["val"]["sha256"] = "corrupt"
+    args = _hotpot_args(enforce_scientific_contract=True, data_identity=identity)
+
+    with pytest.raises(ValueError, match=message):
+        _validate_scientific_data_identity(args)
+
+
+def test_production_wiki17_attestation_avoids_a_second_deep_hash(tmp_path, monkeypatch) -> None:
+    """Reuse the launcher's locked deep verification after checking its manifest digest.
+
+    Args:
+        tmp_path: Pytest directory containing the integrity manifest.
+        monkeypatch: Pytest fixture used to install the production attestation.
+    """
+    integrity_path = tmp_path / "integrity.json"
+    integrity_path.write_text('{"verified":true}', encoding="utf-8")
+    expected_sha256 = file_sha256(integrity_path)
+    verify_integrity = Mock()
+    retriever = SimpleNamespace(
+        integrity_path=integrity_path,
+        verify_integrity=verify_integrity,
+    )
+    monkeypatch.setenv("HOTPOTQA_PRODUCTION_LAUNCH", "1")
+    monkeypatch.setenv("HOTPOTQA_VERIFIED_WIKI17_INTEGRITY_SHA256", expected_sha256)
+
+    _verify_scientific_retriever_integrity(retriever)
+
+    verify_integrity.assert_not_called()
+
+
+def test_direct_wiki17_run_retains_deep_verification(tmp_path, monkeypatch) -> None:
+    """Deep-hash Wiki-2017 when no locked Slurm attestation is available.
+
+    Args:
+        tmp_path: Pytest directory containing an unused integrity manifest.
+        monkeypatch: Pytest fixture used to clear production launch state.
+    """
+    verify_integrity = Mock()
+    retriever = SimpleNamespace(
+        integrity_path=tmp_path / "integrity.json",
+        verify_integrity=verify_integrity,
+    )
+    monkeypatch.delenv("HOTPOTQA_PRODUCTION_LAUNCH", raising=False)
+    monkeypatch.delenv("HOTPOTQA_VERIFIED_WIKI17_INTEGRITY_SHA256", raising=False)
+
+    _verify_scientific_retriever_integrity(retriever)
+
+    verify_integrity.assert_called_once_with()
+
+
+@pytest.mark.parametrize("attestation", ["not-a-digest", "0" * 64])
+def test_production_wiki17_attestation_rejects_invalid_identity(
+    attestation: str,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Reject malformed and byte-mismatched production attestations.
+
+    Args:
+        attestation: Malformed or incorrect manifest digest under test.
+        tmp_path: Pytest directory containing the integrity manifest.
+        monkeypatch: Pytest fixture used to install production launch state.
+    """
+    integrity_path = tmp_path / "integrity.json"
+    integrity_path.write_text('{"verified":true}', encoding="utf-8")
+    retriever = SimpleNamespace(
+        integrity_path=integrity_path,
+        verify_integrity=Mock(),
+    )
+    monkeypatch.setenv("HOTPOTQA_PRODUCTION_LAUNCH", "1")
+    monkeypatch.setenv("HOTPOTQA_VERIFIED_WIKI17_INTEGRITY_SHA256", attestation)
+
+    with pytest.raises(ValueError, match="attestation"):
+        _verify_scientific_retriever_integrity(retriever)
 
 
 def test_material_ablation_axes_get_distinct_resumable_run_keys() -> None:
@@ -292,6 +807,71 @@ def test_complete_run_keys_cover_budget_seed_retrieval_and_data_identity() -> No
     assert level_one_contract["optimizer"]["semantic_controller_policy"] is None
 
 
+def test_scientific_run_key_normalizes_ports_and_rejects_external_endpoints(monkeypatch) -> None:
+    """Resume Qwen across Slurm ports while rejecting external endpoints.
+
+    Args:
+        monkeypatch: Pytest fixture used to install pinned runtime metadata.
+    """
+    monkeypatch.setenv("HOTPOTQA_MODEL_REVISION", QWEN3_8_27B_REVISION)
+    monkeypatch.setenv("HOTPOTQA_MODEL_INTEGRITY_SHA256", "c" * 64)
+    monkeypatch.setenv("HOTPOTQA_WEIGHT_DTYPE", "bfloat16")
+    monkeypatch.setenv("HOTPOTQA_KV_CACHE_DTYPE", "auto")
+    monkeypatch.setenv("HOTPOTQA_VLLM_BATCH_INVARIANT", "false")
+    monkeypatch.setenv("HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS", "true")
+    monkeypatch.setenv("HOTPOTQA_VLLM_VERSION", "0.17.0")
+    monkeypatch.setenv("HOTPOTQA_TRANSFORMERS_VERSION", "5.8.0")
+    monkeypatch.setenv("HOTPOTQA_POSIT_COMMIT", "b" * 40)
+    monkeypatch.setenv("HOTPOTQA_POSIT_ENV_SHA256", "1" * 64)
+    monkeypatch.setenv("HOTPOTQA_GPU_RUNTIME", H200_GPU_RUNTIME)
+    monkeypatch.setenv("HOTPOTQA_SOURCE_COMMIT", "a" * 40)
+    monkeypatch.setenv("HOTPOTQA_SOURCE_MANIFEST_SHA256", "e" * 64)
+    monkeypatch.setenv("HOTPOTQA_PYTHON_VERSION", "3.11.13")
+    monkeypatch.setenv("HOTPOTQA_UV_VERSION", "0.9.13")
+    monkeypatch.setenv("HOTPOTQA_UV_SHA256", "f" * 64)
+    monkeypatch.setenv("HOTPOTQA_LITELLM_VERSION", "1.80.0")
+    monkeypatch.setenv("HOTPOTQA_CAMPAIGN_ID", "hotpotqa-final-v1")
+    monkeypatch.setenv("HOTPOTQA_ENV_SPEC_SHA256", "d" * 64)
+    monkeypatch.setenv("HOTPOTQA_GEPA_ENV_SHA256", "2" * 64)
+    monkeypatch.setenv(
+        "HOTPOTQA_VLLM_SERVE_ARGUMENTS",
+        "tp=1;gpu_memory_utilization=0.92;max_model_len=262144;rope_scaling=none;max_num_seqs=1;dtype=bfloat16;"
+        "kv_cache_dtype=auto;"
+        "prefix_caching=false;reasoning_parser=qwen3;auto_tool_choice=true;tool_parser=qwen3_coder;"
+        "seed=0;batch_invariant=false;single_sequence_replicas=true",
+    )
+    shared = {
+        "enforce_scientific_contract": True,
+        "max_metric_calls": 6_871,
+        "train_limit": None,
+        "val_limit": None,
+        "test_limit": None,
+        "data_identity": _scientific_data_identity(),
+    }
+    first = _hotpot_args(
+        **shared,
+        solver_api_base="http://localhost:10001/v1",
+        reflection_api_base="http://localhost:10001/v1",
+    )
+    resubmitted = _hotpot_args(
+        **shared,
+        solver_api_base="http://localhost:14999/v1",
+        reflection_api_base="http://localhost:14999/v1",
+    )
+    external = _hotpot_args(
+        **shared,
+        solver_api_base="https://solver.example/v1",
+        reflection_api_base="https://solver.example/v1",
+    )
+
+    assert hotpotqa_run_key("react_v2", first) == hotpotqa_run_key("react_v2", resubmitted)
+    with pytest.raises(ValueError, match="solver-api-base"):
+        hotpotqa_run_key("react_v2", external)
+    contract = build_hotpotqa_run_contract("react_v2", first)
+    assert contract["models"]["solver_api_base"] == "local-loopback/v1"
+    assert contract["models"]["reflection_api_base"] == "local-loopback/v1"
+
+
 def test_hotpotqa_merge_is_an_opt_in_axis_shared_by_every_condition() -> None:
     """Keep the paper merge policy orthogonal to every reflection strategy."""
     no_merge_args = _hotpot_args()
@@ -348,6 +928,7 @@ def test_every_condition_uses_the_same_within_run_example_concurrency(
 
         assert config.engine.parallel is True
         assert config.engine.max_workers == 47
+        assert config.engine.raise_on_exception is True
         assert contract["program"]["parallel_workers"] == 47
 
 
@@ -365,8 +946,6 @@ def test_hotpot_and_hover_contracts_record_exact_model_pair() -> None:
         assert contract["models"]["reflection"] == QWEN3_8_27B_MODEL
         assert contract["models"]["reflection_runtime"] == QWEN3_8_27B_MODEL
         assert contract["models"]["reflection_api_base"] == "http://localhost:8000/v1"
-        assert contract["models"]["solver_decoding"] == experiment_decoding(QWEN3_8_27B_MODEL)
-        assert contract["models"]["reflection_decoding"] == experiment_decoding(QWEN3_8_27B_MODEL)
         assert contract["models"]["solver_num_retries"] == EXPERIMENT_NUM_RETRIES
         assert contract["models"]["reflection_num_retries"] == EXPERIMENT_NUM_RETRIES
         assert contract["optimizer"]["max_metric_calls"] == 100
@@ -375,7 +954,16 @@ def test_hotpot_and_hover_contracts_record_exact_model_pair() -> None:
         assert contract["optimizer"]["semantic_action_space"] == SEMANTIC_ACTION_CATALOGS["prompt"]
         assert contract["optimizer"]["semantic_controller_policy"] == CONTROLLER_POLICY_CONTRACT
 
-    assert hotpot["schema_version"] == 7
+    expected_hotpot_decoding = {**experiment_decoding(QWEN3_8_27B_MODEL), "seed": 0}
+    assert hotpot["models"]["solver_decoding"] == expected_hotpot_decoding
+    assert hotpot["models"]["reflection_decoding"] == expected_hotpot_decoding
+    assert hover["models"]["solver_decoding"] == experiment_decoding(QWEN3_8_27B_MODEL)
+    assert hover["models"]["reflection_decoding"] == experiment_decoding(QWEN3_8_27B_MODEL)
+
+    assert hotpot["schema_version"] == 13
+    assert hotpot["scientific_contract_enforced"] is False
+    assert hotpot["models"]["solver_version"] == QWEN3_8_27B_REVISION
+    assert hotpot["models"]["reflection_version"] == QWEN3_8_27B_REVISION
     assert hotpot["models"]["runtime_profile"] == "scientific"
     assert hotpot["retrieval"]["backend"] == "wiki17-bm25s"
     assert hotpot["retrieval"]["k1"] == 0.9
@@ -383,11 +971,48 @@ def test_hotpot_and_hover_contracts_record_exact_model_pair() -> None:
     assert hotpot["optimizer"]["reflection_minibatch_size"] == 3
     assert hotpot["optimizer"]["frontier_type"] == "instance"
     assert hotpot["optimizer"]["skip_perfect_score"] is True
+    assert hotpot["optimizer"]["raise_on_exception"] is True
+    assert hotpot["optimizer"]["branch_history"] == {
+        "storage": "target_scoped_user_assistant_messages",
+        "direct_deepseek_native_delivery": "quoted_user_context",
+        "other_delivery": "provider_chat_messages",
+    }
     assert hotpot["program"]["parallel_workers"] == 32
     assert hotpot["program"]["predictor_type"] == "dspy_chain_of_thought"
     assert hotpot["program"]["predictor_adapter"] == "dspy_chat_adapter"
     assert hotpot["program"]["dspy_runtime_version"] == "2.6.23"
     assert hotpot["program"]["dspy_runtime_commit"] == "62dc3b634d7dc0c4889abcf905cb4c391ea6b396"
+    assert hotpot["program"]["dspy_disk_cache"] is True
+    assert hotpot["program"]["dspy_memory_cache"] is False
+    assert hotpot["program"]["dspy_history"] is False
+    assert hotpot["execution_runtime"] == {
+        "campaign_id": None,
+        "source_commit": None,
+        "source_manifest_sha256": None,
+        "python_version": None,
+        "uv_version": None,
+            "uv_sha256": None,
+            "env_spec_sha256": None,
+            "gepa_env_sha256": None,
+            "posit_commit": None,
+        "posit_env_sha256": None,
+        "gpu_runtime": None,
+        "vllm_version": None,
+        "torch_version": None,
+        "cuda_version": None,
+        "cuda_module": None,
+        "transformers_version": None,
+        "litellm_version": None,
+        "model_revision": None,
+        "model_integrity_sha256": None,
+        "deepseek_response_model": None,
+        "deepseek_system_fingerprint": None,
+        "weight_dtype": None,
+        "kv_cache_dtype": None,
+        "vllm_serve_arguments": None,
+        "vllm_batch_invariant": None,
+        "vllm_single_sequence_replicas": None,
+    }
     assert hotpot["program"]["component_output_fields"] == {
         "summarize1": ["reasoning", "summary"],
         "create_query_hop2": ["reasoning", "query"],
@@ -439,27 +1064,68 @@ def test_deepseek_contract_uses_the_deepseek_pair_and_decoding() -> None:
         "runtime_profile": "scientific",
         "solver": DEEPSEEK_V4_FLASH_MODEL,
         "solver_runtime": DEEPSEEK_V4_FLASH_MODEL,
+        "solver_version": DEEPSEEK_V4_FLASH_DIRECT_ALIAS,
         "solver_api_base": None,
-        "solver_decoding": {
-            "temperature": 1.0,
-            "top_p": 0.95,
-            "max_tokens": 16_384,
-            "reasoning_effort": "max",
-        },
-        "solver_request_overrides": {},
+        "solver_provider_response_identity": None,
+        "solver_decoding": {"max_tokens": 16_384},
+        "solver_request_overrides": experiment_request_overrides(DEEPSEEK_V4_FLASH_MODEL),
         "solver_num_retries": 0,
         "reflection": DEEPSEEK_V4_FLASH_MODEL,
         "reflection_runtime": DEEPSEEK_V4_FLASH_MODEL,
+        "reflection_version": DEEPSEEK_V4_FLASH_DIRECT_ALIAS,
         "reflection_api_base": None,
-        "reflection_decoding": {
-            "temperature": 1.0,
-            "top_p": 0.95,
-            "max_tokens": 16_384,
-            "reasoning_effort": "max",
+        "reflection_provider_response_identity": None,
+        "reflection_decoding": {"max_tokens": 16_384},
+        "reflection_role_decoding": {
+            "controller": {
+                "requested": {"max_tokens": 16_384},
+                "provider_ignored_fields": [],
+            },
+            "manifestor": {
+                "requested": {"max_tokens": 16_384, "temperature": 0},
+                "provider_ignored_fields": ["temperature"],
+            },
+            "react_v2_proposer": {
+                "requested": {"max_tokens": 16_384},
+                "provider_ignored_fields": [],
+            },
         },
-        "reflection_request_overrides": {},
+        "reflection_request_overrides": experiment_request_overrides(DEEPSEEK_V4_FLASH_MODEL),
         "reflection_num_retries": 0,
     }
+
+
+def test_deepseek_response_identity_is_material_to_contract_and_run_key(monkeypatch) -> None:
+    """Persist the preflight identity and isolate provider-runtime changes.
+
+    Args:
+        monkeypatch: Pytest fixture used to change the captured fingerprint.
+    """
+    args = _hotpot_args(
+        solver_model=DEEPSEEK_V4_FLASH_MODEL,
+        reflection_model=DEEPSEEK_V4_FLASH_MODEL,
+        solver_api_base=DEEPSEEK_API_BASE,
+        reflection_api_base=DEEPSEEK_API_BASE,
+    )
+    monkeypatch.setenv("HOTPOTQA_DEEPSEEK_RESPONSE_MODEL", "deepseek-v4-flash-runtime")
+    monkeypatch.setenv("HOTPOTQA_DEEPSEEK_SYSTEM_FINGERPRINT", "fp_first")
+    first_contract = build_hotpotqa_run_contract("react_v2", args)
+    first_key = hotpotqa_run_key("react_v2", args)
+
+    assert first_contract["models"]["solver_provider_response_identity"] == {
+        "model": "deepseek-v4-flash-runtime",
+        "system_fingerprint": "fp_first",
+    }
+    assert first_contract["models"]["reflection_provider_response_identity"] == {
+        "model": "deepseek-v4-flash-runtime",
+        "system_fingerprint": "fp_first",
+    }
+    assert first_contract["execution_runtime"]["deepseek_response_model"] == "deepseek-v4-flash-runtime"
+    assert first_contract["execution_runtime"]["deepseek_system_fingerprint"] == "fp_first"
+
+    monkeypatch.setenv("HOTPOTQA_DEEPSEEK_SYSTEM_FINGERPRINT", "fp_second")
+
+    assert hotpotqa_run_key("react_v2", args) != first_key
 
 
 @pytest.mark.parametrize(
@@ -812,6 +1478,12 @@ def test_random_controller_react_v2_changes_only_controller_selection(
     random_contract.pop("condition")
     verbalized_contract["optimizer"].pop("semantic_controller_policy")
     random_contract["optimizer"].pop("semantic_controller_policy")
+    if contract_builder is build_hotpotqa_run_contract:
+        verbalized_roles = verbalized_contract["models"]["reflection_role_decoding"]
+        random_roles = random_contract["models"]["reflection_role_decoding"]
+        assert verbalized_roles["controller"] is not None
+        assert random_roles["controller"] is None
+        verbalized_roles["controller"] = None
     assert verbalized_contract == random_contract
 
     if contract_builder is build_hotpotqa_run_contract:
@@ -960,7 +1632,7 @@ def test_stateless_action_menu_contract_matches_between_wikipedia_benchmarks() -
     expected = build_hotpotqa_run_contract("random", args)["optimizer"]["stateless_action_menu"]
 
     for build_contract, schema_version in (
-        (build_hotpotqa_run_contract, 7),
+        (build_hotpotqa_run_contract, 13),
         (build_hover_run_contract, 5),
     ):
         contract = build_contract("random", args)

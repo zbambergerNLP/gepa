@@ -668,6 +668,7 @@ def optimize(
         use_cloudpickle=use_cloudpickle,
         write_agent_state=write_agent_state,
         evaluation_cache=evaluation_cache,
+        rng=rng,
     )
 
     with experiment_tracker:

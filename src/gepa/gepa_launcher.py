@@ -1848,6 +1848,7 @@ def optimize_anything(
         use_cloudpickle=config.engine.use_cloudpickle,
         write_agent_state=config.engine.write_agent_state,
         evaluation_cache=evaluation_cache,
+        rng=rng,
     )
 
     # --- 16. Run optimization ---

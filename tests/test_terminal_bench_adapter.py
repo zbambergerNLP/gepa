@@ -33,7 +33,7 @@ _QWEN3_8_27B_LM_KWARGS = {
     "num_retries": 0,
 }
 _QWEN3_8_27B_MODEL_INFO = {
-    "max_input_tokens": 32_768,
+    "max_input_tokens": 262_144,
     "max_output_tokens": 16_384,
     "input_cost_per_token": 0.0,
     "output_cost_per_token": 0.0,

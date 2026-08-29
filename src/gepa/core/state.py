@@ -226,7 +226,7 @@ class GEPAState(Generic[RolloutOutput, DataId]):
     returned by :func:`~gepa.optimize_anything.optimize_anything`.
     """
 
-    _VALIDATION_SCHEMA_VERSION: ClassVar[int] = 8
+    _VALIDATION_SCHEMA_VERSION: ClassVar[int] = 9
     # Attributes that are runtime-only and should not be serialized (e.g., callback hooks, caches)
     _EXCLUDED_FROM_SERIALIZATION: ClassVar[frozenset[str]] = frozenset({"_budget_hooks"})
 
@@ -272,6 +272,18 @@ class GEPAState(Generic[RolloutOutput, DataId]):
     # Opaque bag for adapter-specific persistent state.
     # Core GEPA never inspects this; adapters read/write via get_adapter_state()/set_adapter_state().
     adapter_state: dict[str, Any]
+
+    # Exact optimizer RNG state at the most recent durable iteration boundary.
+    rng_state: object | None
+
+    # Opaque snapshots for callbacks that explicitly support persistence.
+    callback_states: dict[str, Any]
+
+    # Opaque state for the configured training-minibatch sampler.
+    batch_sampler_state: dict[str, Any] | None
+
+    # Opaque state for a reflection strategy with a private RNG or session.
+    reflection_lm_state: dict[str, Any] | None
 
     def __init__(
         self,
@@ -358,6 +370,10 @@ class GEPAState(Generic[RolloutOutput, DataId]):
         self.validation_schema_version = self._VALIDATION_SCHEMA_VERSION
         self.evaluation_cache = evaluation_cache
         self.adapter_state: dict[str, Any] = {}
+        self.rng_state = None
+        self.callback_states: dict[str, Any] = {}
+        self.batch_sampler_state = None
+        self.reflection_lm_state = None
 
     def is_consistent(self) -> bool:
         """Validate parallel state collections and persisted branch histories.
@@ -840,6 +856,10 @@ class GEPAState(Generic[RolloutOutput, DataId]):
         assert set(state.pareto_front_valset.keys()) == set(state.program_at_pareto_front_valset.keys())
         assert set(state.objective_pareto_front.keys()) == set(state.program_at_pareto_front_objectives.keys())
         assert isinstance(state.adapter_state, dict)
+        assert state.rng_state is None or isinstance(state.rng_state, tuple)
+        assert isinstance(state.callback_states, dict)
+        assert state.batch_sampler_state is None or isinstance(state.batch_sampler_state, dict)
+        assert state.reflection_lm_state is None or isinstance(state.reflection_lm_state, dict)
         return state
 
     @staticmethod
@@ -898,6 +918,14 @@ class GEPAState(Generic[RolloutOutput, DataId]):
             d["evaluation_cache"] = None
         if "adapter_state" not in d:
             d["adapter_state"] = {}
+        if "rng_state" not in d:
+            d["rng_state"] = None
+        if "callback_states" not in d:
+            d["callback_states"] = {}
+        if "batch_sampler_state" not in d:
+            d["batch_sampler_state"] = None
+        if "reflection_lm_state" not in d:
+            d["reflection_lm_state"] = None
         if "revision_history_by_candidate" not in d:
             d["revision_history_by_candidate"] = [[] for _ in range(num_candidates)]
         elif previous_version < 8:
@@ -1529,11 +1557,34 @@ def initialize_gepa_state(
     run_dir: str | None,
     logger: LoggerProtocol,
     seed_candidate: dict[str, str],
-    seed_valset_evaluation: ValsetEvaluation[RolloutOutput, DataId],
+    seed_valset_evaluation: ValsetEvaluation[RolloutOutput, DataId] | None,
     track_best_outputs: bool = False,
     frontier_type: FrontierType = "instance",
     evaluation_cache: "EvaluationCache[RolloutOutput, DataId] | None" = None,
 ) -> GEPAState[RolloutOutput, DataId]:
+    """Load a prior optimizer state or initialize one from a seed evaluation.
+
+    A resumed run never needs to evaluate its seed again: the durable state
+    already contains the seed scores needed by the optimizer. A fresh run must
+    provide the completed seed evaluation.
+
+    Args:
+        run_dir: Optional directory containing or receiving optimizer state.
+        logger: Logger used to report a resumed state load.
+        seed_candidate: Initial component mapping for a fresh run.
+        seed_valset_evaluation: Seed evaluation for a fresh run, or ``None``
+            when loading an existing state.
+        track_best_outputs: Whether a fresh state retains tied best outputs.
+        frontier_type: Frontier policy expected by either state path.
+        evaluation_cache: Cache requested for this invocation.
+
+    Returns:
+        Loaded or newly initialized optimizer state.
+
+    Raises:
+        ValueError: The persisted frontier differs from ``frontier_type`` or a
+            fresh run omits ``seed_valset_evaluation``.
+    """
     if run_dir is not None and os.path.exists(os.path.join(run_dir, "gepa_state.bin")):
         logger.log("Loading gepa state from run dir")
         gepa_state = GEPAState.load(run_dir)
@@ -1554,6 +1605,8 @@ def initialize_gepa_state(
             gepa_state.evaluation_cache = evaluation_cache
         # else: keep the loaded cache (gepa_state.evaluation_cache is already set)
     else:
+        if seed_valset_evaluation is None:
+            raise ValueError("A fresh GEPA run requires a seed valset evaluation.")
         if run_dir is not None:
             write_eval_outputs_to_directory(
                 seed_valset_evaluation.outputs_by_val_id,

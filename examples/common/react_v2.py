@@ -218,10 +218,14 @@ def build_react_v2_strategy(
         Configured three-role strategy and its resolved template family.
     """
     resolved_family = resolve_template_family(template_family, task_model)
+    proposer_kwargs = dict(lm_kwargs)
     manifestor_kwargs = dict(lm_kwargs)
     manifestor_kwargs["temperature"] = 0
+    if "response_journal_path" in lm_kwargs:
+        proposer_kwargs["response_journal_namespace"] = "controller-proposer"
+        manifestor_kwargs["response_journal_namespace"] = "manifestor"
     strategy = ThreeRoleReflectionLM(
-        base_lm=LM(reflection_model, **lm_kwargs),
+        base_lm=LM(reflection_model, **proposer_kwargs),
         level=level,
         edit_tool_set=edit_tool_set,
         component_kinds=component_kinds,

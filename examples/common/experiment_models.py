@@ -4,14 +4,18 @@ from copy import deepcopy
 
 QWEN3_8_27B_MODEL = "hosted_vllm/Qwen/Qwen3.8-27B"
 QWEN3_8_27B_OPENROUTER_MODEL = "openrouter/qwen/qwen3.8-27b"
+QWEN3_8_27B_REVISION = "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
 QWEN3_8_27B_MODEL_INFO = {
-    "max_input_tokens": 32_768,
+    "max_input_tokens": 262_144,
     "max_output_tokens": 16_384,
     "input_cost_per_token": 0.0,
     "output_cost_per_token": 0.0,
 }
 DEEPSEEK_V4_FLASH_MODEL = "deepseek/deepseek-v4-flash"
 DEEPSEEK_V4_FLASH_0731_OPENROUTER_MODEL = "openrouter/deepseek/deepseek-v4-flash-0731"
+DEEPSEEK_V4_FLASH_DIRECT_ALIAS = "deepseek-v4-flash"
+DEEPSEEK_V4_FLASH_0731_VERSION = "DeepSeek-V4-Flash-0731"
+DEEPSEEK_API_BASE = "https://api.deepseek.com"
 EXPERIMENT_MODELS = (QWEN3_8_27B_MODEL, DEEPSEEK_V4_FLASH_MODEL)
 EXPERIMENT_API_PROFILES = ("direct", "openrouter")
 EXPERIMENT_NUM_RETRIES = 0
@@ -21,11 +25,18 @@ _OPENROUTER_RUNTIME_MODELS = {
     DEEPSEEK_V4_FLASH_MODEL: DEEPSEEK_V4_FLASH_0731_OPENROUTER_MODEL,
 }
 
-# Qwen3.8-27B thinking mode and DeepSeek V4 Flash's published agent runs both
-# use temperature 1.0 and top-p 0.95. Qwen additionally specifies top-k 20;
-# DeepSeek's published agent setting uses maximum reasoning effort.
+_EXPERIMENT_MODEL_VERSIONS = {
+    QWEN3_8_27B_MODEL: QWEN3_8_27B_REVISION,
+    QWEN3_8_27B_OPENROUTER_MODEL: QWEN3_8_27B_REVISION,
+    DEEPSEEK_V4_FLASH_MODEL: DEEPSEEK_V4_FLASH_DIRECT_ALIAS,
+    DEEPSEEK_V4_FLASH_0731_OPENROUTER_MODEL: DEEPSEEK_V4_FLASH_0731_VERSION,
+}
+
+# Qwen3.8-27B thinking mode uses temperature 1.0, top-p 0.95, and top-k 20.
+# DeepSeek thinking mode ignores temperature and top-p, so its effective
+# configuration is the output bound plus the thinking and effort controls below.
 # Sources: https://huggingface.co/Qwen/Qwen3.8-27B
-#          https://api-docs.deepseek.com/updates/
+#          https://api-docs.deepseek.com/guides/thinking_mode/
 _EXPERIMENT_DECODING = {
     QWEN3_8_27B_MODEL: {
         "temperature": 1.0,
@@ -40,14 +51,9 @@ _EXPERIMENT_DECODING = {
         "max_tokens": 16_384,
     },
     DEEPSEEK_V4_FLASH_MODEL: {
-        "temperature": 1.0,
-        "top_p": 0.95,
         "max_tokens": 16_384,
-        "reasoning_effort": "max",
     },
     DEEPSEEK_V4_FLASH_0731_OPENROUTER_MODEL: {
-        "temperature": 1.0,
-        "top_p": 0.95,
         "max_tokens": 16_384,
     },
 }
@@ -56,6 +62,15 @@ _EXPERIMENT_DECODING = {
 # ordinary completions and native tool calls. Fallbacks are disabled so a run
 # cannot silently change inference providers after it starts.
 _EXPERIMENT_REQUEST_OVERRIDES = {
+    DEEPSEEK_V4_FLASH_MODEL: {
+        "extra_body": {
+            "thinking": {"type": "enabled"},
+            # LiteLLM 1.91 drops its top-level reasoning_effort during DeepSeek
+            # parameter transformation. Keeping the same value in extra_body
+            # makes the provider receive the requested maximum effort.
+            "reasoning_effort": "max",
+        }
+    },
     QWEN3_8_27B_OPENROUTER_MODEL: {
         "extra_body": {
             "provider": {
@@ -86,8 +101,9 @@ def experiment_decoding(model: str) -> dict[str, int | float | str]:
     """Return the fixed decoding settings for one experiment model.
 
     Qwen3.8-27B uses its recommended thinking-mode sampling parameters.
-    DeepSeek V4 Flash uses the settings published for its agent evaluations.
-    Both retain the same output-token ceiling used by the benchmark harnesses.
+    DeepSeek records only the effective output bound here because its thinking
+    mode ignores temperature and nucleus sampling. Thinking and maximum effort
+    are carried by its provider request override.
 
     Args:
         model: Exact LiteLLM model identifier used by a benchmark run.
@@ -105,14 +121,37 @@ def experiment_decoding(model: str) -> dict[str, int | float | str]:
         raise ValueError(f"Unsupported experiment model {model!r}; expected one of: {supported}") from exc
 
 
+def experiment_model_version(model: str) -> str:
+    """Return the declared checkpoint, version, or rolling alias for one model.
+
+    Args:
+        model: Canonical or transport-specific experiment model identifier.
+
+    Returns:
+        Hugging Face revision for Qwen, the dated OpenRouter DeepSeek version,
+        or the rolling alias selected by the direct DeepSeek transport. Direct
+        runs separately pin the concrete provider response identity observed
+        at launch.
+
+    Raises:
+        ValueError: The model is not part of the experiment matrix.
+    """
+    if model not in _EXPERIMENT_MODEL_VERSIONS:
+        supported = ", ".join(EXPERIMENT_MODELS)
+        raise ValueError(f"Unsupported experiment model {model!r}; expected one of: {supported}")
+    version = _EXPERIMENT_MODEL_VERSIONS[model]
+    return version
+
+
 def experiment_request_overrides(model: str) -> dict[str, object]:
     """Return provider-specific request fields for one runtime model.
 
-    Local and direct-provider model identifiers need no transport override.
-    OpenRouter identifiers receive a native request body that fixes the exact
-    inference provider, disables fallback routing, requires every requested
-    parameter, and fixes the reasoning mode. A deep copy prevents one client
-    from mutating the routing policy used by later calls.
+    Direct DeepSeek requests explicitly retain thinking mode and maximum
+    reasoning effort through LiteLLM's provider transformation. OpenRouter
+    identifiers receive a native request body that fixes the exact inference
+    provider, disables fallback routing, requires every requested parameter,
+    and fixes the reasoning mode. A deep copy prevents one client from mutating
+    the policy used by later calls.
 
     Args:
         model: Exact LiteLLM model identifier used by a benchmark run.

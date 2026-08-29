@@ -1,5 +1,6 @@
 """Tests for the Wikipedia-backed HotPotQA and HOVER runners."""
 
+import fcntl
 import json
 import os
 import random
@@ -29,6 +30,7 @@ from examples.hotpotqa import main as hotpot_main
 from examples.hotpotqa import utils as hotpot_utils
 from examples.hover import utils as hover_utils
 from examples.hover.main import make_evaluator as make_hover_evaluator
+from gepa.lm import ProviderIdentityMismatchError
 
 REPO_ROOT = Path(__file__).parents[1]
 HOVER_COT_OUTPUTS = (
@@ -99,12 +101,17 @@ def test_wikipedia_lm_uses_experiment_model_decoding(monkeypatch, module, model:
 
     assert module._call_lm("", "question", model, None) == "answer"
     assert calls[0]["messages"] == [{"role": "user", "content": "question"}]
-    assert {key: value for key, value in calls[0].items() if key not in {"model", "messages"}} == {
+    expected_request = {
         "num_retries": EXPERIMENT_NUM_RETRIES,
         **experiment_decoding(model),
+        **experiment_request_overrides(model),
     }
-    assert "seed" not in calls[0]
-    assert "extra_body" not in calls[0]
+    if module is hotpot_utils and model == QWEN3_8_27B_MODEL:
+        expected_request["seed"] = hotpot_utils.HOTPOTQA_SCIENTIFIC_REQUEST_SEED
+    assert {key: value for key, value in calls[0].items() if key not in {"model", "messages"}} == expected_request
+    if module is not hotpot_utils or model != QWEN3_8_27B_MODEL:
+        assert "seed" not in calls[0]
+    assert calls[0].get("extra_body") == experiment_request_overrides(model).get("extra_body")
 
 
 @pytest.mark.parametrize("module", [hotpot_utils, hover_utils])
@@ -162,6 +169,24 @@ def test_litellm_preserves_openrouter_routing_and_reasoning(model: str) -> None:
     )
 
     assert transformed["extra_body"] == request_overrides["extra_body"]
+
+
+def test_litellm_preserves_direct_deepseek_max_reasoning_effort() -> None:
+    """Keep DeepSeek thinking enabled at maximum effort without ignored sampling fields."""
+    request_overrides = experiment_request_overrides(DEEPSEEK_V4_FLASH_MODEL)
+
+    transformed = get_optional_params(
+        model="deepseek-v4-flash",
+        custom_llm_provider="deepseek",
+        drop_params=True,
+        **experiment_decoding(DEEPSEEK_V4_FLASH_MODEL),
+        **request_overrides,
+    )
+
+    assert transformed["extra_body"]["reasoning_effort"] == "max"
+    assert transformed["extra_body"]["thinking"] == {"type": "enabled"}
+    assert "temperature" not in transformed
+    assert "top_p" not in transformed
 
 
 def test_wikipedia_client_orders_and_persists_results(tmp_path) -> None:
@@ -334,6 +359,112 @@ def test_hotpot_evaluator_scores_only_dspy_task_parse_failures_as_zero(monkeypat
             )
 
 
+def test_hotpot_heldout_evaluation_checkpoints_and_reuses_predictions(monkeypatch, tmp_path) -> None:
+    """Persist each held-out result and resume without repeating model calls.
+
+    Args:
+        monkeypatch: Pytest fixture used to isolate task-program execution.
+        tmp_path: Pytest directory receiving held-out checkpoints.
+    """
+    task_lm = object()
+    candidate = {"summarize1": "candidate"}
+    dataset = [
+        {"id": "first", "question": "first question", "answer": "Alpha"},
+        {"id": "second", "question": "second question", "answer": "Beta delta"},
+    ]
+    run_program = Mock(
+        side_effect=[
+            ("query one", "Alpha", {}),
+            ("query two", "Beta gamma", {}),
+        ]
+    )
+    monkeypatch.setattr(hotpot_main, "build_hotpotqa_task_lm", Mock(return_value=task_lm))
+    monkeypatch.setattr(hotpot_main, "run_program", run_program)
+
+    first = hotpot_main.evaluate_on_set(
+        candidate,
+        dataset,
+        QWEN3_8_27B_MODEL,
+        FakeRetriever({}),
+        None,
+        max_workers=1,
+        checkpoint_dir=tmp_path,
+    )
+
+    assert first == pytest.approx((0.5, 0.75))
+    assert run_program.call_count == 2
+    checkpoint_roots = [path for path in tmp_path.iterdir() if path.is_dir()]
+    assert len(checkpoint_roots) == 1
+    checkpoint_root = checkpoint_roots[0]
+    records = sorted(checkpoint_root.glob("*.json"))
+    assert [path.name for path in records] == [
+        "0000-a7937b64b8ca.json",
+        "0001-16367aacb67a.json",
+        "summary.json",
+    ]
+    assert json.loads((checkpoint_root / "summary.json").read_text()) == {
+        "candidate_sha256": checkpoint_root.name,
+        "example_count": 2,
+        "exact_match": 0.5,
+        "f1": 0.75,
+        "schema_version": 1,
+    }
+
+    monkeypatch.setattr(hotpot_main, "run_program", Mock(side_effect=AssertionError("must resume")))
+    second = hotpot_main.evaluate_on_set(
+        candidate,
+        dataset,
+        QWEN3_8_27B_MODEL,
+        FakeRetriever({}),
+        None,
+        max_workers=2,
+        checkpoint_dir=tmp_path,
+    )
+
+    assert second == pytest.approx(first)
+
+
+def test_hotpot_heldout_evaluation_scores_only_task_parse_errors_as_zero(monkeypatch, tmp_path) -> None:
+    """Checkpoint expected DSPy parse failures without hiding other errors.
+
+    Args:
+        monkeypatch: Pytest fixture used to isolate task-program execution.
+        tmp_path: Pytest directory receiving held-out checkpoints.
+    """
+    parse_error = ValueError("Failed to parse response as per signature from malformed task output")
+    monkeypatch.setattr(hotpot_main, "build_hotpotqa_task_lm", Mock(return_value=object()))
+    monkeypatch.setattr(hotpot_main, "run_program", Mock(side_effect=parse_error))
+
+    scores = hotpot_main.evaluate_on_set(
+        {"summarize1": "candidate"},
+        [{"id": "broken", "question": "question", "answer": "answer"}],
+        QWEN3_8_27B_MODEL,
+        FakeRetriever({}),
+        None,
+        max_workers=1,
+        checkpoint_dir=tmp_path,
+    )
+
+    assert scores == (0.0, 0.0)
+    record_paths = [path for path in tmp_path.rglob("*.json") if path.name != "summary.json"]
+    assert len(record_paths) == 1
+    record = json.loads(record_paths[0].read_text())
+    assert record["prediction"] is None
+    assert record["task_output_parse_error"] is True
+
+    monkeypatch.setattr(hotpot_main, "run_program", Mock(side_effect=RuntimeError("provider unavailable")))
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        hotpot_main.evaluate_on_set(
+            {"summarize1": "different candidate"},
+            [{"id": "broken", "question": "question", "answer": "answer"}],
+            QWEN3_8_27B_MODEL,
+            FakeRetriever({}),
+            None,
+            max_workers=1,
+            checkpoint_dir=tmp_path,
+        )
+
+
 @pytest.mark.skipif(hotpot_utils.dspy is None, reason="HotPotQA's locked DSPy group is not installed")
 def test_hotpot_chain_of_thought_uses_the_real_dspy_protocol() -> None:
     """Execute the artifact signature through DSPy's real ChatAdapter.
@@ -461,7 +592,8 @@ def test_hotpot_dspy_lm_uses_the_selected_experiment_profile(monkeypatch, model:
     """
     task_lm = object()
     lm_constructor = Mock(return_value=task_lm)
-    monkeypatch.setattr(hotpot_utils, "dspy", SimpleNamespace(LM=lm_constructor))
+    settings = SimpleNamespace(configure=Mock())
+    monkeypatch.setattr(hotpot_utils, "dspy", SimpleNamespace(LM=lm_constructor, settings=settings))
     monkeypatch.setattr(
         hotpot_utils,
         "package_version",
@@ -480,12 +612,13 @@ def test_hotpot_dspy_lm_uses_the_selected_experiment_profile(monkeypatch, model:
     result = hotpot_utils.build_hotpotqa_task_lm(model, "http://solver.example/v1")
 
     assert result is task_lm
-    lm_constructor.assert_called_once_with(
-        model=model,
-        api_base="http://solver.example/v1",
-        num_retries=EXPERIMENT_NUM_RETRIES,
-        **experiment_decoding(model),
-    )
+    settings.configure.assert_called_once_with(disable_history=True)
+    expected_kwargs = {
+        "model": model,
+        "cache_in_memory": False,
+        **hotpot_utils.resolve_hotpotqa_lm_kwargs(model, "http://solver.example/v1"),
+    }
+    lm_constructor.assert_called_once_with(**expected_kwargs)
 
 
 @pytest.mark.parametrize(
@@ -500,7 +633,11 @@ def test_hotpot_dspy_lm_forwards_openrouter_routing(monkeypatch, model: str) -> 
         model: Effective OpenRouter runtime model under test.
     """
     lm_constructor = Mock(return_value=object())
-    monkeypatch.setattr(hotpot_utils, "dspy", SimpleNamespace(LM=lm_constructor))
+    monkeypatch.setattr(
+        hotpot_utils,
+        "dspy",
+        SimpleNamespace(LM=lm_constructor, settings=SimpleNamespace(configure=Mock())),
+    )
     monkeypatch.setattr(hotpot_utils, "package_version", Mock(return_value=hotpot_utils.HOTPOTQA_DSPY_VERSION))
     monkeypatch.setattr(
         hotpot_utils,
@@ -517,6 +654,7 @@ def test_hotpot_dspy_lm_forwards_openrouter_routing(monkeypatch, model: str) -> 
     lm_constructor.assert_called_once_with(
         model=model,
         num_retries=EXPERIMENT_NUM_RETRIES,
+        cache_in_memory=False,
         **experiment_decoding(model),
         **experiment_request_overrides(model),
     )
@@ -529,7 +667,11 @@ def test_hotpot_dspy_lm_accepts_the_resolved_technical_smoke_profile(monkeypatch
         monkeypatch: Pytest fixture used to replace the DSPy LM constructor.
     """
     lm_constructor = Mock(return_value=object())
-    monkeypatch.setattr(hotpot_utils, "dspy", SimpleNamespace(LM=lm_constructor))
+    monkeypatch.setattr(
+        hotpot_utils,
+        "dspy",
+        SimpleNamespace(LM=lm_constructor, settings=SimpleNamespace(configure=Mock())),
+    )
     monkeypatch.setattr(hotpot_utils, "package_version", Mock(return_value=hotpot_utils.HOTPOTQA_DSPY_VERSION))
     monkeypatch.setattr(
         hotpot_utils,
@@ -547,7 +689,32 @@ def test_hotpot_dspy_lm_accepts_the_resolved_technical_smoke_profile(monkeypatch
 
     assert lm_kwargs["max_tokens"] == 16_384
     assert lm_kwargs["extra_body"]["reasoning"] == {"effort": "low"}
-    lm_constructor.assert_called_once_with(model=model, **lm_kwargs)
+    lm_constructor.assert_called_once_with(model=model, cache_in_memory=False, **lm_kwargs)
+
+
+def test_hotpot_dspy_lm_rejects_direct_deepseek_identity_drift(monkeypatch) -> None:
+    """Pin every DSPy task response to the DeepSeek preflight identity.
+
+    Args:
+        monkeypatch: Pytest fixture used to install provider identity and mock
+            DSPy's completion boundary.
+    """
+    monkeypatch.setenv("HOTPOTQA_DEEPSEEK_RESPONSE_MODEL", "deepseek-runtime")
+    monkeypatch.setenv("HOTPOTQA_DEEPSEEK_SYSTEM_FINGERPRINT", "fp_launch")
+    monkeypatch.setattr(
+        hotpot_utils,
+        "validate_hotpotqa_dspy_runtime",
+        Mock(return_value=(hotpot_utils.HOTPOTQA_DSPY_VERSION, hotpot_utils.HOTPOTQA_DSPY_COMMIT)),
+    )
+    response = SimpleNamespace(model="deepseek-runtime", system_fingerprint="fp_launch")
+    parent_forward = Mock(return_value=response)
+    monkeypatch.setattr(hotpot_utils.dspy.LM, "forward", parent_forward)
+    task_lm = hotpot_utils.build_hotpotqa_task_lm(DEEPSEEK_V4_FLASH_MODEL, None)
+
+    assert task_lm.forward(messages=[{"role": "user", "content": "question"}]) is response
+    response.system_fingerprint = "fp_changed"
+    with pytest.raises(ProviderIdentityMismatchError, match="fp_changed"):
+        task_lm.forward(messages=[{"role": "user", "content": "question"}])
 
 
 def test_hotpot_openrouter_launcher_plans_ten_merge_off_arms() -> None:
@@ -745,7 +912,13 @@ def test_hotpot_production_loader_uses_the_artifact_split_and_retains_labels(mon
     monkeypatch.setattr(datasets, "load_dataset", load_dataset)
     train, val, test = hotpot_utils.load_hotpotqa_dataset()
 
-    assert calls == [("hotpot_qa", "fullwiki", {"trust_remote_code": True})]
+    assert calls == [
+        (
+            "hotpot_qa",
+            "fullwiki",
+            {"revision": hotpot_utils.HOTPOTQA_HF_REVISION},
+        )
+    ]
     assert (len(train), len(val), len(test)) == (150, 300, 300)
     assert [example["id"] for example in train] == [
         str(index) for index in random.Random(1).sample(list(range(800, 1000)), 150)
@@ -934,6 +1107,21 @@ def test_hotpot_metric_uses_exact_match_as_primary_score() -> None:
     assert score == 0.0
     assert "token-F1" in feedback
     assert "EM=0" in feedback
+
+
+def test_hotpot_normalization_matches_the_artifact_unicode_behavior() -> None:
+    """Normalize canonically equivalent Unicode answers to identical NFD text."""
+    composed = hotpot_utils.normalize_answer("The Caf\u00e9")
+    decomposed = hotpot_utils.normalize_answer("cafe\u0301")
+
+    assert composed == decomposed
+    assert composed == "cafe\u0301"
+
+
+def test_hotpot_f1_uses_ordinary_token_overlap_for_yes_no_answers() -> None:
+    """Avoid adding the non-artifact yes/no exact-match guard to token F1."""
+    assert hotpot_utils.f1_score("yes perhaps", "yes") == pytest.approx(2 / 3)
+    assert hotpot_utils.f1_score("no", "yes") == 0.0
 
 
 def test_hover_loader_reproduces_artifact_splits_and_seed_remixing(tmp_path, monkeypatch) -> None:
@@ -1286,7 +1474,10 @@ def test_wikipedia_della_submit_scales_resources_by_model_profile(benchmark: str
     assert 'SBATCH_RESOURCE_ARGS+=("--partition=${JOB_PARTITION}")' in submit
     assert "if (( DELLA_GPUS > 0 )); then" in submit
     assert 'SBATCH_RESOURCE_ARGS+=("--gres=gpu:${DELLA_GPUS}")' in submit
-    assert "sbatch${SBATCH_RESOURCE_COMMAND}" in submit
+    if benchmark == "hotpotqa":
+        assert r'"\${SBATCH_BIN}"${SBATCH_RESOURCE_COMMAND}' in submit
+    else:
+        assert "sbatch${SBATCH_RESOURCE_COMMAND}" in submit
 
 
 @pytest.mark.parametrize("benchmark", ["hotpotqa", "hover"])
@@ -1306,14 +1497,18 @@ def test_wikipedia_sbatch_configures_within_run_vllm_throughput(benchmark: str) 
         'VLLM_API_SERVER_COUNT="${VLLM_API_SERVER_COUNT:-${VLLM_DATA_PARALLEL_SIZE}}"'
         in script
     )
-    assert 'VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-64}"' in script
+    expected_max_num_seqs = "1" if benchmark == "hotpotqa" else "64"
+    assert f'VLLM_MAX_NUM_SEQS="${{VLLM_MAX_NUM_SEQS:-{expected_max_num_seqs}}}"' in script
     assert 'VLLM_MAX_NUM_BATCHED_TOKENS="${VLLM_MAX_NUM_BATCHED_TOKENS:-16384}"' in script
     assert "--tensor-parallel-size 1" in script
     assert '--data-parallel-size "${VLLM_DATA_PARALLEL_SIZE}"' in script
     assert '--api-server-count "${VLLM_API_SERVER_COUNT}"' in script
     assert '--max-num-seqs "${VLLM_MAX_NUM_SEQS}"' in script
     assert '--max-num-batched-tokens "${VLLM_MAX_NUM_BATCHED_TOKENS}"' in script
-    assert "--enable-prefix-caching" in script
+    if benchmark == "hotpotqa":
+        assert "--no-enable-prefix-caching" in script
+    else:
+        assert "--enable-prefix-caching" in script
     assert "--language-model-only" in script
 
 
@@ -1335,7 +1530,10 @@ def test_wikipedia_sbatch_limits_nested_cpu_threads_after_vllm_starts(benchmark:
         ("NUMEXPR_NUM_THREADS", "1"),
         ("TOKENIZERS_PARALLELISM", "false"),
     ):
-        export = f'export {variable}="${{{variable}:-{default}}}"'
+        if benchmark == "hotpotqa":
+            export = f"export {variable}={default}"
+        else:
+            export = f'export {variable}="${{{variable}:-{default}}}"'
         assert f"-u {variable}" in script[vllm_start - 300 : vllm_start]
         assert script.count(export) == 1
         assert vllm_start < script.index(export) < evaluator_start
@@ -1364,43 +1562,355 @@ def test_wikipedia_della_launch_scripts_have_valid_bash_syntax(script_path: str)
     )
 
 
-def test_hotpotqa_della_submit_preserves_homogeneous_model_pairs() -> None:
-    """Expose homogeneous model profiles and the eight-arm merge-off matrix."""
+def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
+    """Pin methodology while retaining only quality-neutral throughput knobs."""
     submit = (REPO_ROOT / "scripts" / "della" / "submit_hotpotqa.sh").read_text()
     sbatch = (REPO_ROOT / "examples" / "hotpotqa" / "run_hotpotqa.sbatch").read_text()
     build = (REPO_ROOT / "scripts" / "della" / "build_env.sh").read_text()
+    sync = (REPO_ROOT / "scripts" / "della" / "sync_to_della.sh").read_text()
+
     assert "REFLECTION_MODEL" in submit
     assert "REFLECTION_API_BASE" in submit
-    assert "MODEL_PROFILE" in submit
-    assert 'MAX_METRIC_CALLS="${MAX_METRIC_CALLS:-6871}"' in submit
+    assert 'MODEL_PROFILE="${MODEL_PROFILE:-qwen3.8-27b}"' in submit
+    assert 'TREE_PROFILE="${TREE_PROFILE:-standard}"' in submit
+    assert 'HOTPOTQA_CAMPAIGN_ID="${HOTPOTQA_CAMPAIGN_ID:-hotpotqa-final-v1}"' in submit
+    assert "MAX_METRIC_CALLS=6871" in submit
+    assert 'TIME="${TIME:-72:00:00}"' in submit
+    assert "MAX_METRIC_CALLS=15000" in submit
+    assert 'TIME="${TIME:-144:00:00}"' in submit
     assert 'CONDITION="${CONDITION:-all}"' in submit
-    assert 'MERGE="${MERGE:-0}"' in submit
     assert 'MAX_WORKERS="${MAX_WORKERS:-}"' in submit
-    assert 'RETRIEVAL_K="${RETRIEVAL_K:-7}"' in submit
-    assert 'MODEL="${MODEL:-Qwen3.8-27B}"' in submit
+    assert 'MODEL="Qwen3.8-27B"' in submit
+    assert 'if [[ "${GPU_PARTITION}" != "ailab" ]]' in submit
+    assert "Qwen3.8-27B production runs require GPU_PARTITION=ailab" in submit
+    assert "scientific Qwen runs require 8 H200 data-parallel replicas and 8 API servers" in submit
+    assert 'SOLVER_MODEL_PATH="${MODEL_STORAGE}/${MODEL}"' in submit
     assert 'SOLVER_MODEL="hosted_vllm/Qwen/Qwen3.8-27B"' in submit
     assert 'SOLVER_MODEL="deepseek/deepseek-v4-flash"' in submit
     assert 'REFLECTION_MODEL="${SOLVER_MODEL}"' in submit
     assert "DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}" in submit
-    assert "MERGE=${MERGE}" in submit
+    assert "TREE_PROFILE=${TREE_PROFILE}" in submit
+    assert "HOTPOTQA_CAMPAIGN_ID=${HOTPOTQA_CAMPAIGN_ID}" in submit
+    assert 'SBATCH_BIN="\\$(command -v sbatch)"' in submit
+    assert 'SBATCH_HELP="\\$("\\${SBATCH_BIN}" --help 2>&1)"' in submit
+    assert '[[ "\\${SBATCH_HELP}" != *"--export-file"* ]]' in submit
+    assert "umask 077" in submit
+    for local_script in (submit, build, sync):
+        assert '[[ -L "${ENV_FILE}" || ! -O "${ENV_FILE}" ]]' in local_script
+        assert "(8#${ENV_MODE} & 8#077)" in local_script
+        assert "chmod 600 ${ENV_FILE}" in local_script
+    assert "export -n DEEPSEEK_API_KEY 2>/dev/null || true" in submit
+    assert 'SBATCH_EXPORT_FILE="\\$(mktemp)"' in submit
+    assert "cleanup_export_file()" in submit
+    assert 'rm -f -- "\\${SBATCH_EXPORT_FILE}"' in submit
+    assert "printf '%s\\0'" in submit
+    assert '"DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}"' in submit
+    assert "env -i" in submit
+    assert 'HOME="\\${HOME}"' in submit
+    assert 'PATH="\\${PATH}"' in submit
+    assert "LANG=C.UTF-8" in submit
+    assert "LC_ALL=C.UTF-8" in submit
+    assert '"HOME=\\${HOME}"' in submit
+    assert '"PATH=\\${PATH}"' in submit
+    assert "--export=ALL" in submit
+    assert '--export-file="\\${SBATCH_EXPORT_FILE}"' in submit
+    assert "HOTPOTQA_PRODUCTION_LAUNCH=1" in submit
+    assert 'HOTPOTQA_SOURCE_COMMIT="$(git -C "${REPO_ROOT}" rev-parse HEAD)"' in submit
+    assert 'REMOTE_SOURCE_DIR="${REMOTE_DIR%/}/sources/${HOTPOTQA_SOURCE_COMMIT}"' in submit
+    assert 'GEPA_VENV_DIR="${REMOTE_DIR%/}/.venv"' in submit
+    assert submit.count('"${GEPA_VENV_DIR}/bin/python"') == 5
+    assert 'SYNC_SOURCE_COMMIT="${HOTPOTQA_SOURCE_COMMIT}"' in submit
+    assert 'SYNC_REMOTE_DIR="${REMOTE_SOURCE_DIR}"' in submit
+    assert 'SYNC_MANIFEST_OUTPUT="${SOURCE_MANIFEST_OUTPUT}"' in submit
+    assert 'cd "${REMOTE_SOURCE_DIR}"' in submit
+    assert 'export PYTHONPATH="${REMOTE_SOURCE_DIR}/src:${REMOTE_SOURCE_DIR}"' in submit
+    assert 'HOTPOTQA_ENV_SPEC_SHA256="\\$(' in submit
+    assert "printf 'python=%s\\n' \"\\${HOTPOTQA_PYTHON_VERSION}\"" in submit
+    assert "printf 'uv=%s\\n' \"\\${HOTPOTQA_UV_VERSION}\"" in submit
+    assert 'export UV_PROJECT_ENVIRONMENT="${GEPA_VENV_DIR}"' in submit
+    assert "--frozen --check --no-install-project" in submit
+    assert '"${GEPA_VENV_DIR}/.gepa-env-spec.sha256"' in submit
+    assert '"${GEPA_VENV_DIR}/.gepa-python-version"' in submit
+    assert '"${GEPA_VENV_DIR}/.gepa-uv-version"' in submit
+    assert '"${GEPA_VENV_DIR}/.gepa-uv-sha256"' in submit
+    assert "HOTPOTQA_ENV_SPEC_SHA256=\\${HOTPOTQA_ENV_SPEC_SHA256}" in submit
+    assert "HOTPOTQA_GEPA_ENV_SHA256=\\${HOTPOTQA_GEPA_ENV_SHA256}" in submit
+    assert "HOTPOTQA_POSIT_ENV_SHA256=\\${HOTPOTQA_POSIT_ENV_SHA256}" in submit
+    assert 'examples.common.python_environment verify --path "\\${GEPA_ENV_MANIFEST}"' in submit
+    assert "load_hotpotqa_dataset(seed=0)" in submit
+    assert "SUBMIT_CONDITIONS=(vanilla random action react_v2_random react_v2)" in submit
+    assert 'DEPENDENCY_ARGS+=("--dependency=afterok:\\${PREVIOUS_JOB_ID}")' in submit
+    assert "afterany:" not in submit
+    assert "CONDITION=\\${RUN_CONDITION}" in submit
+    assert 'sha256sum "\\${POSIT_ENV_MANIFEST}"' in submit
+    assert 'pip check --python "\\${VLLM_PY}"' in submit
+    assert ".gepa-source-commit" in submit
+    assert ".gepa-source-manifest.sha256sums" in submit
+    assert "HOTPOTQA_SOURCE_MANIFEST_SHA256=${HOTPOTQA_SOURCE_MANIFEST_SHA256}" in submit
+    assert 'DEEPSEEK_API_KEY=""' in submit
+    assert 'if [[ "${MODEL_PROFILE}" == "deepseek-v4-flash" ]]' in submit
+    assert "commit the complete experiment source" in submit
+    assert '"${SCRIPT_DIR}/sync_to_della.sh"' in submit
+    assert "NO_SYNC" not in submit
+    assert "sshpass" not in submit
+    assert "REMOTE_PASSWORD" not in submit
+    assert "-o BatchMode=yes -o StrictHostKeyChecking=yes" in submit
+    for forbidden_export in (
+        "PROGRAM=",
+        "SEED_STYLE=",
+        "DATA_PATH=",
+        "TRAIN_LIMIT=",
+        "VAL_LIMIT=",
+        "TEST_LIMIT=",
+        "MERGE=",
+        "EXPERIMENT_SEED=",
+        "RETRIEVAL_K=",
+    ):
+        assert forbidden_export not in submit
+
+    assert "set -euo pipefail" in sbatch
+    assert 'if [[ "${HOTPOTQA_PRODUCTION_LAUNCH:-}" != "1" ]]' in sbatch
+    assert 'HOTPOTQA_CAMPAIGN_ID="${HOTPOTQA_CAMPAIGN_ID:-}"' in sbatch
+    assert "submit this production job through scripts/della/submit_hotpotqa.sh" in sbatch
     assert "#SBATCH --cpus-per-task=8" in sbatch
+    assert 'TREE_PROFILE="${TREE_PROFILE:-standard}"' in sbatch
+    assert "EXPECTED_MAX_METRIC_CALLS=6871" in sbatch
+    assert "EXPECTED_MAX_METRIC_CALLS=15000" in sbatch
+    assert 'MODEL="Qwen3.8-27B"' in sbatch
+    assert 'SOLVER_MODEL_PATH="${MODEL_STORAGE}/${MODEL}"' in sbatch
+    assert 'QWEN_REVISION="1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"' in sbatch
+    assert 'DEEPSEEK_DIRECT_ALIAS="deepseek-v4-flash"' in sbatch
+    assert "DeepSeek-V4-Flash-0731" not in sbatch
+    assert 'DEEPSEEK_API_BASE="https://api.deepseek.com"' in sbatch
+    assert 'HOTPOTQA_MODEL_REVISION="${QWEN_REVISION}"' in sbatch
+    assert 'HOTPOTQA_MODEL_REVISION="${DEEPSEEK_DIRECT_ALIAS}"' in sbatch
+    assert 'SOLVER_API_BASE="${DEEPSEEK_API_BASE}"' in sbatch
+    assert 'HOTPOTQA_MODEL_INTEGRITY_SHA256="$(sha256sum "${SOLVER_MODEL_PATH}/.gepa-model-integrity.json"' in sbatch
+    assert 'examples.common.model_snapshot verify --root "${SOLVER_MODEL_PATH}"' in sbatch
+    assert 'examples.common.wiki17_bm25 verify --deep --root "${WIKI17_DIR}"' in sbatch
+    assert 'HOTPOTQA_VERIFIED_WIKI17_INTEGRITY_SHA256="${WIKI17_INTEGRITY_SHA256}"' in sbatch
+    assert "export HOTPOTQA_VERIFIED_WIKI17_INTEGRITY_SHA256" in sbatch
     assert '--wiki17-dir "${WIKI17_DIR}"' in sbatch
     assert '--max-workers "${MAX_WORKERS}"' in sbatch
-    assert '--seed "${EXPERIMENT_SEED}"' in sbatch
-    assert 'MERGE="${MERGE:-0}"' in sbatch
-    assert 'CONDITION="${CONDITION:-all}"' in sbatch
-    assert "MERGE_ARG=(--merge)" in sbatch
-    assert '"${MERGE_ARG[@]}"' in sbatch
-    assert 'export DSPY_CACHEDIR="${SCRATCH_BASE}/.cache/dspy"' in sbatch
+    assert 'CONDITION="${CONDITION:-}"' in sbatch
+    assert "each production job must run one named HotPotQA condition" in sbatch
+    assert 'RUN_LOCK_PATH="${RUN_LOCK_DIR}/${MODEL_PROFILE}-${TREE_PROFILE}-${CONDITION}.lock"' in sbatch
+    assert 'if ! flock -n "${RUN_LOCK_FD}"' in sbatch
+    assert "another HotPotQA job is already writing" in sbatch
+    assert "module load proxy/default" in sbatch
+    assert "api.deepseek.com allowlist entry" in sbatch
+    assert "GEN_MAX_LEN=262144" in sbatch
+    assert "max_model_len=262144" in sbatch
+    assert "--dtype bfloat16" in sbatch
+    assert "--kv-cache-dtype auto" in sbatch
+    assert "--no-enable-prefix-caching" in sbatch
+    assert "--enable-prefix-caching" not in sbatch
+    assert "--seed 0" in sbatch
+    assert "unset VLLM_BATCH_INVARIANT" in sbatch
+    assert 'HOTPOTQA_VLLM_BATCH_INVARIANT="false"' in sbatch
+    assert 'HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS="true"' in sbatch
+    assert 'if [[ "${VLLM_MAX_NUM_SEQS}" != "1" ]]' in sbatch
+    assert "scientific Qwen runs require 8 visible H200 data-parallel replicas and 8 API servers" in sbatch
+    assert 'GEN_PORT="${GEN_PORT:-}"' in sbatch
+    assert 'listener.bind(("127.0.0.1", requested_port))' in sbatch
+    assert 'SOLVER_API_BASE="http://127.0.0.1:${GEN_PORT}/v1"' in sbatch
+    assert "generator_reports_expected_model()" in sbatch
+    assert "ids == [sys.argv[1]]" in sbatch
+    assert sbatch.index('if ! kill -0 "${GEN_PID}"') < sbatch.index(
+        "if generator_reports_expected_model"
+    )
+    assert "--reasoning-parser qwen3" in sbatch
+    assert "--enable-auto-tool-choice" in sbatch
+    assert "--tool-call-parser qwen3_coder" in sbatch
+    assert 'Version("0.17.0")' in sbatch
+    assert '"${VLLM_BIN}" serve --help=all' in sbatch
+    assert '"${VLLM_BIN}" serve --help 2>&1' not in sbatch
+    assert 'echo "==> checking native tool-call compatibility"' in sbatch
+    assert "from examples.hotpotqa.utils import resolve_hotpotqa_lm_kwargs" in sbatch
+    assert 'tool_choice="auto"' in sbatch
+    assert 'export DSPY_CACHEDIR="${SCRATCH_BASE}/.cache/dspy/hotpotqa/${RUNTIME_CACHE_KEY}"' in sbatch
+    assert "export HOTPOTQA_MODEL_REVISION" in sbatch
+    assert "export HOTPOTQA_MODEL_INTEGRITY_SHA256" in sbatch
+    assert "export HOTPOTQA_VLLM_VERSION" in sbatch
+    assert "export HOTPOTQA_TORCH_VERSION" in sbatch
+    assert "export HOTPOTQA_CUDA_VERSION" in sbatch
+    assert "export HOTPOTQA_CUDA_MODULE" in sbatch
+    assert "export HOTPOTQA_TRANSFORMERS_VERSION" in sbatch
+    assert "export HOTPOTQA_POSIT_COMMIT" in sbatch
+    assert "export HOTPOTQA_POSIT_ENV_SHA256" in sbatch
+    assert "export HOTPOTQA_GPU_RUNTIME" in sbatch
+    assert "export HOTPOTQA_SOURCE_COMMIT" in sbatch
+    assert "export HOTPOTQA_SOURCE_MANIFEST_SHA256" in sbatch
+    assert "export HOTPOTQA_PYTHON_VERSION" in sbatch
+    assert "export HOTPOTQA_UV_VERSION" in sbatch
+    assert "export HOTPOTQA_UV_SHA256" in sbatch
+    assert "export HOTPOTQA_ENV_SPEC_SHA256" in sbatch
+    assert "export HOTPOTQA_GEPA_ENV_SHA256" in sbatch
+    assert 'CURRENT_ENV_SPEC_SHA256="$(' in sbatch
+    assert 'EXPECTED_HOTPOTQA_PYTHON_VERSION="3.11.13"' in sbatch
+    assert 'EXPECTED_HOTPOTQA_UV_VERSION="0.9.13"' in sbatch
+    assert 'export UV_PROJECT_ENVIRONMENT="${GEPA_VENV_DIR}"' in sbatch
+    assert "--frozen --check --no-install-project" in sbatch
+    assert 'if ! flock -s -n "${ARTIFACT_LOCK_FD}"' in sbatch
+    assert '"${GEPA_VENV_DIR}/.gepa-env-spec.sha256"' in sbatch
+    assert 'GEPA_VENV_DIR="${GEPA_VENV_DIR:-}"' in sbatch
+    assert 'PY="${GEPA_VENV_DIR}/bin/python"' in sbatch
+    assert 'export PYTHONPATH="${PWD}/src:${PWD}"' in sbatch
+    assert 'examples.common.python_environment verify --path "${GEPA_ENV_MANIFEST}"' in sbatch
+    assert ".gepa-source-commit" in sbatch
+    assert "export HOTPOTQA_LITELLM_VERSION" in sbatch
+    assert "export HOTPOTQA_WEIGHT_DTYPE" in sbatch
+    assert "export HOTPOTQA_KV_CACHE_DTYPE" in sbatch
+    assert "export HOTPOTQA_VLLM_SERVE_ARGUMENTS" in sbatch
+    assert "export HOTPOTQA_VLLM_BATCH_INVARIANT" in sbatch
+    assert "export HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS" in sbatch
+    assert "batch_invariant=false" in sbatch
+    assert "single_sequence_replicas=true" in sbatch
+    assert "gpu_memory_utilization=0.92" in sbatch
+    assert "max_model_len=262144" in sbatch
+    assert "rope_scaling=none" in sbatch
+    assert "--rope-scaling" not in sbatch
+    assert "max_num_seqs=1" in sbatch
+    assert "posit_env=${HOTPOTQA_POSIT_ENV_SHA256}" in sbatch
+    assert "gpu=${HOTPOTQA_GPU_RUNTIME}" in sbatch
+    assert 'examples.common.python_environment verify --path "${POSIT_ENV_MANIFEST}"' in sbatch
+    assert 'pip check --python "${VLLM_PY}"' in sbatch
+    assert '"H200" not in name.upper() or capability != "9.0"' in sbatch
+    assert '"nvidia-smi", "--query-gpu=driver_version"' in sbatch
+    assert 'exec {MODEL_LOCK_FD}<"${SOLVER_MODEL_PATH}"' in sbatch
+    assert 'if ! flock -s -n "${MODEL_LOCK_FD}"' in sbatch
+    assert 'export HOTPOTQA_WEIGHT_DTYPE=""' in sbatch
+    assert 'export HOTPOTQA_KV_CACHE_DTYPE=""' in sbatch
+    assert 'export HOTPOTQA_VLLM_SERVE_ARGUMENTS=""' in sbatch
+    assert 'HOTPOTQA_CUDA_MODULE=""' in sbatch
+    assert 'WIKI17_INTEGRITY_SHA256="$(sha256sum "${WIKI17_DIR}/integrity.json"' in sbatch
+    assert 'HOTPOTQA_CUDA_MODULE="cudatoolkit/${HOTPOTQA_CUDA_VERSION}"' in sbatch
+    assert 'module load "${HOTPOTQA_CUDA_MODULE}"' in sbatch
+    assert 'module is-loaded "${HOTPOTQA_CUDA_MODULE}"' in sbatch
+    assert "module load cudatoolkit/13.0" not in sbatch
+    assert "cuda_module=${HOTPOTQA_CUDA_MODULE}" in sbatch
+    assert "RUNTIME_IDENTITY_SHA256=" in sbatch
+    assert "CACHE_IDENTITY_SHA256=" in sbatch
+    assert sbatch.count("litellm=${HOTPOTQA_LITELLM_VERSION}") >= 3
+    assert "model_manifest=${HOTPOTQA_MODEL_INTEGRITY_SHA256}" in sbatch
+    assert "source_manifest=${HOTPOTQA_SOURCE_MANIFEST_SHA256}" in sbatch
+    assert "python=${HOTPOTQA_PYTHON_VERSION}" in sbatch
+    assert "uv=${HOTPOTQA_UV_VERSION}" in sbatch
+    assert "uv_sha=${HOTPOTQA_UV_SHA256}" in sbatch
+    assert "api_base=${SOLVER_API_BASE}" in sbatch
+    assert "provider_response_model=${HOTPOTQA_DEEPSEEK_RESPONSE_MODEL}" in sbatch
+    assert "provider_system_fingerprint=${HOTPOTQA_DEEPSEEK_SYSTEM_FINGERPRINT}" in sbatch
+    assert sbatch.count("provider_response_model=${HOTPOTQA_DEEPSEEK_RESPONSE_MODEL}") >= 3
+    assert sbatch.count("provider_system_fingerprint=${HOTPOTQA_DEEPSEEK_SYSTEM_FINGERPRINT}") >= 3
+    assert "export HOTPOTQA_DEEPSEEK_RESPONSE_MODEL" in sbatch
+    assert "export HOTPOTQA_DEEPSEEK_SYSTEM_FINGERPRINT" in sbatch
+    assert "lm.last_response_identity" in sbatch
+    assert "env_spec=${HOTPOTQA_ENV_SPEC_SHA256}" in sbatch
+    assert "gepa_env=${HOTPOTQA_GEPA_ENV_SHA256}" in sbatch
+    assert "tree=${TREE_PROFILE}" in sbatch
+    assert 'RUNTIME_CACHE_KEY="${MODEL_PROFILE}-${CACHE_IDENTITY_SHA256}"' in sbatch
+    assert 'CAMPAIGN_LOCK_DIR="${SCRATCH_BASE}/.cache/gepa/hotpotqa-campaign/${HOTPOTQA_CAMPAIGN_ID}"' in sbatch
+    assert 'CAMPAIGN_LOCK_PATH="${CAMPAIGN_LOCK_DIR}/${MODEL_PROFILE}.sha256"' in sbatch
+    assert 'DATA_CAMPAIGN_LOCK_PATH="${CAMPAIGN_LOCK_DIR}/data-and-source.sha256"' in sbatch
+    assert 'ln "${DATA_CAMPAIGN_LOCK_TEMP}" "${DATA_CAMPAIGN_LOCK_PATH}"' in sbatch
+    assert 'ln "${CAMPAIGN_LOCK_TEMP}" "${CAMPAIGN_LOCK_PATH}"' in sbatch
+    assert "noclobber" not in sbatch
+    assert "source, dependency lock, HotPotQA data, DSPy, or Wiki-2017 index differs" in sbatch
+    assert "source or quality-relevant runtime differs from the existing campaign lock" in sbatch
+    for scientific_argument in (
+        "--api-profile direct",
+        "--runtime-profile scientific",
+        "--enforce-scientific-contract",
+        "--program 2stage",
+        "--seed-style structured",
+        "--seed 0",
+        "--retrieval-k 7",
+        "--reflection-level 2",
+        "--edit-tool-set broad",
+        "--template-family auto",
+    ):
+        assert scientific_argument in sbatch
+    assert "--merge" not in sbatch
+    assert "--data-path" not in sbatch
+    assert "--train-limit" not in sbatch
+    assert "--val-limit" not in sbatch
+    assert "--test-limit" not in sbatch
+
     assert "validate_hotpotqa_dspy_runtime" in submit
-    assert "--group hotpotqa-task-program" in build
+    assert "sshpass" not in build
+    assert "REMOTE_PASSWORD" not in build
+    assert "-o BatchMode=yes -o StrictHostKeyChecking=yes" in build
+    assert "sshpass" not in sync
+    assert "REMOTE_PASSWORD" not in sync
+    assert sync.count("-o BatchMode=yes -o StrictHostKeyChecking=yes") == 2
+    assert 'HOTPOTQA_PYTHON_VERSION="3.11.13"' in build
+    assert 'HOTPOTQA_UV_VERSION="0.9.13"' in build
+    assert "UV_UNMANAGED_INSTALL" in build
+    assert "--frozen --no-install-project" in build
+    assert "--frozen --check --no-install-project" in build
+    assert 'if ! flock -n "\\${ARTIFACT_LOCK_FD}"' in build
     assert "validate_hotpotqa_dspy_runtime" in build
+    assert 'examples.common.python_environment prepare --path "\\${POSIT_ENV_MANIFEST}"' in build
+    assert 'examples.common.python_environment prepare --path "\\${GEPA_ENV_MANIFEST}"' in build
+    assert 'pip check --python "\\${VLLM_PY}"' in build
+    assert 'git -C "\\${POSIT_DIR}" status --porcelain --untracked-files=normal' in build
+    assert 'HOTPOTQA_ENV_SPEC_SHA256="\\$(' in build
+    assert ".venv/.gepa-env-spec.sha256" in build
+    assert ".venv/.gepa-python-version" in build
+    assert ".venv/.gepa-uv-version" in build
+    assert ".venv/.gepa-uv-sha256" in build
+    assert 'examples.common.model_snapshot prepare --root "${QWEN_MODEL_DIR}"' in build
+    assert 'examples.common.model_snapshot verify --root "${QWEN_MODEL_DIR}"' in build
+    assert 'exec {MODEL_LOCK_FD}<"${QWEN_MODEL_DIR}"' in build
+    assert 'if ! flock -n "\\${MODEL_LOCK_FD}"' in build
+    assert 'examples.common.wiki17_bm25 verify --deep --root "${WIKI17_DIR}"' in build
+    assert "load_hotpotqa_dataset(seed=0)" in build
+    assert "load_hover_dataset" not in build
+    assert "--exclude '.cache/'" in sync
+    assert "--exclude 'logs/'" in sync
+    assert "--exclude 'sources/'" in sync
+    assert 'git -C "${REPO_ROOT}" archive "${SYNC_SOURCE_COMMIT}"' in sync
+    assert 'if [[ -z "${SYNC_SOURCE_COMMIT}" ]]' in sync
+    assert '"${RSYNC_EXCLUDES[@]}"' in sync
+    assert "--exclude '/outputs/'" in sync
+    assert "--exclude '/gepa-hotpotqa-*.log'" in sync
+    assert ".gepa-source-manifest.sha256sums" in sync
+    assert 'SYNC_MANIFEST_OUTPUT="${SYNC_MANIFEST_OUTPUT:-}"' in sync
+    assert 'EXPECTED_REMOTE_SOURCE_DIR="${REMOTE_DIR%/}/sources/${SYNC_SOURCE_COMMIT}"' in sync
+    assert 'printf \'%s\\n\' "${SYNC_SOURCE_COMMIT}" > "${SOURCE_STAGE_DIR}/.gepa-source-commit"' in sync
+    assert '"mkdir -p -- ${REMOTE_SOURCE_DIR_QUOTED}"' in sync
+
+
+def test_hotpotqa_execution_lock_rejects_a_duplicate_writer(tmp_path: Path) -> None:
+    """Hold one run lock and verify a second non-blocking writer is rejected.
+
+    Args:
+        tmp_path: Isolated directory containing the simulated run lock.
+    """
+    lock_path = tmp_path / "campaign-qwen3.8-27b-standard-react_v2.lock"
+    with lock_path.open("w") as owner:
+        fcntl.flock(owner.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        contender = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import fcntl, pathlib, sys; "
+                    "handle = pathlib.Path(sys.argv[1]).open('w'); "
+                    "fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)"
+                ),
+                str(lock_path),
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+    assert contender.returncode != 0
 
 
 def test_hover_della_submit_preserves_artifact_methodology() -> None:
     """Export every HoVer artifact axis through the Della submission wrapper."""
     submit = (REPO_ROOT / "scripts" / "della" / "submit_hover.sh").read_text()
-    build = (REPO_ROOT / "scripts" / "della" / "build_env.sh").read_text()
 
     assert 'MAX_METRIC_CALLS="${MAX_METRIC_CALLS:-7051}"' in submit
     assert 'EXPERIMENT_SEED="${EXPERIMENT_SEED:-0}"' in submit
@@ -1416,8 +1926,6 @@ def test_hover_della_submit_preserves_artifact_methodology() -> None:
     assert "load_hover_dataset(seed=0" in submit
     assert "WIKI17_DIR=${WIKI17_DIR}" in submit
     assert "HOVER_DATA_DIR=${HOVER_DATA_DIR}" in submit
-    assert 'HOVER_DATA_DIR="${HOVER_DATA_DIR:-${SCRATCH_BASE}/.cache/gepa/hover}"' in build
-    assert 'data_dir=os.environ["HOVER_DATA_DIR"]' in build
     for variable in (
         "PROGRAM",
         "SEED_STYLE",

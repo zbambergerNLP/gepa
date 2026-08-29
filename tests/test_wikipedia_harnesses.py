@@ -1572,7 +1572,7 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert "REFLECTION_MODEL" in submit
     assert "REFLECTION_API_BASE" in submit
     assert 'MODEL_PROFILE="${MODEL_PROFILE:-qwen3.8-27b}"' in submit
-    assert 'TREE_PROFILE="${TREE_PROFILE:-campaign}"' in submit
+    assert 'BUDGET_PROFILE="${BUDGET_PROFILE:-campaign}"' in submit
     assert 'HOTPOTQA_CAMPAIGN_ID="${HOTPOTQA_CAMPAIGN_ID:-hotpotqa-final-v1}"' in submit
     assert "MAX_METRIC_CALLS=6871" in submit
     assert 'STANDARD_TIME="${STANDARD_TIME:-${TIME:-72:00:00}}"' in submit
@@ -1589,7 +1589,7 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert 'SOLVER_MODEL="deepseek/deepseek-v4-flash"' in submit
     assert 'REFLECTION_MODEL="${SOLVER_MODEL}"' in submit
     assert "DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}" in submit
-    assert r"TREE_PROFILE=\${RUN_TREE_PROFILE}" in submit
+    assert r"BUDGET_PROFILE=\${RUN_BUDGET_PROFILE}" in submit
     assert "HOTPOTQA_CAMPAIGN_ID=${HOTPOTQA_CAMPAIGN_ID}" in submit
     assert 'SBATCH_BIN="\\$(command -v sbatch)"' in submit
     assert 'SBATCH_HELP="\\$("\\${SBATCH_BIN}" --help 2>&1)"' in submit
@@ -1638,14 +1638,14 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert "HOTPOTQA_POSIT_ENV_SHA256=\\${HOTPOTQA_POSIT_ENV_SHA256}" in submit
     assert 'examples.common.python_environment verify --path "\\${GEPA_ENV_MANIFEST}"' in submit
     assert "load_hotpotqa_dataset(seed=0)" in submit
-    assert "SUBMIT_TREE_PROFILES=(standard standard standard standard expanded expanded)" in submit
+    assert "SUBMIT_BUDGET_PROFILES=(standard standard standard standard expanded expanded)" in submit
     assert "SUBMIT_CONDITIONS=(vanilla react_v2 react_v2_random action vanilla react_v2)" in submit
     assert "SUBMIT_CONDITIONS=(vanilla random" not in submit
-    assert "SUBMIT_TREE_PROFILES=(standard standard standard standard)" in submit
+    assert "SUBMIT_BUDGET_PROFILES=(standard standard standard standard)" in submit
     assert "SUBMIT_CONDITIONS=(vanilla react_v2 react_v2_random action)" in submit
-    assert "SUBMIT_TREE_PROFILES=(expanded expanded)" in submit
+    assert "SUBMIT_BUDGET_PROFILES=(expanded expanded)" in submit
     assert "SUBMIT_CONDITIONS=(vanilla react_v2)" in submit
-    assert r'RUN_TREE_PROFILE="\${SUBMIT_TREE_PROFILES[\${CELL_INDEX}]}"' in submit
+    assert r'RUN_BUDGET_PROFILE="\${SUBMIT_BUDGET_PROFILES[\${CELL_INDEX}]}"' in submit
     assert "RUN_MAX_METRIC_CALLS=6871" in submit
     assert "RUN_MAX_METRIC_CALLS=15000" in submit
     assert 'RUN_TIME="${STANDARD_TIME}"' in submit
@@ -1653,7 +1653,7 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert 'DEPENDENCY_ARGS+=("--dependency=afterok:\\${PREVIOUS_JOB_ID}")' in submit
     assert "afterany:" not in submit
     assert "CONDITION=\\${RUN_CONDITION}" in submit
-    assert r'--job-name="gepa-hp-${MODEL_PROFILE}-\${RUN_TREE_PROFILE}-\${RUN_CONDITION}"' in submit
+    assert r'--job-name="gepa-hp-${MODEL_PROFILE}-\${RUN_BUDGET_PROFILE}-\${RUN_CONDITION}"' in submit
     assert r'--time="\${RUN_TIME}"' in submit
     assert 'sha256sum "\\${POSIT_ENV_MANIFEST}"' in submit
     assert 'pip check --python "\\${VLLM_PY}"' in submit
@@ -1686,7 +1686,7 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert 'HOTPOTQA_CAMPAIGN_ID="${HOTPOTQA_CAMPAIGN_ID:-}"' in sbatch
     assert "submit this production job through scripts/della/submit_hotpotqa.sh" in sbatch
     assert "#SBATCH --cpus-per-task=8" in sbatch
-    assert 'TREE_PROFILE="${TREE_PROFILE:-standard}"' in sbatch
+    assert 'BUDGET_PROFILE="${BUDGET_PROFILE:-standard}"' in sbatch
     assert "EXPECTED_MAX_METRIC_CALLS=6871" in sbatch
     assert "EXPECTED_MAX_METRIC_CALLS=15000" in sbatch
     assert 'MODEL="Qwen3.8-27B"' in sbatch
@@ -1716,7 +1716,7 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
         "expanded:react_v2_random",
     ):
         assert rejected_cell not in sbatch
-    assert 'RUN_LOCK_PATH="${RUN_LOCK_DIR}/${MODEL_PROFILE}-${TREE_PROFILE}-${CONDITION}.lock"' in sbatch
+    assert 'RUN_LOCK_PATH="${RUN_LOCK_DIR}/${MODEL_PROFILE}-${BUDGET_PROFILE}-${CONDITION}.lock"' in sbatch
     assert 'if ! flock -n "${RUN_LOCK_FD}"' in sbatch
     assert "another HotPotQA job is already writing" in sbatch
     assert "module load proxy/default" in sbatch
@@ -1829,7 +1829,7 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert "lm.last_response_identity" in sbatch
     assert "env_spec=${HOTPOTQA_ENV_SPEC_SHA256}" in sbatch
     assert "gepa_env=${HOTPOTQA_GEPA_ENV_SHA256}" in sbatch
-    assert "tree=${TREE_PROFILE}" in sbatch
+    assert "budget_profile=${BUDGET_PROFILE}" in sbatch
     assert 'RUNTIME_CACHE_KEY="${MODEL_PROFILE}-${CACHE_IDENTITY_SHA256}"' in sbatch
     assert 'CAMPAIGN_LOCK_DIR="${SCRATCH_BASE}/.cache/gepa/hotpotqa-campaign/${HOTPOTQA_CAMPAIGN_ID}"' in sbatch
     assert 'CAMPAIGN_LOCK_PATH="${CAMPAIGN_LOCK_DIR}/${MODEL_PROFILE}.sha256"' in sbatch

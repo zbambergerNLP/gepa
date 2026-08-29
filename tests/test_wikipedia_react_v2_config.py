@@ -82,6 +82,8 @@ from gepa.strategies.intervention import (
     UNIFORM_RANDOM_CONTROLLER_POLICY_CONTRACT,
     StatelessActionConstraint,
 )
+from gepa.strategies.proposal_sampling import SingleMutationSampling
+from gepa.strategies.proposal_selection import AllImprovements
 
 H200_GPU_RUNTIME = json.dumps(
     {
@@ -375,12 +377,21 @@ def test_hotpot_scientific_contract_accepts_only_the_pinned_qwen_runtime(
 
 
 def test_hotpot_scientific_campaign_contains_only_the_six_approved_cells() -> None:
-    """Lock the four standard-budget and two expanded-budget comparisons."""
+    """Lock the six comparisons and their shared classic GEPA topology."""
     assert _SCIENTIFIC_CONDITIONS_BY_BUDGET == {
         6_871: ("vanilla", "react_v2", "react_v2_random", "action"),
         15_000: ("vanilla", "react_v2"),
     }
     assert sum(len(conditions) for conditions in _SCIENTIFIC_CONDITIONS_BY_BUDGET.values()) == 6
+    for max_metric_calls, conditions in _SCIENTIFIC_CONDITIONS_BY_BUDGET.items():
+        for condition in conditions:
+            config, _ = build_hotpotqa_config(
+                condition,
+                _hotpot_args(max_metric_calls=max_metric_calls),
+                {},
+            )
+            assert isinstance(config.engine.sampling_strategy, SingleMutationSampling)
+            assert isinstance(config.engine.selection_strategy, AllImprovements)
 
 
 def test_hotpot_scientific_contract_accepts_the_pinned_deepseek_runtime(monkeypatch) -> None:
@@ -1003,7 +1014,7 @@ def test_hotpot_and_hover_contracts_record_exact_model_pair() -> None:
     assert hover["models"]["solver_decoding"] == experiment_decoding(QWEN3_8_27B_MODEL)
     assert hover["models"]["reflection_decoding"] == experiment_decoding(QWEN3_8_27B_MODEL)
 
-    assert hotpot["schema_version"] == 13
+    assert hotpot["schema_version"] == 14
     assert hotpot["scientific_contract_enforced"] is False
     assert hotpot["models"]["solver_version"] == QWEN3_8_27B_REVISION
     assert hotpot["models"]["reflection_version"] == QWEN3_8_27B_REVISION
@@ -1012,6 +1023,12 @@ def test_hotpot_and_hover_contracts_record_exact_model_pair() -> None:
     assert hotpot["retrieval"]["k1"] == 0.9
     assert hotpot["retrieval"]["b"] == 0.4
     assert hotpot["optimizer"]["reflection_minibatch_size"] == 3
+    assert hotpot["optimizer"]["proposal_sampling_strategy"] == {
+        "name": "single_mutation",
+        "parents_per_iteration": 1,
+        "mutations_per_parent": 1,
+    }
+    assert hotpot["optimizer"]["proposal_selection_strategy"] == "all_improvements"
     assert hotpot["optimizer"]["frontier_type"] == "instance"
     assert hotpot["optimizer"]["skip_perfect_score"] is True
     assert hotpot["optimizer"]["raise_on_exception"] is True
@@ -1675,7 +1692,7 @@ def test_stateless_action_menu_contract_matches_between_wikipedia_benchmarks() -
     expected = build_hotpotqa_run_contract("random", args)["optimizer"]["stateless_action_menu"]
 
     for build_contract, schema_version in (
-        (build_hotpotqa_run_contract, 13),
+        (build_hotpotqa_run_contract, 14),
         (build_hover_run_contract, 5),
     ):
         contract = build_contract("random", args)

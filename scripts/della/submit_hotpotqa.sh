@@ -6,9 +6,9 @@
 #
 # Use MODEL_PROFILE=qwen3.8-27b or MODEL_PROFILE=deepseek-v4-flash. Each
 # profile uses the same model for the student and proposer. The default
-# TREE_PROFILE=campaign submits exactly six serial jobs: vanilla, ReAct V2,
+# BUDGET_PROFILE=campaign submits exactly six serial jobs: vanilla, ReAct V2,
 # random-Controller ReAct V2, and selected-action GEPA at 6,871 calls, followed
-# by vanilla and ReAct V2 at 15,000 calls. TREE_PROFILE=standard or expanded
+# by vanilla and ReAct V2 at 15,000 calls. BUDGET_PROFILE=standard or expanded
 # resubmits only the approved cells at one budget.
 set -euo pipefail
 
@@ -59,7 +59,7 @@ trap cleanup_local_files EXIT
 # Tunable knobs (env overrides).
 MODEL_PROFILE="${MODEL_PROFILE:-qwen3.8-27b}"
 DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-}"
-TREE_PROFILE="${TREE_PROFILE:-campaign}"
+BUDGET_PROFILE="${BUDGET_PROFILE:-campaign}"
 CONDITION="${CONDITION:-all}"
 HOTPOTQA_CAMPAIGN_ID="${HOTPOTQA_CAMPAIGN_ID:-hotpotqa-final-v1}"
 MAX_WORKERS="${MAX_WORKERS:-}"
@@ -86,11 +86,11 @@ if [[ ! "${HOTPOTQA_CAMPAIGN_ID}" =~ ^[A-Za-z0-9._-]+$ ]]; then
     exit 1
 fi
 
-case "${TREE_PROFILE}" in
+case "${BUDGET_PROFILE}" in
     campaign)
         CAMPAIGN_BUDGET_LABEL="6871+15000"
         if [[ "${CONDITION}" != "all" ]]; then
-            echo "ERROR: TREE_PROFILE=campaign requires CONDITION=all" >&2
+            echo "ERROR: BUDGET_PROFILE=campaign requires CONDITION=all" >&2
             exit 1
         fi
         ;;
@@ -115,7 +115,7 @@ case "${TREE_PROFILE}" in
         esac
         ;;
     *)
-        echo "ERROR: TREE_PROFILE must be campaign, standard, or expanded" >&2
+        echo "ERROR: BUDGET_PROFILE must be campaign, standard, or expanded" >&2
         exit 1
         ;;
 esac
@@ -238,7 +238,7 @@ fi
 
 # Step 2: submit sbatch on della login node.
 echo "==> submitting HotpotQA: profile=${MODEL_PROFILE} solver=${SOLVER_MODEL} reflection=${REFLECTION_MODEL}"
-echo "==> scientific contract: selection=${TREE_PROFILE} budget=${CAMPAIGN_BUDGET_LABEL} condition=${CONDITION} merge=off"
+echo "==> scientific contract: budget_profile=${BUDGET_PROFILE} budget=${CAMPAIGN_BUDGET_LABEL} condition=${CONDITION} merge=off"
 echo "==> method: frozen Wiki-2017/BM25 k=7 seed=0 workers=${MAX_WORKERS} two-stage structured prompts"
 echo "==> Della resources: partition=${JOB_PARTITION:-cluster-default} gpus=${DELLA_GPUS} cpus=${DELLA_CPUS_PER_TASK} memory=${DELLA_MEMORY}"
 if [[ "${MODEL_PROFILE}" == "qwen3.8-27b" ]]; then
@@ -362,21 +362,21 @@ if [[ "\${SBATCH_HELP}" != *"--export-file"* ]]; then
     exit 1
 fi
 
-if [[ "${TREE_PROFILE}" == "campaign" ]]; then
-    SUBMIT_TREE_PROFILES=(standard standard standard standard expanded expanded)
+if [[ "${BUDGET_PROFILE}" == "campaign" ]]; then
+    SUBMIT_BUDGET_PROFILES=(standard standard standard standard expanded expanded)
     SUBMIT_CONDITIONS=(vanilla react_v2 react_v2_random action vanilla react_v2)
-elif [[ "${TREE_PROFILE}" == "standard" && "${CONDITION}" == "all" ]]; then
-    SUBMIT_TREE_PROFILES=(standard standard standard standard)
+elif [[ "${BUDGET_PROFILE}" == "standard" && "${CONDITION}" == "all" ]]; then
+    SUBMIT_BUDGET_PROFILES=(standard standard standard standard)
     SUBMIT_CONDITIONS=(vanilla react_v2 react_v2_random action)
-elif [[ "${TREE_PROFILE}" == "expanded" && "${CONDITION}" == "all" ]]; then
-    SUBMIT_TREE_PROFILES=(expanded expanded)
+elif [[ "${BUDGET_PROFILE}" == "expanded" && "${CONDITION}" == "all" ]]; then
+    SUBMIT_BUDGET_PROFILES=(expanded expanded)
     SUBMIT_CONDITIONS=(vanilla react_v2)
 else
-    SUBMIT_TREE_PROFILES=("${TREE_PROFILE}")
+    SUBMIT_BUDGET_PROFILES=("${BUDGET_PROFILE}")
     SUBMIT_CONDITIONS=("${CONDITION}")
 fi
-if [[ "\${#SUBMIT_TREE_PROFILES[@]}" != "\${#SUBMIT_CONDITIONS[@]}" ]]; then
-    echo "ERROR: HotPotQA campaign tree and condition lists differ in length" >&2
+if [[ "\${#SUBMIT_BUDGET_PROFILES[@]}" != "\${#SUBMIT_CONDITIONS[@]}" ]]; then
+    echo "ERROR: HotPotQA campaign budget and condition lists differ in length" >&2
     exit 1
 fi
 
@@ -391,9 +391,9 @@ cleanup_export_file() {
 trap cleanup_export_file EXIT
 PREVIOUS_JOB_ID=""
 for CELL_INDEX in "\${!SUBMIT_CONDITIONS[@]}"; do
-    RUN_TREE_PROFILE="\${SUBMIT_TREE_PROFILES[\${CELL_INDEX}]}"
+    RUN_BUDGET_PROFILE="\${SUBMIT_BUDGET_PROFILES[\${CELL_INDEX}]}"
     RUN_CONDITION="\${SUBMIT_CONDITIONS[\${CELL_INDEX}]}"
-    case "\${RUN_TREE_PROFILE}" in
+    case "\${RUN_BUDGET_PROFILE}" in
         standard)
             RUN_MAX_METRIC_CALLS=6871
             RUN_TIME="${STANDARD_TIME}"
@@ -403,14 +403,14 @@ for CELL_INDEX in "\${!SUBMIT_CONDITIONS[@]}"; do
             RUN_TIME="${EXPANDED_TIME}"
             ;;
         *)
-            echo "ERROR: generated an unsupported HotPotQA budget profile: \${RUN_TREE_PROFILE}" >&2
+            echo "ERROR: generated an unsupported HotPotQA budget profile: \${RUN_BUDGET_PROFILE}" >&2
             exit 1
             ;;
     esac
     SBATCH_EXPORT_FILE="\$(mktemp)"
     printf '%s\0' \
         "MODEL_PROFILE=${MODEL_PROFILE}" \
-        "TREE_PROFILE=\${RUN_TREE_PROFILE}" \
+        "BUDGET_PROFILE=\${RUN_BUDGET_PROFILE}" \
         "MAX_METRIC_CALLS=\${RUN_MAX_METRIC_CALLS}" \
         "CONDITION=\${RUN_CONDITION}" \
         "HOTPOTQA_CAMPAIGN_ID=${HOTPOTQA_CAMPAIGN_ID}" \
@@ -460,7 +460,7 @@ for CELL_INDEX in "\${!SUBMIT_CONDITIONS[@]}"; do
             LC_ALL=C.UTF-8 \
             "\${SBATCH_BIN}"${SBATCH_RESOURCE_COMMAND} \
             --parsable \
-            --job-name="gepa-hp-${MODEL_PROFILE}-\${RUN_TREE_PROFILE}-\${RUN_CONDITION}" \
+            --job-name="gepa-hp-${MODEL_PROFILE}-\${RUN_BUDGET_PROFILE}-\${RUN_CONDITION}" \
             --output="${SCRATCH_BASE}/logs/hotpotqa-%x-%j.log" \
             --time="\${RUN_TIME}" \
             --export=ALL \
@@ -475,7 +475,7 @@ for CELL_INDEX in "\${!SUBMIT_CONDITIONS[@]}"; do
     fi
     rm -f -- "\${SBATCH_EXPORT_FILE}"
     SBATCH_EXPORT_FILE=""
-    echo "==> submitted \${RUN_TREE_PROFILE}/\${RUN_CONDITION}: job \${PREVIOUS_JOB_ID}"
+    echo "==> submitted \${RUN_BUDGET_PROFILE}/\${RUN_CONDITION}: job \${PREVIOUS_JOB_ID}"
 done
 
 echo "==> approved HotPotQA campaign chain submitted. Check status with: squeue -u ${REMOTE_USER}"

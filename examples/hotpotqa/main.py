@@ -107,6 +107,8 @@ from gepa.strategies.intervention import (
     UNIFORM_RANDOM_CONTROLLER_POLICY_CONTRACT,
     StatelessActionConstraint,
 )
+from gepa.strategies.proposal_sampling import SingleMutationSampling
+from gepa.strategies.proposal_selection import AllImprovements
 
 # GEPA artifact components: summarize1 -> create_query_hop2 -> summarize2 -> final_answer.
 SEED_CANDIDATE = {
@@ -561,7 +563,7 @@ def build_run_contract(condition: str, args) -> dict:
         else:
             semantic_controller_policy = deepcopy(CONTROLLER_POLICY_CONTRACT)
     return {
-        "schema_version": 13,
+        "schema_version": 14,
         "benchmark": "hotpotqa-technical-mini" if technical_mini_index else "hotpotqa-fullwiki-wiki17",
         "reference_artifact_commit": GEPA_ARTIFACT_COMMIT,
         "scientific_contract_enforced": scientific_contract,
@@ -593,6 +595,12 @@ def build_run_contract(condition: str, args) -> dict:
             "max_metric_calls": args.max_metric_calls,
             "seed": args.seed,
             "candidate_selection_strategy": "pareto",
+            "proposal_sampling_strategy": {
+                "name": "single_mutation",
+                "parents_per_iteration": 1,
+                "mutations_per_parent": 1,
+            },
+            "proposal_selection_strategy": "all_improvements",
             "frontier_type": "instance",
             "validation_evaluation": "full_eval",
             "acceptance_criterion": "strict_improvement",
@@ -1197,6 +1205,8 @@ def build_config(condition: str, args, reflection_lm_kwargs: dict, run_dir: str 
             max_metric_calls=args.max_metric_calls,
             val_evaluation_policy="full_eval",
             candidate_selection_strategy="pareto",
+            sampling_strategy=SingleMutationSampling(),
+            selection_strategy=AllImprovements(),
             frontier_type="instance",
             acceptance_criterion="strict_improvement",
             raise_on_exception=True,

@@ -11,7 +11,7 @@
 # Submit through scripts/della/submit_hotpotqa.sh. It supplies the complete
 # model-specific resource request and is the only supported production entry.
 #
-# The production path fixes every scientific setting. TREE_PROFILE identifies
+# The production path fixes every scientific setting. BUDGET_PROFILE identifies
 # the standard 6,871-call or expanded 15,000-call search budget for one approved
 # campaign cell. Throughput settings may change scheduling, but not prompts,
 # data, retrieval, decoding, candidate budgets, or evaluation order.
@@ -34,7 +34,7 @@ fi
 
 MODEL_STORAGE="${MODEL_STORAGE:-/projects/BSTEWART/model_storage}"
 MODEL_PROFILE="${MODEL_PROFILE:-qwen3.8-27b}"
-TREE_PROFILE="${TREE_PROFILE:-standard}"
+BUDGET_PROFILE="${BUDGET_PROFILE:-standard}"
 CONDITION="${CONDITION:-}"
 HOTPOTQA_CAMPAIGN_ID="${HOTPOTQA_CAMPAIGN_ID:-}"
 if [[ ! "${HOTPOTQA_CAMPAIGN_ID}" =~ ^[A-Za-z0-9._-]+$ ]]; then
@@ -146,7 +146,7 @@ if [[ ! "${HOTPOTQA_GEPA_ENV_SHA256}" =~ ^[0-9a-f]{64}$ \
     exit 1
 fi
 
-case "${TREE_PROFILE}" in
+case "${BUDGET_PROFILE}" in
     standard)
         EXPECTED_MAX_METRIC_CALLS=6871
         ;;
@@ -154,17 +154,17 @@ case "${TREE_PROFILE}" in
         EXPECTED_MAX_METRIC_CALLS=15000
         ;;
     *)
-        echo "ERROR: TREE_PROFILE must be standard or expanded" >&2
+        echo "ERROR: BUDGET_PROFILE must be standard or expanded" >&2
         exit 1
         ;;
 esac
 if [[ -n "${MAX_METRIC_CALLS:-}" && "${MAX_METRIC_CALLS}" != "${EXPECTED_MAX_METRIC_CALLS}" ]]; then
-    echo "ERROR: MAX_METRIC_CALLS must match TREE_PROFILE=${TREE_PROFILE} (${EXPECTED_MAX_METRIC_CALLS})" >&2
+    echo "ERROR: MAX_METRIC_CALLS must match BUDGET_PROFILE=${BUDGET_PROFILE} (${EXPECTED_MAX_METRIC_CALLS})" >&2
     exit 1
 fi
 MAX_METRIC_CALLS="${EXPECTED_MAX_METRIC_CALLS}"
 
-case "${TREE_PROFILE}:${CONDITION}" in
+case "${BUDGET_PROFILE}:${CONDITION}" in
     standard:vanilla|standard:react_v2|standard:react_v2_random|standard:action) ;;
     expanded:vanilla|expanded:react_v2) ;;
     *)
@@ -219,10 +219,10 @@ mkdir -p "${XDG_CACHE_HOME}" "${HF_HOME}" "${VLLM_CACHE_ROOT}" \
 
 RUN_LOCK_DIR="${SCRATCH_BASE}/.cache/gepa/hotpotqa-runs/${HOTPOTQA_CAMPAIGN_ID}"
 mkdir -p "${RUN_LOCK_DIR}"
-RUN_LOCK_PATH="${RUN_LOCK_DIR}/${MODEL_PROFILE}-${TREE_PROFILE}-${CONDITION}.lock"
+RUN_LOCK_PATH="${RUN_LOCK_DIR}/${MODEL_PROFILE}-${BUDGET_PROFILE}-${CONDITION}.lock"
 exec {RUN_LOCK_FD}>"${RUN_LOCK_PATH}"
 if ! flock -n "${RUN_LOCK_FD}"; then
-    echo "ERROR: another HotPotQA job is already writing ${MODEL_PROFILE}/${TREE_PROFILE}/${CONDITION}" >&2
+    echo "ERROR: another HotPotQA job is already writing ${MODEL_PROFILE}/${BUDGET_PROFILE}/${CONDITION}" >&2
     exit 1
 fi
 echo "==> acquired exclusive run lock for: ${CONDITION}"
@@ -617,7 +617,7 @@ elif [[ "$(tr -d '\n' < "${CAMPAIGN_LOCK_PATH}")" != "${CAMPAIGN_IDENTITY_SHA256
 fi
 rm -f -- "${CAMPAIGN_LOCK_TEMP}"
 RUNTIME_IDENTITY_SHA256="$(printf '%s' "${RUNTIME_IDENTITY}" | sha256sum | cut -d' ' -f1)"
-CACHE_IDENTITY="source=${HOTPOTQA_SOURCE_COMMIT};source_manifest=${HOTPOTQA_SOURCE_MANIFEST_SHA256};python=${HOTPOTQA_PYTHON_VERSION};uv=${HOTPOTQA_UV_VERSION};uv_sha=${HOTPOTQA_UV_SHA256};env_spec=${HOTPOTQA_ENV_SPEC_SHA256};gepa_env=${HOTPOTQA_GEPA_ENV_SHA256};model=${HOTPOTQA_MODEL_REVISION};model_manifest=${HOTPOTQA_MODEL_INTEGRITY_SHA256};provider_response_model=${HOTPOTQA_DEEPSEEK_RESPONSE_MODEL};provider_system_fingerprint=${HOTPOTQA_DEEPSEEK_SYSTEM_FINGERPRINT};tree=${TREE_PROFILE};runtime=${RUNTIME_IDENTITY_SHA256};litellm=${HOTPOTQA_LITELLM_VERSION};dspy=${HOTPOTQA_DSPY_COMMIT};hotpot=${HOTPOTQA_DATA_REVISION};wiki17=${WIKI17_REVISION};index=${WIKI17_INTEGRITY_SHA256}"
+CACHE_IDENTITY="source=${HOTPOTQA_SOURCE_COMMIT};source_manifest=${HOTPOTQA_SOURCE_MANIFEST_SHA256};python=${HOTPOTQA_PYTHON_VERSION};uv=${HOTPOTQA_UV_VERSION};uv_sha=${HOTPOTQA_UV_SHA256};env_spec=${HOTPOTQA_ENV_SPEC_SHA256};gepa_env=${HOTPOTQA_GEPA_ENV_SHA256};model=${HOTPOTQA_MODEL_REVISION};model_manifest=${HOTPOTQA_MODEL_INTEGRITY_SHA256};provider_response_model=${HOTPOTQA_DEEPSEEK_RESPONSE_MODEL};provider_system_fingerprint=${HOTPOTQA_DEEPSEEK_SYSTEM_FINGERPRINT};budget_profile=${BUDGET_PROFILE};runtime=${RUNTIME_IDENTITY_SHA256};litellm=${HOTPOTQA_LITELLM_VERSION};dspy=${HOTPOTQA_DSPY_COMMIT};hotpot=${HOTPOTQA_DATA_REVISION};wiki17=${WIKI17_REVISION};index=${WIKI17_INTEGRITY_SHA256}"
 CACHE_IDENTITY_SHA256="$(printf '%s' "${CACHE_IDENTITY}" | sha256sum | cut -d' ' -f1)"
 RUNTIME_CACHE_KEY="${MODEL_PROFILE}-${CACHE_IDENTITY_SHA256}"
 export DSPY_CACHEDIR="${SCRATCH_BASE}/.cache/dspy/hotpotqa/${RUNTIME_CACHE_KEY}"
@@ -675,7 +675,7 @@ print("Native tool-call preflight passed.")
 PY
 fi
 
-echo "==> running GEPA experiment: condition=${CONDITION} tree=${TREE_PROFILE} max_metric_calls=${MAX_METRIC_CALLS}"
+echo "==> running GEPA experiment: condition=${CONDITION} budget_profile=${BUDGET_PROFILE} max_metric_calls=${MAX_METRIC_CALLS}"
 echo "==> solver=${SOLVER_MODEL} solver_api_base=${SOLVER_API_BASE:-provider-default}"
 echo "==> reflection=${REFLECTION_MODEL} reflection_api_base=${REFLECTION_API_BASE:-provider-default}"
 echo "==> retrieval=Wiki-2017/BM25 k=7 concurrent_examples=${MAX_WORKERS} root=${WIKI17_DIR}"
@@ -699,4 +699,4 @@ echo "==> retrieval=Wiki-2017/BM25 k=7 concurrent_examples=${MAX_WORKERS} root=$
     --api-profile direct \
     --runtime-profile scientific \
     --enforce-scientific-contract \
-    --tag "${TREE_PROFILE}"
+    --tag "${BUDGET_PROFILE}"

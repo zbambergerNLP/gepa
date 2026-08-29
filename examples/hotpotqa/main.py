@@ -2,9 +2,11 @@
 
 The default benchmark path follows the GEPA paper artifact's data split,
 frozen Wiki-2017 BM25 retrieval, two-hop four-component program, component
-feedback, exact-match objective, and 6,871-call budget. Model identities remain
-configurable, and all conditions receive the same model assignments and task
-evidence.
+feedback, exact-match objective, and 6,871-call budget. The locked production
+campaign runs four methods at that standard budget and only the headline
+vanilla/ReAct V2 pair at the 15,000-call expanded budget. Model identities
+remain configurable, and all conditions receive the same model assignments and
+task evidence.
 
 Conditions:
     vanilla         - stock GEPA reflective mutation
@@ -142,7 +144,11 @@ _CONDITION_LABELS = {
 
 _PAPER_MAX_MERGE_INVOCATIONS = 5
 _PAPER_MERGE_VAL_OVERLAP_FLOOR = 5
-_SCIENTIFIC_METRIC_CALL_BUDGETS = {6_871, 15_000}
+_SCIENTIFIC_CONDITIONS_BY_BUDGET = {
+    6_871: ("vanilla", "react_v2", "react_v2_random", "action"),
+    15_000: ("vanilla", "react_v2"),
+}
+_SCIENTIFIC_METRIC_CALL_BUDGETS = set(_SCIENTIFIC_CONDITIONS_BY_BUDGET)
 _SCIENTIFIC_PYTHON_VERSION = "3.11.13"
 _SCIENTIFIC_UV_VERSION = "0.9.13"
 _SCIENTIFIC_SPLIT_COUNTS = {"train": 150, "val": 300, "test": 300}
@@ -198,8 +204,18 @@ def _validated_runtime_profile(args) -> str:
                 changed_axes.append(f"--{name.replace('_', '-')} must be omitted")
         if getattr(args, "merge", False):
             changed_axes.append("--merge must be omitted")
-        if getattr(args, "max_metric_calls", 6_871) not in _SCIENTIFIC_METRIC_CALL_BUDGETS:
+        max_metric_calls = getattr(args, "max_metric_calls", 6_871)
+        if max_metric_calls not in _SCIENTIFIC_METRIC_CALL_BUDGETS:
             changed_axes.append("--max-metric-calls must be 6871 or 15000")
+        else:
+            requested_condition = getattr(args, "condition", "both")
+            approved_conditions = _SCIENTIFIC_CONDITIONS_BY_BUDGET[max_metric_calls]
+            if requested_condition not in {*approved_conditions, "all", "both"}:
+                approved_text = ", ".join(approved_conditions)
+                changed_axes.append(
+                    f"--condition {requested_condition!r} is not in the approved {max_metric_calls}-call "
+                    f"campaign cells ({approved_text})"
+                )
         if getattr(args, "max_workers", 1) < 1:
             changed_axes.append("--max-workers must be positive")
         source_commit = os.environ.get("HOTPOTQA_SOURCE_COMMIT", "")
@@ -1335,7 +1351,7 @@ def main():
         action="store_true",
         help=(
             "Fail unless the paper-aligned data, retrieval, task program, seed, templates, merge setting, "
-            "and standard or expanded tree budget are selected"
+            "and approved standard- or expanded-budget campaign cell are selected"
         ),
     )
     parser.add_argument(
@@ -1514,7 +1530,9 @@ def main():
         solver_lm_kwargs=solver_lm_kwargs,
     )
 
-    if args.condition == "all":
+    if args.condition == "all" and args.enforce_scientific_contract:
+        conditions = list(_SCIENTIFIC_CONDITIONS_BY_BUDGET[args.max_metric_calls])
+    elif args.condition == "all":
         conditions = ["vanilla", "random", "action", "react_v2_random", "react_v2"]
     elif args.condition == "both":
         conditions = ["vanilla", "react_v2"]

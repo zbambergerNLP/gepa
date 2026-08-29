@@ -36,16 +36,27 @@ from examples.common.react_v2 import (
     resolve_template_family,
     structured_prompt,
 )
-from examples.hotpotqa.main import _run_key as hotpotqa_run_key
 from examples.hotpotqa.main import (
+    _SCIENTIFIC_CONDITIONS_BY_BUDGET,
     _validate_scientific_data_identity,
     _validated_runtime_profile,
     _verify_scientific_retriever_integrity,
 )
-from examples.hotpotqa.main import build_config as build_hotpotqa_config
-from examples.hotpotqa.main import build_run_contract as build_hotpotqa_run_contract
-from examples.hotpotqa.main import dump_candidates as dump_hotpotqa_candidates
-from examples.hotpotqa.main import seed_candidate as hotpotqa_seed_candidate
+from examples.hotpotqa.main import (
+    _run_key as hotpotqa_run_key,
+)
+from examples.hotpotqa.main import (
+    build_config as build_hotpotqa_config,
+)
+from examples.hotpotqa.main import (
+    build_run_contract as build_hotpotqa_run_contract,
+)
+from examples.hotpotqa.main import (
+    dump_candidates as dump_hotpotqa_candidates,
+)
+from examples.hotpotqa.main import (
+    seed_candidate as hotpotqa_seed_candidate,
+)
 from examples.hotpotqa.utils import (
     HOTPOTQA_HF_REVISION,
     HOTPOTQA_SCIENTIFIC_SPLIT_SHA256,
@@ -211,6 +222,7 @@ def _hotpot_args(**overrides):
     values = {
         "api_profile": "direct",
         "api_base": None,
+        "condition": "both",
         "data_identity": {
             "source": {"type": "huggingface", "dataset": "hotpot_qa", "config": "fullwiki"},
             "splits": {"train": {"count": 150, "ids": ["train"], "sha256": "train-v1"}},
@@ -298,11 +310,28 @@ def test_experiment_model_version_rejects_unknown_models() -> None:
         experiment_model_version(unknown_model)
 
 
-def test_hotpot_scientific_contract_accepts_only_the_pinned_qwen_runtime(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("max_metric_calls", "condition"),
+    [
+        (6_871, "vanilla"),
+        (6_871, "react_v2"),
+        (6_871, "react_v2_random"),
+        (6_871, "action"),
+        (15_000, "vanilla"),
+        (15_000, "react_v2"),
+    ],
+)
+def test_hotpot_scientific_contract_accepts_only_the_pinned_qwen_runtime(
+    monkeypatch,
+    max_metric_calls: int,
+    condition: str,
+) -> None:
     """Accept the full paper-aligned Qwen method with immutable runtime pins.
 
     Args:
         monkeypatch: Pytest fixture used to install recorded runtime metadata.
+        max_metric_calls: Approved standard or expanded campaign budget.
+        condition: Approved method at the selected budget.
     """
     monkeypatch.setenv("HOTPOTQA_MODEL_REVISION", QWEN3_8_27B_REVISION)
     monkeypatch.setenv("HOTPOTQA_MODEL_INTEGRITY_SHA256", "c" * 64)
@@ -332,8 +361,9 @@ def test_hotpot_scientific_contract_accepts_only_the_pinned_qwen_runtime(monkeyp
         "seed=0;batch_invariant=false;single_sequence_replicas=true",
     )
     args = _hotpot_args(
+        condition=condition,
         enforce_scientific_contract=True,
-        max_metric_calls=6_871,
+        max_metric_calls=max_metric_calls,
         train_limit=None,
         val_limit=None,
         test_limit=None,
@@ -342,6 +372,15 @@ def test_hotpot_scientific_contract_accepts_only_the_pinned_qwen_runtime(monkeyp
 
     assert _validated_runtime_profile(args) == "scientific"
     _validate_scientific_data_identity(args)
+
+
+def test_hotpot_scientific_campaign_contains_only_the_six_approved_cells() -> None:
+    """Lock the four standard-budget and two expanded-budget comparisons."""
+    assert _SCIENTIFIC_CONDITIONS_BY_BUDGET == {
+        6_871: ("vanilla", "react_v2", "react_v2_random", "action"),
+        15_000: ("vanilla", "react_v2"),
+    }
+    assert sum(len(conditions) for conditions in _SCIENTIFIC_CONDITIONS_BY_BUDGET.values()) == 6
 
 
 def test_hotpot_scientific_contract_accepts_the_pinned_deepseek_runtime(monkeypatch) -> None:
@@ -363,6 +402,7 @@ def test_hotpot_scientific_contract_accepts_the_pinned_deepseek_runtime(monkeypa
     monkeypatch.setenv("HOTPOTQA_ENV_SPEC_SHA256", "d" * 64)
     monkeypatch.setenv("HOTPOTQA_GEPA_ENV_SHA256", "2" * 64)
     args = _hotpot_args(
+        condition="react_v2",
         enforce_scientific_contract=True,
         max_metric_calls=15_000,
         solver_model=DEEPSEEK_V4_FLASH_MODEL,
@@ -497,6 +537,9 @@ def test_hotpot_scientific_contract_rejects_deepseek_endpoint_drift(
         ({"test_limit": 299}, "--test-limit"),
         ({"merge": True}, "--merge"),
         ({"max_metric_calls": 6_870}, "--max-metric-calls"),
+        ({"condition": "random"}, "--condition"),
+        ({"condition": "action", "max_metric_calls": 15_000}, "--condition"),
+        ({"condition": "react_v2_random", "max_metric_calls": 15_000}, "--condition"),
         ({"max_workers": 0}, "--max-workers"),
     ],
 )

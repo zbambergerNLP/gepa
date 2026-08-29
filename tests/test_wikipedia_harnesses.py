@@ -1572,12 +1572,12 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert "REFLECTION_MODEL" in submit
     assert "REFLECTION_API_BASE" in submit
     assert 'MODEL_PROFILE="${MODEL_PROFILE:-qwen3.8-27b}"' in submit
-    assert 'TREE_PROFILE="${TREE_PROFILE:-standard}"' in submit
+    assert 'TREE_PROFILE="${TREE_PROFILE:-campaign}"' in submit
     assert 'HOTPOTQA_CAMPAIGN_ID="${HOTPOTQA_CAMPAIGN_ID:-hotpotqa-final-v1}"' in submit
     assert "MAX_METRIC_CALLS=6871" in submit
-    assert 'TIME="${TIME:-72:00:00}"' in submit
+    assert 'STANDARD_TIME="${STANDARD_TIME:-${TIME:-72:00:00}}"' in submit
     assert "MAX_METRIC_CALLS=15000" in submit
-    assert 'TIME="${TIME:-144:00:00}"' in submit
+    assert 'EXPANDED_TIME="${EXPANDED_TIME:-${TIME:-144:00:00}}"' in submit
     assert 'CONDITION="${CONDITION:-all}"' in submit
     assert 'MAX_WORKERS="${MAX_WORKERS:-}"' in submit
     assert 'MODEL="Qwen3.8-27B"' in submit
@@ -1589,7 +1589,7 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert 'SOLVER_MODEL="deepseek/deepseek-v4-flash"' in submit
     assert 'REFLECTION_MODEL="${SOLVER_MODEL}"' in submit
     assert "DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}" in submit
-    assert "TREE_PROFILE=${TREE_PROFILE}" in submit
+    assert r"TREE_PROFILE=\${RUN_TREE_PROFILE}" in submit
     assert "HOTPOTQA_CAMPAIGN_ID=${HOTPOTQA_CAMPAIGN_ID}" in submit
     assert 'SBATCH_BIN="\\$(command -v sbatch)"' in submit
     assert 'SBATCH_HELP="\\$("\\${SBATCH_BIN}" --help 2>&1)"' in submit
@@ -1638,10 +1638,23 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert "HOTPOTQA_POSIT_ENV_SHA256=\\${HOTPOTQA_POSIT_ENV_SHA256}" in submit
     assert 'examples.common.python_environment verify --path "\\${GEPA_ENV_MANIFEST}"' in submit
     assert "load_hotpotqa_dataset(seed=0)" in submit
-    assert "SUBMIT_CONDITIONS=(vanilla random action react_v2_random react_v2)" in submit
+    assert "SUBMIT_TREE_PROFILES=(standard standard standard standard expanded expanded)" in submit
+    assert "SUBMIT_CONDITIONS=(vanilla react_v2 react_v2_random action vanilla react_v2)" in submit
+    assert "SUBMIT_CONDITIONS=(vanilla random" not in submit
+    assert "SUBMIT_TREE_PROFILES=(standard standard standard standard)" in submit
+    assert "SUBMIT_CONDITIONS=(vanilla react_v2 react_v2_random action)" in submit
+    assert "SUBMIT_TREE_PROFILES=(expanded expanded)" in submit
+    assert "SUBMIT_CONDITIONS=(vanilla react_v2)" in submit
+    assert r'RUN_TREE_PROFILE="\${SUBMIT_TREE_PROFILES[\${CELL_INDEX}]}"' in submit
+    assert "RUN_MAX_METRIC_CALLS=6871" in submit
+    assert "RUN_MAX_METRIC_CALLS=15000" in submit
+    assert 'RUN_TIME="${STANDARD_TIME}"' in submit
+    assert 'RUN_TIME="${EXPANDED_TIME}"' in submit
     assert 'DEPENDENCY_ARGS+=("--dependency=afterok:\\${PREVIOUS_JOB_ID}")' in submit
     assert "afterany:" not in submit
     assert "CONDITION=\\${RUN_CONDITION}" in submit
+    assert r'--job-name="gepa-hp-${MODEL_PROFILE}-\${RUN_TREE_PROFILE}-\${RUN_CONDITION}"' in submit
+    assert r'--time="\${RUN_TIME}"' in submit
     assert 'sha256sum "\\${POSIT_ENV_MANIFEST}"' in submit
     assert 'pip check --python "\\${VLLM_PY}"' in submit
     assert ".gepa-source-commit" in submit
@@ -1693,7 +1706,16 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert '--wiki17-dir "${WIKI17_DIR}"' in sbatch
     assert '--max-workers "${MAX_WORKERS}"' in sbatch
     assert 'CONDITION="${CONDITION:-}"' in sbatch
-    assert "each production job must run one named HotPotQA condition" in sbatch
+    assert "the requested condition and budget are not an approved HotPotQA campaign cell" in sbatch
+    assert "standard:vanilla|standard:react_v2|standard:react_v2_random|standard:action" in sbatch
+    assert "expanded:vanilla|expanded:react_v2" in sbatch
+    for rejected_cell in (
+        "standard:random",
+        "expanded:random",
+        "expanded:action",
+        "expanded:react_v2_random",
+    ):
+        assert rejected_cell not in sbatch
     assert 'RUN_LOCK_PATH="${RUN_LOCK_DIR}/${MODEL_PROFILE}-${TREE_PROFILE}-${CONDITION}.lock"' in sbatch
     assert 'if ! flock -n "${RUN_LOCK_FD}"' in sbatch
     assert "another HotPotQA job is already writing" in sbatch

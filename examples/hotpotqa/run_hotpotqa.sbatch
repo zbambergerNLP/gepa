@@ -11,10 +11,10 @@
 # Submit through scripts/della/submit_hotpotqa.sh. It supplies the complete
 # model-specific resource request and is the only supported production entry.
 #
-# The production path fixes every scientific setting. TREE_PROFILE selects
-# only the standard 6,871-call or expanded 15,000-call search tree. Throughput
-# settings may change scheduling, but not prompts, data, retrieval, decoding,
-# candidate budgets, or evaluation order.
+# The production path fixes every scientific setting. TREE_PROFILE identifies
+# the standard 6,871-call or expanded 15,000-call search budget for one approved
+# campaign cell. Throughput settings may change scheduling, but not prompts,
+# data, retrieval, decoding, candidate budgets, or evaluation order.
 
 #SBATCH --job-name=gepa-hotpotqa
 #SBATCH --nodes=1
@@ -164,10 +164,11 @@ if [[ -n "${MAX_METRIC_CALLS:-}" && "${MAX_METRIC_CALLS}" != "${EXPECTED_MAX_MET
 fi
 MAX_METRIC_CALLS="${EXPECTED_MAX_METRIC_CALLS}"
 
-case "${CONDITION}" in
-    vanilla|random|action|react_v2_random|react_v2) ;;
+case "${TREE_PROFILE}:${CONDITION}" in
+    standard:vanilla|standard:react_v2|standard:react_v2_random|standard:action) ;;
+    expanded:vanilla|expanded:react_v2) ;;
     *)
-        echo "ERROR: each production job must run one named HotPotQA condition" >&2
+        echo "ERROR: the requested condition and budget are not an approved HotPotQA campaign cell" >&2
         exit 1
         ;;
 esac

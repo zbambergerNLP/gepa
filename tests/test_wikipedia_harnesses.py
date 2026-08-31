@@ -1351,6 +1351,12 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert "Qwen3.8-27B production runs require GPU_PARTITION=ailab" in submit
     assert "scientific Qwen runs require 8 H200 data-parallel replicas and 8 API servers" in submit
     assert 'SOLVER_MODEL_PATH="${MODEL_STORAGE}/${MODEL}"' in submit
+    assert 'MODEL_SNAPSHOT_PROFILE="qwen3.8-27b"' in submit
+    assert 'MODEL_SNAPSHOT_PROFILE="glm-5.3-flash"' in submit
+    assert 'MODEL_INTEGRITY_MANIFEST="${SOLVER_MODEL_PATH}/.gepa-model-integrity.json"' in submit
+    assert '[[ ! -d "${SOLVER_MODEL_PATH}" || ! -s "\\${MODEL_INTEGRITY_MANIFEST}" ]]' in submit
+    assert "checkpoint is not staged at ${SOLVER_MODEL_PATH}" in submit
+    assert "found staged local ${MODEL_SNAPSHOT_PROFILE} checkpoint" in submit
     assert 'SOLVER_MODEL="hosted_vllm/Qwen/Qwen3.8-27B"' in submit
     assert 'SOLVER_MODEL="hosted_vllm/zai-org/GLM-5.3-Flash"' in submit
     assert 'REFLECTION_MODEL="${SOLVER_MODEL}"' in submit

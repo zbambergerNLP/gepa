@@ -149,6 +149,7 @@ case "${MODEL_PROFILE}" in
         fi
         MODEL="Qwen3.8-27B"
         SOLVER_MODEL_PATH="${MODEL_STORAGE}/${MODEL}"
+        MODEL_SNAPSHOT_PROFILE="qwen3.8-27b"
         SOLVER_SERVED_NAME="Qwen/Qwen3.8-27B"
         SOLVER_MODEL="hosted_vllm/Qwen/Qwen3.8-27B"
         SOLVER_API_BASE=""
@@ -172,6 +173,7 @@ case "${MODEL_PROFILE}" in
         VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-8}"
         MODEL="GLM-5.3-Flash"
         SOLVER_MODEL_PATH="${MODEL_STORAGE}/${MODEL}"
+        MODEL_SNAPSHOT_PROFILE="glm-5.3-flash"
         SOLVER_SERVED_NAME="zai-org/GLM-5.3-Flash"
         SOLVER_MODEL="hosted_vllm/zai-org/GLM-5.3-Flash"
         SOLVER_API_BASE=""
@@ -368,6 +370,12 @@ if ! "${GEPA_VENV_DIR}/bin/python" -m examples.common.wiki17_bm25 verify --root 
     echo "ERROR: Wiki-2017 is not prepared at ${WIKI17_DIR}; run scripts/della/build_env.sh first" >&2
     exit 1
 fi
+MODEL_INTEGRITY_MANIFEST="${SOLVER_MODEL_PATH}/.gepa-model-integrity.json"
+if [[ ! -d "${SOLVER_MODEL_PATH}" || ! -s "\${MODEL_INTEGRITY_MANIFEST}" ]]; then
+    echo "ERROR: pinned ${MODEL} checkpoint is not staged at ${SOLVER_MODEL_PATH}; run scripts/della/build_env.sh first" >&2
+    exit 1
+fi
+echo "==> found staged local ${MODEL_SNAPSHOT_PROFILE} checkpoint at ${SOLVER_MODEL_PATH}"
 "${GEPA_VENV_DIR}/bin/python" - <<'PY'
 from examples.hotpotqa.utils import load_hotpotqa_dataset
 

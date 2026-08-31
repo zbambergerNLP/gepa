@@ -1,5 +1,6 @@
 #!/bin/bash
-# Build the Della environment and frozen Wiki-2017 index on the visualization node.
+# Build the Della environment and stage frozen data, model, and runtime artifacts
+# on the internet-connected visualization node.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

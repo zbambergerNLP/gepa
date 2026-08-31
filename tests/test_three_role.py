@@ -17,7 +17,8 @@ from gepa.proposer.reflective_mutation.reflection_lm import ReflectionProposal, 
 from gepa.proposer.reflective_mutation.reflective_mutation import ReflectiveMutationProposer
 from gepa.proposer.reflective_mutation.three_role import ThreeRoleReflectionLM, ensure_reflection_run_contract
 from gepa.strategies.document_template import TEMPLATE_FAMILIES, TEMPLATES, DocumentTemplate, MalformedDocumentError
-from gepa.strategies.edit_tools import EditTool
+from gepa.strategies.edit_tools import EDIT_TOOL_SETS, EditTool
+from gepa.strategies.intervention import build_controller_menu
 
 PROMPT = TEMPLATES["system_prompt"].render({"Role": "helper", "Rules": "- be nice\n- be brief"})
 SKILL = TEMPLATES["skill"].render(
@@ -277,6 +278,8 @@ def make_reflective_proposer(reflection_strategy: ThreeRoleReflectionLM) -> Refl
     [
         pytest.param({"level": 3}, id="invalid_level"),
         pytest.param({"level": 1, "edit_tool_set": "huge"}, id="invalid_tool_set"),
+        pytest.param({"level": 1, "controller_selection": "weighted_coin"}, id="invalid_controller_selection"),
+        pytest.param({"level": 0, "controller_selection": "uniform_random"}, id="level_zero_random_controller"),
         pytest.param({"level": 1, "template_family": "meta"}, id="invalid_template_family"),
         pytest.param(
             {"level": 1, "component_kinds": {"sys": "memo"}},
@@ -408,15 +411,20 @@ def test_three_role_run_contract_blocks_catalog_or_policy_drift(tmp_path: Path) 
     """
     strat, _ = strategy(2)
     contract = strat.run_contract({"sys": PROMPT})
-    assert contract["schema_version"] == 3
+    assert contract["schema_version"] == 4
     assert contract["component_kinds"] == {"sys": "system_prompt"}
-    assert contract["controller"]["version"] == 2
+    assert contract["controller"]["version"] == 4
     assert contract["controller"]["factorization"] == "P(region, action)"
     assert len(contract["semantic_action_spaces"]["system_prompt"]["actions"]) == 10
     assert contract["semantic_action_spaces"]["system_prompt"]["kind"] == "prompt"
     assert contract["reflection_prompt_template"] is None
     assert contract["controller_react_lm"]["configuration_source"] == "explicit"
     assert contract["manifestor_lm"]["configuration_source"] == "explicit"
+    assert contract["branch_history"] == {
+        "storage": "target_scoped_user_assistant_messages",
+        "direct_deepseek_native_delivery": "quoted_user_context",
+        "other_delivery": "provider_chat_messages",
+    }
 
     path = Path(ensure_reflection_run_contract(str(tmp_path), contract))
     assert path.name == "reflection-run-contract.json"
@@ -470,6 +478,39 @@ def test_three_role_run_contract_identifies_role_lm_configuration_without_creden
     assert contract["manifestor_lm"]["completion_kwargs"]["api_key"] == "<redacted>"
 
 
+def test_three_role_run_contract_normalizes_only_ephemeral_loopback_ports(tmp_path: Path) -> None:
+    """Resume across local ports while rejecting a different external endpoint.
+
+    Args:
+        tmp_path: Temporary run directory supplied by pytest.
+    """
+
+    def contract_for(api_base: str) -> dict[str, Any]:
+        """Build one otherwise-identical three-role contract.
+
+        Args:
+            api_base: Endpoint assigned to both runtime language models.
+
+        Returns:
+            Public reflection contract.
+        """
+        base_lm = LM("hosted_vllm/model", api_base=api_base)
+        manifestor_lm = LM("hosted_vllm/model", api_base=api_base, temperature=0.0)
+        strategy = ThreeRoleReflectionLM(base_lm, 2, manifestor_lm=manifestor_lm)
+        return strategy.run_contract({"sys": PROMPT})
+
+    first = contract_for("http://127.0.0.1:31001/v1")
+    resumed = contract_for("http://127.0.0.1:41999/v1")
+    external = contract_for("https://different-provider.test/v1")
+
+    assert first == resumed
+    assert first["controller_react_lm"]["completion_kwargs"]["api_base"] == "http://127.0.0.1/v1"
+    ensure_reflection_run_contract(str(tmp_path), first)
+    assert ensure_reflection_run_contract(str(tmp_path), resumed)
+    with pytest.raises(ValueError, match="different reflection strategy contract"):
+        ensure_reflection_run_contract(str(tmp_path), external)
+
+
 def test_three_role_run_contract_requires_identity_for_custom_lm() -> None:
     """Refuse resumable state when a custom callable has no stable configuration identity."""
     strat = ThreeRoleReflectionLM(ThreeRoleLM(DIRECT_REEXPRESS_REPLIES), 2)
@@ -501,12 +542,132 @@ def test_level2_selects_semantic_action_manifests_and_executes_one_direct_call()
     assert len(sampling["probs"]) == 70
     assert sampling["probs"]["reexpress@Rules/REPLACE_TEXT"] == pytest.approx(0.99)
     assert sampling["fallback"] is False
-    assert sampling["policy"] == "joint_region_action_v2"
-    assert sampling["sampling_policy"] == "full_distribution_uniform_mixture"
+    assert sampling["policy"] == "joint_region_action_v4"
+    assert sampling["sampling_policy"] == "positive_support_uniform_mixture"
     assert sampling["exploration_epsilon"] == pytest.approx(0.1)
     assert sampling["joint_sampling_probability"] == pytest.approx(sampling["sampled_probabilities"][0])
     assert sampling["joint_sampling_probability"] > 0
     assert record["controller_sampling"] == sampling
+
+
+def test_level2_uniform_random_controller_draws_once_from_the_complete_menu() -> None:
+    """Replace only Controller ranking with one seeded full-menu uniform draw."""
+    seed = 73
+    expected_rng = random.Random(seed)
+    expected_menu = build_controller_menu(
+        TEMPLATES["system_prompt"],
+        "sys",
+        EDIT_TOOL_SETS["broad"],
+        2,
+        rng=expected_rng,
+        max_menu=999,
+    )
+    expected_action = expected_rng.choice(expected_menu)
+    lm = ThreeRoleLM(list(DIRECT_REEXPRESS_REPLIES))
+    strat = ThreeRoleReflectionLM(
+        lm,
+        level=2,
+        controller_selection="uniform_random",
+        rng=random.Random(seed),
+        max_menu=999,
+        base_lm_run_identity={"test_lm": "ThreeRoleLM"},
+    )
+
+    proposal, _ = strat.reflect({"sys": PROMPT}, deepcopy(SYS_REFLECTIVE_DATASET), ["sys"])
+
+    assert len(expected_menu) == 70
+    assert expected_action.menu_id == "reexpress@Rules/REPLACE_TEXT"
+    assert strat.rng.getstate() == expected_rng.getstate()
+    assert lm.roles == ["manifestor", "react_v2"]
+    assert proposal.new_texts["sys"] != PROMPT
+    assert proposal.metadata["action_choice"] == expected_action.menu_id
+    assert proposal.metadata["action_operator"] == expected_action.edit_tool.value
+    assert proposal.metadata["action_target_section"] == expected_action.edit_target.section
+    sampling = proposal.metadata["controller_sampling"]
+    probability = 1.0 / len(expected_menu)
+    assert set(sampling["sampling_probs"]) == {choice.menu_id for choice in expected_menu}
+    assert all(value == pytest.approx(probability) for value in sampling["sampling_probs"].values())
+    assert sampling["sampled"] == [expected_action.menu_id]
+    assert sampling["sampled_probabilities"] == pytest.approx([probability])
+    assert sampling["sampling_policy"] == "uniform"
+    assert sampling["policy"] == "joint_region_action_uniform_v1"
+    assert sampling["joint_sampling_probability"] == pytest.approx(probability)
+
+
+def test_uniform_random_controller_preserves_target_scoped_branch_history() -> None:
+    """Keep Manifestor, ReAct V2, and user/assistant branch history unchanged."""
+    history = [
+        {"role": "assistant", "content": "<tool_call>this-parent-only</tool_call>"},
+        {
+            "role": "user",
+            "content": "Optimizer result: accepted; the branch now contains this edit. Edit target: sys:Rules.",
+        },
+    ]
+    lm = ThreeRoleLM(list(DIRECT_REEXPRESS_REPLIES))
+    strat = ThreeRoleReflectionLM(
+        lm,
+        level=2,
+        controller_selection="uniform_random",
+        rng=random.Random(73),
+        max_menu=999,
+        base_lm_run_identity={"test_lm": "ThreeRoleLM"},
+    )
+
+    proposal, _ = strat.reflect(
+        {"sys": PROMPT},
+        deepcopy(SYS_REFLECTIVE_DATASET),
+        ["sys"],
+        metadata={"branch_edit_history": history},
+    )
+
+    assert lm.roles == ["manifestor", "react_v2"]
+    assert lm.react_calls[0][1:3] == history
+    assert proposal.metadata["branch_history_length"] == len(history)
+
+
+def test_uniform_random_controller_policy_is_part_of_the_resume_contract(tmp_path: Path) -> None:
+    """Reject resume when only the Controller selection policy changes.
+
+    Args:
+        tmp_path: Temporary run directory supplied by pytest.
+    """
+    verbalized, _ = strategy(2)
+    uniform, _ = strategy(2, controller_selection="uniform_random")
+    verbalized_contract = verbalized.run_contract({"sys": PROMPT})
+    uniform_contract = uniform.run_contract({"sys": PROMPT})
+
+    assert uniform_contract["controller"] == {
+        "version": 1,
+        "factorization": "P(region, action)",
+        "candidates": "all cataloged region/action pairs",
+        "selection": "uniform_random",
+        "sampling": "uniform over all candidates",
+        "context": "none",
+        "distribution_failure": None,
+        "max_menu": 999,
+    }
+    assert verbalized_contract["controller"]["version"] == 4
+    ensure_reflection_run_contract(str(tmp_path), uniform_contract)
+    with pytest.raises(ValueError, match="different reflection strategy contract"):
+        ensure_reflection_run_contract(str(tmp_path), verbalized_contract)
+
+
+def test_controller_sees_omitted_sections_as_empty_without_rendering_them() -> None:
+    """Expose sparse section occupancy only to the Controller selection call."""
+    strat, lm = strategy(2)
+
+    strat.reflect({"sys": PROMPT}, deepcopy(SYS_REFLECTIVE_DATASET), ["sys"])
+
+    controller_prompt = next(prompt for prompt in lm.string_calls if "Choose edit actions that address" in prompt)
+    assert (
+        "An empty region has no target bytes: assign probability 0 to its DELETE_TEXT, REPLACE_TEXT, and "
+        "MOVE_TEXT choices. Judge its INSERT_TEXT choices by their semantic fit."
+    ) in controller_prompt
+    assert "## Role\nhelper" in controller_prompt
+    assert "## Rules\n- be nice\n- be brief" in controller_prompt
+    for section in ("Task", "Context", "Reasoning", "Examples", "Output Format"):
+        assert f"## {section}\n[EMPTY SECTION]" in controller_prompt
+        assert f"## {section}" not in PROMPT
 
 
 def test_level2_minimal_basis_uses_a_deeper_delete_insert_trajectory() -> None:
@@ -784,6 +945,24 @@ def test_controller_uniform_fallback_provenance_is_persisted() -> None:
     assert proposal.metadata["attempt_records"][0]["controller_sampling"] == sampling
 
 
+def test_level2_drops_after_two_incomplete_controller_distributions() -> None:
+    """Do not invent a region/action pair when the Controller never scores the menu."""
+    lm = FallbackControllerLM([])
+    strat, _ = strategy(2, lm=lm)
+
+    proposal, _ = strat.reflect({"sys": PROMPT}, deepcopy(SYS_REFLECTIVE_DATASET), ["sys"])
+
+    assert proposal.new_texts == {}
+    assert lm.roles == ["controller", "controller"]
+    assert proposal.metadata["react_v2_dropped"] == ["sys"]
+    assert proposal.metadata["controller_failures"] == [
+        {
+            "component": "sys",
+            "error": "Controller did not return a complete action distribution after two attempts.",
+        }
+    ]
+
+
 def test_reflection_metadata_keeps_action_and_react_diagnostics() -> None:
     """Preserve the documented metadata contract and ReAct V2 provenance."""
     strat, _ = strategy(2)
@@ -932,3 +1111,27 @@ def test_default_strategy_rng_binds_to_engine_sampling() -> None:
     strat.bind_rng(engine_rng)
 
     assert strat.rng is engine_rng
+
+
+@pytest.mark.parametrize("controller_selection", ["verbalized", "uniform_random"])
+def test_strategy_rng_checkpoint_replays_controller_choices(controller_selection: str) -> None:
+    """Resume both ReAct V2 Controller policies at the exact next random choice."""
+    uninterrupted = ThreeRoleReflectionLM(
+        ThreeRoleLM([]),
+        level=2,
+        controller_selection=controller_selection,
+        rng=random.Random(31),
+    )
+    uninterrupted.rng.choices(range(50), k=4)
+    checkpoint = uninterrupted.get_state()
+    expected = uninterrupted.rng.choices(range(50), k=20)
+
+    resumed = ThreeRoleReflectionLM(
+        ThreeRoleLM([]),
+        level=2,
+        controller_selection=controller_selection,
+        rng=random.Random(999),
+    )
+    resumed.set_state(checkpoint)
+
+    assert resumed.rng.choices(range(50), k=20) == expected

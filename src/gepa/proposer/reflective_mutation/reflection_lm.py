@@ -14,11 +14,15 @@ from __future__ import annotations
 
 import random
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Protocol, cast, runtime_checkable
 
+from gepa.lm import LMProviderError, ProviderIdentityMismatchError
 from gepa.proposer.reflective_mutation.base import LanguageModel
+from gepa.response_journal import ResponseJournalError
 from gepa.strategies.action_space import ActionSelector, VerbalizedActionSelector
+from gepa.strategies.document_template import MalformedDocumentError
 from gepa.strategies.instruction_proposal import InstructionProposalSignature
 from gepa.strategies.intervention import (
     StatelessActionConstraint,
@@ -171,6 +175,60 @@ class StatelessReflectionLM:
         """
         self.rng = rng
 
+    def get_batch_retry_state(self) -> dict[str, Any]:
+        """Snapshot mutable selection and journal state before batch reflection.
+
+        Returns:
+            RNG state, any verbalized-selector history, and response-journal
+            cursors exposed by the reflection and selector language models.
+        """
+        state: dict[str, Any] = {
+            "rng_state": self.rng.getstate(),
+        }
+        lm_cursor = getattr(self.lm, "response_journal_cursor_state", None)
+        if callable(lm_cursor):
+            state["reflection_lm_cursor"] = lm_cursor()
+        selector = self.action_selector
+        if isinstance(selector, VerbalizedActionSelector):
+            state["selector_history"] = deepcopy(selector.history)
+            selector_cursor = getattr(selector.lm, "response_journal_cursor_state", None)
+            if callable(selector_cursor):
+                state["selector_lm_cursor"] = selector_cursor()
+        return state
+
+    def set_batch_retry_state(self, state: Mapping[str, Any]) -> None:
+        """Restore mutable selection and journal state before per-task fallback.
+
+        Args:
+            state: Snapshot returned by :meth:`get_batch_retry_state`.
+
+        Raises:
+            TypeError: The RNG or selector-history snapshot is malformed, or
+                an LM rejects its journal cursor snapshot.
+        """
+        rng_state = state.get("rng_state")
+        if not isinstance(rng_state, tuple):
+            raise TypeError("StatelessReflectionLM retry rng_state must be a tuple.")
+        self.rng.setstate(rng_state)
+        reflection_cursor = state.get("reflection_lm_cursor")
+        if reflection_cursor is not None:
+            restore = getattr(self.lm, "restore_response_journal_cursor_state", None)
+            if not callable(restore):
+                raise TypeError("Reflection LM cannot restore its response-journal cursor.")
+            restore(reflection_cursor)
+        selector = self.action_selector
+        if isinstance(selector, VerbalizedActionSelector):
+            selector_history = state.get("selector_history")
+            if not isinstance(selector_history, list):
+                raise TypeError("StatelessReflectionLM retry selector_history must be a list.")
+            selector.history = deepcopy(selector_history)
+            selector_cursor = state.get("selector_lm_cursor")
+            if selector_cursor is not None:
+                restore = getattr(selector.lm, "restore_response_journal_cursor_state", None)
+                if not callable(restore):
+                    raise TypeError("Action-selector LM cannot restore its response-journal cursor.")
+                restore(selector_cursor)
+
     def _log(self, message: str) -> None:
         if self.logger is not None:
             self.logger.log(message)
@@ -258,13 +316,36 @@ class StatelessReflectionLM:
         messages = [{"role": "user", "content": prompt}] if isinstance(prompt, str) else prompt
         return prompt, messages
 
-    def _batch_complete(self, prompts: list[Any], messages_list: list[list[dict[str, Any]]]) -> list[str]:
+    def _batch_complete(
+        self,
+        prompts: list[Any],
+        messages_list: list[list[dict[str, Any]]],
+    ) -> list[str | None]:
         """Issue the reflection completions, batched when possible.
 
         A single prompt uses the plain completion path, so N=1 is byte-identical
         to the historical single reflection.  When the LM exposes
         ``batch_complete`` (``litellm.batch_completion``), all prompts go out as
-        one concurrent request; a custom callable without it runs sequentially.
+        one concurrent request. If that transport fails, the already-rendered
+        prompts run individually without selecting new semantic actions. A
+        recoverable individual failure leaves only its aligned proposal empty.
+
+        Args:
+            prompts: Provider inputs accepted by the reflection LM callable.
+            messages_list: Normalized message form of each prompt for a native
+                batch-completion interface.
+
+        Returns:
+            Job-aligned completion text, with ``None`` for a recoverable
+            individual failure.
+
+        Raises:
+            LMProviderError: The configured completion provider fails a batch
+                or individual request.
+            ProviderIdentityMismatchError: A live or replayed response changes
+                the provider identity pinned at launch.
+            ResponseJournalError: A replay slot is corrupt or belongs to a
+                different scientific request.
         """
         if not prompts:
             return []
@@ -272,8 +353,28 @@ class StatelessReflectionLM:
             return [self.lm(prompts[0])]
         batch_complete = getattr(self.lm, "batch_complete", None)
         if batch_complete is not None:
-            return list(batch_complete(messages_list))
-        return [self.lm(prompt) for prompt in prompts]
+            try:
+                return list(batch_complete(messages_list))
+            except (ProviderIdentityMismatchError, ResponseJournalError):
+                raise
+            except LMProviderError as exc:
+                self._log(
+                    f"Batched reflection completion failed ({exc}); retrying its selected actions individually."
+                )
+            except Exception as exc:
+                self._log(
+                    f"Batched reflection completion failed ({exc}); retrying its selected actions individually."
+                )
+        outputs: list[str | None] = []
+        for index, prompt in enumerate(prompts):
+            try:
+                outputs.append(self.lm(prompt))
+            except (LMProviderError, ProviderIdentityMismatchError, ResponseJournalError):
+                raise
+            except Exception as exc:
+                self._log(f"Individual reflection completion {index} failed: {exc}")
+                outputs.append(None)
+        return outputs
 
     def _select_actions_batch(self, jobs: list[ReflectionJob]) -> list[StatelessActionConstraint | None]:
         """Choose all jobs' actions in one selector call (default cost tradeoff).
@@ -424,15 +525,23 @@ class StatelessReflectionLM:
 
         proposals = [ReflectionProposal(new_texts={}, prompts={}, raw_lm_outputs={}) for _ in jobs]
         for (job_idx, name, prompt, _messages), raw_output in zip(rendered, raw_outputs, strict=True):
+            if raw_output is None:
+                continue
             new_instruction = InstructionProposalSignature.output_extractor(raw_output.strip())["new_instruction"]
             action = actions[job_idx]
             if action is not None:
                 parent = jobs[job_idx][0][name]
-                new_instruction = action.document_template.replace_section_body(
-                    parent,
-                    action.target_section,
-                    new_instruction,
-                )
+                try:
+                    new_instruction = action.document_template.replace_section_body(
+                        parent,
+                        action.target_section,
+                        new_instruction,
+                    )
+                except MalformedDocumentError as exc:
+                    self._log(
+                        f"Action-conditioned reflection for component '{name}' returned an invalid section body: {exc}"
+                    )
+                    continue
             proposals[job_idx].new_texts[name] = new_instruction
             proposals[job_idx].prompts[name] = prompt
             proposals[job_idx].raw_lm_outputs[name] = raw_output

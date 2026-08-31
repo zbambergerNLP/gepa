@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import difflib
 from collections import defaultdict
+from collections.abc import Mapping
+from copy import deepcopy
 from typing import Any
 
 from gepa.core.callbacks import (
@@ -38,8 +40,13 @@ class ActionDiversityCallback:
         print(tracker.summary())
     """
 
-    def __init__(self) -> None:
-        """Initialize empty per-action, per-iteration, and outcome metrics."""
+    def __init__(self, selector: Any | None = None) -> None:
+        """Initialize per-action, per-iteration, and outcome metrics.
+
+        Args:
+            selector: Optional action selector whose verbalized distribution
+                history must survive optimizer resume with these metrics.
+        """
         self.action_proposal_counts: dict[str, int] = defaultdict(int)
         self.action_acceptance_counts: dict[str, int] = defaultdict(int)
         self.action_rejection_counts: dict[str, int] = defaultdict(int)
@@ -49,6 +56,89 @@ class ActionDiversityCallback:
 
         self._iteration_texts: dict[int, list[str]] = defaultdict(list)
         self._current_iteration: int = -1
+        self.selector = selector
+
+    def get_state(self) -> dict[str, Any]:
+        """Return a durable snapshot of all accumulated mechanism evidence.
+
+        Returns:
+            Counts, score deltas, proposal texts, per-iteration texts, current
+            iteration, and optional verbalized-selector history.
+        """
+        selector_history = None
+        if self.selector is not None and hasattr(self.selector, "history"):
+            selector_history = deepcopy(self.selector.history)
+        return {
+            "action_proposal_counts": dict(self.action_proposal_counts),
+            "action_acceptance_counts": dict(self.action_acceptance_counts),
+            "action_rejection_counts": dict(self.action_rejection_counts),
+            "action_score_deltas": {key: list(values) for key, values in self.action_score_deltas.items()},
+            "action_texts": {key: list(values) for key, values in self.action_texts.items()},
+            "iteration_texts": {key: list(values) for key, values in self._iteration_texts.items()},
+            "current_iteration": self._current_iteration,
+            "selector_history": selector_history,
+        }
+
+    def set_state(self, state: Mapping[str, Any]) -> None:
+        """Restore mechanism evidence from a durable optimizer checkpoint.
+
+        Args:
+            state: Snapshot previously returned by :meth:`get_state`.
+
+        Raises:
+            TypeError: A persisted collection or selector history has an
+                incompatible type.
+        """
+        mapping_fields = {
+            "action_proposal_counts",
+            "action_acceptance_counts",
+            "action_rejection_counts",
+            "action_score_deltas",
+            "action_texts",
+            "iteration_texts",
+        }
+        for field_name in mapping_fields:
+            if not isinstance(state.get(field_name, {}), Mapping):
+                raise TypeError(f"Persisted {field_name} must be a mapping")
+
+        self.action_proposal_counts = defaultdict(
+            int,
+            {str(key): int(value) for key, value in state.get("action_proposal_counts", {}).items()},
+        )
+        self.action_acceptance_counts = defaultdict(
+            int,
+            {str(key): int(value) for key, value in state.get("action_acceptance_counts", {}).items()},
+        )
+        self.action_rejection_counts = defaultdict(
+            int,
+            {str(key): int(value) for key, value in state.get("action_rejection_counts", {}).items()},
+        )
+        self.action_score_deltas = defaultdict(
+            list,
+            {
+                str(key): [float(value) for value in values]
+                for key, values in state.get("action_score_deltas", {}).items()
+            },
+        )
+        self.action_texts = defaultdict(
+            list,
+            {str(key): [str(value) for value in values] for key, values in state.get("action_texts", {}).items()},
+        )
+        self._iteration_texts = defaultdict(
+            list,
+            {
+                int(key): [str(value) for value in values]
+                for key, values in state.get("iteration_texts", {}).items()
+            },
+        )
+        self._current_iteration = int(state.get("current_iteration", -1))
+
+        selector_history = state.get("selector_history")
+        if selector_history is not None:
+            if not isinstance(selector_history, list):
+                raise TypeError("Persisted selector_history must be a list or None")
+            if self.selector is not None and hasattr(self.selector, "history"):
+                self.selector.history = deepcopy(selector_history)
 
     @staticmethod
     def _action_from_event(event: Any) -> str | None:

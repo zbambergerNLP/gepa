@@ -3,9 +3,10 @@
 
 import json
 import os
+import random
 import traceback
 from collections.abc import Mapping, Sequence
-from typing import Any, Generic
+from typing import Any, Generic, cast
 
 from gepa.core.adapter import (
     DataInst,
@@ -50,7 +51,6 @@ from gepa.logging.logger import LoggerProtocol
 from gepa.logging.utils import log_detailed_metrics_after_discovering_new_program
 from gepa.proposer.base import CandidateProposal
 from gepa.proposer.merge import MergeProposer
-from gepa.proposer.reflective_mutation.react_v2_proposer import ReActV2ContextError
 from gepa.proposer.reflective_mutation.reflective_mutation import ReflectiveMutationProposer
 from gepa.strategies.acceptance import AcceptanceCriterion, ImprovementOrEqualAcceptance, StrictImprovementAcceptance
 from gepa.strategies.eval_policy import EvaluationPolicy, FullEvaluationPolicy
@@ -164,7 +164,36 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
         selection_strategy: SelectionStrategy | None = None,
         # Evaluation caching (stored in state, passed here for initialization)
         evaluation_cache: EvaluationCache[RolloutOutput, DataId] | None = None,
+        # Shared RNG used by every stochastic optimizer strategy.
+        rng: random.Random | None = None,
     ):
+        """Configure one resumable GEPA optimization engine.
+
+        Args:
+            adapter: Task-specific rollout and feedback adapter.
+            run_dir: Optional directory for durable optimizer state.
+            valset: Validation examples or their loader.
+            seed_candidate: Initial instruction for every optimized component.
+            perfect_score: Optional score at which a training item is skipped.
+            seed: Experiment seed used when no RNG is supplied.
+            reflective_proposer: Reflective candidate-mutation strategy.
+            merge_proposer: Optional candidate-merge strategy.
+            frontier_type: Pareto-frontier granularity.
+            logger: Optimization logger.
+            experiment_tracker: Metric and artifact tracker.
+            callbacks: Optional lifecycle callbacks.
+            track_best_outputs: Whether to retain outputs from the best candidate.
+            display_progress_bar: Whether to render interactive progress.
+            raise_on_exception: Whether rollout exceptions abort optimization.
+            use_cloudpickle: Whether durable state uses cloudpickle.
+            write_agent_state: Whether adapter agent state is persisted.
+            stop_callback: Optional external stopping condition.
+            val_evaluation_policy: Validation-evaluation strategy.
+            acceptance_criterion: Reflective-proposal acceptance policy.
+            selection_strategy: Reflective-proposal selection policy.
+            evaluation_cache: Optional shared rollout cache.
+            rng: Shared stochastic state restored across exact resume.
+        """
         self.logger = logger
         self.run_dir = run_dir
         self.callbacks = callbacks
@@ -197,6 +226,7 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
 
         self.perfect_score = perfect_score
         self.seed = seed
+        self.rng = rng if rng is not None else random.Random(seed)
         self.experiment_tracker = experiment_tracker
 
         self.reflective_proposer = reflective_proposer
@@ -238,6 +268,139 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
         setter = getattr(self.adapter, "set_adapter_state", None)
         if setter is not None:
             setter(state.adapter_state)
+
+    def _sync_callback_states_to_state(self, state: GEPAState) -> None:
+        """Snapshot explicitly stateful callbacks before a durable save.
+
+        Callback positions and concrete types form stable keys, allowing more
+        than one callback of the same type without merging their observations.
+        Stateless callbacks are ignored.
+
+        Args:
+            state: Optimizer state that receives callback snapshots.
+
+        Raises:
+            TypeError: A callback's ``get_state`` method does not return a
+                mapping.
+        """
+        callback_states: dict[str, Any] = {}
+        for index, callback in enumerate(self.callbacks or []):
+            getter = getattr(callback, "get_state", None)
+            if getter is None:
+                continue
+            callback_state = getter()
+            if not isinstance(callback_state, Mapping):
+                raise TypeError(f"{type(callback).__name__}.get_state() must return a mapping")
+            key = f"{index}:{type(callback).__module__}.{type(callback).__qualname__}"
+            callback_states[key] = dict(callback_state)
+        state.callback_states = callback_states
+
+    def _sync_state_to_callbacks(self, state: GEPAState) -> None:
+        """Restore persisted observations into matching stateful callbacks.
+
+        Args:
+            state: Loaded optimizer state containing callback snapshots.
+
+        Raises:
+            TypeError: Persisted callback state exists for a callback without a
+                matching ``set_state`` method.
+        """
+        for index, callback in enumerate(self.callbacks or []):
+            key = f"{index}:{type(callback).__module__}.{type(callback).__qualname__}"
+            if key not in state.callback_states:
+                continue
+            setter = getattr(callback, "set_state", None)
+            if setter is None:
+                raise TypeError(f"{type(callback).__name__} has persisted state but no set_state() method")
+            setter(state.callback_states[key])
+
+    def _sync_batch_sampler_to_state(self, state: GEPAState) -> None:
+        """Snapshot a stateful minibatch sampler before a durable save.
+
+        Args:
+            state: Optimizer state that receives the sampler snapshot.
+
+        Raises:
+            TypeError: The sampler's ``get_state`` method does not return a
+                mapping.
+        """
+        sampler = self.reflective_proposer.batch_sampler
+        getter = getattr(sampler, "get_state", None)
+        if getter is None:
+            state.batch_sampler_state = None
+            return
+        sampler_state = getter()
+        if not isinstance(sampler_state, Mapping):
+            raise TypeError(f"{type(sampler).__name__}.get_state() must return a mapping")
+        state.batch_sampler_state = dict(sampler_state)
+
+    def _sync_state_to_batch_sampler(self, state: GEPAState) -> None:
+        """Restore a persisted minibatch-sampler permutation and cursor.
+
+        Args:
+            state: Loaded optimizer state containing an optional sampler
+                snapshot.
+
+        Raises:
+            ValueError: A stateful sampler has no persisted snapshot.
+            TypeError: Persisted sampler state exists without a matching
+                ``set_state`` method.
+        """
+        sampler = self.reflective_proposer.batch_sampler
+        setter = getattr(sampler, "set_state", None)
+        if state.batch_sampler_state is None:
+            if setter is not None:
+                raise ValueError(
+                    "This persisted GEPA state has no minibatch-sampler checkpoint and cannot resume exactly."
+                )
+            return
+        if setter is None:
+            raise TypeError(f"{type(sampler).__name__} has persisted state but no set_state() method")
+        setter(state.batch_sampler_state)
+
+    def _sync_reflection_lm_to_state(self, state: GEPAState) -> None:
+        """Snapshot a reflection strategy with private runtime state.
+
+        Args:
+            state: Optimizer state that receives the reflection snapshot.
+
+        Raises:
+            TypeError: The strategy's ``get_state`` method does not return a
+                mapping.
+        """
+        reflection_lm = self.reflective_proposer._reflection_lm
+        getter = getattr(reflection_lm, "get_state", None)
+        if getter is None:
+            state.reflection_lm_state = None
+            return
+        reflection_state = getter()
+        if not isinstance(reflection_state, Mapping):
+            raise TypeError(f"{type(reflection_lm).__name__}.get_state() must return a mapping")
+        state.reflection_lm_state = dict(reflection_state)
+
+    def _sync_state_to_reflection_lm(self, state: GEPAState) -> None:
+        """Restore a reflection strategy's private runtime state.
+
+        Args:
+            state: Loaded optimizer state containing an optional reflection
+                snapshot.
+
+        Raises:
+            ValueError: A stateful reflection strategy has no persisted state.
+            TypeError: Persisted state exists without a matching ``set_state``
+                method.
+        """
+        reflection_lm = self.reflective_proposer._reflection_lm
+        setter = getattr(reflection_lm, "set_state", None)
+        if state.reflection_lm_state is None:
+            if setter is not None:
+                raise ValueError(
+                    "This persisted GEPA state has no reflection-strategy checkpoint and cannot resume exactly."
+                )
+            return
+        if setter is None:
+            raise TypeError(f"{type(reflection_lm).__name__} has persisted state but no set_state() method")
+        setter(state.reflection_lm_state)
 
     def _write_agent_iteration_files(
         self,
@@ -792,8 +955,6 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
         merge if one is due, propose and gate a reflective batch, and notify the
         iteration callbacks. Per-iteration exceptions are reported through
         ``on_error`` and re-raised only when ``raise_on_exception`` is set.
-        ReAct V2 context overflows are always explicit failures because retrying
-        without changing the branch history cannot recover.
 
         Returns:
             The final optimization state, after the closing save and the
@@ -801,7 +962,6 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
 
         Raises:
             ImportError: If the progress bar is enabled but ``tqdm`` is missing.
-            ReActV2ContextError: Branch-local ReAct history exceeds its budget.
             ValueError: If no valset was provided.
         """
         # Check tqdm availability if progress bar is enabled
@@ -896,15 +1056,16 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
             ),
         )
 
-        # Evaluate seed candidate on valset (after on_optimization_start callback).
-        # Policies may narrow the seed evaluation via the optional get_seed_eval_batch
-        # hook; the state does not exist yet, so get_eval_batch cannot be used here.
-        seed_batch_fn = getattr(self.val_evaluation_policy, "get_seed_eval_batch", None)
-        seed_val_ids = list(seed_batch_fn(valset)) if seed_batch_fn is not None else list(valset.all_ids())
-        seed_valset_evaluation = valset_evaluator(self.seed_candidate, seed_val_ids)
-
-        # Initialize state with pre-computed seed evaluation
         resumed = self.run_dir is not None and os.path.exists(os.path.join(self.run_dir, "gepa_state.bin"))
+        seed_valset_evaluation = None
+        if not resumed:
+            # Policies may narrow the seed evaluation via the optional
+            # get_seed_eval_batch hook. A resume uses its persisted scores and
+            # avoids repeating a potentially expensive full validation pass.
+            seed_batch_fn = getattr(self.val_evaluation_policy, "get_seed_eval_batch", None)
+            seed_val_ids = list(seed_batch_fn(valset)) if seed_batch_fn is not None else list(valset.all_ids())
+            seed_valset_evaluation = valset_evaluator(self.seed_candidate, seed_val_ids)
+
         state = initialize_gepa_state(
             run_dir=self.run_dir,
             logger=self.logger,
@@ -914,10 +1075,24 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
             frontier_type=self.frontier_type,
             evaluation_cache=self._initial_evaluation_cache,
         )
+        if resumed:
+            if state.rng_state is None:
+                raise ValueError(
+                    "This persisted GEPA state predates exact RNG checkpoints and cannot be resumed reproducibly. "
+                    "Start a new run directory."
+                )
+            self.rng.setstate(cast(tuple[Any, ...], state.rng_state))
+            self._sync_state_to_batch_sampler(state)
+            self._sync_state_to_reflection_lm(state)
+            self._sync_state_to_callbacks(state)
+        else:
+            state.rng_state = self.rng.getstate()
+
         # Fresh runs: record the seed valset eval in the cache. On resume the seed scores already
         # live in state; writing the re-computed seed eval would desynchronize cache from
         # prog_candidate_val_subscores.
         if not resumed and state.evaluation_cache is not None:
+            assert seed_valset_evaluation is not None
             seed_ids = list(seed_valset_evaluation.scores_by_val_id)
             seed_obj = (
                 [seed_valset_evaluation.objective_scores_by_val_id[eid] for eid in seed_ids]
@@ -935,7 +1110,9 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
 
         # Seed uses the reserved iteration id — outputs/trajectories go under
         # iterations/seed/ alongside subsequent loop iterations.
-        self._write_agent_iteration_files(SEED_ITERATION_ID, seed_valset_evaluation)
+        if not resumed:
+            assert seed_valset_evaluation is not None
+            self._write_agent_iteration_files(SEED_ITERATION_ID, seed_valset_evaluation)
 
         # Restore adapter state from persisted state (only has effect on resume)
         self._sync_state_to_adapter(state)
@@ -1037,6 +1214,10 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
             evals_before_iteration = state.total_num_evals
             try:
                 self._sync_adapter_state_to_state(state)
+                self._sync_batch_sampler_to_state(state)
+                self._sync_reflection_lm_to_state(state)
+                self._sync_callback_states_to_state(state)
+                state.rng_state = self.rng.getstate()
                 state.save(
                     self.run_dir,
                     use_cloudpickle=self.use_cloudpickle,
@@ -1166,7 +1347,6 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
                 proposal_accepted = self._run_reflective_batch(proposals, state)
 
             except Exception as e:
-                fatal_context_error = isinstance(e, ReActV2ContextError)
                 self.logger.log(f"Iteration {state.i + 1}: Exception during optimization: {e}")
                 self.logger.log(traceback.format_exc())
                 made_progress = state.total_num_evals > evals_before_iteration
@@ -1177,12 +1357,10 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
                     ErrorEvent(
                         iteration=state.i + 1,
                         exception=e,
-                        will_continue=(
-                            not self.raise_on_exception and made_progress and not fatal_context_error
-                        ),
+                        will_continue=not self.raise_on_exception and made_progress,
                     ),
                 )
-                if self.raise_on_exception or fatal_context_error or not made_progress:
+                if self.raise_on_exception or not made_progress:
                     raise
                 continue
             finally:
@@ -1204,6 +1382,10 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
             progress_bar.close()
 
         self._sync_adapter_state_to_state(state)
+        self._sync_batch_sampler_to_state(state)
+        self._sync_reflection_lm_to_state(state)
+        self._sync_callback_states_to_state(state)
+        state.rng_state = self.rng.getstate()
         state.save(
             self.run_dir,
             use_cloudpickle=self.use_cloudpickle,

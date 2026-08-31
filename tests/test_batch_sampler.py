@@ -65,3 +65,33 @@ def test_extra_calls_do_not_perturb_later_iterations():
         assert multi.next_minibatch_ids(loader_multi, state) == expected
         for _ in range(4):
             multi.next_minibatch_ids(loader_multi, state)
+
+
+def test_checkpoint_resume_matches_uninterrupted_mid_epoch_sequence() -> None:
+    """Restoring both RNG and sampler state preserves every later minibatch."""
+    loader = ListDataLoader(list("abcdefghijk"))
+    uninterrupted_rng = random.Random(23)
+    uninterrupted = EpochShuffledBatchSampler(minibatch_size=3, rng=uninterrupted_rng)
+    state = SimpleNamespace(i=0)
+    uninterrupted.next_minibatch_ids(loader, state)
+    state.i = 1
+    uninterrupted.next_minibatch_ids(loader, state)
+
+    rng_checkpoint = uninterrupted_rng.getstate()
+    sampler_checkpoint = uninterrupted.get_state()
+    expected = []
+    for iteration in range(2, 14):
+        state.i = iteration
+        expected.append(uninterrupted.next_minibatch_ids(loader, state))
+
+    resumed_rng = random.Random(999)
+    resumed_rng.setstate(rng_checkpoint)
+    resumed = EpochShuffledBatchSampler(minibatch_size=3, rng=resumed_rng)
+    resumed.set_state(sampler_checkpoint)
+    actual = []
+    for iteration in range(2, 14):
+        state.i = iteration
+        actual.append(resumed.next_minibatch_ids(loader, state))
+
+    assert actual == expected
+    assert resumed_rng.getstate() == uninterrupted_rng.getstate()

@@ -5,7 +5,9 @@ import os
 import random
 import re
 import string
+import unicodedata
 from collections import Counter
+from copy import deepcopy
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import distribution as package_distribution
 from importlib.metadata import version as package_version
@@ -17,7 +19,13 @@ try:
 except ImportError:
     dspy = None  # type: ignore[assignment]
 
-from examples.common.experiment_models import EXPERIMENT_NUM_RETRIES, QWEN3_8_27B_MODEL, experiment_decoding
+from examples.common.experiment_models import (
+    EXPERIMENT_NUM_RETRIES,
+    GLM_5_3_FLASH_MODEL,
+    QWEN3_8_27B_MODEL,
+    experiment_decoding,
+    experiment_request_overrides,
+)
 from examples.common.wikipedia import WikipediaPassage, WikipediaRetriever
 
 DEFAULT_DATA_PATH = os.path.join(
@@ -29,6 +37,64 @@ DEFAULT_DATA_PATH = os.path.join(
 FINAL_RESPONSE_MARKER = "Final Response:"
 HOTPOTQA_DSPY_VERSION = "2.6.23"
 HOTPOTQA_DSPY_COMMIT = "62dc3b634d7dc0c4889abcf905cb4c391ea6b396"
+HOTPOTQA_HF_REVISION = "1908d6afbbead072334abe2965f91bd2709910ab"
+HOTPOTQA_SCIENTIFIC_SPLIT_SHA256 = {
+    "train": "0287a62f31caa939df13d9e176436293a5c071164728bcb3cfcbf8dd40a7918e",
+    "val": "c6d794b172724eb87e8087d671b74e94725040b79c9a63980cb45dcb53146408",
+    "test": "55cd1c7a999476ea4c7ec67f964ad4fa0ae662a2b9f7ade59c64108e659add31",
+}
+HOTPOTQA_SCIENTIFIC_REQUEST_SEED = 0
+
+
+if dspy is not None:
+    class _HotPotQAChatAdapter(dspy.ChatAdapter):
+        """Parse artifact fields after repairing one observed marker near-miss."""
+
+        def parse(self, signature: type, completion: str | None) -> dict[str, object]:
+            """Repair missing trailing hashes in exact output-field headers.
+
+            Qwen occasionally emits ``[[ ## summary ]]`` while otherwise
+            following DSPy's protocol exactly. Only a whole-line header for an
+            expected output field or ``completed`` is normalized; content and
+            canonical headers remain unchanged before the pinned parser runs.
+
+            Args:
+                signature: DSPy signature containing the expected output fields.
+                completion: Raw assistant completion to parse, or ``None`` when
+                    the provider returns no text.
+
+            Returns:
+                Parsed output fields produced by the pinned DSPy ChatAdapter.
+
+            Raises:
+                ValueError: The provider returns no completion text or the
+                    completion remains invalid after the narrow marker repair.
+            """
+            if completion is None:
+                raise ValueError(
+                    "Failed to parse response as per signature: provider returned no completion text."
+                )
+            try:
+                return super().parse(signature, completion)
+            except ValueError:
+                expected_headers = {*signature.output_fields, "completed"}
+                normalized_lines = []
+                repaired = False
+                for line in completion.splitlines():
+                    stripped = line.strip()
+                    match = re.fullmatch(r"\[\[ ## (\w+) \]\]", stripped)
+                    if match is not None and match.group(1) in expected_headers:
+                        indentation = line[: len(line) - len(line.lstrip())]
+                        line = f"{indentation}[[ ## {match.group(1)} ## ]]"
+                        repaired = True
+                    normalized_lines.append(line)
+                if not repaired:
+                    raise
+                normalized_completion = "\n".join(normalized_lines)
+                return super().parse(signature, normalized_completion)
+
+else:
+    _HotPotQAChatAdapter = None
 
 
 def _render_passages(passages: list[WikipediaPassage]) -> list[str]:
@@ -85,12 +151,43 @@ def validate_hotpotqa_dspy_runtime() -> tuple[str, str]:
     return installed_version, installed_commit
 
 
-def build_hotpotqa_task_lm(model: str, api_base: str | None) -> object:
+def resolve_hotpotqa_lm_kwargs(
+    model: str,
+    api_base: str | None,
+) -> dict[str, object]:
+    """Resolve the fixed HotPotQA scientific request settings.
+
+    Args:
+        model: Exact LiteLLM runtime model identifier.
+        api_base: Optional role-specific API endpoint.
+
+    Returns:
+        Independent LM keyword arguments for the requested local runtime.
+    """
+    kwargs: dict[str, object] = {
+        "num_retries": EXPERIMENT_NUM_RETRIES,
+        **experiment_decoding(model),
+        **experiment_request_overrides(model),
+    }
+    if model in {QWEN3_8_27B_MODEL, GLM_5_3_FLASH_MODEL}:
+        kwargs["seed"] = HOTPOTQA_SCIENTIFIC_REQUEST_SEED
+    if api_base is not None:
+        kwargs["api_base"] = api_base
+    return kwargs
+
+
+def build_hotpotqa_task_lm(
+    model: str,
+    api_base: str | None,
+    lm_kwargs: dict[str, object] | None = None,
+) -> object:
     """Build the pinned DSPy task-model client used by HotPotQA.
 
     Args:
         model: LiteLLM model identifier.
         api_base: Optional solver API endpoint.
+        lm_kwargs: Optional fully resolved request settings. When omitted, the
+            scientific profile is used for backward-compatible direct calls.
 
     Returns:
         DSPy language-model client configured with the experiment's fixed
@@ -102,12 +199,12 @@ def build_hotpotqa_task_lm(model: str, api_base: str | None) -> object:
     """
     validate_hotpotqa_dspy_runtime()
 
-    kwargs: dict = {
-        "num_retries": EXPERIMENT_NUM_RETRIES,
-        **experiment_decoding(model),
-    }
-    if api_base is not None:
-        kwargs["api_base"] = api_base
+    if lm_kwargs is None:
+        kwargs = resolve_hotpotqa_lm_kwargs(model, api_base)
+    else:
+        kwargs = deepcopy(lm_kwargs)
+    dspy.settings.configure(disable_history=True)
+    kwargs["cache_in_memory"] = False
     return dspy.LM(model=model, **kwargs)
 
 
@@ -149,20 +246,23 @@ def _call_chain_of_thought(
     predictor_signature = dspy.ensure_signature(signature).with_instructions(instructions)
     predictor = dspy.ChainOfThought(predictor_signature)
     predictor.set_lm(task_lm)
-    with dspy.context(adapter=dspy.ChatAdapter()):
+    assert _HotPotQAChatAdapter is not None
+    with dspy.context(adapter=_HotPotQAChatAdapter()):
         prediction = predictor(**inputs)
     return str(prediction.reasoning), str(getattr(prediction, output_field))
 
 
 def normalize_answer(text: str) -> str:
-    """Apply the official HotPotQA answer normalization.
+    """Apply the pinned DSPy artifact's answer normalization.
 
     Args:
         text: Prediction or reference answer.
 
     Returns:
-        Lowercase text without punctuation, articles, or repeated whitespace.
+        NFD-normalized lowercase text without punctuation, articles, or
+        repeated whitespace.
     """
+    text = unicodedata.normalize("NFD", text)
     text = text.lower()
     text = "".join(ch for ch in text if ch not in set(string.punctuation))
     text = re.sub(r"\b(a|an|the)\b", " ", text)
@@ -170,7 +270,7 @@ def normalize_answer(text: str) -> str:
 
 
 def f1_score(prediction: str, gold: str) -> float:
-    """Compute the official token-overlap F1 score.
+    """Compute the pinned DSPy artifact's ordinary token-overlap F1.
 
     Args:
         prediction: Model answer.
@@ -181,16 +281,8 @@ def f1_score(prediction: str, gold: str) -> float:
     """
     pred = normalize_answer(prediction)
     truth = normalize_answer(gold)
-    if not truth:
-        return 0.0
-    if pred in ("yes", "no", "noanswer") and pred != truth:
-        return 0.0
-    if truth in ("yes", "no", "noanswer") and pred != truth:
-        return 0.0
     pred_tokens = pred.split()
     truth_tokens = truth.split()
-    if not pred_tokens:
-        return 0.0
     common = Counter(pred_tokens) & Counter(truth_tokens)
     num_same = sum(common.values())
     if num_same == 0:
@@ -216,7 +308,13 @@ def _extract_final_response(output: str) -> str:
     return output.strip()
 
 
-def _call_lm(system: str, user: str, model: str, api_base: str | None) -> str:
+def _call_lm(
+    system: str,
+    user: str,
+    model: str,
+    api_base: str | None,
+    lm_kwargs: dict[str, object] | None = None,
+) -> str:
     """Call the solver with the HotPotQA experiment's decoding settings.
 
     Args:
@@ -224,6 +322,8 @@ def _call_lm(system: str, user: str, model: str, api_base: str | None) -> str:
         user: Example-specific user message.
         model: LiteLLM model identifier.
         api_base: Optional solver API endpoint.
+        lm_kwargs: Optional fully resolved request settings. When omitted, the
+            scientific profile is used for backward-compatible direct calls.
 
     Returns:
         Raw message content when it contains non-whitespace text, otherwise raw
@@ -234,16 +334,15 @@ def _call_lm(system: str, user: str, model: str, api_base: str | None) -> str:
     if system.strip():
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": user})
-    kwargs: dict = {
-        "model": model,
-        "messages": messages,
-        "num_retries": EXPERIMENT_NUM_RETRIES,
-        **experiment_decoding(model),
-    }
-    if api_base is not None:
-        kwargs["api_base"] = api_base
+    if lm_kwargs is None:
+        kwargs = resolve_hotpotqa_lm_kwargs(model, api_base)
+    else:
+        kwargs = deepcopy(lm_kwargs)
+    kwargs["model"] = model
+    kwargs["messages"] = messages
     response = None
-    for max_tokens in (kwargs["max_tokens"], 4096, 1024, 256):
+    max_token_fallbacks = dict.fromkeys((kwargs["max_tokens"], 4096, 1024, 256))
+    for max_tokens in max_token_fallbacks:
         kwargs["max_tokens"] = max_tokens
         try:
             response = litellm.completion(**kwargs)
@@ -267,6 +366,7 @@ def run_single_stage(
     model: str = QWEN3_8_27B_MODEL,
     api_base: str | None = None,
     retrieval_k: int = 7,
+    lm_kwargs: dict[str, object] | None = None,
 ) -> str:
     """Retrieve once and answer with one optimized prompt.
 
@@ -277,13 +377,14 @@ def run_single_stage(
         model: Solver model identifier.
         api_base: Optional solver API endpoint.
         retrieval_k: Maximum passages requested.
+        lm_kwargs: Optional fully resolved solver request settings.
 
     Returns:
         Extracted final answer.
     """
     passages = "\n\n".join(_render_passages(retriever.search(question, retrieval_k)))
     user = f"Question:\n{question}\n\nRetrieved passages:\n{passages}\n\nAnswer:"
-    out = _call_lm(prompt, user, model, api_base)
+    out = _call_lm(prompt, user, model, api_base, lm_kwargs)
     return _extract_final_response(out)
 
 
@@ -298,6 +399,7 @@ def run_two_stage(
     api_base: str | None = None,
     retrieval_k: int = 7,
     task_lm: object | None = None,
+    lm_kwargs: dict[str, object] | None = None,
 ) -> tuple[str, str, dict[str, object]]:
     """Run the GEPA artifact's two-retrieval-hop HotPotQA program.
 
@@ -313,13 +415,15 @@ def run_two_stage(
         retrieval_k: Maximum passages requested per hop.
         task_lm: Optional shared DSPy language-model client. A pinned client is
             created when this function is invoked directly without one.
+        lm_kwargs: Optional fully resolved solver request settings used when a
+            task-model client must be created.
 
     Returns:
         Generated second-hop query, extracted answer, and the complete
         four-component execution trace used for artifact feedback.
     """
     if task_lm is None:
-        task_lm = build_hotpotqa_task_lm(model, api_base)
+        task_lm = build_hotpotqa_task_lm(model, api_base, lm_kwargs)
 
     hop1_documents = retriever.search(question, retrieval_k)
     hop1_passages = _render_passages(hop1_documents)
@@ -736,7 +840,11 @@ def load_hotpotqa_dataset(
     try:
         from datasets import load_dataset  # type: ignore[import-not-found]
 
-        ds = load_dataset("hotpot_qa", "fullwiki", trust_remote_code=True)
+        ds = load_dataset(
+            "hotpot_qa",
+            "fullwiki",
+            revision=HOTPOTQA_HF_REVISION,
+        )
         examples = _jsonl_to_examples(list(ds["train"]))
         first_boundary = int(0.4 * len(examples))
         second_boundary = int(0.8 * len(examples))

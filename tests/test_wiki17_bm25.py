@@ -1,7 +1,10 @@
 """Tests for the frozen Wiki-2017 BM25 retriever."""
 
+import hashlib
 import json
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -71,6 +74,9 @@ def test_prepare_uses_artifact_bm25_settings_without_downloading(monkeypatch, tm
     dependencies.bm25_factory.return_value = index
     monkeypatch.setattr(wiki17_bm25, "WIKI17_DOCUMENT_COUNT", len(corpus))
     retriever = wiki17_bm25.Wiki17BM25Retriever(tmp_path)
+    corpus_bytes = b"fixture corpus bytes\n"
+    retriever.corpus_path.write_bytes(corpus_bytes)
+    monkeypatch.setattr(wiki17_bm25, "WIKI17_CORPUS_SHA256", hashlib.sha256(corpus_bytes).hexdigest())
     monkeypatch.setattr(retriever, "_ensure_archive", Mock())
     monkeypatch.setattr(retriever, "_ensure_corpus", Mock())
     monkeypatch.setattr(retriever, "_load_corpus", Mock(return_value=corpus))
@@ -84,6 +90,50 @@ def test_prepare_uses_artifact_bm25_settings_without_downloading(monkeypatch, tm
     index.save.assert_called_once_with(tmp_path / f".{wiki17_bm25.WIKI17_INDEX_DIR_NAME}.building")
     assert retriever.index_path.is_dir()
     assert json.loads(retriever.manifest_path.read_text(encoding="utf-8")) == manifest
+    integrity = json.loads(retriever.integrity_path.read_text(encoding="utf-8"))
+    assert integrity["corpus_sha256"] == hashlib.sha256(corpus_bytes).hexdigest()
+    assert integrity["index_files"] == [
+        {
+            "path": "index.json",
+            "sha256": hashlib.sha256(b"{}").hexdigest(),
+            "size": 2,
+        }
+    ]
+    dependencies.bm25_factory.load.assert_called_once_with(retriever.index_path, load_corpus=False)
+    assert retriever.provenance()["integrity_manifest_sha256"] == hashlib.sha256(
+        retriever.integrity_path.read_bytes()
+    ).hexdigest()
+
+
+def test_deep_integrity_rejects_same_size_corpus_and_index_corruption(monkeypatch, tmp_path) -> None:
+    """Detect byte changes that shallow size and non-empty checks cannot see.
+
+    Args:
+        monkeypatch: Pytest fixture used to install fake pinned dependencies.
+        tmp_path: Pytest directory containing prepared retrieval artifacts.
+    """
+    dependencies = install_fake_dependencies(monkeypatch)
+    retriever = wiki17_bm25.Wiki17BM25Retriever(tmp_path)
+    corpus_bytes = b"exact corpus\n"
+    retriever.corpus_path.write_bytes(corpus_bytes)
+    monkeypatch.setattr(wiki17_bm25, "WIKI17_CORPUS_SHA256", hashlib.sha256(corpus_bytes).hexdigest())
+    retriever.index_path.mkdir()
+    index_path = retriever.index_path / "index.json"
+    index_path.write_bytes(b"index-a")
+
+    recorded = retriever._ensure_integrity_manifest()
+
+    assert recorded["index_files"][0]["sha256"] == hashlib.sha256(b"index-a").hexdigest()
+    dependencies.bm25_factory.load.assert_called_once_with(retriever.index_path, load_corpus=False)
+
+    index_path.write_bytes(b"index-b")
+    with pytest.raises(wiki17_bm25.Wiki17PreparationError, match="differs from its integrity manifest"):
+        retriever._ensure_integrity_manifest()
+
+    index_path.write_bytes(b"index-a")
+    retriever.corpus_path.write_bytes(b"corrupt body\n")
+    with pytest.raises(wiki17_bm25.Wiki17PreparationError, match="corpus failed integrity validation"):
+        retriever._ensure_integrity_manifest()
 
 
 def test_search_preserves_artifact_order_dedup_threads_and_cache(monkeypatch, tmp_path) -> None:
@@ -104,6 +154,7 @@ def test_search_preserves_artifact_order_dedup_threads_and_cache(monkeypatch, tm
     retriever.corpus_path.write_text(corpus_text, encoding="utf-8")
     retriever.index_path.mkdir()
     (retriever.index_path / "index.json").write_text("{}", encoding="utf-8")
+    retriever.integrity_path.write_text('{"identity":"first"}\n', encoding="utf-8")
     monkeypatch.setattr(wiki17_bm25, "WIKI17_CORPUS_SIZE", retriever.corpus_path.stat().st_size)
     monkeypatch.setattr(wiki17_bm25, "WIKI17_DOCUMENT_COUNT", len(corpus_rows))
     retriever.manifest_path.write_text(json.dumps(retriever._expected_manifest()), encoding="utf-8")
@@ -136,6 +187,136 @@ def test_search_preserves_artifact_order_dedup_threads_and_cache(monkeypatch, tm
         ("two hop question", 3),
         [("Alpha", "first abstract"), ("Beta", "second abstract")],
     )
+    integrity_digest = hashlib.sha256(retriever.integrity_path.read_bytes()).hexdigest()
+    dependencies.cache_factory.assert_called_once_with(
+        str(tmp_path / f"retriever_cache_{wiki17_bm25.WIKI17_CORPUS_SHA256}_{integrity_digest}")
+    )
+
+
+def test_search_cache_identity_changes_with_index_integrity(monkeypatch, tmp_path) -> None:
+    """Keep cached rankings isolated when the prepared index identity changes.
+
+    Args:
+        monkeypatch: Pytest fixture used to replace optional dependencies.
+        tmp_path: Pytest directory containing two index identities.
+    """
+    dependencies = install_fake_dependencies(monkeypatch)
+    corpus_rows = [{"title": "Alpha", "text": ["first abstract"]}]
+    corpus_text = "".join(json.dumps(row) + "\n" for row in corpus_rows)
+    monkeypatch.setattr(wiki17_bm25, "WIKI17_CORPUS_SIZE", len(corpus_text.encode()))
+    monkeypatch.setattr(wiki17_bm25, "WIKI17_DOCUMENT_COUNT", len(corpus_rows))
+
+    cache_paths = []
+    for identity in ("first", "second"):
+        retriever = wiki17_bm25.Wiki17BM25Retriever(tmp_path)
+        retriever.corpus_path.write_text(corpus_text, encoding="utf-8")
+        retriever.index_path.mkdir(exist_ok=True)
+        (retriever.index_path / "index.json").write_text("{}", encoding="utf-8")
+        retriever.manifest_path.write_text(json.dumps(retriever._expected_manifest()), encoding="utf-8")
+        retriever.integrity_path.write_text(json.dumps({"identity": identity}) + "\n", encoding="utf-8")
+        dependencies.bm25_factory.load.return_value = Mock()
+        retriever._initialize()
+        cache_paths.append(retriever.cache_path)
+
+    assert cache_paths[0] != cache_paths[1]
+
+
+def test_search_uses_one_stemmer_per_concurrent_evaluator_thread(monkeypatch, tmp_path) -> None:
+    """Give each evaluator thread one private, reusable PyStemmer instance.
+
+    Args:
+        monkeypatch: Pytest fixture used to replace optional dependencies.
+        tmp_path: Pytest directory used for isolated prepared state.
+    """
+    dependencies = install_fake_dependencies(monkeypatch)
+    corpus_rows = [{"title": "Alpha", "text": ["first abstract"]}]
+    corpus_text = "".join(json.dumps(row) + "\n" for row in corpus_rows)
+    retriever = wiki17_bm25.Wiki17BM25Retriever(tmp_path)
+    retriever.corpus_path.write_text(corpus_text, encoding="utf-8")
+    retriever.index_path.mkdir()
+    (retriever.index_path / "index.json").write_text("{}", encoding="utf-8")
+    retriever.integrity_path.write_text('{"identity":"threaded"}\n', encoding="utf-8")
+    monkeypatch.setattr(wiki17_bm25, "WIKI17_CORPUS_SIZE", retriever.corpus_path.stat().st_size)
+    monkeypatch.setattr(wiki17_bm25, "WIKI17_DOCUMENT_COUNT", len(corpus_rows))
+    retriever.manifest_path.write_text(json.dumps(retriever._expected_manifest()), encoding="utf-8")
+
+    index = Mock()
+    index.retrieve.return_value = ([[0]], [[1.0]])
+    dependencies.bm25_factory.load.return_value = index
+    cache = Mock()
+    cache.get.return_value = None
+    dependencies.cache_factory.return_value = cache
+
+    worker_count = 4
+    tokenize_barrier = threading.Barrier(worker_count)
+    observation_lock = threading.Lock()
+    stemmers_by_thread: dict[int, list[object]] = {}
+
+    def make_stemmer(language: str) -> object:
+        """Create a distinguishable fake stemmer for one evaluator thread.
+
+        Args:
+            language: Stemmer language requested by the retriever.
+
+        Returns:
+            A unique object representing the new stemmer instance.
+        """
+        assert language == "english"
+        return object()
+
+    def tokenize_query(
+        query: str,
+        *,
+        stopwords: str,
+        stemmer: object,
+        show_progress: bool,
+    ) -> str:
+        """Record the calling thread and synchronize concurrent tokenization.
+
+        Args:
+            query: Query text supplied by the evaluator thread.
+            stopwords: Stopword set selected by the retriever.
+            stemmer: Thread-local fake stemmer used for this query.
+            show_progress: Whether BM25S progress output is enabled.
+
+        Returns:
+            The query text as a lightweight fake token sequence.
+        """
+        assert stopwords == "en"
+        assert show_progress is False
+        thread_id = threading.get_ident()
+        with observation_lock:
+            stemmers_by_thread.setdefault(thread_id, []).append(stemmer)
+        tokenize_barrier.wait(timeout=5)
+        return query
+
+    def search_twice(worker_id: int) -> tuple[list[wiki17_bm25.WikipediaPassage], ...]:
+        """Run two uncached searches from the same evaluator thread.
+
+        Args:
+            worker_id: Identifier used to make both cache keys unique.
+
+        Returns:
+            Both ranked passage lists returned to the evaluator.
+        """
+        first = retriever.search(f"question {worker_id} first", 1)
+        second = retriever.search(f"question {worker_id} second", 1)
+        return first, second
+
+    dependencies.stemmer_factory.side_effect = make_stemmer
+    dependencies.tokenize.side_effect = tokenize_query
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        search_results = list(executor.map(search_twice, range(worker_count)))
+
+    expected = [("Alpha", "first abstract")]
+    for worker_results in search_results:
+        for passages in worker_results:
+            assert [(passage.title, passage.text) for passage in passages] == expected
+    assert len(stemmers_by_thread) == worker_count
+    assert dependencies.stemmer_factory.call_count == worker_count
+    assert len({id(stemmers[0]) for stemmers in stemmers_by_thread.values()}) == worker_count
+    assert all(len(stemmers) == 2 and stemmers[0] is stemmers[1] for stemmers in stemmers_by_thread.values())
+    assert index.retrieve.call_count == worker_count * 2
 
 
 def test_prepared_state_requires_exact_manifest_index_and_corpus_size(monkeypatch, tmp_path) -> None:
@@ -171,6 +352,7 @@ def test_provenance_locks_artifact_source_versions_and_retrieval_parameters() ->
         "huggingface_revision": "ef6a5e72a98b47cef31574a400fea8fe149559a3",
         "archive_sha256": "744183e61af986bde9b25c880b59c1502618a8b673671e189cbc0ee684fceb42",
         "archive_size": 608_448_121,
+        "corpus_sha256": "c006527c7c600f85ed594afa36d2a34d0598996405f560474227738342463724",
         "corpus_size": 1_780_746_240,
         "document_count": 5_233_330,
         "bm25s_version": "0.2.12",
@@ -181,6 +363,7 @@ def test_provenance_locks_artifact_source_versions_and_retrieval_parameters() ->
         "stopwords": "en",
         "stemmer": "PyStemmer english",
         "retrieval_threads": 1,
+        "integrity_manifest_sha256": None,
     }
 
 

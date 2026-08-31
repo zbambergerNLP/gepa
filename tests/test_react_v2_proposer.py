@@ -11,7 +11,6 @@ import pytest
 
 from gepa.lm import NativeToolCall, ToolCompletion
 from gepa.proposer.reflective_mutation.react_v2_proposer import (
-    ReActV2ContextError,
     ReActV2Proposer,
     ReActV2ProtocolError,
     parse_tool_call,
@@ -132,8 +131,6 @@ def run(
     history: list[dict[str, Any]] | None = None,
     max_iterations: int = 8,
     max_tool_calls: int = 4,
-    max_history_chars: int = 12_000,
-    max_initial_context_chars: int = 64_000,
     max_chars: int | None = None,
     component_text: str = PROMPT,
     edit_target: EditTarget = RULES,
@@ -149,8 +146,6 @@ def run(
         history: Parent-branch chat history.
         max_iterations: Assistant-turn budget.
         max_tool_calls: Valid tool-call budget.
-        max_history_chars: Serialized branch-history budget.
-        max_initial_context_chars: Total serialized request budget.
         max_chars: Optional completed-section length limit.
         component_text: Canonical component document.
         edit_target: Selected component section.
@@ -165,8 +160,6 @@ def run(
         allowed_tools or EDIT_TOOL_SETS["broad"],
         max_iterations=max_iterations,
         max_tool_calls=max_tool_calls,
-        max_history_chars=max_history_chars,
-        max_initial_context_chars=max_initial_context_chars,
     )
     region_text = TEMPLATE.parse(component_text)[edit_target.section]
     return proposer.propose(
@@ -343,6 +336,7 @@ def test_multiple_native_tool_calls_are_rejected_before_retry() -> None:
                         json.dumps({"target": "be nice", "text": "be wrong"}),
                     ),
                 ),
+                "reasoning that DeepSeek requires on the retry",
             ),
             ToolCompletion(
                 "",
@@ -361,8 +355,69 @@ def test_multiple_native_tool_calls_are_rejected_before_retry() -> None:
     assert "received 2" in result.steps[0].error
     assert "wrong" not in result.new_text
     retry_messages = lm.calls[1]
+    assistant_turn = next(message for message in retry_messages if message["role"] == "assistant")
+    assert assistant_turn["reasoning_content"] == "reasoning that DeepSeek requires on the retry"
     assert [message["role"] for message in retry_messages[-2:]] == ["tool", "tool"]
     assert {message["tool_call_id"] for message in retry_messages[-2:]} == {"call-insert", "call-replace"}
+
+
+def test_direct_deepseek_quotes_prior_branch_turns_outside_the_native_tool_conversation() -> None:
+    """Avoid replaying assistant turns whose private reasoning was not retained."""
+    history = [
+        {"role": "assistant", "content": "Earlier edit attempt."},
+        {"role": "user", "content": "Optimizer result: accepted."},
+    ]
+    lm = NativeScriptedLM(
+        [
+            ToolCompletion(
+                "",
+                (
+                    NativeToolCall(
+                        "call-replace",
+                        EditTool.REPLACE_TEXT.value,
+                        json.dumps({"target": "be nice", "text": "be kind"}),
+                    ),
+                ),
+                "reasoning for the current provider turn",
+            )
+        ]
+    )
+    lm.model = "deepseek/deepseek-v4-flash"
+
+    result = run(lm, preferred_tool=EditTool.REPLACE_TEXT, history=history)
+
+    assert result.changed is True
+    assert [message["role"] for message in lm.calls[0]] == ["system", "user"]
+    assert json.dumps(history, ensure_ascii=False) in lm.calls[0][-1]["content"]
+    assert "not earlier turns in this provider tool conversation" in lm.calls[0][-1]["content"]
+
+
+def test_other_native_providers_keep_branch_history_as_chat_messages() -> None:
+    """Preserve ordinary branch-message replay when no provider rule forbids it."""
+    history = [
+        {"role": "assistant", "content": "Earlier edit attempt."},
+        {"role": "user", "content": "Optimizer result: accepted."},
+    ]
+    lm = NativeScriptedLM(
+        [
+            ToolCompletion(
+                "",
+                (
+                    NativeToolCall(
+                        "call-replace",
+                        EditTool.REPLACE_TEXT.value,
+                        json.dumps({"target": "be nice", "text": "be kind"}),
+                    ),
+                ),
+            )
+        ]
+    )
+    lm.model = "hosted_vllm/Qwen/Qwen3.8-27B"
+
+    result = run(lm, preferred_tool=EditTool.REPLACE_TEXT, history=history)
+
+    assert result.changed is True
+    assert lm.calls[0][1:3] == history
 
 
 def test_multiple_text_tool_blocks_are_rejected_before_retry() -> None:
@@ -868,17 +923,17 @@ def test_branch_chat_history_is_replayed_before_the_current_task() -> None:
     assert result.steps[0].action == "REPLACE_TEXT"
 
 
-def test_branch_history_overflow_raises_without_calling_the_lm() -> None:
-    """Fail explicitly instead of adding global memory or lossy compression."""
-    lm = ScriptedLM([])
-    with pytest.raises(ReActV2ContextError, match="Global history.*disabled"):
-        run(
-            lm,
-            preferred_tool=EditTool.REPLACE_TEXT,
-            history=[{"role": "user", "content": "x" * 100}],
-            max_history_chars=20,
-        )
-    assert lm.calls == []
+def test_large_branch_history_is_replayed_without_truncation() -> None:
+    """Preserve a long parent transcript byte-for-byte for the provider."""
+    content = "x" * 12_001
+    history = [{"role": "user", "content": content}]
+    lm = ScriptedLM([tool_call(EditTool.REPLACE_TEXT, target="be nice", text="be kind")])
+
+    result = run(lm, preferred_tool=EditTool.REPLACE_TEXT, history=history)
+
+    assert lm.calls[0][1] == history[0]
+    assert lm.calls[0][1]["content"] == content
+    assert result.changed is True
 
 
 @pytest.mark.parametrize(
@@ -905,30 +960,24 @@ def test_branch_chat_history_requires_user_assistant_content_messages(
     assert lm.calls == []
 
 
-def test_total_initial_context_overflow_includes_traces_and_precedes_lm_call() -> None:
-    """Bound the whole initial request, not only its branch-history subsection."""
-    lm = ScriptedLM([])
-    with pytest.raises(ReActV2ContextError, match="total context budget.*compression.*disabled"):
-        run(
-            lm,
-            preferred_tool=EditTool.REPLACE_TEXT,
-            traces="trajectory-step\n" * 1_000,
-            max_initial_context_chars=4_000,
-        )
-    assert lm.calls == []
+def test_large_combined_context_reaches_the_lm_and_completes() -> None:
+    """Let the configured provider model enforce its real context window."""
+    history = [{"role": "assistant", "content": "h" * 20_000}]
+    traces = "trajectory-step\n" * 3_000
+    lm = ScriptedLM([tool_call(EditTool.REPLACE_TEXT, target="be nice", text="be kind")])
 
+    result = run(
+        lm,
+        preferred_tool=EditTool.REPLACE_TEXT,
+        history=history,
+        traces=traces,
+    )
 
-def test_context_growth_overflow_precedes_the_next_lm_call() -> None:
-    """Recheck the full conversation after observations grow the next turn."""
-    lm = ScriptedLM(["invalid response " + "x" * 5_000])
-    with pytest.raises(ReActV2ContextError, match="prior ReAct turns.*compression.*disabled"):
-        run(
-            lm,
-            preferred_tool=EditTool.REPLACE_TEXT,
-            max_iterations=2,
-            max_initial_context_chars=6_000,
-        )
-    assert len(lm.calls) == 1
+    serialized = json.dumps(lm.calls[0], ensure_ascii=False)
+    assert len(serialized) > 64_000
+    assert history[0] in lm.calls[0]
+    assert traces in lm.calls[0][-1]["content"]
+    assert result.changed is True
 
 
 def test_iteration_exhaustion_drops_partial_atomic_edits() -> None:

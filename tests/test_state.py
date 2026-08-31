@@ -1,5 +1,6 @@
 import json
 import os
+import random
 import shutil
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -559,6 +560,41 @@ def test_adapter_state_defaults_to_empty_dict():
     assert state.adapter_state == {}
 
 
+def test_runtime_checkpoint_state_defaults_are_empty() -> None:
+    """Fresh state has no prior RNG snapshot or stateful-callback evidence."""
+    state = state_mod.GEPAState(
+        {"prompt": "p"},
+        ValsetEvaluation(outputs_by_val_id={0: "out"}, scores_by_val_id={0: 0.5}, objective_scores_by_val_id=None),
+    )
+
+    assert state.rng_state is None
+    assert state.callback_states == {}
+    assert state.batch_sampler_state is None
+    assert state.reflection_lm_state is None
+
+
+def test_rng_checkpoint_round_trip_replays_future_choices(run_dir) -> None:
+    """A loaded RNG snapshot produces the same future choices as uninterrupted execution."""
+    uninterrupted = random.Random(17)
+    uninterrupted.sample(range(20), 4)
+    state = state_mod.GEPAState(
+        {"prompt": "p"},
+        ValsetEvaluation(outputs_by_val_id={0: "out"}, scores_by_val_id={0: 0.5}, objective_scores_by_val_id=None),
+    )
+    state.rng_state = uninterrupted.getstate()
+    state.callback_states = {"0:tracker": {"count": 3}}
+    state.save(str(run_dir))
+
+    expected = [uninterrupted.randrange(1_000) for _ in range(12)]
+    loaded = state_mod.GEPAState.load(str(run_dir))
+    resumed = random.Random(999)
+    assert loaded.rng_state is not None
+    resumed.setstate(loaded.rng_state)
+
+    assert [resumed.randrange(1_000) for _ in range(12)] == expected
+    assert loaded.callback_states == {"0:tracker": {"count": 3}}
+
+
 def test_adapter_state_save_and_load(run_dir):
     """adapter_state round-trips through save/load."""
     state = state_mod.GEPAState(
@@ -600,6 +636,10 @@ def test_upgrade_state_dict_adds_missing_fields():
     }
     state_mod.GEPAState._upgrade_state_dict(d)
     assert d["adapter_state"] == {}
+    assert d["rng_state"] is None
+    assert d["callback_states"] == {}
+    assert d["batch_sampler_state"] is None
+    assert d["reflection_lm_state"] is None
     # Seed (candidate_idx 0) → "seed"; accepted candidate_idx 1 discovered at
     # trace i=3 had no stamped iteration_id → legacy anchor str(3 + 1) = "4".
     assert d["iteration_ids_by_candidate_idx"] == ["seed", "4"]

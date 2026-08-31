@@ -6,12 +6,15 @@
 import inspect
 import random
 from dataclasses import dataclass
-from unittest.mock import MagicMock
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from gepa.core.action_tracking import ActionDiversityCallback
 from gepa.gepa_launcher import GEPAConfig, ReflectionConfig
+from gepa.lm import LM
 from gepa.optimize_anything import _from_legacy_config
 from gepa.proposer.reflective_mutation.reflection_lm import (
     ReflectionLM,
@@ -19,8 +22,10 @@ from gepa.proposer.reflective_mutation.reflection_lm import (
     StatelessReflectionLM,
 )
 from gepa.proposer.reflective_mutation.reflective_mutation import ReflectiveMutationProposer
+from gepa.response_journal import response_journal_scope
 from gepa.strategies.action_space import (
     ActionDistribution,
+    IncompleteActionDistributionError,
     RandomActionSelector,
     VerbalizedActionSelector,
     _sample_from_tails,
@@ -672,6 +677,90 @@ class TestActionDiversityCallback:
         assert len(cb.action_acceptance_counts) == 0
         assert len(cb.action_rejection_counts) == 0
 
+    def test_state_round_trip_restores_metrics_and_selector_history(self) -> None:
+        """Persist complete action evidence without aliasing mutable selector history."""
+        selector = SimpleNamespace(history=[{"sampled": ["action_e"]}])
+        callback = ActionDiversityCallback(selector=selector)
+        callback.on_proposal_end(
+            {
+                "iteration": 4,
+                "new_instructions": {"system_prompt": "revised instruction"},
+                "prompts": {"system_prompt": "proposal prompt"},
+                "raw_lm_outputs": {"system_prompt": "raw output"},
+                "metadata": self._metadata("action_e"),
+            }
+        )
+        callback.on_candidate_accepted(
+            {
+                "iteration": 4,
+                "new_candidate_idx": 1,
+                "old_score": 0.25,
+                "new_score": 0.75,
+                "parent_ids": [0],
+                "metadata": self._metadata("action_e"),
+            }
+        )
+
+        checkpoint = callback.get_state()
+        selector.history.append({"sampled": ["action_f"]})
+        restored_selector = SimpleNamespace(history=[])
+        restored = ActionDiversityCallback(selector=restored_selector)
+        restored.set_state(checkpoint)
+
+        assert restored.summary() == callback.summary()
+        assert restored.action_texts == callback.action_texts
+        assert restored.proposal_records == callback.proposal_records
+        assert restored_selector.history == [{"sampled": ["action_e"]}]
+
+    def test_proposal_records_preserve_controller_and_component_evidence(self) -> None:
+        """Retain parsed Controller provenance and component-scoped proposal text."""
+        callback = ActionDiversityCallback()
+        controller_sampling = {
+            "probs": {"reexpress@Rules/REPLACE_TEXT": 1.0},
+            "sampled": ["reexpress@Rules/REPLACE_TEXT"],
+            "sampling_policy": "positive_support_uniform_mixture",
+        }
+        callback.on_proposal_end(
+            {
+                "iteration": 7,
+                "new_instructions": {"summarize1": "revised summary instruction"},
+                "prompts": {"summarize1": "proposal prompt"},
+                "raw_lm_outputs": {"summarize1": "raw output"},
+                "metadata": {
+                    "action": "reexpress",
+                    "action_choice": "reexpress@Rules/REPLACE_TEXT",
+                    "action_operator": "REPLACE_TEXT",
+                    "action_target_section": "Rules",
+                    "controller_sampling": controller_sampling,
+                    "proposer_backend": "react_v2",
+                    "semantic_action": "reexpress",
+                },
+            }
+        )
+
+        assert callback.proposal_records == [
+            {
+                "iteration": 7,
+                "action": "reexpress",
+                "texts_by_component": {"summarize1": "revised summary instruction"},
+                "action_choice": "reexpress@Rules/REPLACE_TEXT",
+                "action_operator": "REPLACE_TEXT",
+                "action_target_section": "Rules",
+                "controller_sampling": controller_sampling,
+                "proposer_backend": "react_v2",
+                "semantic_action": "reexpress",
+            }
+        ]
+
+    def test_invalid_persisted_selector_history_is_rejected(self) -> None:
+        """Reject a malformed selector-history snapshot instead of losing evidence silently."""
+        callback = ActionDiversityCallback(selector=SimpleNamespace(history=[]))
+        checkpoint = callback.get_state()
+        checkpoint["selector_history"] = {"sampled": ["action_e"]}
+
+        with pytest.raises(TypeError, match="selector_history"):
+            callback.set_state(checkpoint)
+
 
 # ---------------------------------------------------------------------------
 # Verbalized action selector tests
@@ -786,6 +875,40 @@ class TestVerbalizedActionSelector:
         assert dist.is_fallback is True
         assert len(dist.entries) == len(TEST_ACTIONS)
         assert len({action.menu_id for action, _, _ in dist.entries}) == len(TEST_ACTIONS)
+
+    def test_required_full_support_retries_an_incomplete_model_response(self) -> None:
+        """Use a complete second distribution instead of sampling the parser fallback."""
+        probability = 1.0 / len(TEST_ACTIONS)
+        complete_output = (
+            "<response>"
+            + "".join(
+                "<candidate>"
+                f"<action>{action.menu_id}</action><reasoning>test</reasoning>"
+                f"<probability>{probability}</probability>"
+                "</candidate>"
+                for action in TEST_ACTIONS
+            )
+            + "</response>"
+        )
+        lm = MagicMock(side_effect=["not a distribution", complete_output])
+        selector = VerbalizedActionSelector(TEST_ACTIONS, lm=lm, require_full_support=True)
+
+        selected = selector.select(1, candidate="component", feedback_summary="feedback")
+
+        assert len(selected) == 1
+        assert lm.call_count == 2
+        assert selector.history[0]["fallback"] is False
+
+    def test_required_full_support_rejects_two_incomplete_model_responses(self) -> None:
+        """Leave selection unresolved when the model never supplies its judgment."""
+        lm = MagicMock(return_value="not a distribution")
+        selector = VerbalizedActionSelector(TEST_ACTIONS, lm=lm, require_full_support=True)
+
+        with pytest.raises(IncompleteActionDistributionError, match="after two attempts"):
+            selector.select(1, candidate="component", feedback_summary="feedback")
+
+        assert lm.call_count == 2
+        assert selector.history == []
 
     @pytest.mark.parametrize("probability", ["nan", "inf", "-0.1"])
     def test_invalid_numeric_probability_falls_back_uniformly(self, probability: str) -> None:
@@ -1061,6 +1184,51 @@ class TestVerbalizedReflectionIntegration:
         # Distinct parents are disclosed in the candidate context.
         assert "2 distinct parent candidates" in action_lm.calls[0]
 
+    def test_invalid_section_body_drops_only_that_proposal(self) -> None:
+        """Keep valid siblings when one selected-action output includes a header."""
+
+        class MixedBatchLM:
+            """Return one invalid section body followed by one valid body."""
+
+            def batch_complete(self, messages_list) -> list[str]:
+                """Return one response for each of the two expected prompts.
+
+                Args:
+                    messages_list: Batched reflection prompts.
+
+                Returns:
+                    Invalid and valid section-body responses in job order.
+                """
+                assert len(messages_list) == 2
+                return ["```\n## Role\nfull section returned\n```", "```\nvalid revision\n```"]
+
+        selector = MagicMock()
+        selector.select.return_value = [STATELESS_ACTIONS[0], STATELESS_ACTIONS[1]]
+        logger = MagicMock()
+        reflection = StatelessReflectionLM(MixedBatchLM(), logger=logger, action_selector=selector)
+        jobs = [
+            (
+                {"sp": TEST_TEMPLATE.render({"Role": "parent one"})},
+                {"sp": [{"Feedback": "feedback-alpha"}]},
+                ["sp"],
+            ),
+            (
+                {"sp": TEST_TEMPLATE.render({"Role": "parent two"})},
+                {"sp": [{"Feedback": "feedback-beta"}]},
+                ["sp"],
+            ),
+        ]
+
+        results = reflection.reflect_many(jobs)
+
+        first, second = (proposal for proposal, _strategy in results)
+        assert first.new_texts == {}
+        assert first.metadata["action_choice"] == STATELESS_ACTIONS[0].menu_id
+        assert second.new_texts["sp"] != jobs[1][0]["sp"]
+        assert second.metadata["action_choice"] == STATELESS_ACTIONS[1].menu_id
+        selector.select.assert_called_once()
+        assert "invalid section body" in logger.log.call_args.args[0]
+
     def test_per_job_selection_scopes_context_to_each_job(self) -> None:
         """Test that opt-in per-job selection scopes each selector call to its own job.
 
@@ -1091,6 +1259,149 @@ class TestVerbalizedReflectionIntegration:
         # No batch-aggregation disclosure in per-job mode.
         assert "distinct parent candidates" not in action_lm.calls[0]
 
+    def test_failed_batch_reuses_selected_actions_and_replays_after_restart(self, tmp_path: Path) -> None:
+        """Keep one aggregated Controller decision through fallback and restart.
+
+        Args:
+            tmp_path: Pytest directory containing the response journal.
+        """
+        journal_path = tmp_path / "responses.sqlite3"
+
+        class FallbackReflectionClient:
+            """Expose a failing batch transport over a journaled plain client."""
+
+            def __init__(self, inner: LM):
+                """Store the journaled client and initialize a batch-call count.
+
+                Args:
+                    inner: LM used for individual fallback requests.
+                """
+                self.inner = inner
+                self.batch_calls = 0
+
+            def batch_complete(self, messages_list) -> list[str]:
+                """Simulate an optional batch transport failure.
+
+                Args:
+                    messages_list: Batched messages that would have been sent.
+
+                Raises:
+                    RuntimeError: Always, so stateless reflection reuses the
+                        selected actions through its individual path.
+                """
+                self.batch_calls += 1
+                raise RuntimeError(f"batch transport failed for {len(messages_list)} requests")
+
+            def __call__(self, prompt) -> str:
+                """Complete one fallback prompt through the durable client.
+
+                Args:
+                    prompt: Rendered reflection prompt.
+
+                Returns:
+                    Journaled reflection response text.
+                """
+                return self.inner(prompt)
+
+        def provider_response(content: str) -> MagicMock:
+            """Build one LiteLLM-shaped response with fixed provider identity.
+
+            Args:
+                content: Assistant text returned by the fake provider.
+
+            Returns:
+                Completion response accepted by :class:`gepa.lm.LM`.
+            """
+            response = MagicMock()
+            response.model = "runtime-model"
+            response.system_fingerprint = "fp-fixed"
+            response.usage = None
+            response.choices = [MagicMock()]
+            response.choices[0].finish_reason = "stop"
+            response.choices[0].message.content = content
+            return response
+
+        def make_strategy() -> tuple[
+            StatelessReflectionLM,
+            VerbalizedActionSelector,
+            FallbackReflectionClient,
+        ]:
+            """Build fresh journaled Controller and reflection clients.
+
+            Returns:
+                Stateless reflector, its selector, and batch-failing client.
+            """
+            controller_lm = LM(
+                "test/controller",
+                response_journal_path=str(journal_path),
+                response_journal_namespace="stateless-controller",
+            )
+            selector = VerbalizedActionSelector(STATELESS_ACTIONS, lm=controller_lm)
+            reflection_client = FallbackReflectionClient(
+                LM(
+                    "test/reflection",
+                    response_journal_path=str(journal_path),
+                    response_journal_namespace="reflection-proposer",
+                )
+            )
+            return (
+                StatelessReflectionLM(reflection_client, action_selector=selector),
+                selector,
+                reflection_client,
+            )
+
+        jobs = [
+            (
+                {"sp": TEST_TEMPLATE.render({"Role": "parent one"})},
+                {"sp": [{"Feedback": "feedback-alpha"}]},
+                ["sp"],
+            ),
+            (
+                {"sp": TEST_TEMPLATE.render({"Role": "parent two"})},
+                {"sp": [{"Feedback": "feedback-beta"}]},
+                ["sp"],
+            ),
+        ]
+        initial, initial_selector, initial_client = make_strategy()
+        with (
+            patch(
+                "litellm.completion",
+                side_effect=[
+                    provider_response(STATELESS_LM_OUTPUT),
+                    provider_response("```\nfirst revision\n```"),
+                    provider_response("```\nsecond revision\n```"),
+                ],
+            ) as provider,
+            response_journal_scope("optimizer-iteration-21"),
+        ):
+            initial_results = initial.reflect_many(jobs)
+
+        controller_calls = [
+            call for call in provider.call_args_list if call.kwargs["model"] == "test/controller"
+        ]
+        assert len(controller_calls) == 1
+        assert provider.call_count == 3
+        assert initial_client.batch_calls == 1
+        assert len(initial_selector.history) == 1
+        assert all(proposal.new_texts for proposal, _strategy in initial_results)
+
+        resumed, resumed_selector, resumed_client = make_strategy()
+        with (
+            patch("litellm.completion") as resumed_provider,
+            response_journal_scope("optimizer-iteration-21"),
+        ):
+            replayed_results = resumed.reflect_many(jobs)
+
+        assert [proposal.new_texts for proposal, _strategy in replayed_results] == [
+            proposal.new_texts for proposal, _strategy in initial_results
+        ]
+        assert [proposal.metadata for proposal, _strategy in replayed_results] == [
+            proposal.metadata for proposal, _strategy in initial_results
+        ]
+        assert resumed_selector.history == initial_selector.history
+        assert resumed_client.batch_calls == 1
+        resumed_provider.assert_not_called()
+
 
 class TestVerbalizedHistory:
     def test_history_records_distribution_and_samples(self):
@@ -1109,8 +1420,8 @@ class TestVerbalizedHistory:
         assert record["sampling_policy"] == "tail"
         assert record["exploration_epsilon"] == 0.0
 
-    def test_full_support_policy_mixes_verbalized_and_uniform_probabilities(self) -> None:
-        """Give every declared action a logged nonzero sampling propensity."""
+    def test_full_support_policy_preserves_controller_zero_probabilities(self) -> None:
+        """Explore within the Controller's positive support without reviving rejected actions."""
         actions = TEST_ACTIONS[:3]
         output = (
             "<response>"
@@ -1128,18 +1439,20 @@ class TestVerbalizedHistory:
             rng=random.Random(0),
             require_full_support=True,
         )
-        selector.select(1, candidate="component", feedback_summary="feedback")
+        selected = selector.select(100, candidate="component", feedback_summary="feedback")
 
         record = selector.history[0]
-        assert record["sampling_policy"] == "full_distribution_uniform_mixture"
+        assert record["sampling_policy"] == "positive_support_uniform_mixture"
         assert record["exploration_epsilon"] == pytest.approx(0.1)
         assert record["sampling_probs"] == pytest.approx(
             {
-                actions[0].menu_id: 0.9 + 0.1 / 3,
-                actions[1].menu_id: 0.1 / 3,
-                actions[2].menu_id: 0.1 / 3,
+                actions[0].menu_id: 1.0,
+                actions[1].menu_id: 0.0,
+                actions[2].menu_id: 0.0,
             }
         )
+        assert set(record["probs"]) == {action.menu_id for action in actions}
+        assert {action.menu_id for action in selected} == {actions[0].menu_id}
         assert sum(record["sampling_probs"].values()) == pytest.approx(1.0)
 
     def test_history_records_tail_sample_stats(self) -> None:

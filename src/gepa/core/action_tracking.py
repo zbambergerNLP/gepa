@@ -6,13 +6,16 @@
 When action-conditioned reflection is active, each proposal is tagged with the
 semantic action that constrained it (e.g. ``"contextualize"``, ``"resequence"``).
 This callback collects per-action counts, acceptance rates, score deltas,
-and textual diversity metrics for analysis.
+proposal records, Controller sampling provenance, and textual diversity metrics
+for analysis.
 """
 
 from __future__ import annotations
 
 import difflib
 from collections import defaultdict
+from collections.abc import Mapping
+from copy import deepcopy
 from typing import Any
 
 from gepa.core.callbacks import (
@@ -38,17 +41,114 @@ class ActionDiversityCallback:
         print(tracker.summary())
     """
 
-    def __init__(self) -> None:
-        """Initialize empty per-action, per-iteration, and outcome metrics."""
+    def __init__(self, selector: Any | None = None) -> None:
+        """Initialize per-action, per-iteration, and outcome metrics.
+
+        Args:
+            selector: Optional action selector whose verbalized distribution
+                history must survive optimizer resume with these metrics.
+        """
         self.action_proposal_counts: dict[str, int] = defaultdict(int)
         self.action_acceptance_counts: dict[str, int] = defaultdict(int)
         self.action_rejection_counts: dict[str, int] = defaultdict(int)
         self.action_score_deltas: dict[str, list[float]] = defaultdict(list)
 
         self.action_texts: dict[str, list[str]] = defaultdict(list)
+        self.proposal_records: list[dict[str, Any]] = []
 
         self._iteration_texts: dict[int, list[str]] = defaultdict(list)
         self._current_iteration: int = -1
+        self.selector = selector
+
+    def get_state(self) -> dict[str, Any]:
+        """Return a durable snapshot of all accumulated mechanism evidence.
+
+        Returns:
+            Counts, score deltas, component-scoped proposal records,
+            per-iteration texts, current iteration, and optional
+            verbalized-selector history.
+        """
+        selector_history = None
+        if self.selector is not None and hasattr(self.selector, "history"):
+            selector_history = deepcopy(self.selector.history)
+        return {
+            "action_proposal_counts": dict(self.action_proposal_counts),
+            "action_acceptance_counts": dict(self.action_acceptance_counts),
+            "action_rejection_counts": dict(self.action_rejection_counts),
+            "action_score_deltas": {key: list(values) for key, values in self.action_score_deltas.items()},
+            "action_texts": {key: list(values) for key, values in self.action_texts.items()},
+            "proposal_records": deepcopy(self.proposal_records),
+            "iteration_texts": {key: list(values) for key, values in self._iteration_texts.items()},
+            "current_iteration": self._current_iteration,
+            "selector_history": selector_history,
+        }
+
+    def set_state(self, state: Mapping[str, Any]) -> None:
+        """Restore mechanism evidence from a durable optimizer checkpoint.
+
+        Args:
+            state: Snapshot previously returned by :meth:`get_state`.
+
+        Raises:
+            TypeError: A persisted collection or selector history has an
+                incompatible type.
+        """
+        mapping_fields = {
+            "action_proposal_counts",
+            "action_acceptance_counts",
+            "action_rejection_counts",
+            "action_score_deltas",
+            "action_texts",
+            "iteration_texts",
+        }
+        for field_name in mapping_fields:
+            if not isinstance(state.get(field_name, {}), Mapping):
+                raise TypeError(f"Persisted {field_name} must be a mapping")
+        proposal_records = state.get("proposal_records", [])
+        if not isinstance(proposal_records, list) or any(
+            not isinstance(record, Mapping) for record in proposal_records
+        ):
+            raise TypeError("Persisted proposal_records must be a list of mappings")
+
+        self.action_proposal_counts = defaultdict(
+            int,
+            {str(key): int(value) for key, value in state.get("action_proposal_counts", {}).items()},
+        )
+        self.action_acceptance_counts = defaultdict(
+            int,
+            {str(key): int(value) for key, value in state.get("action_acceptance_counts", {}).items()},
+        )
+        self.action_rejection_counts = defaultdict(
+            int,
+            {str(key): int(value) for key, value in state.get("action_rejection_counts", {}).items()},
+        )
+        self.action_score_deltas = defaultdict(
+            list,
+            {
+                str(key): [float(value) for value in values]
+                for key, values in state.get("action_score_deltas", {}).items()
+            },
+        )
+        self.action_texts = defaultdict(
+            list,
+            {str(key): [str(value) for value in values] for key, values in state.get("action_texts", {}).items()},
+        )
+        self.proposal_records = [deepcopy(dict(record)) for record in proposal_records]
+        self._iteration_texts = defaultdict(
+            list,
+            {
+                int(key): [str(value) for value in values]
+                for key, values in state.get("iteration_texts", {}).items()
+            },
+        )
+        self._current_iteration = int(state.get("current_iteration", -1))
+
+        selector_history = state.get("selector_history")
+        if selector_history is not None:
+            if not isinstance(selector_history, list):
+                raise TypeError("Persisted selector_history must be a list or None")
+            if self.selector is not None and hasattr(self.selector, "history"):
+                self.selector.history = deepcopy(selector_history)
 
     @staticmethod
     def _action_from_event(event: Any) -> str | None:
@@ -64,7 +164,7 @@ class ActionDiversityCallback:
         return metadata.get("action")
 
     def on_proposal_end(self, event: ProposalEndEvent) -> None:
-        """Record the proposed instruction and its action (if present).
+        """Record the proposed instruction and its mechanism evidence.
 
         A length-capped attempt reaches here with empty ``new_instructions`` (#7):
         it still counts toward the action's proposal total, but contributes no
@@ -72,13 +172,31 @@ class ActionDiversityCallback:
         dissimilar and inflate them).
 
         Args:
-            event: The proposal-end event; its ``metadata["action"]`` names the
-                action credited with the proposal.
+            event: The proposal-end event. Its metadata identifies the optional
+                action and carries Controller sampling provenance when ReAct V2
+                produced the proposal.
         """
         self._current_iteration = event["iteration"]
         new_instructions = event["new_instructions"]
 
         action_name = self._action_from_event(event)
+        metadata = event.get("metadata") or {}
+        proposal_record: dict[str, Any] = {
+            "iteration": event["iteration"],
+            "action": action_name,
+            "texts_by_component": {str(component): str(text) for component, text in new_instructions.items() if text},
+        }
+        for field_name in (
+            "action_choice",
+            "action_operator",
+            "action_target_section",
+            "controller_sampling",
+            "proposer_backend",
+            "semantic_action",
+        ):
+            if field_name in metadata:
+                proposal_record[field_name] = deepcopy(metadata[field_name])
+        self.proposal_records.append(proposal_record)
         if action_name:
             self.action_proposal_counts[action_name] += 1
             if new_instructions:

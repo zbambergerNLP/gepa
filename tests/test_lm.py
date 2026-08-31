@@ -5,7 +5,17 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from gepa.lm import LM, InlineReasoningError, InlineReasoningLM, NativeToolCall, ToolCompletion, TrackingLM
+from gepa.lm import (
+    LM,
+    InlineReasoningError,
+    InlineReasoningLM,
+    LMProviderError,
+    NativeToolCall,
+    ProviderIdentityMismatchError,
+    ProviderResponseIdentity,
+    ToolCompletion,
+    TrackingLM,
+)
 
 
 class TestLMInit:
@@ -107,6 +117,100 @@ class TestLMCall:
         assert result == "truncated"
         assert "truncated" in caplog.text.lower()
 
+    @patch("litellm.completion", side_effect=RuntimeError("provider unavailable"))
+    def test_provider_failure_uses_fatal_lm_error(self, mock_completion) -> None:
+        """Classify an exhausted plain provider call as a fatal LM failure.
+
+        Args:
+            mock_completion: Patched LiteLLM completion callable.
+        """
+        with pytest.raises(LMProviderError, match="Completion provider failed"):
+            LM("openai/gpt-4.1")("question")
+
+        mock_completion.assert_called_once()
+
+
+class TestLMProviderIdentity:
+    """Test launch-time provider identity enforcement."""
+
+    def test_identity_configuration_requires_both_fields(self) -> None:
+        """Reject a partial expected provider identity."""
+        with pytest.raises(ValueError, match="must be provided together"):
+            LM("deepseek/deepseek-v4-flash", expected_response_model="deepseek-runtime")
+
+    @patch("litellm.completion")
+    def test_call_captures_and_accepts_matching_identity(self, mock_completion) -> None:
+        """Capture the provider identity and accept an exact match.
+
+        Args:
+            mock_completion: Patched LiteLLM completion callable.
+        """
+        response = MagicMock()
+        response.model = "deepseek-runtime"
+        response.system_fingerprint = "fp_launch"
+        response.choices = [MagicMock()]
+        response.choices[0].message.content = "answer"
+        response.choices[0].finish_reason = "stop"
+        mock_completion.return_value = response
+        lm = LM(
+            "deepseek/deepseek-v4-flash",
+            expected_response_model="deepseek-runtime",
+            expected_system_fingerprint="fp_launch",
+        )
+
+        assert lm("question") == "answer"
+        assert lm.last_response_identity == ProviderResponseIdentity("deepseek-runtime", "fp_launch")
+
+    @patch("litellm.completion")
+    def test_native_tools_reject_provider_model_drift(self, mock_completion) -> None:
+        """Reject a native-tool response from a different provider model.
+
+        Args:
+            mock_completion: Patched LiteLLM completion callable.
+        """
+        response = MagicMock()
+        response.model = "different-runtime"
+        response.system_fingerprint = "fp_launch"
+        response.choices = [MagicMock()]
+        response.choices[0].message.content = "answer"
+        response.choices[0].message.tool_calls = []
+        response.choices[0].finish_reason = "stop"
+        mock_completion.return_value = response
+        lm = LM(
+            "deepseek/deepseek-v4-flash",
+            expected_response_model="deepseek-runtime",
+            expected_system_fingerprint="fp_launch",
+        )
+
+        with pytest.raises(ProviderIdentityMismatchError, match="identity changed"):
+            lm.complete_with_tools(
+                [{"role": "user", "content": "edit"}],
+                [{"type": "function", "function": {"name": "EDIT", "parameters": {}}}],
+            )
+
+    @patch("litellm.batch_completion")
+    def test_batch_rejects_system_fingerprint_drift(self, mock_batch) -> None:
+        """Reject any batched response with a changed provider fingerprint.
+
+        Args:
+            mock_batch: Patched LiteLLM batch-completion callable.
+        """
+        response = MagicMock()
+        response.model = "deepseek-runtime"
+        response.system_fingerprint = "fp_changed"
+        response.choices = [MagicMock()]
+        response.choices[0].message.content = "answer"
+        response.choices[0].finish_reason = "stop"
+        mock_batch.return_value = [response]
+        lm = LM(
+            "deepseek/deepseek-v4-flash",
+            expected_response_model="deepseek-runtime",
+            expected_system_fingerprint="fp_launch",
+        )
+
+        with pytest.raises(ProviderIdentityMismatchError, match="fp_changed"):
+            lm.batch_complete([[{"role": "user", "content": "question"}]])
+
 
 class TestLMNativeTools:
     """Test the provider-native function-tool completion path."""
@@ -146,6 +250,7 @@ class TestLMNativeTools:
         assert result == ToolCompletion(
             content="",
             tool_calls=(NativeToolCall("call-1", "REPLACE_TEXT", '{"target":"old","text":"new"}'),),
+            reasoning_content="private reasoning",
         )
         mock_completion.assert_called_once_with(
             model="openai/gpt-4.1",
@@ -157,16 +262,59 @@ class TestLMNativeTools:
             temperature=0.5,
         )
 
+    @patch("litellm.completion")
+    def test_direct_deepseek_v4_omits_explicit_tool_choice(self, mock_completion) -> None:
+        """Keep tools but omit the field rejected by DeepSeek V4 thinking mode.
+
+        Args:
+            mock_completion: Patched LiteLLM completion callable.
+        """
+        response = MagicMock()
+        response.choices = [MagicMock()]
+        response.choices[0].finish_reason = "stop"
+        response.choices[0].message.content = "done"
+        response.choices[0].message.reasoning_content = "reasoning"
+        response.choices[0].message.tool_calls = []
+        mock_completion.return_value = response
+        tools = [{"type": "function", "function": {"name": "EDIT", "parameters": {"type": "object"}}}]
+
+        LM(
+            "deepseek/deepseek-v4-flash",
+            reasoning_effort="max",
+            extra_body={"thinking": {"type": "enabled"}, "reasoning_effort": "max"},
+        ).complete_with_tools([{"role": "user", "content": "edit"}], tools)
+
+        request = mock_completion.call_args.kwargs
+        assert request["tools"] == tools
+        assert "tool_choice" not in request
+        assert request["reasoning_effort"] == "max"
+        assert request["extra_body"]["reasoning_effort"] == "max"
+
+    @patch("litellm.completion", side_effect=RuntimeError("provider unavailable"))
+    def test_native_tool_provider_failure_uses_fatal_lm_error(self, mock_completion) -> None:
+        """Classify an exhausted native-tool call as a fatal LM failure.
+
+        Args:
+            mock_completion: Patched LiteLLM completion callable.
+        """
+        tools = [{"type": "function", "function": {"name": "EDIT", "parameters": {}}}]
+
+        with pytest.raises(LMProviderError, match="Completion provider failed"):
+            LM("openai/gpt-4.1").complete_with_tools([{"role": "user", "content": "edit"}], tools)
+
+        mock_completion.assert_called_once()
+
     def test_tracking_wrapper_conditionally_preserves_native_tool_interface(self):
         """Verify tracking preserves native tools only when the callable has them."""
         native_callable = MagicMock(return_value="unused")
         native_callable.complete_with_tools.return_value = ToolCompletion(
-            "", (NativeToolCall("call-1", "DELETE_TEXT", "{}"),)
+            "", (NativeToolCall("call-1", "DELETE_TEXT", "{}"),), "provider reasoning"
         )
         wrapped_native = TrackingLM(native_callable)
         result = wrapped_native.complete_with_tools([], [], tool_choice="auto")
 
         assert result.tool_calls[0].name == "DELETE_TEXT"
+        assert result.reasoning_content == "provider reasoning"
         assert hasattr(wrapped_native, "complete_with_tools")
         assert not hasattr(TrackingLM(MagicMock(return_value="fallback", spec=[])), "complete_with_tools")
 
@@ -248,6 +396,30 @@ class TestLMBatchComplete:
 
         call_kwargs = mock_batch.call_args[1]
         assert call_kwargs["temperature"] == 0.9
+
+    @patch("litellm.batch_completion", side_effect=RuntimeError("provider unavailable"))
+    def test_batch_provider_failure_uses_fatal_lm_error(self, mock_batch) -> None:
+        """Classify an exhausted batch request as a fatal LM failure.
+
+        Args:
+            mock_batch: Patched LiteLLM batch-completion callable.
+        """
+        with pytest.raises(LMProviderError, match="Batch completion provider failed"):
+            LM("openai/gpt-4.1").batch_complete([[{"role": "user", "content": "question"}]])
+
+        mock_batch.assert_called_once()
+
+    @patch("litellm.batch_completion", return_value=[RuntimeError("one item failed")])
+    def test_batch_item_failure_uses_fatal_lm_error(self, mock_batch) -> None:
+        """Reject an exception returned inside a provider batch response.
+
+        Args:
+            mock_batch: Patched LiteLLM batch-completion callable.
+        """
+        with pytest.raises(LMProviderError, match="Batch completion provider failed"):
+            LM("openai/gpt-4.1").batch_complete([[{"role": "user", "content": "question"}]])
+
+        mock_batch.assert_called_once()
 
 
 class TestInlineReasoningLM:
@@ -360,12 +532,16 @@ class TestInlineReasoningLM:
         calls = (NativeToolCall("call-1", "REPLACE_TEXT", '{"target":"old","text":"new"}'),)
 
         inner = MagicMock(return_value="unused", spec=["complete_with_tools"])
-        inner.complete_with_tools.return_value = ToolCompletion("<think>private</think>ready", calls)
+        inner.complete_with_tools.return_value = ToolCompletion(
+            "<think>private</think>ready",
+            calls,
+            "provider reasoning",
+        )
         lm = InlineReasoningLM(inner)
 
         result = lm.complete_with_tools([], [], tool_choice="required")
 
-        assert result == ToolCompletion("ready", calls)
+        assert result == ToolCompletion("ready", calls, "provider reasoning")
         assert result.tool_calls is calls
         inner.complete_with_tools.assert_called_once_with([], [], tool_choice="required")
 

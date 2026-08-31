@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Sequence, cast
+from typing import Any, cast
 
 from gepa.lm import NativeToolCall, ToolCompletion
 from gepa.proposer.reflective_mutation.base import LanguageModel
@@ -31,16 +32,9 @@ from gepa.strategies.edit_tools import (
     apply_edit,
 )
 
-MAX_BRANCH_HISTORY_CHARS = 12_000
-MAX_INITIAL_CONTEXT_CHARS = 64_000
-
 
 class ReActV2ProtocolError(ValueError):
     """Raised when a ReAct V2 reply is not a valid tool or finish action."""
-
-
-class ReActV2ContextError(ValueError):
-    """Raised when branch-local history or the initial request exceeds its budget."""
 
 
 @dataclass
@@ -435,21 +429,17 @@ def parse_native_tool_call(call: NativeToolCall) -> tuple[EditTool, EditArgs]:
 
 def _validated_branch_history(
     history: Sequence[Mapping[str, Any]],
-    max_chars: int,
 ) -> list[dict[str, str]]:
     """Validate one branch's user/assistant transcript without truncation.
 
     Args:
         history: User/assistant messages for the selected parent candidate.
-        max_chars: Maximum serialized history length.
-
     Returns:
         Copied provider-ready chat messages.
 
     Raises:
         TypeError: A message is not a mapping or its content is not a string.
         ValueError: A message contains extra fields or a role other than user/assistant.
-        ReActV2ContextError: The history exceeds the configured budget.
     """
     messages: list[dict[str, str]] = []
     for message in history:
@@ -464,12 +454,6 @@ def _validated_branch_history(
         if not isinstance(content, str):
             raise TypeError("Branch-local history message content must be a string.")
         messages.append({"role": role, "content": content})
-    rendered = json.dumps(messages, ensure_ascii=False)
-    if len(rendered) > max_chars:
-        raise ReActV2ContextError(
-            f"Branch-local user/assistant history is {len(rendered)} characters, exceeding the {max_chars}-character "
-            "ReAct V2 history budget. Global history and automatic compression are intentionally disabled."
-        )
     return messages
 
 
@@ -482,11 +466,6 @@ class ReActV2Proposer:
         allowed_tools: Tools exposed by the configured edit basis.
         max_iterations: Maximum assistant turns, including invalid retries and finish.
         max_tool_calls: Maximum valid calls in an atomic-basis proposal.
-        max_history_chars: Branch-local chat-history budget. Overflow raises instead of
-            silently introducing global memory or lossy compression.
-        max_initial_context_chars: Total serialized message-and-tool budget before
-            every provider call. The historical argument name is retained for
-            compatibility.
         logger: Optional run logger.
     """
 
@@ -498,8 +477,6 @@ class ReActV2Proposer:
         *,
         max_iterations: int = 8,
         max_tool_calls: int = 4,
-        max_history_chars: int = MAX_BRANCH_HISTORY_CHARS,
-        max_initial_context_chars: int = MAX_INITIAL_CONTEXT_CHARS,
         logger: Any | None = None,
     ):
         """Validate and store the bounded ReAct proposer configuration.
@@ -510,9 +487,6 @@ class ReActV2Proposer:
             allowed_tools: Non-empty edit-tool basis exposed to the proposer.
             max_iterations: Maximum assistant turns, including invalid retries.
             max_tool_calls: Maximum valid calls in one proposal.
-            max_history_chars: Maximum serialized branch-history length.
-            max_initial_context_chars: Maximum serialized messages and tool
-                schemas before each provider call.
             logger: Optional run logger.
 
         Raises:
@@ -525,15 +499,11 @@ class ReActV2Proposer:
             raise ValueError("max_iterations must be at least 1.")
         if max_tool_calls < 1:
             raise ValueError("max_tool_calls must be at least 1.")
-        if max_initial_context_chars < 1:
-            raise ValueError("max_initial_context_chars must be at least 1.")
         self.lm = lm
         self.template = template
         self.allowed_tools = tuple(allowed_tools)
         self.max_iterations = max_iterations
         self.max_tool_calls = max_tool_calls
-        self.max_history_chars = max_history_chars
-        self.max_initial_context_chars = max_initial_context_chars
         self.logger = logger
 
     def _initial_messages(
@@ -614,38 +584,25 @@ class ReActV2Proposer:
             traces=traces_text,
         )
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
-        messages.extend(_validated_branch_history(branch_history, self.max_history_chars))
+        validated_history = _validated_branch_history(branch_history)
+        model = getattr(self.lm, "model", "")
+        direct_deepseek_native_tools = (
+            native_tools
+            and isinstance(model, str)
+            and model.startswith("deepseek/deepseek-v4-")
+        )
+        if validated_history and direct_deepseek_native_tools:
+            history_json = json.dumps(validated_history, ensure_ascii=False)
+            task = (
+                "Prior branch-local edit transcript (context only; these are not earlier turns in this "
+                f"provider tool conversation):\n{history_json}\n\n{task}"
+            )
+        else:
+            messages.extend(validated_history)
         if steering_message:
             task = f"{steering_message}\n\n{task}"
         messages.append({"role": "user", "content": task})
         return messages
-
-    def _check_context(
-        self,
-        messages: Sequence[Mapping[str, Any]],
-        native_tools: Sequence[Mapping[str, Any]],
-    ) -> None:
-        """Reject an oversized conversation before making a provider call.
-
-        Args:
-            messages: Conversation accumulated for the next model turn.
-            native_tools: Native tool schemas included with that turn.
-
-        Raises:
-            ReActV2ContextError: The serialized request exceeds the configured
-                total-context budget.
-        """
-        payload: dict[str, Any] = {"messages": list(messages)}
-        if native_tools:
-            payload["tools"] = list(native_tools)
-        rendered = json.dumps(payload, ensure_ascii=False, default=str)
-        if len(rendered) > self.max_initial_context_chars:
-            raise ReActV2ContextError(
-                f"ReAct V2 context is {len(rendered)} characters, exceeding the "
-                f"{self.max_initial_context_chars}-character total context budget. The total includes system "
-                "instructions, native tool schemas, the selected section, feedback, traces, steering message, and "
-                "branch-local history plus prior ReAct turns; automatic compression is intentionally disabled."
-            )
 
     @staticmethod
     def _native_assistant_message(completion: ToolCompletion) -> dict[str, Any]:
@@ -659,6 +616,8 @@ class ReActV2Proposer:
             calls are present.
         """
         message: dict[str, Any] = {"role": "assistant", "content": completion.content}
+        if completion.reasoning_content:
+            message["reasoning_content"] = completion.reasoning_content
         if completion.tool_calls:
             message["tool_calls"] = [
                 {
@@ -766,8 +725,6 @@ class ReActV2Proposer:
                 directly nor reproducible by the configured atomic basis.
             TypeError: Native completion support returns an unexpected value or
                 branch-history entries have invalid types.
-            ReActV2ContextError: Branch history or the accumulated request
-                exceeds its configured context budget.
         """
         native_complete = getattr(self.lm, "complete_with_tools", None)
         use_native_tools = callable(native_complete)
@@ -813,7 +770,6 @@ class ReActV2Proposer:
         last_output = ""
 
         for turn in range(1, self.max_iterations + 1):
-            self._check_context(messages, provider_tools)
             native_calls: tuple[NativeToolCall, ...] = ()
             action_text = ""
             assistant_history_content = ""
@@ -822,7 +778,11 @@ class ReActV2Proposer:
                 if not isinstance(completion, ToolCompletion):
                     raise TypeError("complete_with_tools must return gepa.lm.ToolCompletion.")
                 content = completion.content.strip()
-                completion = ToolCompletion(content=content, tool_calls=completion.tool_calls)
+                completion = ToolCompletion(
+                    content=content,
+                    tool_calls=completion.tool_calls,
+                    reasoning_content=completion.reasoning_content,
+                )
                 native_calls = completion.tool_calls
                 action_text = completion.content
                 messages.append(self._native_assistant_message(completion))

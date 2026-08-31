@@ -6,7 +6,8 @@
 When action-conditioned reflection is active, each proposal is tagged with the
 semantic action that constrained it (e.g. ``"contextualize"``, ``"resequence"``).
 This callback collects per-action counts, acceptance rates, score deltas,
-and textual diversity metrics for analysis.
+proposal records, Controller sampling provenance, and textual diversity metrics
+for analysis.
 """
 
 from __future__ import annotations
@@ -53,6 +54,7 @@ class ActionDiversityCallback:
         self.action_score_deltas: dict[str, list[float]] = defaultdict(list)
 
         self.action_texts: dict[str, list[str]] = defaultdict(list)
+        self.proposal_records: list[dict[str, Any]] = []
 
         self._iteration_texts: dict[int, list[str]] = defaultdict(list)
         self._current_iteration: int = -1
@@ -62,8 +64,9 @@ class ActionDiversityCallback:
         """Return a durable snapshot of all accumulated mechanism evidence.
 
         Returns:
-            Counts, score deltas, proposal texts, per-iteration texts, current
-            iteration, and optional verbalized-selector history.
+            Counts, score deltas, component-scoped proposal records,
+            per-iteration texts, current iteration, and optional
+            verbalized-selector history.
         """
         selector_history = None
         if self.selector is not None and hasattr(self.selector, "history"):
@@ -74,6 +77,7 @@ class ActionDiversityCallback:
             "action_rejection_counts": dict(self.action_rejection_counts),
             "action_score_deltas": {key: list(values) for key, values in self.action_score_deltas.items()},
             "action_texts": {key: list(values) for key, values in self.action_texts.items()},
+            "proposal_records": deepcopy(self.proposal_records),
             "iteration_texts": {key: list(values) for key, values in self._iteration_texts.items()},
             "current_iteration": self._current_iteration,
             "selector_history": selector_history,
@@ -100,6 +104,11 @@ class ActionDiversityCallback:
         for field_name in mapping_fields:
             if not isinstance(state.get(field_name, {}), Mapping):
                 raise TypeError(f"Persisted {field_name} must be a mapping")
+        proposal_records = state.get("proposal_records", [])
+        if not isinstance(proposal_records, list) or any(
+            not isinstance(record, Mapping) for record in proposal_records
+        ):
+            raise TypeError("Persisted proposal_records must be a list of mappings")
 
         self.action_proposal_counts = defaultdict(
             int,
@@ -124,6 +133,7 @@ class ActionDiversityCallback:
             list,
             {str(key): [str(value) for value in values] for key, values in state.get("action_texts", {}).items()},
         )
+        self.proposal_records = [deepcopy(dict(record)) for record in proposal_records]
         self._iteration_texts = defaultdict(
             list,
             {
@@ -154,7 +164,7 @@ class ActionDiversityCallback:
         return metadata.get("action")
 
     def on_proposal_end(self, event: ProposalEndEvent) -> None:
-        """Record the proposed instruction and its action (if present).
+        """Record the proposed instruction and its mechanism evidence.
 
         A length-capped attempt reaches here with empty ``new_instructions`` (#7):
         it still counts toward the action's proposal total, but contributes no
@@ -162,13 +172,31 @@ class ActionDiversityCallback:
         dissimilar and inflate them).
 
         Args:
-            event: The proposal-end event; its ``metadata["action"]`` names the
-                action credited with the proposal.
+            event: The proposal-end event. Its metadata identifies the optional
+                action and carries Controller sampling provenance when ReAct V2
+                produced the proposal.
         """
         self._current_iteration = event["iteration"]
         new_instructions = event["new_instructions"]
 
         action_name = self._action_from_event(event)
+        metadata = event.get("metadata") or {}
+        proposal_record: dict[str, Any] = {
+            "iteration": event["iteration"],
+            "action": action_name,
+            "texts_by_component": {str(component): str(text) for component, text in new_instructions.items() if text},
+        }
+        for field_name in (
+            "action_choice",
+            "action_operator",
+            "action_target_section",
+            "controller_sampling",
+            "proposer_backend",
+            "semantic_action",
+        ):
+            if field_name in metadata:
+                proposal_record[field_name] = deepcopy(metadata[field_name])
+        self.proposal_records.append(proposal_record)
         if action_name:
             self.action_proposal_counts[action_name] += 1
             if new_instructions:

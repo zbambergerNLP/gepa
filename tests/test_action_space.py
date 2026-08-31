@@ -709,7 +709,48 @@ class TestActionDiversityCallback:
 
         assert restored.summary() == callback.summary()
         assert restored.action_texts == callback.action_texts
+        assert restored.proposal_records == callback.proposal_records
         assert restored_selector.history == [{"sampled": ["action_e"]}]
+
+    def test_proposal_records_preserve_controller_and_component_evidence(self) -> None:
+        """Retain parsed Controller provenance and component-scoped proposal text."""
+        callback = ActionDiversityCallback()
+        controller_sampling = {
+            "probs": {"reexpress@Rules/REPLACE_TEXT": 1.0},
+            "sampled": ["reexpress@Rules/REPLACE_TEXT"],
+            "sampling_policy": "positive_support_uniform_mixture",
+        }
+        callback.on_proposal_end(
+            {
+                "iteration": 7,
+                "new_instructions": {"summarize1": "revised summary instruction"},
+                "prompts": {"summarize1": "proposal prompt"},
+                "raw_lm_outputs": {"summarize1": "raw output"},
+                "metadata": {
+                    "action": "reexpress",
+                    "action_choice": "reexpress@Rules/REPLACE_TEXT",
+                    "action_operator": "REPLACE_TEXT",
+                    "action_target_section": "Rules",
+                    "controller_sampling": controller_sampling,
+                    "proposer_backend": "react_v2",
+                    "semantic_action": "reexpress",
+                },
+            }
+        )
+
+        assert callback.proposal_records == [
+            {
+                "iteration": 7,
+                "action": "reexpress",
+                "texts_by_component": {"summarize1": "revised summary instruction"},
+                "action_choice": "reexpress@Rules/REPLACE_TEXT",
+                "action_operator": "REPLACE_TEXT",
+                "action_target_section": "Rules",
+                "controller_sampling": controller_sampling,
+                "proposer_backend": "react_v2",
+                "semantic_action": "reexpress",
+            }
+        ]
 
     def test_invalid_persisted_selector_history_is_rejected(self) -> None:
         """Reject a malformed selector-history snapshot instead of losing evidence silently."""

@@ -83,8 +83,8 @@ GLM_SGLANG_IMAGE_URI="docker://lmsysorg/sglang@${GLM_SGLANG_IMAGE_DIGEST}"
 GLM_SGLANG_IMAGE="${MODEL_STORAGE}/runtimes/sglang-glm-5.3-flash-x86_64.sif"
 HOTPOTQA_PYTHON_VERSION="3.11.13"
 
-if [[ ! "${HOTPOTQA_CAMPAIGN_ID}" =~ ^[A-Za-z0-9._-]+$ ]]; then
-    echo "ERROR: HOTPOTQA_CAMPAIGN_ID may contain only letters, numbers, dots, underscores, and hyphens" >&2
+if [[ ! "${HOTPOTQA_CAMPAIGN_ID}" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$ ]]; then
+    echo "ERROR: HOTPOTQA_CAMPAIGN_ID must start and end with a letter or number" >&2
     exit 1
 fi
 
@@ -467,7 +467,8 @@ if [[ "\${#SUBMIT_BUDGET_PROFILES[@]}" != "\${#SUBMIT_CONDITIONS[@]}" ]]; then
     exit 1
 fi
 
-mkdir -p "${SCRATCH_BASE}/logs"
+HOTPOTQA_LOG_DIR="${SCRATCH_BASE}/logs/hotpotqa/${HOTPOTQA_CAMPAIGN_ID}/${HOTPOTQA_SOURCE_COMMIT}"
+mkdir -p "${HOTPOTQA_LOG_DIR}"
 umask 077
 SBATCH_EXPORT_FILE=""
 cleanup_export_file() {
@@ -539,7 +540,7 @@ if [[ "${MODEL_PROFILE}" == "glm-5.3-flash" ]]; then
             "\${SBATCH_BIN}"${SBATCH_RESOURCE_COMMAND} \
             --parsable \
             --job-name="gepa-hp-glm-canary" \
-            --output="${SCRATCH_BASE}/logs/hotpotqa-%x-%j.log" \
+            --output="${HOTPOTQA_LOG_DIR}/hotpotqa-%x-%j.log" \
             --time="04:00:00" \
             --export=ALL \
             --export-file="\${SBATCH_EXPORT_FILE}" \
@@ -588,7 +589,7 @@ for CELL_INDEX in "\${!SUBMIT_CONDITIONS[@]}"; do
             "\${SBATCH_BIN}"${SBATCH_RESOURCE_COMMAND} \
             --parsable \
             --job-name="gepa-hp-${MODEL_PROFILE}-\${RUN_BUDGET_PROFILE}-\${RUN_CONDITION}" \
-            --output="${SCRATCH_BASE}/logs/hotpotqa-%x-%j.log" \
+            --output="${HOTPOTQA_LOG_DIR}/hotpotqa-%x-%j.log" \
             --time="\${RUN_TIME}" \
             --export=ALL \
             --export-file="\${SBATCH_EXPORT_FILE}" \

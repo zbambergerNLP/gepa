@@ -38,7 +38,7 @@ BUDGET_PROFILE="${BUDGET_PROFILE:-standard}"
 CONDITION="${CONDITION:-}"
 HOTPOTQA_CANARY_ONLY="${HOTPOTQA_CANARY_ONLY:-0}"
 HOTPOTQA_CAMPAIGN_ID="${HOTPOTQA_CAMPAIGN_ID:-}"
-if [[ ! "${HOTPOTQA_CAMPAIGN_ID}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+if [[ ! "${HOTPOTQA_CAMPAIGN_ID}" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$ ]]; then
     echo "ERROR: production launcher did not provide a valid HotPotQA campaign ID" >&2
     exit 1
 fi
@@ -228,7 +228,7 @@ export JAX_PLATFORMS=cpu
 export VLLM_LOGGING_LEVEL=WARNING
 export VLLM_USE_FLASHINFER_SAMPLER=0
 
-LOG_DIR="${SCRATCH_BASE}/logs"
+LOG_DIR="${SCRATCH_BASE}/logs/hotpotqa/${HOTPOTQA_CAMPAIGN_ID}/${HOTPOTQA_SOURCE_COMMIT}"
 mkdir -p "${XDG_CACHE_HOME}" "${HF_HOME}" "${VLLM_CACHE_ROOT}" \
     "${TORCHINDUCTOR_CACHE_DIR}" "${TRITON_CACHE_DIR}" "${LOG_DIR}"
 

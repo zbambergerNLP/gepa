@@ -1309,6 +1309,7 @@ def test_hotpotqa_sbatch_limits_nested_cpu_threads_after_vllm_starts() -> None:
     "script_path",
     [
         "scripts/della/submit_hotpotqa.sh",
+        "scripts/della/fetch_hotpotqa_results.sh",
         "scripts/della/submit_hover.sh",
         "examples/hotpotqa/run_hotpotqa.sbatch",
         "examples/hover/run_hover.sbatch",
@@ -1334,12 +1335,18 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     sbatch = (REPO_ROOT / "examples" / "hotpotqa" / "run_hotpotqa.sbatch").read_text()
     build = (REPO_ROOT / "scripts" / "della" / "build_env.sh").read_text()
     sync = (REPO_ROOT / "scripts" / "della" / "sync_to_della.sh").read_text()
+    fetch = (REPO_ROOT / "scripts" / "della" / "fetch_hotpotqa_results.sh").read_text()
 
     assert "REFLECTION_MODEL" in submit
     assert "REFLECTION_API_BASE" in submit
     assert 'MODEL_PROFILE="${MODEL_PROFILE:-qwen3.8-27b}"' in submit
     assert 'BUDGET_PROFILE="${BUDGET_PROFILE:-campaign}"' in submit
     assert 'HOTPOTQA_CAMPAIGN_ID="${HOTPOTQA_CAMPAIGN_ID:-hotpotqa-final-v1}"' in submit
+    assert 'HOTPOTQA_CAMPAIGN_ID="${HOTPOTQA_CAMPAIGN_ID:-hotpotqa-final-v1}"' in fetch
+    campaign_pattern = r"^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$"
+    assert campaign_pattern in submit
+    assert campaign_pattern in fetch
+    assert campaign_pattern in sbatch
     assert "MAX_METRIC_CALLS=6871" in submit
     assert 'STANDARD_TIME="${STANDARD_TIME:-${TIME:-72:00:00}}"' in submit
     assert "MAX_METRIC_CALLS=13742" in submit
@@ -1372,6 +1379,30 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
         assert '[[ -L "${ENV_FILE}" || ! -O "${ENV_FILE}" ]]' in local_script
         assert "(8#${ENV_MODE} & 8#077)" in local_script
         assert "chmod 600 ${ENV_FILE}" in local_script
+    assert '[[ -L "${ENV_FILE}" || ! -O "${ENV_FILE}" ]]' in fetch
+    assert "(8#${ENV_MODE} & 8#077)" in fetch
+    assert "chmod 600 ${ENV_FILE}" in fetch
+    assert "sshpass" not in fetch
+    assert "REMOTE_PASSWORD" not in fetch
+    assert "--delete" not in fetch
+    assert "-o BatchMode=yes -o StrictHostKeyChecking=yes" in fetch
+    assert '"${REMOTE_USER}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$' in fetch
+    assert '"${REMOTE_HOST}" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$' in fetch
+    assert "${REMOTE_DIR%/}/sources/${HOTPOTQA_SOURCE_COMMIT}" in fetch
+    assert "${SCRATCH_BASE%/}/logs/hotpotqa/${HOTPOTQA_CAMPAIGN_ID}/${HOTPOTQA_SOURCE_COMMIT}" in fetch
+    assert 'FETCH_ROOT="$(mktemp -d ' in fetch
+    assert 'mv -- "${LOCAL_ROOT}" "${PREVIOUS_ROOT}"' in fetch
+    assert 'mv -- "${FETCH_ROOT}" "${LOCAL_ROOT}"' in fetch
+    assert "examples.hotpotqa.analyze_results" in fetch
+    assert '--campaign-id "${HOTPOTQA_CAMPAIGN_ID}"' in fetch
+    assert '--source-commit "${HOTPOTQA_SOURCE_COMMIT}"' in fetch
+    assert '--analysis-source-commit "${ANALYSIS_SOURCE_COMMIT}"' in fetch
+    assert "commit tracked worktree changes before publishing campaign analysis" in fetch
+    assert 'mv -- "${PREVIOUS_ROOT}" "${LOCAL_ROOT}"' in fetch
+    assert (
+        'HOTPOTQA_LOG_DIR="${SCRATCH_BASE}/logs/hotpotqa/${HOTPOTQA_CAMPAIGN_ID}/${HOTPOTQA_SOURCE_COMMIT}"' in submit
+    )
+    assert 'LOG_DIR="${SCRATCH_BASE}/logs/hotpotqa/${HOTPOTQA_CAMPAIGN_ID}/${HOTPOTQA_SOURCE_COMMIT}"' in sbatch
     assert 'SBATCH_EXPORT_FILE="\\$(mktemp)"' in submit
     assert "cleanup_export_file()" in submit
     assert 'rm -f -- "\\${SBATCH_EXPORT_FILE}"' in submit

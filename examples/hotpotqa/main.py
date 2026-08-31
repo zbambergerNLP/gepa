@@ -1104,21 +1104,38 @@ def dump_candidates(result, run_dir: str, run_contract: dict) -> str:
     return path
 
 
-def dump_action_summary(tracker: ActionDiversityCallback, run_dir: str, selector=None) -> str:
-    """Persist aggregate and per-action diversity evidence.
+def dump_action_summary(
+    tracker: ActionDiversityCallback,
+    run_dir: str,
+    candidate_artifact_path: str,
+    run_contract: dict,
+    selector=None,
+) -> str:
+    """Persist performance-mechanism evidence for one optimizer condition.
 
     Args:
-        tracker: Callback containing action outcomes and generated text.
+        tracker: Callback containing proposal text, Controller provenance, and
+            optional semantic-action outcomes.
         run_dir: Directory that receives ``action_summary.json``.
+        candidate_artifact_path: Exact ``candidates.json`` file whose
+            proposals are summarized.
+        run_contract: Material experiment identity shared with the candidate
+            artifact.
         selector: Optional verbalized selector whose history is included.
 
     Returns:
         Path to the written action summary.
     """
     payload = {
+        "schema_version": 1,
+        "run_contract": run_contract,
+        "candidate_artifact_sha256": hashlib.sha256(
+            Path(candidate_artifact_path).read_bytes()
+        ).hexdigest(),
         "summary": tracker.summary(),
         "action_score_deltas": dict(tracker.action_score_deltas),
         "action_texts": dict(tracker.action_texts),
+        "proposal_records": tracker.proposal_records,
     }
     if selector is not None and getattr(selector, "history", None):
         payload["verbalized_history"] = selector.history
@@ -1515,10 +1532,8 @@ def main():
         run_dirs[condition] = run_dir
         ensure_wikipedia_run_contract(run_dir, run_contract)
         config, selector = build_config(condition, args, reflection_lm_kwargs, run_dir=run_dir)
-        callbacks = None
-        if condition in _SEMANTIC_CONDITIONS:
-            trackers[condition] = ActionDiversityCallback(selector=selector)
-            callbacks = [trackers[condition]]
+        trackers[condition] = ActionDiversityCallback(selector=selector)
+        callbacks = [trackers[condition]]
         seed = seed_candidate(args.program, args.seed_style, resolved_family)
         condition_label = _CONDITION_LABELS[condition]
         if args.merge:
@@ -1542,11 +1557,16 @@ def main():
                 f"the locked budget is {args.max_metric_calls}. Resubmit the same commit and campaign to resume."
             )
         results[condition] = condition_result
-        path = dump_candidates(results[condition], run_dir, run_contract)
+        candidate_artifact_path = dump_candidates(results[condition], run_dir, run_contract)
+        print(f"[{condition}] wrote {candidate_artifact_path}")
+        path = dump_action_summary(
+            trackers[condition],
+            run_dir,
+            candidate_artifact_path,
+            run_contract,
+            selector=selector,
+        )
         print(f"[{condition}] wrote {path}")
-        if condition in trackers:
-            path = dump_action_summary(trackers[condition], run_dir, selector=selector)
-            print(f"[{condition}] wrote {path}")
 
     # Report: best prompts (full text)
     print(f"\n{'=' * 60}")
@@ -1618,8 +1638,10 @@ def main():
             )
         print()
 
-    # Action diversity metrics (random / action conditions)
+    # Semantic-action metrics do not apply to the vanilla condition.
     for name, tracker in trackers.items():
+        if name not in _SEMANTIC_CONDITIONS:
+            continue
         print(f"{'=' * 60}")
         print(f"  Action Diversity Metrics [{name}]")
         print(f"{'=' * 60}\n")

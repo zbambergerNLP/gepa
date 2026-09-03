@@ -1686,6 +1686,8 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert "load_hotpotqa_dataset(seed=0)" in build
     assert "load_hover_dataset" not in build
     assert "--exclude '.cache/'" in sync
+    assert "--exclude '.serving-venv/'" in sync
+    assert "--exclude '.tools/'" in sync
     assert "--exclude 'logs/'" in sync
     assert "--exclude 'sources/'" in sync
     assert 'git -C "${REPO_ROOT}" archive "${SYNC_SOURCE_COMMIT}"' in sync

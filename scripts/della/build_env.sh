@@ -197,6 +197,9 @@ GLM_IMAGE_SOURCE_PATH="${GLM_SGLANG_IMAGE}.source"
 GLM_IMAGE_SHA_PATH="${GLM_SGLANG_IMAGE}.sha256"
 if [[ ! -f "${GLM_SGLANG_IMAGE}" ]]; then
     GLM_IMAGE_TEMP="\$(mktemp "${GLM_RUNTIME_DIR}/.glm-5.3-flash.XXXXXX.sif")"
+    # mktemp creates the file, and \`apptainer build\` refuses to overwrite an
+    # existing target; keep the unique name but hand apptainer a free path.
+    rm -f -- "\${GLM_IMAGE_TEMP}"
     cleanup_glm_image() {
         rm -f -- "\${GLM_IMAGE_TEMP}"
     }

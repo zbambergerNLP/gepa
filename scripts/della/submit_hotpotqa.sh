@@ -488,10 +488,10 @@ cleanup_export_file() {
 trap cleanup_export_file EXIT
 
 write_sbatch_export_file() {
-    local run_budget_profile="$1"
-    local run_max_metric_calls="$2"
-    local run_condition="$3"
-    local canary_only="$4"
+    local run_budget_profile="\$1"
+    local run_max_metric_calls="\$2"
+    local run_condition="\$3"
+    local canary_only="\$4"
 
     SBATCH_EXPORT_FILE="\$(mktemp)"
     printf '%s\0' \

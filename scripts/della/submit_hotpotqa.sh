@@ -60,6 +60,9 @@ MODEL_PROFILE="${MODEL_PROFILE:-qwen3.8-27b}"
 BUDGET_PROFILE="${BUDGET_PROFILE:-campaign}"
 CONDITION="${CONDITION:-all}"
 HOTPOTQA_CAMPAIGN_ID="${HOTPOTQA_CAMPAIGN_ID:-hotpotqa-final-v1}"
+# Defined locally: the remote heredoc below is unquoted, so every ${...} it
+# contains expands on the laptop, and set -u aborts on an unset name.
+HOTPOTQA_LOG_DIR="${SCRATCH_BASE}/logs/hotpotqa/${HOTPOTQA_CAMPAIGN_ID}/${HOTPOTQA_SOURCE_COMMIT}"
 MAX_WORKERS="${MAX_WORKERS:-}"
 WIKI17_DIR="${WIKI17_DIR:-${SCRATCH_BASE}/.cache/gepa/wiki17}"
 GEN_GMU=0.92

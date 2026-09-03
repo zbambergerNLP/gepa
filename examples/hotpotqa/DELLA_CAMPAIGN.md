@@ -1,4 +1,6 @@
-<!-- Source: Gilad Morad, https://gist.github.com/gilad12-coder/b0142ad28de98c47487ea9847686206a (fetched 2026-09-02). Checked in verbatim so the runbook is versioned next to the code it describes. -->
+<!-- Source: Gilad Morad, https://gist.github.com/gilad12-coder/b0142ad28de98c47487ea9847686206a (fetched 2026-09-02).
+     Adapted in this checkout: the Qwen arm no longer depends on an external POSIT checkout; this repo builds its own
+     hash-locked vLLM serving venv (section 4). Everything else follows the gist. -->
 
 # Running the HotPotQA campaign on Della
 
@@ -104,45 +106,39 @@ MODEL_STORAGE="/projects/BSTEWART/model_storage"
 
 `MODEL_STORAGE` must be writable while the artifacts are first prepared and readable from the visualization, login, and compute nodes.
 
-If your POSIT checkout is not at the default location, also add:
-
-```bash
-POSIT_DIR="/home/YOUR_NETID/posit"
-```
-
 Recheck the file mode:
 
 ```bash
 test "$(stat -f '%Lp' scripts/della/.env 2>/dev/null || stat -c '%a' scripts/della/.env)" = "600"
 ```
 
-## 4. Check POSIT/vLLM
+## 4. Check the serving prerequisites
 
-The GEPA setup script does not clone or build POSIT. It expects a clean POSIT checkout with the Qwen serving environment at `$POSIT_DIR`. The default is `/home/YOUR_NETID/posit`.
+The Qwen arm is served by a vLLM environment that this repository builds itself from
+`examples/hotpotqa/serving/requirements.in` and its hash-locked resolution
+`examples/hotpotqa/serving/requirements-x86_64-linux-py312.txt` (regenerate with
+`scripts/della/lock_serving_env.sh` after changing the `.in` file, and commit the lock).
+No other project's checkout or virtual environment is used.
 
-```text
-/home/YOUR_NETID/posit/src/.venv/bin/python
-/home/YOUR_NETID/posit/src/.venv/bin/vllm
-```
-
-Check it from your laptop:
+Run the read-only preflight from your laptop; it covers steps 1-4:
 
 ```bash
-source scripts/della/.env
-POSIT_DIR="${POSIT_DIR:-/home/${REMOTE_USER}/posit}"
-
-ssh "${REMOTE_USER}@${REMOTE_VIS_HOST}" bash -s -- "${POSIT_DIR}" <<'REMOTE'
-set -euo pipefail
-posit_dir="$1"
-test -x "${posit_dir}/src/.venv/bin/python"
-test -x "${posit_dir}/src/.venv/bin/vllm"
-test -z "$(git -C "${posit_dir}" status --porcelain --untracked-files=normal)"
-"${posit_dir}/src/.venv/bin/python" -c \
-  'from importlib.metadata import version; print("vLLM", version("vllm"))'
-REMOTE
+scripts/della/preflight_hotpotqa.sh
 ```
 
-The production job requires vLLM 0.17.0 or newer, along with the data-parallel, multi-API-server, and native tool-call options. If the check fails, ask the lab for its Della POSIT setup. An unrelated vLLM install would change the recorded runtime.
+It checks the local tools, the exact commit and clean tree, `scripts/della/.env`,
+non-interactive SSH to both hosts, and on `della-vis1`: Apptainer, the `cudatoolkit/13.0`
+module, a writable `MODEL_STORAGE`, the home quota, and (once built) that the serving venv
+matches the committed lock. The pinned vLLM is 0.25.1 on torch 2.11 / CUDA 13.0, which
+satisfies the 0.17.0 floor with the data-parallel, multi-API-server, and native tool-call
+options.
+
+Della requires an SSH key **and** a password step; the launcher scripts use `BatchMode=yes`,
+so open the persistent master connections once per laptop session:
+
+```bash
+scripts/della/della_session.sh open
+```
 
 ## 5. Build the shared artifacts
 
@@ -155,7 +151,7 @@ scripts/della/build_env.sh
 `build_env.sh` runs the downloads on `della-vis1`. It also:
 
 - builds the frozen Python 3.11.13 and uv 0.9.13 GEPA environment;
-- freezes the realized POSIT serving environment;
+- builds the hash-locked vLLM serving venv at `$REMOTE_DIR/.serving-venv` and freezes its manifest;
 - builds and verifies the frozen Wiki-2017 BM25 index;
 - caches the exact HotPotQA 150/300/300 split;
 - downloads and byte-verifies both pinned model checkpoints; and

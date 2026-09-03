@@ -70,7 +70,8 @@ VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-}"
 VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-}"
 VLLM_MAX_NUM_BATCHED_TOKENS="${VLLM_MAX_NUM_BATCHED_TOKENS:-16384}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-1800}"
-POSIT_DIR="${POSIT_DIR:-/home/${REMOTE_USER}/posit}"
+SERVING_VENV_DIR="${SERVING_VENV_DIR:-${REMOTE_DIR%/}/.serving-venv}"
+SERVING_LOCK_RELATIVE="examples/hotpotqa/serving/requirements-x86_64-linux-py312.txt"
 DELLA_GPUS="${DELLA_GPUS:-}"
 DELLA_CPUS_PER_TASK="${DELLA_CPUS_PER_TASK:-}"
 DELLA_MEMORY="${DELLA_MEMORY:-}"
@@ -302,7 +303,7 @@ echo "==> scientific contract: budget_profile=${BUDGET_PROFILE} budget=${CAMPAIG
 echo "==> method: frozen Wiki-2017/BM25 k=7 seed=0 workers=${MAX_WORKERS} two-stage structured prompts"
 echo "==> Della resources: partition=${JOB_PARTITION:-cluster-default} gpus=${DELLA_GPUS} cpus=${DELLA_CPUS_PER_TASK} memory=${DELLA_MEMORY}"
 if [[ "${MODEL_PROFILE}" == "qwen3.8-27b" ]]; then
-    echo "==> Qwen POSIT/vLLM: tp=1 dp=8 api_servers=8 max_num_seqs=1/replica max_batched_tokens=${VLLM_MAX_NUM_BATCHED_TOKENS}"
+    echo "==> Qwen vLLM: tp=1 dp=8 api_servers=8 max_num_seqs=1/replica max_batched_tokens=${VLLM_MAX_NUM_BATCHED_TOKENS}"
 else
     echo "==> GLM SGLang: tp=8 ep=8 max_running_requests=8 BF16-KV TileLang-DSA deep_gemm no-speculation no-DP-attention"
 fi
@@ -395,31 +396,36 @@ if [[ ! "\${HOTPOTQA_GEPA_ENV_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
     exit 1
 fi
 
-HOTPOTQA_POSIT_ENV_SHA256=""
+HOTPOTQA_SERVING_ENV_SHA256=""
 HOTPOTQA_SGLANG_IMAGE_SHA256=""
 if [[ "${MODEL_PROFILE}" == "qwen3.8-27b" ]]; then
-    VLLM_PY="${POSIT_DIR}/src/.venv/bin/python"
-    if [[ ! -x "\${VLLM_PY}" ]]; then
-        echo "ERROR: missing \${VLLM_PY}; run scripts/della/build_env.sh" >&2
+    VLLM_PY="${SERVING_VENV_DIR}/bin/python"
+    if [[ ! -x "\${VLLM_PY}" || ! -x "${SERVING_VENV_DIR}/bin/vllm" ]]; then
+        echo "ERROR: missing serving environment at ${SERVING_VENV_DIR}; run scripts/della/build_env.sh" >&2
         exit 1
     fi
-    if [[ -n "\$(git -C "${POSIT_DIR}" status --porcelain --untracked-files=normal)" ]]; then
-        echo "ERROR: commit or remove local POSIT changes before a production submission" >&2
+    if [[ ! -f "${SERVING_LOCK_RELATIVE}" ]]; then
+        echo "ERROR: staged source lacks ${SERVING_LOCK_RELATIVE}" >&2
         exit 1
     fi
-    HOTPOTQA_POSIT_COMMIT="\$(git -C "${POSIT_DIR}" rev-parse HEAD)"
-    POSIT_ENV_MANIFEST="${SCRATCH_BASE}/.cache/gepa/posit-environments/\${HOTPOTQA_POSIT_COMMIT}.json"
+    HOTPOTQA_SERVING_LOCK_SHA256="\$(sha256sum "${SERVING_LOCK_RELATIVE}" | cut -d' ' -f1)"
+    if [[ ! -f "${SERVING_VENV_DIR}/.gepa-serving-lock.sha256" \
+        || "\$(tr -d '\n' < "${SERVING_VENV_DIR}/.gepa-serving-lock.sha256")" != "\${HOTPOTQA_SERVING_LOCK_SHA256}" ]]; then
+        echo "ERROR: serving environment was built from a different lockfile; run scripts/della/build_env.sh" >&2
+        exit 1
+    fi
+    SERVING_ENV_MANIFEST="${SCRATCH_BASE}/.cache/gepa/serving-environments/\${HOTPOTQA_SERVING_LOCK_SHA256}.json"
     if ! "\${GEPA_UV_BIN}" pip check --python "\${VLLM_PY}"; then
-        echo "ERROR: POSIT serving environment has inconsistent dependencies" >&2
+        echo "ERROR: serving environment has inconsistent dependencies" >&2
         exit 1
     fi
-    if [[ ! -f "\${POSIT_ENV_MANIFEST}" ]]; then
-        echo "ERROR: POSIT serving environment is not frozen; run scripts/della/build_env.sh" >&2
+    if [[ ! -f "\${SERVING_ENV_MANIFEST}" ]]; then
+        echo "ERROR: serving environment is not frozen; run scripts/della/build_env.sh" >&2
         exit 1
     fi
-    HOTPOTQA_POSIT_ENV_SHA256="\$(sha256sum "\${POSIT_ENV_MANIFEST}" | cut -d' ' -f1)"
-    if [[ ! "\${HOTPOTQA_POSIT_ENV_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
-        echo "ERROR: POSIT serving environment is not frozen; run scripts/della/build_env.sh" >&2
+    HOTPOTQA_SERVING_ENV_SHA256="\$(sha256sum "\${SERVING_ENV_MANIFEST}" | cut -d' ' -f1)"
+    if [[ ! "\${HOTPOTQA_SERVING_ENV_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
+        echo "ERROR: serving environment is not frozen; run scripts/della/build_env.sh" >&2
         exit 1
     fi
 else
@@ -502,7 +508,7 @@ write_sbatch_export_file() {
         "VLLM_MAX_NUM_SEQS=${VLLM_MAX_NUM_SEQS}" \
         "VLLM_MAX_NUM_BATCHED_TOKENS=${VLLM_MAX_NUM_BATCHED_TOKENS}" \
         "HEALTH_TIMEOUT=${HEALTH_TIMEOUT}" \
-        "POSIT_DIR=${POSIT_DIR}" \
+        "SERVING_VENV_DIR=${SERVING_VENV_DIR}" \
         "MODEL_STORAGE=${MODEL_STORAGE}" \
         "GLM_SGLANG_IMAGE=${GLM_SGLANG_IMAGE}" \
         "GLM_SGLANG_IMAGE_URI=${GLM_SGLANG_IMAGE_URI}" \
@@ -522,7 +528,7 @@ write_sbatch_export_file() {
         "GEPA_UV_BIN=${GEPA_UV_BIN}" \
         "HOTPOTQA_ENV_SPEC_SHA256=\${HOTPOTQA_ENV_SPEC_SHA256}" \
         "HOTPOTQA_GEPA_ENV_SHA256=\${HOTPOTQA_GEPA_ENV_SHA256}" \
-        "HOTPOTQA_POSIT_ENV_SHA256=\${HOTPOTQA_POSIT_ENV_SHA256}" \
+        "HOTPOTQA_SERVING_ENV_SHA256=\${HOTPOTQA_SERVING_ENV_SHA256}" \
         "HOTPOTQA_PRODUCTION_LAUNCH=1" \
         > "\${SBATCH_EXPORT_FILE}"
 }

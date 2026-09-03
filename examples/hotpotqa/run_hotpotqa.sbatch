@@ -60,8 +60,10 @@ VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-1}"
 VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-1}"
 VLLM_MAX_NUM_BATCHED_TOKENS="${VLLM_MAX_NUM_BATCHED_TOKENS:-16384}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-1800}"
-# POSIT repo location (for its vLLM install).
-POSIT_DIR="${POSIT_DIR:-/home/${USER}/posit}"
+# Self-contained vLLM serving environment built by scripts/della/build_env.sh from
+# examples/hotpotqa/serving/requirements-x86_64-linux-py312.txt.
+SERVING_VENV_DIR="${SERVING_VENV_DIR:-}"
+SERVING_LOCK="examples/hotpotqa/serving/requirements-x86_64-linux-py312.txt"
 GEPA_VENV_DIR="${GEPA_VENV_DIR:-}"
 SCRATCH_BASE="${SCRATCH_BASE:-/scratch/gpfs/BSTEWART/${USER}/gepa}"
 EXPECTED_HOTPOTQA_PYTHON_VERSION="3.11.13"
@@ -83,7 +85,7 @@ HOTPOTQA_SOURCE_COMMIT="${HOTPOTQA_SOURCE_COMMIT:-}"
 HOTPOTQA_SOURCE_MANIFEST_SHA256="${HOTPOTQA_SOURCE_MANIFEST_SHA256:-}"
 HOTPOTQA_ENV_SPEC_SHA256="${HOTPOTQA_ENV_SPEC_SHA256:-}"
 HOTPOTQA_GEPA_ENV_SHA256="${HOTPOTQA_GEPA_ENV_SHA256:-}"
-HOTPOTQA_POSIT_ENV_SHA256="${HOTPOTQA_POSIT_ENV_SHA256:-}"
+HOTPOTQA_SERVING_ENV_SHA256="${HOTPOTQA_SERVING_ENV_SHA256:-}"
 if [[ ! "${HOTPOTQA_SOURCE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]; then
     echo "ERROR: production launcher did not provide an exact source commit" >&2
     exit 1
@@ -289,16 +291,16 @@ HOTPOTQA_VLLM_VERSION=""
 HOTPOTQA_SGLANG_VERSION=""
 HOTPOTQA_SERVING_IMAGE_URI=""
 HOTPOTQA_SERVING_IMAGE_SHA256=""
-HOTPOTQA_POSIT_COMMIT=""
+HOTPOTQA_SERVING_LOCK_SHA256=""
 HOTPOTQA_CUDA_MODULE=""
 HOTPOTQA_VLLM_BATCH_INVARIANT=""
 HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS=""
 
 if [[ "${SERVING_ENGINE}" == "vllm" ]]; then
-    VLLM_PY="${POSIT_DIR}/src/.venv/bin/python"
-    VLLM_BIN="${POSIT_DIR}/src/.venv/bin/vllm"
-    if [[ ! -x "${VLLM_PY}" || ! -x "${VLLM_BIN}" ]]; then
-        echo "ERROR: missing frozen POSIT vLLM environment; run scripts/della/build_env.sh" >&2
+    VLLM_PY="${SERVING_VENV_DIR}/bin/python"
+    VLLM_BIN="${SERVING_VENV_DIR}/bin/vllm"
+    if [[ -z "${SERVING_VENV_DIR}" || ! -x "${VLLM_PY}" || ! -x "${VLLM_BIN}" ]]; then
+        echo "ERROR: missing frozen vLLM serving environment; run scripts/della/build_env.sh" >&2
         exit 1
     fi
     if [[ "${VLLM_TENSOR_PARALLEL_SIZE}" != "1" \
@@ -311,7 +313,7 @@ if [[ "${SERVING_ENGINE}" == "vllm" ]]; then
     unset VLLM_BATCH_INVARIANT
     HOTPOTQA_VLLM_BATCH_INVARIANT="false"
     HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS="true"
-    export PATH="${POSIT_DIR}/src/.venv/bin:${PATH}"
+    export PATH="${SERVING_VENV_DIR}/bin:${PATH}"
     HOTPOTQA_VLLM_VERSION="$("${VLLM_PY}" -c 'from importlib.metadata import version; print(version("vllm"))')"
     HOTPOTQA_TORCH_VERSION="$("${VLLM_PY}" -c 'import torch; print(torch.__version__)')"
     HOTPOTQA_CUDA_VERSION="$("${VLLM_PY}" -c 'import torch; print(torch.version.cuda)')"
@@ -322,22 +324,27 @@ if [[ "${SERVING_ENGINE}" == "vllm" ]]; then
         echo "ERROR: exact CUDA module ${HOTPOTQA_CUDA_MODULE} is unavailable" >&2
         exit 1
     fi
-    if [[ -n "$(git -C "${POSIT_DIR}" status --porcelain --untracked-files=normal)" ]]; then
-        echo "ERROR: commit or remove local POSIT changes before a production submission" >&2
+    if [[ ! -f "${SERVING_LOCK}" ]]; then
+        echo "ERROR: Slurm job source lacks ${SERVING_LOCK}" >&2
         exit 1
     fi
-    HOTPOTQA_POSIT_COMMIT="$(git -C "${POSIT_DIR}" rev-parse HEAD)"
-    POSIT_ENV_MANIFEST="${SCRATCH_BASE}/.cache/gepa/posit-environments/${HOTPOTQA_POSIT_COMMIT}.json"
+    HOTPOTQA_SERVING_LOCK_SHA256="$(sha256sum "${SERVING_LOCK}" | cut -d' ' -f1)"
+    if [[ ! -f "${SERVING_VENV_DIR}/.gepa-serving-lock.sha256" \
+        || "$(tr -d '\n' < "${SERVING_VENV_DIR}/.gepa-serving-lock.sha256")" != "${HOTPOTQA_SERVING_LOCK_SHA256}" ]]; then
+        echo "ERROR: serving environment was built from a different lockfile; run scripts/della/build_env.sh" >&2
+        exit 1
+    fi
+    SERVING_ENV_MANIFEST="${SCRATCH_BASE}/.cache/gepa/serving-environments/${HOTPOTQA_SERVING_LOCK_SHA256}.json"
     if ! "${GEPA_UV_BIN}" pip check --python "${VLLM_PY}"; then
-        echo "ERROR: POSIT serving environment has inconsistent dependencies" >&2
+        echo "ERROR: serving environment has inconsistent dependencies" >&2
         exit 1
     fi
-    VERIFIED_POSIT_ENV_SHA256="$(
-        "${VLLM_PY}" -m examples.common.python_environment verify --path "${POSIT_ENV_MANIFEST}"
+    VERIFIED_SERVING_ENV_SHA256="$(
+        "${VLLM_PY}" -m examples.common.python_environment verify --path "${SERVING_ENV_MANIFEST}"
     )"
-    if [[ ! "${HOTPOTQA_POSIT_ENV_SHA256}" =~ ^[0-9a-f]{64}$ \
-        || "${VERIFIED_POSIT_ENV_SHA256}" != "${HOTPOTQA_POSIT_ENV_SHA256}" ]]; then
-        echo "ERROR: POSIT serving environment differs from the submitted frozen environment" >&2
+    if [[ ! "${HOTPOTQA_SERVING_ENV_SHA256}" =~ ^[0-9a-f]{64}$ \
+        || "${VERIFIED_SERVING_ENV_SHA256}" != "${HOTPOTQA_SERVING_ENV_SHA256}" ]]; then
+        echo "ERROR: serving environment differs from the submitted frozen environment" >&2
         exit 1
     fi
     "${VLLM_PY}" - "${HOTPOTQA_VLLM_VERSION}" <<'PY'
@@ -366,7 +373,7 @@ PY
     export HOTPOTQA_WEIGHT_DTYPE="bfloat16"
     export HOTPOTQA_KV_CACHE_DTYPE="auto"
     HOTPOTQA_SERVE_ARGUMENTS="tp=1;dp=8;api_servers=8;gpu_memory_utilization=${GEN_GMU};max_model_len=${GEN_MAX_LEN};rope_scaling=none;max_num_seqs=1;max_num_batched_tokens=${VLLM_MAX_NUM_BATCHED_TOKENS};dtype=bfloat16;kv_cache_dtype=auto;prefix_caching=false;language_model_only=true;reasoning_parser=qwen3;auto_tool_choice=true;tool_parser=qwen3_coder;seed=0;batch_invariant=false;single_sequence_replicas=true"
-    echo "==> serving Qwen with POSIT vLLM TP1/DP8 on :${GEN_PORT}; log: ${GEN_LOG}"
+    echo "==> serving Qwen with vLLM TP1/DP8 on :${GEN_PORT}; log: ${GEN_LOG}"
     env \
         -u OMP_NUM_THREADS \
         -u MKL_NUM_THREADS \
@@ -560,8 +567,8 @@ export HOTPOTQA_TORCH_VERSION
 export HOTPOTQA_CUDA_VERSION
 export HOTPOTQA_CUDA_MODULE
 export HOTPOTQA_TRANSFORMERS_VERSION
-export HOTPOTQA_POSIT_COMMIT
-export HOTPOTQA_POSIT_ENV_SHA256
+export HOTPOTQA_SERVING_LOCK_SHA256
+export HOTPOTQA_SERVING_ENV_SHA256
 export HOTPOTQA_GPU_RUNTIME
 export HOTPOTQA_SOURCE_COMMIT
 export HOTPOTQA_SOURCE_MANIFEST_SHA256
@@ -574,8 +581,8 @@ export HOTPOTQA_VLLM_BATCH_INVARIANT
 export HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS
 HOTPOTQA_LITELLM_VERSION="$("${PY}" -c 'from importlib.metadata import version; print(version("litellm"))')"
 export HOTPOTQA_LITELLM_VERSION
-RUNTIME_IDENTITY="python=${HOTPOTQA_PYTHON_VERSION};uv=${HOTPOTQA_UV_VERSION};uv_sha=${HOTPOTQA_UV_SHA256};gepa_env=${HOTPOTQA_GEPA_ENV_SHA256};model_manifest=${HOTPOTQA_MODEL_INTEGRITY_SHA256};engine=${HOTPOTQA_SERVING_ENGINE};vllm=${HOTPOTQA_VLLM_VERSION};sglang=${HOTPOTQA_SGLANG_VERSION};image_uri=${HOTPOTQA_SERVING_IMAGE_URI};image_sha=${HOTPOTQA_SERVING_IMAGE_SHA256};torch=${HOTPOTQA_TORCH_VERSION};cuda=${HOTPOTQA_CUDA_VERSION};cuda_module=${HOTPOTQA_CUDA_MODULE};transformers=${HOTPOTQA_TRANSFORMERS_VERSION};posit=${HOTPOTQA_POSIT_COMMIT};posit_env=${HOTPOTQA_POSIT_ENV_SHA256};gpu=${HOTPOTQA_GPU_RUNTIME};${HOTPOTQA_SERVE_ARGUMENTS}"
-CAMPAIGN_QUALITY_IDENTITY="source=${HOTPOTQA_SOURCE_COMMIT};source_manifest=${HOTPOTQA_SOURCE_MANIFEST_SHA256};python=${HOTPOTQA_PYTHON_VERSION};uv=${HOTPOTQA_UV_VERSION};uv_sha=${HOTPOTQA_UV_SHA256};env_spec=${HOTPOTQA_ENV_SPEC_SHA256};gepa_env=${HOTPOTQA_GEPA_ENV_SHA256};model=${HOTPOTQA_MODEL_REVISION};model_manifest=${HOTPOTQA_MODEL_INTEGRITY_SHA256};engine=${HOTPOTQA_SERVING_ENGINE};vllm=${HOTPOTQA_VLLM_VERSION};sglang=${HOTPOTQA_SGLANG_VERSION};image_uri=${HOTPOTQA_SERVING_IMAGE_URI};image_sha=${HOTPOTQA_SERVING_IMAGE_SHA256};torch=${HOTPOTQA_TORCH_VERSION};cuda=${HOTPOTQA_CUDA_VERSION};cuda_module=${HOTPOTQA_CUDA_MODULE};transformers=${HOTPOTQA_TRANSFORMERS_VERSION};litellm=${HOTPOTQA_LITELLM_VERSION};posit=${HOTPOTQA_POSIT_COMMIT};posit_env=${HOTPOTQA_POSIT_ENV_SHA256};gpu=${HOTPOTQA_GPU_RUNTIME};serve=${HOTPOTQA_SERVE_ARGUMENTS};request_seed=0;dspy=${HOTPOTQA_DSPY_COMMIT};hotpot=${HOTPOTQA_DATA_REVISION};wiki17=${WIKI17_REVISION};index=${WIKI17_INTEGRITY_SHA256}"
+RUNTIME_IDENTITY="python=${HOTPOTQA_PYTHON_VERSION};uv=${HOTPOTQA_UV_VERSION};uv_sha=${HOTPOTQA_UV_SHA256};gepa_env=${HOTPOTQA_GEPA_ENV_SHA256};model_manifest=${HOTPOTQA_MODEL_INTEGRITY_SHA256};engine=${HOTPOTQA_SERVING_ENGINE};vllm=${HOTPOTQA_VLLM_VERSION};sglang=${HOTPOTQA_SGLANG_VERSION};image_uri=${HOTPOTQA_SERVING_IMAGE_URI};image_sha=${HOTPOTQA_SERVING_IMAGE_SHA256};torch=${HOTPOTQA_TORCH_VERSION};cuda=${HOTPOTQA_CUDA_VERSION};cuda_module=${HOTPOTQA_CUDA_MODULE};transformers=${HOTPOTQA_TRANSFORMERS_VERSION};serving_lock=${HOTPOTQA_SERVING_LOCK_SHA256};serving_env=${HOTPOTQA_SERVING_ENV_SHA256};gpu=${HOTPOTQA_GPU_RUNTIME};${HOTPOTQA_SERVE_ARGUMENTS}"
+CAMPAIGN_QUALITY_IDENTITY="source=${HOTPOTQA_SOURCE_COMMIT};source_manifest=${HOTPOTQA_SOURCE_MANIFEST_SHA256};python=${HOTPOTQA_PYTHON_VERSION};uv=${HOTPOTQA_UV_VERSION};uv_sha=${HOTPOTQA_UV_SHA256};env_spec=${HOTPOTQA_ENV_SPEC_SHA256};gepa_env=${HOTPOTQA_GEPA_ENV_SHA256};model=${HOTPOTQA_MODEL_REVISION};model_manifest=${HOTPOTQA_MODEL_INTEGRITY_SHA256};engine=${HOTPOTQA_SERVING_ENGINE};vllm=${HOTPOTQA_VLLM_VERSION};sglang=${HOTPOTQA_SGLANG_VERSION};image_uri=${HOTPOTQA_SERVING_IMAGE_URI};image_sha=${HOTPOTQA_SERVING_IMAGE_SHA256};torch=${HOTPOTQA_TORCH_VERSION};cuda=${HOTPOTQA_CUDA_VERSION};cuda_module=${HOTPOTQA_CUDA_MODULE};transformers=${HOTPOTQA_TRANSFORMERS_VERSION};litellm=${HOTPOTQA_LITELLM_VERSION};serving_lock=${HOTPOTQA_SERVING_LOCK_SHA256};serving_env=${HOTPOTQA_SERVING_ENV_SHA256};gpu=${HOTPOTQA_GPU_RUNTIME};serve=${HOTPOTQA_SERVE_ARGUMENTS};request_seed=0;dspy=${HOTPOTQA_DSPY_COMMIT};hotpot=${HOTPOTQA_DATA_REVISION};wiki17=${WIKI17_REVISION};index=${WIKI17_INTEGRITY_SHA256}"
 CAMPAIGN_IDENTITY_SHA256="$(printf '%s' "${CAMPAIGN_QUALITY_IDENTITY}" | sha256sum | cut -d' ' -f1)"
 CAMPAIGN_LOCK_DIR="${SCRATCH_BASE}/.cache/gepa/hotpotqa-campaign/${HOTPOTQA_CAMPAIGN_ID}"
 CAMPAIGN_LOCK_PATH="${CAMPAIGN_LOCK_DIR}/${MODEL_PROFILE}.sha256"

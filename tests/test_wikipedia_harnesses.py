@@ -1437,7 +1437,7 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert '"${GEPA_VENV_DIR}/.gepa-uv-sha256"' in submit
     assert "HOTPOTQA_ENV_SPEC_SHA256=\\${HOTPOTQA_ENV_SPEC_SHA256}" in submit
     assert "HOTPOTQA_GEPA_ENV_SHA256=\\${HOTPOTQA_GEPA_ENV_SHA256}" in submit
-    assert "HOTPOTQA_POSIT_ENV_SHA256=\\${HOTPOTQA_POSIT_ENV_SHA256}" in submit
+    assert "HOTPOTQA_SERVING_ENV_SHA256=\\${HOTPOTQA_SERVING_ENV_SHA256}" in submit
     assert 'examples.common.python_environment verify --path "\\${GEPA_ENV_MANIFEST}"' in submit
     assert "load_hotpotqa_dataset(seed=0)" in submit
     assert "SUBMIT_BUDGET_PROFILES=(standard standard standard standard expanded expanded)" in submit
@@ -1457,7 +1457,7 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert r'"CONDITION=\${run_condition}"' in submit
     assert r'--job-name="gepa-hp-${MODEL_PROFILE}-\${RUN_BUDGET_PROFILE}-\${RUN_CONDITION}"' in submit
     assert r'--time="\${RUN_TIME}"' in submit
-    assert 'sha256sum "\\${POSIT_ENV_MANIFEST}"' in submit
+    assert 'sha256sum "\\${SERVING_ENV_MANIFEST}"' in submit
     assert 'pip check --python "\\${VLLM_PY}"' in submit
     assert ".gepa-source-commit" in submit
     assert ".gepa-source-manifest.sha256sums" in submit
@@ -1556,8 +1556,8 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert "export HOTPOTQA_CUDA_VERSION" in sbatch
     assert "export HOTPOTQA_CUDA_MODULE" in sbatch
     assert "export HOTPOTQA_TRANSFORMERS_VERSION" in sbatch
-    assert "export HOTPOTQA_POSIT_COMMIT" in sbatch
-    assert "export HOTPOTQA_POSIT_ENV_SHA256" in sbatch
+    assert "export HOTPOTQA_SERVING_LOCK_SHA256" in sbatch
+    assert "export HOTPOTQA_SERVING_ENV_SHA256" in sbatch
     assert "export HOTPOTQA_GPU_RUNTIME" in sbatch
     assert "export HOTPOTQA_SOURCE_COMMIT" in sbatch
     assert "export HOTPOTQA_SOURCE_MANIFEST_SHA256" in sbatch
@@ -1591,9 +1591,9 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert "rope_scaling=none" in sbatch
     assert "--rope-scaling" not in sbatch
     assert "max_num_seqs=1" in sbatch
-    assert "posit_env=${HOTPOTQA_POSIT_ENV_SHA256}" in sbatch
+    assert "serving_env=${HOTPOTQA_SERVING_ENV_SHA256}" in sbatch
     assert "gpu=${HOTPOTQA_GPU_RUNTIME}" in sbatch
-    assert 'examples.common.python_environment verify --path "${POSIT_ENV_MANIFEST}"' in sbatch
+    assert 'examples.common.python_environment verify --path "${SERVING_ENV_MANIFEST}"' in sbatch
     assert 'pip check --python "${VLLM_PY}"' in sbatch
     assert '"H200" not in name.upper() or capability != "9.0"' in sbatch
     assert '"nvidia-smi", "--query-gpu=driver_version"' in sbatch
@@ -1667,10 +1667,10 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert "--frozen --check --no-install-project" in build
     assert 'if ! flock -n "\\${ARTIFACT_LOCK_FD}"' in build
     assert "validate_hotpotqa_dspy_runtime" in build
-    assert 'examples.common.python_environment prepare --path "\\${POSIT_ENV_MANIFEST}"' in build
+    assert 'examples.common.python_environment prepare --path "\\${SERVING_ENV_MANIFEST}"' in build
     assert 'examples.common.python_environment prepare --path "\\${GEPA_ENV_MANIFEST}"' in build
-    assert 'pip check --python "\\${VLLM_PY}"' in build
-    assert 'git -C "\\${POSIT_DIR}" status --porcelain --untracked-files=normal' in build
+    assert 'pip check --python "\\${SERVING_PY}"' in build
+    assert 'pip sync --python "\\${SERVING_PY}" --require-hashes "\\${SERVING_LOCK}"' in build
     assert 'HOTPOTQA_ENV_SPEC_SHA256="\\$(' in build
     assert ".venv/.gepa-env-spec.sha256" in build
     assert ".venv/.gepa-python-version" in build

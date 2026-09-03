@@ -1,0 +1,21 @@
+# Qwen3.8-27B serving environment for examples/hotpotqa/run_hotpotqa.sbatch.
+#
+# This repo builds its own vLLM venv on Della (scripts/della/build_env.sh) so the
+# campaign does not depend on any other project's checkout. The pins below are the
+# versions proven to serve on Della's ailab H200 nodes (torch 2.11 / CUDA 13.0 wheels
+# from PyPI; the job loads the matching `cudatoolkit/13.0` module). The exact,
+# hash-locked resolution lives next to this file in requirements-x86_64-linux-py312.txt;
+# regenerate it with scripts/della/lock_serving_env.sh whenever this file changes.
+#
+# vLLM is capped below 0.26: from 0.26 flashinfer fetches GPU kernels at runtime
+# instead of shipping them in flashinfer-cubin, which fails on Della's offline GPU nodes.
+vllm==0.25.1
+transformers==5.13.0
+torch==2.11.0
+
+# flashinfer JIT-compiles some kernels on first load on the GPU node; it needs ninja
+# in the venv and the system CUDA toolkit module.
+ninja==1.11.1.4
+
+# Used by the sbatch's inline version checks.
+packaging

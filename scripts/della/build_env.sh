@@ -37,7 +37,11 @@ GLM_RUNTIME_DIR="${MODEL_STORAGE}/runtimes"
 GLM_SGLANG_IMAGE_DIGEST="sha256:0836f0160fa785e424e68d13ef88ddd548f87e6e11ad9f0e4de982e4f9188aaf"
 GLM_SGLANG_IMAGE_URI="docker://lmsysorg/sglang@${GLM_SGLANG_IMAGE_DIGEST}"
 GLM_SGLANG_IMAGE="${GLM_RUNTIME_DIR}/sglang-glm-5.3-flash-x86_64.sif"
-POSIT_DIR="${POSIT_DIR:-/home/${REMOTE_USER}/posit}"
+# Self-contained Qwen serving environment (vLLM), built from the hash-locked
+# requirements in this repo; nothing outside the checkout is consulted.
+SERVING_VENV_DIR="${SERVING_VENV_DIR:-${REMOTE_DIR%/}/.serving-venv}"
+SERVING_LOCK_RELATIVE="examples/hotpotqa/serving/requirements-x86_64-linux-py312.txt"
+HOTPOTQA_SERVING_PYTHON_VERSION="3.12.7"
 HOTPOTQA_PYTHON_VERSION="3.11.13"
 HOTPOTQA_UV_VERSION="0.9.13"
 GEPA_UV_DIR="${REMOTE_DIR%/}/.tools/uv-${HOTPOTQA_UV_VERSION}"
@@ -60,7 +64,9 @@ HOTPOTQA_UV_VERSION="${HOTPOTQA_UV_VERSION}"
 GEPA_UV_DIR="${GEPA_UV_DIR}"
 GEPA_UV_BIN="\${GEPA_UV_DIR}/uv"
 export UV_PROJECT_ENVIRONMENT="${REMOTE_DIR%/}/.venv"
-POSIT_DIR="${POSIT_DIR}"
+SERVING_VENV_DIR="${SERVING_VENV_DIR}"
+SERVING_LOCK="${SERVING_LOCK_RELATIVE}"
+HOTPOTQA_SERVING_PYTHON_VERSION="${HOTPOTQA_SERVING_PYTHON_VERSION}"
 mkdir -p "\${XDG_CACHE_HOME}" "\${HF_HOME}" "\${UV_CACHE_DIR}" "\${DSPY_CACHEDIR}" \
     "${SCRATCH_BASE}/.cache/apptainer/tmp" "${WIKI17_DIR}" "${QWEN_MODEL_DIR}" \
     "${GLM_MODEL_DIR}" "${GLM_RUNTIME_DIR}"
@@ -128,34 +134,52 @@ version, commit = validate_hotpotqa_dspy_runtime()
 print(f"DSPy task-program runtime: {version} ({commit[:8]})")
 PY
 
-echo "==> freezing the realized POSIT serving environment"
-VLLM_PY="\${POSIT_DIR}/src/.venv/bin/python"
-if [[ ! -x "\${VLLM_PY}" ]]; then
-    echo "ERROR: missing \${VLLM_PY} -- build the POSIT venv first" >&2
+echo "==> building the pinned Qwen serving environment (vLLM)"
+if [[ ! -f "\${SERVING_LOCK}" ]]; then
+    echo "ERROR: missing \${SERVING_LOCK}; run scripts/della/lock_serving_env.sh and commit the result" >&2
     exit 1
 fi
-if [[ -n "\$(git -C "\${POSIT_DIR}" status --porcelain --untracked-files=normal)" ]]; then
-    echo "ERROR: commit or remove local POSIT changes before preparing production artifacts" >&2
+HOTPOTQA_SERVING_LOCK_SHA256="\$(sha256sum "\${SERVING_LOCK}" | cut -d' ' -f1)"
+SERVING_PY="\${SERVING_VENV_DIR}/bin/python"
+SERVING_LOCK_MARKER="\${SERVING_VENV_DIR}/.gepa-serving-lock.sha256"
+"\${GEPA_UV_BIN}" python install "\${HOTPOTQA_SERVING_PYTHON_VERSION}"
+if [[ ! -x "\${SERVING_PY}" \
+    || ! -f "\${SERVING_LOCK_MARKER}" \
+    || "\$(tr -d '\n' < "\${SERVING_LOCK_MARKER}")" != "\${HOTPOTQA_SERVING_LOCK_SHA256}" ]]; then
+    rm -rf -- "\${SERVING_VENV_DIR}"
+    "\${GEPA_UV_BIN}" venv --python "\${HOTPOTQA_SERVING_PYTHON_VERSION}" "\${SERVING_VENV_DIR}"
+    "\${GEPA_UV_BIN}" pip sync --python "\${SERVING_PY}" --require-hashes "\${SERVING_LOCK}"
+    # The nvidia-cutlass-dsl-libs-base and -libs-cu13 wheels overwrite each other's
+    # copies of the same Python files; only the order "cu13 first, base last" leaves
+    # a tree where \`vllm serve\` can import cutlass.cute. Reinstall them in that order
+    # at the locked version.
+    CUTLASS_VERSION="\$(grep -oE '^nvidia-cutlass-dsl==[0-9.]+' "\${SERVING_LOCK}" | cut -d= -f3)"
+    if [[ -n "\${CUTLASS_VERSION}" ]]; then
+        "\${GEPA_UV_BIN}" pip install --python "\${SERVING_PY}" --reinstall --no-deps \
+            "nvidia-cutlass-dsl-libs-cu13==\${CUTLASS_VERSION}"
+        "\${GEPA_UV_BIN}" pip install --python "\${SERVING_PY}" --reinstall --no-deps \
+            "nvidia-cutlass-dsl-libs-base==\${CUTLASS_VERSION}"
+    fi
+    printf '%s\n' "\${HOTPOTQA_SERVING_LOCK_SHA256}" > "\${SERVING_LOCK_MARKER}"
+fi
+ACTUAL_SERVING_PYTHON="\$("\${SERVING_PY}" -c 'import platform; print(platform.python_version())')"
+if [[ "\${ACTUAL_SERVING_PYTHON}" != "\${HOTPOTQA_SERVING_PYTHON_VERSION}" ]]; then
+    echo "ERROR: serving environment expected Python \${HOTPOTQA_SERVING_PYTHON_VERSION}, found \${ACTUAL_SERVING_PYTHON}" >&2
     exit 1
 fi
-HOTPOTQA_POSIT_COMMIT="\$(git -C "\${POSIT_DIR}" rev-parse HEAD)"
-if [[ ! "\${HOTPOTQA_POSIT_COMMIT}" =~ ^[0-9a-f]{40}$ ]]; then
-    echo "ERROR: POSIT source does not resolve to an exact Git commit" >&2
+if ! "\${GEPA_UV_BIN}" pip check --python "\${SERVING_PY}"; then
+    echo "ERROR: serving environment has inconsistent dependencies" >&2
     exit 1
 fi
-if ! "\${GEPA_UV_BIN}" pip check --python "\${VLLM_PY}"; then
-    echo "ERROR: POSIT serving environment has inconsistent dependencies" >&2
-    exit 1
-fi
-POSIT_ENV_MANIFEST="${SCRATCH_BASE}/.cache/gepa/posit-environments/\${HOTPOTQA_POSIT_COMMIT}.json"
-HOTPOTQA_POSIT_ENV_SHA256="\$(
-    "\${VLLM_PY}" -m examples.common.python_environment prepare --path "\${POSIT_ENV_MANIFEST}"
+SERVING_ENV_MANIFEST="${SCRATCH_BASE}/.cache/gepa/serving-environments/\${HOTPOTQA_SERVING_LOCK_SHA256}.json"
+HOTPOTQA_SERVING_ENV_SHA256="\$(
+    "\${SERVING_PY}" -m examples.common.python_environment prepare --path "\${SERVING_ENV_MANIFEST}"
 )"
-if [[ ! "\${HOTPOTQA_POSIT_ENV_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
-    echo "ERROR: POSIT environment freeze did not produce a valid digest" >&2
+if [[ ! "\${HOTPOTQA_SERVING_ENV_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "ERROR: serving environment freeze did not produce a valid digest" >&2
     exit 1
 fi
-echo "==> POSIT environment: \${HOTPOTQA_POSIT_COMMIT}/\${HOTPOTQA_POSIT_ENV_SHA256}"
+echo "==> serving environment: lock \${HOTPOTQA_SERVING_LOCK_SHA256} / realized \${HOTPOTQA_SERVING_ENV_SHA256}"
 
 echo "==> preparing the pinned GLM SGLang image"
 APPTAINER_BIN="\$(command -v apptainer || true)"

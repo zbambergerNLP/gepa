@@ -310,15 +310,15 @@ def _validate_scientific_contract(args) -> None:
                 changed_axes.append("HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS must be 'true'")
             if not os.environ.get("HOTPOTQA_VLLM_VERSION"):
                 changed_axes.append("HOTPOTQA_VLLM_VERSION must identify the serving runtime")
-            posit_commit = os.environ.get("HOTPOTQA_POSIT_COMMIT", "")
-            if len(posit_commit) != 40 or any(character not in "0123456789abcdef" for character in posit_commit):
-                changed_axes.append("HOTPOTQA_POSIT_COMMIT must identify the exact serving source")
-            posit_environment = os.environ.get("HOTPOTQA_POSIT_ENV_SHA256", "")
-            if len(posit_environment) != 64 or any(
-                character not in "0123456789abcdef" for character in posit_environment
+            serving_lock = os.environ.get("HOTPOTQA_SERVING_LOCK_SHA256", "")
+            if len(serving_lock) != 64 or any(character not in "0123456789abcdef" for character in serving_lock):
+                changed_axes.append("HOTPOTQA_SERVING_LOCK_SHA256 must identify the serving lockfile")
+            serving_environment = os.environ.get("HOTPOTQA_SERVING_ENV_SHA256", "")
+            if len(serving_environment) != 64 or any(
+                character not in "0123456789abcdef" for character in serving_environment
             ):
                 changed_axes.append(
-                    "HOTPOTQA_POSIT_ENV_SHA256 must identify the frozen serving environment"
+                    "HOTPOTQA_SERVING_ENV_SHA256 must identify the frozen serving environment"
                 )
             required_serve_settings = (
                 "tp=1",
@@ -679,8 +679,8 @@ def build_run_contract(condition: str, args) -> dict:
             "serving_engine": os.environ.get("HOTPOTQA_SERVING_ENGINE"),
             "serving_image_uri": os.environ.get("HOTPOTQA_SERVING_IMAGE_URI"),
             "serving_image_sha256": os.environ.get("HOTPOTQA_SERVING_IMAGE_SHA256"),
-            "posit_commit": os.environ.get("HOTPOTQA_POSIT_COMMIT"),
-            "posit_env_sha256": os.environ.get("HOTPOTQA_POSIT_ENV_SHA256"),
+            "serving_lock_sha256": os.environ.get("HOTPOTQA_SERVING_LOCK_SHA256"),
+            "serving_env_sha256": os.environ.get("HOTPOTQA_SERVING_ENV_SHA256"),
             "gpu_runtime": (
                 json.loads(os.environ["HOTPOTQA_GPU_RUNTIME"])
                 if os.environ.get("HOTPOTQA_GPU_RUNTIME")

@@ -1,8 +1,9 @@
 #!/bin/bash
 # Steps 1-4 of examples/hotpotqa/DELLA_CAMPAIGN.md as one check: local
 # prerequisites, exact source commit and clean tree, scripts/della/.env,
-# non-interactive SSH to both Della hosts, and the POSIT/vLLM serving
-# environment on the visualization node. Read-only; run before build_env.sh.
+# non-interactive SSH to both Della hosts, and the serving prerequisites
+# (apptainer, CUDA module, model storage, serving venv vs. lock) on the
+# visualization node. Read-only; run before build_env.sh.
 #
 # Usage:
 #   HOTPOTQA_SOURCE_COMMIT=<sha> scripts/della/preflight_hotpotqa.sh
@@ -50,32 +51,45 @@ ssh "${SSH_OPTS[@]}" "${REMOTE_USER}@${REMOTE_HOST}" 'echo "login node ok: $(hos
 ssh "${SSH_OPTS[@]}" "${REMOTE_USER}@${REMOTE_VIS_HOST}" 'echo "vis node ok: $(hostname)"' \
     || fail "BatchMode ssh to ${REMOTE_VIS_HOST} failed; run scripts/della/della_session.sh open"
 
-echo "== 4. POSIT/vLLM on ${REMOTE_VIS_HOST}"
-POSIT_DIR="${POSIT_DIR:-/home/${REMOTE_USER}/posit}"
-ssh "${SSH_OPTS[@]}" "${REMOTE_USER}@${REMOTE_VIS_HOST}" bash -s -- "${POSIT_DIR}" "${MIN_VLLM}" "${MODEL_STORAGE}" <<'REMOTE'
+echo "== 4. serving prerequisites on ${REMOTE_VIS_HOST}"
+SERVING_VENV_DIR="${SERVING_VENV_DIR:-${REMOTE_DIR%/}/.serving-venv}"
+SERVING_LOCK="${REPO_ROOT}/examples/hotpotqa/serving/requirements-x86_64-linux-py312.txt"
+[[ -f "${SERVING_LOCK}" ]] || fail "missing ${SERVING_LOCK}; run scripts/della/lock_serving_env.sh"
+SERVING_LOCK_SHA256="$(sha256sum "${SERVING_LOCK}" | cut -d' ' -f1)"
+echo "serving lock ${SERVING_LOCK_SHA256}"
+ssh "${SSH_OPTS[@]}" "${REMOTE_USER}@${REMOTE_VIS_HOST}" bash -s -- \
+    "${SERVING_VENV_DIR}" "${SERVING_LOCK_SHA256}" "${MIN_VLLM}" "${MODEL_STORAGE}" <<'REMOTE'
 set -euo pipefail
-posit_dir="$1"; min_vllm="$2"; model_storage="$3"
-test -x "${posit_dir}/src/.venv/bin/python" || { echo "FAIL: missing ${posit_dir}/src/.venv/bin/python"; exit 1; }
-test -x "${posit_dir}/src/.venv/bin/vllm" || { echo "FAIL: missing ${posit_dir}/src/.venv/bin/vllm"; exit 1; }
-if ! git -C "${posit_dir}" rev-parse --verify HEAD >/dev/null 2>&1; then
-    echo "FAIL: ${posit_dir} is not a git checkout; build_env.sh needs an exact POSIT commit"; exit 1
+serving_venv="$1"; lock_sha="$2"; min_vllm="$3"; model_storage="$4"
+command -v apptainer >/dev/null && echo "apptainer $(apptainer --version | awk '{print $NF}')" \
+    || { echo "FAIL: apptainer missing on vis node"; exit 1; }
+source /usr/share/Modules/init/bash 2>/dev/null || true
+if module avail cudatoolkit/13.0 2>&1 | grep -q 'cudatoolkit/13.0'; then
+    echo "cudatoolkit/13.0 module ok"
+else
+    echo "FAIL: cudatoolkit/13.0 module missing"; exit 1
 fi
-if [[ -n "$(git -C "${posit_dir}" status --porcelain --untracked-files=normal)" ]]; then
-    echo "FAIL: POSIT checkout at ${posit_dir} is dirty"; git -C "${posit_dir}" status --short | head -20; exit 1
-fi
-echo "POSIT commit $(git -C "${posit_dir}" rev-parse HEAD)"
-vllm_version="$("${posit_dir}/src/.venv/bin/python" -c 'from importlib.metadata import version; print(version("vllm"))')"
-echo "vLLM ${vllm_version}"
-"${posit_dir}/src/.venv/bin/python" - "${vllm_version}" "${min_vllm}" <<'PY'
+test -w "${model_storage}" && echo "${model_storage} writable" || { echo "FAIL: ${model_storage} not writable"; exit 1; }
+echo "home quota:"; checkquota 2>/dev/null | awk '/Della home/ {print "  " $0}'
+if [[ -x "${serving_venv}/bin/python" ]]; then
+    marker="${serving_venv}/.gepa-serving-lock.sha256"
+    if [[ -f "${marker}" && "$(tr -d '\n' < "${marker}")" == "${lock_sha}" ]]; then
+        echo "serving venv present and matches the lock"
+    else
+        echo "serving venv present but built from a different lock; build_env.sh will rebuild it"
+    fi
+    vllm_version="$("${serving_venv}/bin/python" -c 'from importlib.metadata import version; print(version("vllm"))')"
+    echo "vLLM ${vllm_version}"
+    "${serving_venv}/bin/python" - "${vllm_version}" "${min_vllm}" <<'PY'
 import sys
 from packaging.version import Version
 have, need = sys.argv[1], sys.argv[2]
 if Version(have) < Version(need):
-    raise SystemExit(f"FAIL: vLLM {have} < required {need}; ask the lab for its Della POSIT setup")
+    raise SystemExit(f"FAIL: vLLM {have} < required {need}")
 PY
-command -v apptainer >/dev/null && echo "apptainer $(apptainer --version | awk '{print $NF}')" || { echo "FAIL: apptainer missing on vis node"; exit 1; }
-test -w "${model_storage}" && echo "${model_storage} writable" || { echo "FAIL: ${model_storage} not writable"; exit 1; }
-echo "home quota:"; checkquota 2>/dev/null | awk '/Della home/ {print "  " $0}'
+else
+    echo "serving venv not built yet (build_env.sh creates ${serving_venv})"
+fi
 REMOTE
 
 echo "== preflight passed; next: scripts/della/build_env.sh"

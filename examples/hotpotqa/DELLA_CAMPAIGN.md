@@ -92,11 +92,11 @@ FlashInfer builds use the serving environment's CUDA headers first.
 | Active sequences | One per replica | One |
 | Context / output cap | 262,144 / 16,384 | 262,144 / 16,384 |
 | Thinking effort | `xhigh` | `100` |
-| Initial worker default | 12 | 4 |
+| Approved initial pilot workers | 12 | 4 |
 
-Lower worker defaults incorporate Zach's observed queue timeout. They are
-starting operational settings, not a completed training calibration. Calibrate
-on training data, then freeze per model across methods and budgets. The
+The approved starting values incorporate Zach's observed queue timeout. Check
+throughput and timeouts on training examples, then freeze the chosen concurrency
+across all six cells per model. This calibration remains pending. The
 new V4.1 runtime uses one sequence per replica, as in Zach's branch.
 
 Temperature is 1.0 and top-p is 0.95 for both models and all roles. DeepSeek uses

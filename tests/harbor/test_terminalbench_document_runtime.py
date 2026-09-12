@@ -27,7 +27,6 @@ from harbor.models.trajectories import Step
 
 from examples.terminalbench.terminus_agent import PromptedTerminus
 from gepa.adapters.terminal_bench_adapter import HarborCLI, load_terminalbench_manifest
-from gepa.adapters.terminal_bench_adapter.context import reflection_trajectories
 from gepa.adapters.terminal_bench_adapter.documents import (
     render_initial_instructions,
     seed_documents,
@@ -189,19 +188,14 @@ def test_timeout_keeps_real_command_and_observation(runtime: tuple) -> None:
     assert "sleep 10" in message and "REAL_STATE" in message
 
 
-def test_reflection_recognizes_real_harbor_copied_context(runtime: tuple) -> None:
-    """Reference history marked by Harbor's actual subagent-copy implementation."""
+def test_real_harbor_copied_context_keeps_the_original_message(runtime: tuple) -> None:
+    """Verify Harbor's native copy marker preserves message content."""
     agent, _, _, _ = runtime
     agent._trajectory_steps = [Step(step_id=1, source="user", message="ORIGINAL_TASK")]
     copied, _ = agent._prepare_copied_trajectory_steps(1)
     assert copied[0].is_copied_context is True
-    originals = [step.model_dump(mode="json", exclude_none=True) for step in agent._trajectory_steps]
-    copies = [step.model_dump(mode="json", exclude_none=True) for step in copied]
-    projected = reflection_trajectories(
-        [{"agent": {"name": "main"}, "steps": originals}, {"agent": {"name": "summary"}, "steps": copies}]
-    )
-    assert projected[1]["steps"][0]["copied_context_from"] == "Trajectory 1 / Step 1"
-    assert str(projected).count("ORIGINAL_TASK") == 1
+    assert copied[0].message == agent._trajectory_steps[0].message == "ORIGINAL_TASK"
+    assert copied[0] is not agent._trajectory_steps[0]
 
 
 def test_job_config_is_accepted_by_pinned_harbor(runtime: tuple) -> None:

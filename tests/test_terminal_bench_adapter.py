@@ -582,9 +582,9 @@ def test_runner_isolates_candidates_and_adapter_maps_complete_evidence_by_task_i
         rows = adapter.make_reflective_dataset(_candidate(instruction_prompt=SEED_PROMPT), evaluated, [component])
         assert rows[component][0]["Document"]["kind"] == COMPONENT_KINDS[component]
         assert rows[component][0]["Generated Outputs"]["atif_trajectories"]
-        assert "trial_result" not in rows[component][0]["Generated Outputs"]
-        assert "harbor_process" not in rows[component][0]["Generated Outputs"]
-        assert "text" not in rows[component][0]["Document"]
+        assert rows[component][0]["Generated Outputs"]["trial_result"] == evaluated.trajectories[0]["trial_result"]
+        assert rows[component][0]["Generated Outputs"]["harbor_process"]["returncode"] == 0
+        assert rows[component][0]["Document"]["text"] == _candidate(instruction_prompt=SEED_PROMPT)[component]
 
     runner.run([batch[0].task_id], _candidate(instruction_prompt=SEED_PROMPT))
     assert len(captured_configs) == 2

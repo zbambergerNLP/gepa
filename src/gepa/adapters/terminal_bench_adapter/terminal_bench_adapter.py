@@ -17,12 +17,12 @@ import shutil
 import subprocess
 import uuid
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import Any, TypedDict
 
-from gepa.adapters.terminal_bench_adapter.context import reflection_trajectories
 from gepa.adapters.terminal_bench_adapter.documents import (
     COMPONENT_KINDS,
     render_instruction,
@@ -62,12 +62,12 @@ SPLIT_WEIGHTS = {"train": 0.40, "val": 0.30, "test": 0.30}
 SUPPORTED_ATIF_SCHEMA_VERSIONS = {f"ATIF-v1.{minor}" for minor in range(8)}
 VERIFIER_LOG_FILENAMES = ("test-stdout.txt", "test-stderr.txt")
 REFLECTION_FEEDBACK_CONTRACT = {
-    "version": 4,
+    "version": 5,
     "score": "official_verifier_reward",
     "reflection_split": "train",
     "trajectory_directories": ["agent", "steps/*/agent"],
-    "trajectory_projection": "execution_content_with_visible_copied_step_references_v1",
-    "raw_trial_and_process_metadata": "artifacts_only",
+    "trajectory_projection": "complete_atif_without_deduplication",
+    "raw_trial_and_process_metadata": "included_in_reflection",
     "verifier_log_filenames": list(VERIFIER_LOG_FILENAMES),
     "verifier_log_directories": ["verifier", "steps/*/verifier"],
     "max_chars_per_verifier_log": None,
@@ -1084,7 +1084,13 @@ class TerminusAdapter(GEPAAdapter[TerminalBenchTask, TerminalBenchTrajectory, Te
                         "task_id": trajectory["task_id"],
                     },
                     "Generated Outputs": {
-                        "atif_trajectories": reflection_trajectories(trajectory["atif_trajectories"]),
+                        "atif_trajectories": deepcopy(trajectory["atif_trajectories"]),
+                        "trial_result": deepcopy(trajectory["trial_result"]),
+                        "harbor_process": {
+                            "returncode": trajectory["harbor_returncode"],
+                            "stdout_path": trajectory["harbor_stdout_path"],
+                            "stderr_path": trajectory["harbor_stderr_path"],
+                        },
                     },
                     "Feedback": json.dumps(
                         {
@@ -1106,6 +1112,7 @@ class TerminusAdapter(GEPAAdapter[TerminalBenchTask, TerminalBenchTrajectory, Te
                     "Document": {
                         "name": component,
                         "kind": self.text_scope.component_kinds[component],
+                        "text": candidate[component],
                     },
                 }
                 for row in rows

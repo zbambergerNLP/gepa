@@ -243,7 +243,8 @@ def test_generated_run_contract_records_metric_call_budget(tmp_path: Path) -> No
     assert contract["react_execution"]["max_tool_calls"] is None
     assert contract["manifestor_traces_chars"] is None
     assert contract["manifestor_temperature"] == 1.0
-    assert contract["reflection_context"]["version"] == 1
+    assert contract["reflection_context"]["version"] == 2
+    assert contract["reflection_context"]["duplicates"] == "preserved"
     assert contract["failure_policy"]["accepted_trial_exceptions"] == ["AgentTimeoutError"]
     assert contract["failure_policy"]["harbor_max_retries"] == 0
     assert contract["reflection_feedback"]["reflection_split"] == "train"

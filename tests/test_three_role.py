@@ -548,6 +548,23 @@ def test_three_role_run_contract_requires_identity_for_custom_lm() -> None:
         strat.run_contract({"sys": PROMPT})
 
 
+def test_deduplicated_context_cannot_resume_with_the_preservation_policy(tmp_path: Path) -> None:
+    """Reject checkpoints created with the former reflection-context transformation."""
+    strat = ThreeRoleReflectionLM(LM("hosted_vllm/test-model"), 2)
+    current = strat.run_contract({"sys": PROMPT})
+    previous = deepcopy(current)
+    previous["reflection_context"] = {
+        "version": 1,
+        "duplicates": "exact_text_and_paragraph_references_within_each_prompt",
+        "minimum_reference_chars": 256,
+        "repeated_lines": "retain_first_and_count_when_at_least_three_lines_save_256_chars",
+        "unique_text": "preserved_without_character_truncation",
+    }
+    ensure_reflection_run_contract(str(tmp_path), previous)
+    with pytest.raises(ValueError, match="different reflection strategy contract"):
+        ensure_reflection_run_contract(str(tmp_path), current)
+
+
 def test_separate_controller_sampling_is_material_to_resume(tmp_path: Path) -> None:
     """Reject a Controller-only sampling change even when editor settings match."""
     base = LM("hosted_vllm/test-model", top_p=0.95)
@@ -903,8 +920,8 @@ def test_manifestor_receives_only_selected_section_feedback_and_trace() -> None:
     assert "Output: vague answer" in manifestor_prompt
 
 
-def test_long_context_roles_receive_late_evidence_and_feedback_once() -> None:
-    """Preserve the end of a long trace and avoid a second copy of feedback."""
+def test_long_context_roles_receive_late_evidence_and_full_feedback() -> None:
+    """Preserve long traces and feedback in both the dedicated field and example."""
     lm = ThreeRoleLM(list(DIRECT_REEXPRESS_REPLIES))
     strat, _ = strategy(2, lm=lm, manifestor_traces_chars=None)
     evidence = "\n".join(f"Distinct command {index} produced observation {index}" for index in range(400))
@@ -923,7 +940,8 @@ def test_long_context_roles_receive_late_evidence_and_feedback_once() -> None:
     react_prompt = json.dumps(lm.react_calls[0])
     for prompt in (manifestor_prompt, react_prompt):
         assert "LATE_EVIDENCE" in prompt
-        assert prompt.count("TASK_ERROR") == 1
+        assert prompt.count("TASK_ERROR") == 2
+        assert "See each example's Feedback" not in prompt
 
 
 @pytest.mark.parametrize(

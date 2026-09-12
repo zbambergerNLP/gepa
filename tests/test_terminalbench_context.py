@@ -1,8 +1,40 @@
-"""Ensure Terminal-Bench reflection retains decisions without duplicated telemetry."""
+"""Preserve complete Terminal-Bench traces, including repeated and copied context."""
 
 from copy import deepcopy
+from pathlib import Path
+from unittest.mock import Mock
 
-from gepa.adapters.terminal_bench_adapter.context import reflection_trajectories
+from gepa.adapters.terminal_bench_adapter import HarborCLI, TerminusAdapter, load_terminalbench_manifest
+from gepa.core.adapter import EvaluationBatch
+
+
+def _reflect(trajectories: list[dict]) -> list[dict]:
+    """Build reflection evidence through the real adapter without running Harbor."""
+    manifest = load_terminalbench_manifest(
+        Path(__file__).resolve().parents[1] / "examples/terminalbench/terminalbench-v2.1-manifest.json"
+    )
+    adapter = TerminusAdapter(manifest, Mock(spec=HarborCLI, manifest=manifest))
+    candidate = adapter.text_scope.seed_candidate()
+    evaluated = EvaluationBatch(
+        outputs=[{}],
+        scores=[0.0],
+        trajectories=[
+            {
+                "task_id": manifest.splits["train"][0],
+                "atif_trajectories": trajectories,
+                "trial_result": {},
+                "harbor_returncode": 0,
+                "harbor_stdout_path": "stdout.txt",
+                "harbor_stderr_path": "stderr.txt",
+                "reward": 0.0,
+                "rewards": {"reward": 0.0},
+                "errors": [],
+                "verifier_logs": {},
+            }
+        ],
+    )
+    rows = adapter.make_reflective_dataset(candidate, evaluated, ["instruction_prompt"])
+    return rows["instruction_prompt"][0]["Generated Outputs"]["atif_trajectories"]
 
 
 def _trajectory(steps: list[dict]) -> dict:
@@ -15,8 +47,8 @@ def _trajectory(steps: list[dict]) -> dict:
     }
 
 
-def test_projection_preserves_execution_and_references_copied_context() -> None:
-    """Keep original steps, new summary reasoning, and copied-step positions once."""
+def test_reflection_preserves_complete_original_and_copied_context() -> None:
+    """Keep every original field and copied step without altering stored traces."""
     original = {
         "step_id": 1,
         "source": "agent",
@@ -32,41 +64,36 @@ def test_projection_preserves_execution_and_references_copied_context() -> None:
         _trajectory([original]),
     ]
     untouched = deepcopy(traces)
-    projected = reflection_trajectories(traces)
+    reflected = _reflect(traces)
     assert traces == untouched
-    assert projected[0]["steps"][0] == {"step_id": 1, "copied_context_from": "Trajectory 2 / Step 1"}
-    assert projected[0]["steps"][1]["message"] == "New summary reasoning"
-    kept = projected[1]["steps"][0]
-    assert kept["message"] == original["message"]
-    assert kept["reasoning_content"] == original["reasoning_content"]
-    assert kept["tool_calls"] == original["tool_calls"]
-    assert kept["observation"] == original["observation"]
-    assert "logprobs" not in str(projected) and "CONFIGURATION" not in str(projected)
+    assert reflected == traces
+    assert str(reflected).count("Run the failing test") == 2
+    reflected[0]["steps"][0]["message"] = "Changed by reflection consumer"
+    assert traces == untouched
 
 
 def test_copied_content_without_a_visible_original_is_kept() -> None:
     """Avoid dangling references or lost evidence when the original trace is absent."""
     text = "\n".join(f"Unique evidence {index}" for index in range(1000))
     traces = [_trajectory([{"step_id": 1, "source": "user", "message": text, "is_copied_context": True}])]
-    assert reflection_trajectories(traces)[0]["steps"][0]["message"] == text
+    assert _reflect(traces)[0]["steps"][0]["message"] == text
 
 
 def test_real_repeated_actions_remain_separate_steps() -> None:
     """Keep repeated attempts and their outcomes when they are not copied history."""
     traces = [_trajectory([{"step_id": index, "source": "agent", "message": "retry"} for index in range(1, 4)])]
-    steps = reflection_trajectories(traces)[0]["steps"]
+    steps = _reflect(traces)[0]["steps"]
     assert [step["step_id"] for step in steps] == [1, 2, 3]
     assert all(step["message"] == "retry" for step in steps)
 
 
-def test_embedded_subagent_evidence_is_kept_and_linked() -> None:
-    """Project embedded children without repeating their copied parent history."""
+def test_embedded_subagent_evidence_keeps_its_full_copied_history() -> None:
+    """Retain nested children and copied parent context at their original positions."""
     parent_step = {"step_id": 1, "source": "user", "message": "Task instruction"}
     parent = _trajectory([parent_step])
     parent["subagent_trajectories"] = [
         {**_trajectory([{**parent_step, "is_copied_context": True}]), "trajectory_id": "child-1"}
     ]
-    projected = reflection_trajectories([parent])
-    assert projected[1]["trajectory_id"] == "child-1"
-    assert projected[1]["label"] == "Trajectory 1 / Trajectory 1"
-    assert projected[1]["steps"][0]["copied_context_from"] == "Trajectory 1 / Step 1"
+    reflected = _reflect([parent])
+    assert reflected == [parent]
+    assert str(reflected).count("Task instruction") == 2

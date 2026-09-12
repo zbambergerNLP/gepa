@@ -20,7 +20,7 @@ the merge. The existing branches are preserved; consolidation is local.
 | Runtime verification | Keep our mandatory exact-runtime DeepSeek canary and Zach's independent transcript/tool diagnostic. Both use the current editor probes. Write campaign locks only after canary/native-tool success. |
 | Setup | Adopt checked-in remote stages, detached downloads, scratch storage, SSH helpers, CUDA-header precedence, and rsync environment exclusions. Propagate custom Wiki-2017 paths and use this checkout's source in uninstalled remote environments. |
 | Wiki-2017 | Adopt corrected extracted-corpus size, 1,780,742,620 bytes. Corpus/archive hashes, document count, retrieval parameters, and split stay fixed. |
-| Text/editor behavior | Preserve configurable unlimited-by-default character limits, context deduplication, actionable tool-error feedback, repeated selected-section edits, and explicit finish. |
+| Text/editor behavior | Preserve configurable unlimited-by-default character limits, repeated reflection evidence without deduplication, actionable tool-error feedback, repeated selected-section edits, and explicit finish. |
 | Run identity | HotPotQA schema 26 records the shared starting-baseline protocol, timeout, and serving provenance. Terminal-Bench schema 32 records test-after-each-ablation timing; runtime freeze and pilot schema 9 are preserved. Old runtime contracts cannot be silently resumed. |
 | Della skill/runbook | Include and reconcile PR #62's skill and runbook with the current decisions. Remove obsolete instructions to launch the old commit; use the approved V4.1 arm. |
 
@@ -42,6 +42,10 @@ approved smaller output caps. See the provider review for sources.
 - Keep a shared unoptimized starting baseline per benchmark/model, using the
   same test examples and task runtime as its ablations. Preserve each benchmark's
   repetition protocol: one test pass for HotPotQA, three for Terminal-Bench.
+- Do not add bootstrap confidence intervals by resampling questions or tasks.
+  Report HotPotQA EM/F1 and baseline gains from its single test pass, without a
+  claim about rerun variability. For Terminal-Bench, retain the three actual
+  test repetition scores, their mean, and sample standard deviation.
 - The model executing the benchmark is also the optimizer model within each arm.
 - Provider guidance determines role-specific sampling and reasoning: temperature
   1.0 and top-p 0.95 for both models; Qwen xhigh and DeepSeek V4.1 numeric effort 100.
@@ -53,8 +57,12 @@ approved smaller output caps. See the provider review for sources.
   10% uniform-positive-choice adaptation. Zero-probability choices are excluded.
 - ReAct editors may correct tool errors and make multiple edits within the
   selected section/action; no fixed turn cap; explicit finish is required.
-- Reflection receives task feedback and deduplicated evidence. Keep distinct
-  evidence and avoid repeating identical long blocks.
+- Reflection preserves supplied task evidence, including exact repeated text,
+  paragraphs, log lines, feedback, document bodies, and Harbor copied history.
+  Remove our added deduplication and trace projection for both benchmarks.
+  Reflection-context policy version 2 and Terminal-Bench feedback version 5
+  distinguish this behavior from older runs. Native Harbor incremental terminal
+  output, summarization, and usage accounting remain as previously configured.
 - Evaluation caching is off. HotPotQA DSPy response caches are off. Recovery
   checkpoints and optimizer response journals remain supported.
 - Training batches use their own seeded random stream, independent of method
@@ -126,6 +134,13 @@ Canonical detailed protocol and commands:
 
 ## Local verification
 
+The context-preservation update passes **546 focused offline tests**, with one
+optional test skipped, plus **28** tests in the pinned Harbor environment. Ruff
+and targeted Pyright pass. Existing formatting differences are unchanged from
+the previous committed source. Tests verify repeated evidence, complete copied
+and nested Harbor traces, unchanged native summarization, and rejection of the
+previous deduplication policy on resume. No benchmark jobs were launched.
+
 The shared HotPotQA baseline update passes **252 focused offline tests** and
 Ruff. The new baseline module and result analyzer have no Pyright errors;
 HotPotQA's main module retains its two pre-existing selector/config type errors,
@@ -167,7 +182,8 @@ The original consolidation was verified as follows:
 
 - Ask Lakshya to confirm the system-prompt/all-text scope ablation.
 - Ask Lakshya to confirm the TB2.1 30/19/40 split.
-- Gilad to review implemented context deduplication and redundancy removal.
+- Gilad's deduplication review is resolved by removing our added context
+  deduplication and evidence pruning for HotPotQA and Terminal-Bench.
 - Review the integrated source and live Della runtime before scheduling HotPotQA.
 
 No messages to collaborators or Della jobs are sent by this consolidation.

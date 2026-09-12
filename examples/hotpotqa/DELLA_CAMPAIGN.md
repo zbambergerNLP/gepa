@@ -109,7 +109,8 @@ See the [provider review](../common/temperature_policy.md).
 
 HotPotQA retains 150/300/300 examples, seed 0, the pinned DSPy two-stage program,
 Wiki-2017 BM25 k=7, and minibatches of three. Evaluation and response caches stay
-off. Text feedback and exact deduplication remain enabled. Character limits
+off. Text feedback remains enabled; repeated context is preserved without
+deduplication, as recorded by reflection-context policy version 2. Character limits
 default to unlimited and can be set with `HOTPOTQA_TEXT_LIMITS_JSON`; model token
 limits remain. See [shared decisions](../../scripts/della/README.md).
 

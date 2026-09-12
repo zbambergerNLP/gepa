@@ -56,7 +56,7 @@ per-evaluation refiner uses `RefinerConfig(text_limits=limits)` for its prompt,
 proposed text, and saved-output fields.
 
 Positive integers enable limits. Zero, negative numbers, booleans, non-integers,
-and unknown field names are rejected. With no configuration, the existing
-deduplication policy still removes redundant representations, while unique text
-remains complete. Conciseness instructions remain guidance, without a numerical
-character target.
+and unknown field names are rejected. With no configuration, all supplied text
+remains complete, including repeated passages, feedback, and log lines. No
+context deduplication is applied. Conciseness instructions remain guidance,
+without a numerical character target.

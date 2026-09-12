@@ -219,11 +219,10 @@ resume and before final comparison. All execution paths use the same settings.
 
 #### Textual feedback for reflection
 
-Every method receives the same training-evidence format: task identity, ATIF
-execution content, official rewards, and textual verifier diagnostics. The task
-instructions, new reasoning, commands, observations, and subagent relationships
-remain available. Raw trial/process metadata, token statistics, and model
-configuration stay in the original artifacts rather than entering reflection.
+Every method receives the same training-evidence format: task identity, complete
+ATIF trajectories, raw trial/process metadata, official rewards, and textual
+verifier diagnostics. Task instructions, reasoning, commands, observations,
+subagent relationships, copied context, and ATIF metadata remain as recorded.
 The official verifier reward is the optimization score; diagnostic text supplies
 evidence for reflection without changing that score.
 
@@ -237,20 +236,28 @@ its existing reflection procedure.
 
 TB2.1 and HotPotQA default to unlimited Manifestor
 traces within the configured model's context window; `manifestor_trace_chars`
-can set an explicit allowance. Exact repeated long strings and paragraphs are
-shown once per request with references for later occurrences. Long identical-line
-runs retain one line and their repetition count. Distinct text is not shortened
-by default. FOREST's Manifestor and editor read feedback once in the per-example
-traces. Context overflow stops the run through the provider error path instead
-of silently truncating evidence.
+can set an explicit allowance. Repeated strings, paragraphs, log lines, feedback,
+and document bodies remain intact. FOREST's Manifestor and editor receive feedback
+in their dedicated field and in the per-example traces. Context overflow stops
+the run through the provider error path instead of silently truncating evidence.
 
-Harbor's copied-context steps refer to identical original steps when those
-originals are present in the same reflection input. Unmatched copied context and
-new subagent reasoning stay intact; repeated actual actions keep their separate
-step identities. The adapter retains complete original ATIF and job results,
-and it no longer repeats the editable document body in every example's metadata.
-Context formatting and the Manifestor limit are pinned for resume and final
-comparison alongside the feedback policy.
+The adapter passes complete saved ATIF trajectories into reflection, including
+copied-context steps and nested subagent history. It does not replace copies
+with references, collapse repeated lines, or prune trajectory metadata. Each
+example retains its editable document body. Reflection-context policy version 2
+and feedback version 5 are pinned for resume and final comparison alongside the
+Manifestor limit.
+
+This removes our additional preprocessing, while preserving the configured
+Harbor task agent. Harbor 0.22.0's native
+[terminal reader](https://github.com/harbor-framework/harbor/blob/v0.22.0/src/harbor/agents/terminus_2/tmux_session.py)
+returns incremental output when available, falling back to the current screen.
+Its [summarization flow](https://github.com/harbor-framework/harbor/blob/v0.22.0/src/harbor/agents/terminus_2/terminus_2.py)
+remains enabled; copied history retains messages while omitting duplicate usage
+counters. The reference
+[GEPA adapter](https://github.com/gepa-ai/gepa/blob/4f1613773d0c13c8f1551543a801b299bd8acf73/src/gepa/adapters/terminal_bench_adapter/terminal_bench_adapter.py)
+passes recorded message history into reflection without our former text
+deduplication pass.
 
 Each log contributes its full text by default. Configure `verifier_log_chars`
 to retain source characters from the beginning and end with an omission marker.
@@ -335,11 +342,11 @@ comparison, not a reproduction of its GEPA setup or reported scores.
   approved working decision.
 - [ ] Ask Lakshya to confirm the TB2.1 train/validation/test split (30/19/40),
   including the preserved task-name assignments.
-- [ ] Gilad: review all implemented deduplication and redundant-context removal
-  for HotPotQA and TB2.1: exact-text and paragraph references, repeated log
-  lines, Harbor copied history, excluded metadata, duplicate feedback/document
-  text, and remaining limits. Check useful-evidence preservation and the final
-  model prompts, including JSON-encoded verifier logs.
+- [x] Gilad resolved the context-deduplication review by choosing to remove our
+  added deduplication and evidence pruning in HotPotQA and TB2.1. Preserve
+  repeated text, feedback, document bodies, and complete Harbor traces.
+  Configurable character limits and native Harbor context management retain
+  their previously approved settings.
 
 #### Dataset pins and run identity
 

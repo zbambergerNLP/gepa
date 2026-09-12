@@ -1182,7 +1182,8 @@ def test_hotpot_and_hover_contracts_record_exact_model_pair() -> None:
     assert hotpot["optimizer"]["react_execution"]["max_iterations"] is None
     assert hotpot["optimizer"]["react_execution"]["max_tool_calls"] is None
     assert hotpot["optimizer"]["manifestor_traces_chars"] is None
-    assert hotpot["optimizer"]["reflection_context"]["version"] == 1
+    assert hotpot["optimizer"]["reflection_context"]["version"] == 2
+    assert hotpot["optimizer"]["reflection_context"]["duplicates"] == "preserved"
     assert hotpot["scientific_contract_enforced"] is False
     assert hotpot["models"]["solver_version"] == QWEN3_8_27B_REVISION
     assert hotpot["models"]["reflection_version"] == QWEN3_8_27B_REVISION

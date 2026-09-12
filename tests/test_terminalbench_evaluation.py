@@ -409,7 +409,7 @@ def test_invalid_source_runs_are_rejected_before_test_execution(tmp_path: Path, 
         elif damage == "different_failure_policy":
             contract["failure_policy"]["harbor_max_retries"] = 1
         elif damage == "different_context_policy":
-            contract["reflection_context"]["minimum_reference_chars"] = 8000
+            contract["reflection_context"]["duplicates"] = "exact_text_and_paragraph_references_within_each_prompt"
         elif damage == "manifestor_trace_cap":
             contract["manifestor_traces_chars"] = 8000
         elif damage == "manifestor_temperature":

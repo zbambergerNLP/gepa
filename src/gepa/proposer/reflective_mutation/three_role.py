@@ -45,7 +45,7 @@ from gepa.strategies.intervention import (
     build_controller_menu,
     summarize_feedback,
 )
-from gepa.strategies.reflection_context import REFLECTION_CONTEXT_CONTRACT, compact_reflection_records
+from gepa.strategies.reflection_context import REFLECTION_CONTEXT_CONTRACT
 from gepa.strategies.text_limits import TextLimitError, TextLimits, clip_text, resolve_text_limits
 
 MAX_HISTORY_STEPS = 16
@@ -322,17 +322,11 @@ def _summarize_traces(entries: Sequence[Mapping[str, Any]]) -> str:
     Returns:
         One labeled block per example, or a no-traces marker.
     """
-    visible = [
-        {
-            "Inputs": entry.get("Inputs"),
-            "Output": entry.get("Generated Outputs", entry.get("Generated Output")),
-            "Feedback": entry.get("Feedback") or entry.get("execution_feedback"),
-        }
-        for entry in entries
-    ]
     blocks: list[str] = []
-    for index, entry in enumerate(compact_reflection_records(visible)):
-        inputs, outputs, feedback = entry["Inputs"], entry["Output"], entry["Feedback"]
+    for index, entry in enumerate(entries):
+        inputs = entry.get("Inputs")
+        outputs = entry.get("Generated Outputs", entry.get("Generated Output"))
+        feedback = entry.get("Feedback") or entry.get("execution_feedback")
         blocks.append(f"[example {index + 1}]\nInputs: {inputs}\nOutput: {outputs}\nFeedback: {feedback}")
     return "\n\n".join(blocks) or "(no traces available)"
 
@@ -981,7 +975,6 @@ class ThreeRoleReflectionLM:
             text = candidate[name]
             feedback = summarize_feedback(entries, self.text_limits.controller_feedback_chars)
             traces = _summarize_traces(entries)
-            feedback_in_traces = "See each example's Feedback in Execution traces below."
             section_bodies = template.parse(text)
             # Sparse rendering keeps empty sections out of task-model messages.
             # The Controller still needs their occupancy to judge which semantic
@@ -1051,7 +1044,7 @@ class ThreeRoleReflectionLM:
                     steering_message = manifestor.manifest(
                         action,
                         region_text,
-                        feedback_in_traces if self.manifestor_traces_chars is None else feedback,
+                        feedback,
                         traces,
                     )
                 except ManifestationError as exc:
@@ -1110,7 +1103,7 @@ class ThreeRoleReflectionLM:
                 action.edit_target,
                 action.edit_tool,
                 steering_message,
-                feedback_in_traces,
+                feedback,
                 traces,
                 history,
                 self.max_chars,

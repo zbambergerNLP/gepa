@@ -22,6 +22,7 @@ from examples.common.experiment_models import (
     experiment_request_overrides,
 )
 from examples.common.provider_retries import install_provider_retries
+from examples.terminalbench import evaluate as terminalbench_evaluate
 from examples.terminalbench import main as terminalbench_main
 from examples.terminalbench.main import (
     EXPERIMENT_MANIFESTS,
@@ -38,6 +39,7 @@ from gepa.adapters.terminal_bench_adapter import (
     load_terminalbench_manifest,
 )
 from gepa.adapters.terminal_bench_adapter.documents import COMPONENT_KINDS
+from gepa.adapters.terminal_bench_adapter.terminal_bench_adapter import derive_terminalbench_splits
 from gepa.adapters.terminal_bench_adapter.text_scope import OPTIMIZATION_SCOPES, TerminalBenchTextScope
 from gepa.core.adapter import EvaluationBatch
 from gepa.strategies.batch_sampler import IndependentEpochShuffledBatchSampler
@@ -155,6 +157,43 @@ def test_run_contract_allows_exact_resume_and_rejects_drift(tmp_path: Path) -> N
         ensure_run_contract(tmp_path, {**contract, "edit_tool_set": "minimal"})
 
 
+def test_campaign_rejects_a_valid_but_different_manifest_split_before_optimization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Do not permit resplitting the same pinned tasks while retaining the 30/19/40 counts."""
+    payload = json.loads(MANIFEST_PATH.read_text())
+    payload["split_policy"]["seed"] = "different-ablation-seed"
+    payload["splits"] = derive_terminalbench_splits(
+        list(payload["task_refs"]), payload["split_policy"]["seed"], payload["split_policy"]["counts"]
+    )
+    path = tmp_path / "different-manifest.json"
+    path.write_text(json.dumps(payload))
+    assert load_terminalbench_manifest(path).splits != load_terminalbench_manifest(MANIFEST_PATH).splits
+    optimizer, harbor = Mock(), Mock()
+    monkeypatch.setattr(terminalbench_main, "optimize", optimizer)
+    monkeypatch.setattr(terminalbench_main, "HarborCLI", harbor)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "terminalbench",
+            "--condition",
+            "vanilla",
+            "--manifest",
+            str(path),
+            "--run-dir",
+            str(tmp_path / "run"),
+            "--harbor-work-dir",
+            str(tmp_path / "harbor"),
+        ],
+    )
+    with pytest.raises(SystemExit):
+        terminalbench_main.main()
+    optimizer.assert_not_called()
+    harbor.assert_not_called()
+    assert not (tmp_path / "run").exists()
+
+
 def test_generated_run_contract_records_metric_call_budget(tmp_path: Path) -> None:
     """Record metric budget and semantic Controller policy in generated state.
 
@@ -189,7 +228,8 @@ def test_generated_run_contract_records_metric_call_budget(tmp_path: Path) -> No
     )
 
     assert contract["max_metric_calls"] == 400
-    assert contract["schema_version"] == 31
+    assert contract["schema_version"] == 32
+    assert contract["evaluation_protocol"]["test_timing"] == "after_each_completed_ablation"
     assert contract["skip_perfect_score"] is True
     assert contract["perfect_score"] == 1.0
     assert contract["adapter"] == TERMINUS_ADAPTER_CONTRACT
@@ -526,6 +566,8 @@ def test_epoch_cli_budget_stops_and_resumes_with_real_engine(
     monkeypatch.setattr(terminalbench_main.HarborCLI, "check_requirements", Mock())
     monkeypatch.setattr(terminalbench_main, "TerminusAdapter", lambda *args, **kwargs: BudgetAdapter())
     monkeypatch.setattr(terminalbench_main, "optimize", optimize_offline)
+    heldout = Mock(return_value={"harnesses": {}})
+    monkeypatch.setattr(terminalbench_evaluate, "evaluate_comparison", heldout)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -553,14 +595,23 @@ def test_epoch_cli_budget_stops_and_resumes_with_real_engine(
     pilot_dir = write_pilot_fixture(tmp_path / "pilot", initial_contract, manifest)
     monkeypatch.setattr(sys, "argv", [*sys.argv, "--reviewed-pilot", str(pilot_dir)])
 
-    terminalbench_main.main()
+    with pytest.raises(ValueError, match="optimization has not completed"):
+        terminalbench_main.main()
     assert len(parent_batches) == 5
+    heldout.assert_not_called()
     monkeypatch.setattr(sys, "argv", sys.argv[:-2])
     stop_file.unlink()
     terminalbench_main.main()
     assert len(parent_batches) == iterations
+    heldout.assert_called_once()
+    frozen_manifest, comparison, test_dir, _ = heldout.call_args.args
+    assert frozen_manifest.splits == manifest.splits
+    cell = f"{optimization_scope}__vanilla{'_2x' if budget_name == 'double' else ''}"
+    assert comparison["source_runs"][cell]["selected_candidate_index"] == results[-1].best_idx
+    assert test_dir == run_dir / "heldout"
     terminalbench_main.main()
     assert len(parent_batches) == iterations
+    assert heldout.call_count == 2
 
     contract = json.loads((run_dir / "terminalbench-run-contract.json").read_text())
     budget = contract["optimization_budget"]

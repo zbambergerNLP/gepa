@@ -1,6 +1,6 @@
 """Configure system-prompt and full-text experiments on Terminal-Bench 2.1.
 
-The held-out test split is not evaluated automatically.
+Each completed ablation freezes its validation winner and then evaluates test.
 
 * ``vanilla`` uses stock free-form GEPA reflection.
 * ``react_v2`` uses the Controller -> Manifestor -> ReAct V2 workflow.
@@ -20,6 +20,7 @@ import argparse
 import json
 import random
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -107,6 +108,7 @@ EVALUATION_PROTOCOL = {
     "selection_metric": "mean_validation_reward",
     "test_metric": "pass_at_1",
     "standard_deviation_ddof": 1,
+    "test_timing": "after_each_completed_ablation",
 }
 TemplateFamily = Literal["generic", "openai", "anthropic", "google", "alibaba"]
 
@@ -253,6 +255,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--manifest", type=Path, default=None, help="Optional manifest path; must match --experiment")
     parser.add_argument("--run-dir", type=Path, required=True)
+    parser.add_argument(
+        "--test-output-dir",
+        type=Path,
+        help="Shared comparison directory for this model's ablations; defaults to RUN_DIR/heldout",
+    )
     parser.add_argument("--harbor-work-dir", type=Path, required=True)
     parser.add_argument("--harbor-executable", default="harbor")
     parser.add_argument("--docker-executable", default="docker")
@@ -289,6 +296,9 @@ def build_run_contract(
     validate_experiment_model_pair(args.student_model, args.proposer_model)
     if manifest.experiment != args.experiment:
         raise ValueError("--manifest must match the selected --experiment")
+    pinned_manifest = load_terminalbench_manifest(EXPERIMENT_MANIFESTS[args.experiment])
+    if replace(manifest, path=pinned_manifest.path) != pinned_manifest:
+        raise ValueError("All ablations must use the pinned benchmark data and identical train/validation/test splits")
     if not trainset or not valset:
         raise ValueError("train and validation selections must both be non-empty")
     if args.reflection_minibatch_size <= 0:
@@ -331,7 +341,7 @@ def build_run_contract(
             "react_v2_proposer": {"requested": react_decoding, "provider_ignored_fields": []},
         }
     return {
-        "schema_version": 31,
+        "schema_version": 32,
         "execution_runtime": deepcopy(getattr(args, "execution_runtime", None)),
         "pilot_protocol": deepcopy(PILOT_PROTOCOL),
         "pilot_review": deepcopy(getattr(args, "pilot_review", None)),
@@ -584,6 +594,28 @@ def main() -> None:
         template_family=resolved_family,
         template_model=args.student_model,
         text_limits=text_limits,
+    )
+
+    if trainset != manifest.tasks("train") or valset != manifest.tasks("val"):
+        print("Partial-split diagnostic finished; held-out testing requires the complete campaign splits.")
+        return
+
+    # Import after configuration is defined: the evaluator also validates these contracts.
+    from examples.terminalbench.evaluate import main as evaluate_main
+
+    cell = f"{args.optimization_scope}__{condition}{'_2x' if args.budget == 'double' else ''}"
+    evaluate_main(
+        [
+            "--run-dir",
+            f"{cell}={args.run_dir}",
+            "--output-dir",
+            str(args.test_output_dir or args.run_dir / "heldout"),
+            "--harbor-executable",
+            args.harbor_executable,
+            "--docker-executable",
+            args.docker_executable,
+            *(["--runtime-record", str(args.runtime_record)] if args.runtime_record else []),
+        ]
     )
 
 

@@ -9,7 +9,7 @@ from examples.terminalbench.main import REPO_ROOT, SCOPE_CAMPAIGN_CELLS, build_p
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Run the ordered matrix, forwarding shared model and runtime options.
+    """Optimize and test each cell before advancing, with shared data and runtime options.
 
     Args:
         argv: Optional arguments; omitted uses the process command line.
@@ -25,7 +25,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--run-root", type=Path, required=True, help="One model's campaign directory")
     parser.add_argument("--dry-run", action="store_true", help="Print the ordered commands without executing them")
     args, shared_options = parser.parse_known_args(argv)
-    managed = {"--optimization-scope", "--condition", "--budget", "--run-dir", "--harbor-work-dir"}
+    managed = {"--optimization-scope", "--condition", "--budget", "--run-dir", "--harbor-work-dir", "--test-output-dir"}
     if any(option.split("=", 1)[0] in managed for option in shared_options):
         parser.error("Scope, condition, budget, and per-run directories are set by the campaign matrix")
     run_root = args.run_root.resolve()
@@ -45,8 +45,12 @@ def main(argv: list[str] | None = None) -> None:
             str(run_dir),
             "--harbor-work-dir",
             str(run_dir / "harbor"),
+            "--test-output-dir",
+            str(run_root / "test"),
         ]
-        build_parser().parse_args(options)
+        cell_args = build_parser().parse_args(options)
+        if cell_args.train_limit is not None or cell_args.val_limit is not None:
+            parser.error("Campaign ablations must use the complete, identical pinned splits; no split limits")
         commands.append(["uv", "run", "--no-sync", "python", "-m", "examples.terminalbench.main", *options])
     for command in commands:
         print(shlex.join(command), flush=True)

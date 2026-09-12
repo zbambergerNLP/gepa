@@ -903,7 +903,11 @@ def test_hotpot_scientific_contract_rejects_qwen_runtime_drift(
     [
         ("revision", "revision"),
         ("train_count", "train split"),
+        ("train_digest", "train split"),
+        ("val_count", "val split"),
         ("val_digest", "val split"),
+        ("test_count", "test split"),
+        ("test_digest", "test split"),
     ],
 )
 def test_hotpot_scientific_data_identity_rejects_split_drift(changed_field: str, message: str) -> None:
@@ -916,10 +920,12 @@ def test_hotpot_scientific_data_identity_rejects_split_drift(changed_field: str,
     identity = _scientific_data_identity()
     if changed_field == "revision":
         identity["source"]["revision"] = "moving-main"
-    elif changed_field == "train_count":
-        identity["splits"]["train"]["count"] = 149
     else:
-        identity["splits"]["val"]["sha256"] = "corrupt"
+        split, field = changed_field.split("_")
+        if field == "count":
+            identity["splits"][split]["count"] -= 1
+        else:
+            identity["splits"][split]["sha256"] = "corrupt"
     args = _hotpot_args(enforce_scientific_contract=True, data_identity=identity)
 
     with pytest.raises(ValueError, match=message):

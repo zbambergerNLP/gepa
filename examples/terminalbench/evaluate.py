@@ -1,4 +1,4 @@
-"""Freeze completed Terminal-Bench comparisons and repeat held-out Pass@1 tests."""
+"""Freeze each completed Terminal-Bench ablation and repeat held-out Pass@1 tests."""
 
 from __future__ import annotations
 
@@ -134,34 +134,34 @@ def load_completed_run(
 
 
 def freeze_comparison(run_dirs: dict[str, Path]) -> tuple[TerminalBenchManifest, dict[str, Any]]:
-    """Freeze both scopes' twelve validation winners before any held-out testing.
+    """Freeze the supplied validation winners without waiting for later ablations.
 
     Args:
-        run_dirs: One completed directory per scope/method/budget for one model.
+        run_dirs: One or more completed scope/method/budget cells for one model.
 
     Returns:
-        Manifest and thirteen immutable harnesses, including the common initial one.
+        Manifest and immutable harnesses, including the common initial one.
 
     Raises:
-        ValueError: A campaign cell is missing or shared experimental settings differ.
+        ValueError: A cell is unknown, incomplete, or shared experimental settings differ.
     """
-    if set(run_dirs) != set(SCOPE_CAMPAIGN_CELLS):
-        raise ValueError(
-            f"Final testing requires exactly these twelve campaign cells: {', '.join(SCOPE_CAMPAIGN_CELLS)}"
-        )
+    if not run_dirs or not set(run_dirs).issubset(SCOPE_CAMPAIGN_CELLS):
+        raise ValueError(f"Supply one or more supported campaign cells: {', '.join(SCOPE_CAMPAIGN_CELLS)}")
     runs = {}
     for label, (scope_name, condition, budget) in SCOPE_CAMPAIGN_CELLS.items():
+        if label not in run_dirs:
+            continue
         manifest, runs[label] = load_completed_run(run_dirs[label], condition, budget, scope_name)
-    vanilla = runs[f"{DEFAULT_OPTIMIZATION_SCOPE}__vanilla"]
-    manifest = load_terminalbench_manifest(EXPERIMENT_MANIFESTS[vanilla["contract"]["experiment"]])
-    shared = {key: value for key, value in vanilla["contract"].items() if key not in METHOD_SPECIFIC_FIELDS}
+    reference = next(iter(runs.values()))
+    manifest = load_terminalbench_manifest(EXPERIMENT_MANIFESTS[reference["contract"]["experiment"]])
+    shared = {key: value for key, value in reference["contract"].items() if key not in METHOD_SPECIFIC_FIELDS}
     for label, run in runs.items():
         other = {key: value for key, value in run["contract"].items() if key not in METHOD_SPECIFIC_FIELDS}
-        if shared != other or vanilla["initial"] != run["initial"]:
-            raise ValueError(f"{label}: all twelve runs must share benchmark, model settings, seed, and splits")
-    candidates = {"initial": vanilla["initial"], **{label: run["selected"] for label, run in runs.items()}}
+        if shared != other or reference["initial"] != run["initial"]:
+            raise ValueError(f"{label}: all ablations must share benchmark, model settings, seed, and splits")
+    candidates = {"initial": reference["initial"], **{label: run["selected"] for label, run in runs.items()}}
     return manifest, {
-        "schema_version": 3,
+        "schema_version": 4,
         "protocol": dict(EVALUATION_PROTOCOL),
         "shared_configuration": shared,
         "source_runs": {
@@ -177,6 +177,36 @@ def freeze_comparison(run_dirs: dict[str, Path]) -> tuple[TerminalBenchManifest,
             for label, candidate in candidates.items()
         },
     }
+
+
+def _extend_comparison(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    """Add matched ablations without replacing any already-frozen winner or source."""
+    collections = {"source_runs", "harnesses"}
+    if {key: value for key, value in existing.items() if key not in collections} != {
+        key: value for key, value in incoming.items() if key not in collections
+    }:
+        raise ValueError("This test directory belongs to a different frozen comparison: shared configuration changed")
+    merged = dict(existing)
+    for field in collections:
+        previous, additions = existing[field], incoming[field]
+        if any(previous[label] != additions[label] for label in previous.keys() & additions.keys()):
+            raise ValueError("This test directory belongs to a different frozen comparison: frozen cell changed")
+        combined = {**previous, **additions}
+        merged[field] = {label: combined[label] for label in ("initial", *SCOPE_CAMPAIGN_CELLS) if label in combined}
+    return merged
+
+
+def _validate_manifest(manifest: TerminalBenchManifest, comparison: dict[str, Any]) -> None:
+    """Require the exact recorded data and ordered split membership for every test call."""
+    expected = {
+        "experiment": manifest.experiment,
+        "dataset": manifest.dataset,
+        "task_refs": manifest.task_refs,
+        "split_policy": manifest.split_policy,
+        **{f"{split}_task_ids": manifest.splits[split] for split in ("train", "val", "test")},
+    }
+    if any(comparison["shared_configuration"].get(key) != value for key, value in expected.items()):
+        raise ValueError("Test manifest must match the frozen data and identical train/validation/test splits")
 
 
 def _validate_repetition(record: dict[str, Any], identity: dict[str, Any], task_ids: list[str]) -> None:
@@ -198,8 +228,8 @@ def evaluate_comparison(
     """Resume three fresh test repetitions per frozen harness and summarize Pass@1.
 
     Args:
-        manifest: Pinned benchmark shared by all twelve optimization runs.
-        comparison: Frozen initial harness and twelve validation-selected winners.
+        manifest: Pinned benchmark shared by every optimization run.
+        comparison: Common initial harness and the newly completed validation winners.
         output_dir: Dedicated comparison directory; use one writer at a time.
         harbor: Runner with the recorded student model and runtime settings.
 
@@ -209,18 +239,23 @@ def evaluate_comparison(
     Raises:
         ValueError: Frozen identity changed or saved test results are invalid.
     """
-    # Winners are already materialized into complete runtime bundles in both scopes.
-    adapter = TerminusAdapter(manifest, harbor, text_scope=TerminalBenchTextScope("all_text"))
+    _validate_manifest(manifest, comparison)
     output_dir.mkdir(parents=True, exist_ok=True)
     frozen_path = output_dir / FROZEN_COMPARISON_FILENAME
     if frozen_path.exists():
-        if json.loads(frozen_path.read_text()) != comparison:
-            raise ValueError("This test directory belongs to a different frozen comparison")
+        existing = json.loads(frozen_path.read_text())
+        comparison = _extend_comparison(existing, comparison)
+        if comparison != existing:
+            # A previous summary only covered earlier cells; do not present it as complete.
+            (output_dir / "summary.json").unlink(missing_ok=True)
+            _write_json(frozen_path, comparison)
     else:
         if any(output_dir.glob("*-repetition-*.json")) or (output_dir / "summary.json").exists():
             raise ValueError("Existing test results have no frozen comparison")
         _write_json(frozen_path, comparison)
 
+    # Winners are already materialized into complete runtime bundles in both scopes.
+    adapter = TerminusAdapter(manifest, harbor, text_scope=TerminalBenchTextScope("all_text"))
     task_ids = manifest.splits["test"]
     records: dict[tuple[str, int], dict[str, Any]] = {}
     identities = {
@@ -267,6 +302,9 @@ def evaluate_comparison(
 
     summary: dict[str, Any] = {
         "complete": True,
+        "campaign_complete": set(comparison["source_runs"]) == set(SCOPE_CAMPAIGN_CELLS),
+        "completed_cells": list(comparison["source_runs"]),
+        "pending_cells": [label for label in SCOPE_CAMPAIGN_CELLS if label not in comparison["source_runs"]],
         "experiment": manifest.experiment,
         "student_model": comparison["shared_configuration"]["student_model"],
         "protocol": dict(EVALUATION_PROTOCOL),
@@ -291,15 +329,15 @@ def evaluate_comparison(
     return summary
 
 
-def main() -> None:
-    """Evaluate one matched benchmark/model comparison from completed local runs."""
+def main(argv: list[str] | None = None) -> None:
+    """Evaluate completed local cells and extend their model's matched comparison."""
     parser = argparse.ArgumentParser(description="Three frozen Terminal-Bench Pass@1 test repetitions")
     parser.add_argument(
         "--run-dir",
         action="append",
         required=True,
         metavar="CELL=PATH",
-        help=f"Repeat once for each of: {', '.join(SCOPE_CAMPAIGN_CELLS)}",
+        help=f"Supply any completed cells, one per flag: {', '.join(SCOPE_CAMPAIGN_CELLS)}",
     )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--harbor-executable", default="harbor")
@@ -307,7 +345,7 @@ def main() -> None:
     parser.add_argument(
         "--runtime-record", type=Path, help="Current local task-server record from the runtime launcher"
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     run_dirs = {}
     for specification in args.run_dir:
         label, separator, path = specification.partition("=")

@@ -39,7 +39,7 @@ Optimization, training pilots, and final evaluation all instantiate
 `gepa.adapters.terminal_bench_adapter.TerminusAdapter`; `TerminalBenchAdapter`
 remains an alias for existing callers. Final evaluation uses the adapter's
 evaluation path without constructing reflection feedback. There is no fallback
-to the legacy runner. Run contract version 31 and pilot configuration version 9
+to the legacy runner. Run contract version 32 and pilot configuration version 9
 record the adapter entry point, the explicit `harbor_port` implementation, and
 upstream provenance. Missing or changed adapter identity prevents optimization
 resume and final comparison; use fresh run directories for older contracts.
@@ -306,7 +306,7 @@ separate policies above.
 Every physical attempt is recorded in `provider-attempts.jsonl` and in the
 existing `token-usage.jsonl` files, including failures with unknown usage.
 The two files describe the same requests, so their totals must not be added.
-The policy is pinned in run contract version 31 and pilot configuration version
+The policy is pinned in run contract version 32 and pilot configuration version
 9; older or changed policies cannot resume or enter final evaluation.
 
 #### Reference protocol and pending confirmation
@@ -370,7 +370,10 @@ splits, target, editable scope, materialized and common reference seed digests,
 models, decoding, and budget. Only `tb2.1` is
 accepted. Earlier benchmark contracts and checkpoints require fresh run
 directories; they cannot silently resume or enter final comparisons as TB2.1.
-The held-out test split is never evaluated automatically.
+Each completed full-split ablation automatically freezes its validation winner
+and evaluates the held-out test split. All ablations must use the checked-in
+manifest's exact data, immutable task refs, and ordered 30/19/40 split; a custom
+manifest cannot change assignments while retaining the same counts.
 
 #### Optimization budget
 
@@ -396,7 +399,7 @@ minibatch size, and seed produce identical task order across methods, models, an
 text scopes. Eight-epoch runs share the first four epochs with standard runs,
 then continue the shuffle sequence. Checkpoints save the permutation, cursor,
 and private RNG state so a resumed run retains every later epoch's task order.
-Run contract version 31 records this policy; older checkpoints require fresh
+Run contract version 32 records this policy; older checkpoints require fresh
 runs. HotPotQA uses the same sampler, with its existing metric-call budgets.
 
 Each iteration samples one minibatch for one mutation attempt; merging is off.
@@ -416,7 +419,9 @@ They cannot extend a standard-budget checkpoint in place.
 operational runs. It is checked at iteration boundaries and can be exceeded by
 the final iteration's evaluations. A run stopped by that cap before its selected
 epoch budget does not complete the protocol. The normal commands omit this cap.
-Final held-out test evaluation remains separate.
+An incomplete full-split run cannot enter held-out evaluation and stops the
+campaign until it is resumed to completion. Partial-split diagnostic runs skip
+held-out testing and cannot be launched as campaign ablations.
 
 #### Evaluation caching
 
@@ -430,7 +435,7 @@ counted for these fresh executions.
 Completed checkpoint records and optimizer response journals remain available
 for recovery of the same logical work. They do not supply results for unrelated
 new evaluations, and completed held-out repetitions remain resumable. Run
-contract version 31 records `cache_evaluation=false`, forwards it to GEPA, and
+contract version 32 records `cache_evaluation=false`, forwards it to GEPA, and
 rejects missing or changed policies on resume and before final comparison.
 
 #### Parent selection
@@ -450,7 +455,7 @@ The final winner remains the harness with the highest mean validation score.
 
 `candidate_selection_strategy="pareto"` and `frontier_type="instance"` are
 explicit run contract fields forwarded to the optimizer for every method and
-budget. Run contract version 31 rejects missing or changed parent-selection
+budget. Run contract version 32 rejects missing or changed parent-selection
 policies on resume and before final comparison.
 
 #### Proposal acceptance and validation
@@ -470,7 +475,7 @@ improvement or automatically replace the existing best harness.
 
 `acceptance_criterion="strict_improvement"`, `validation_evaluation="full_eval"`,
 `skip_perfect_score=true`, and `perfect_score=1.0` are explicit run contract
-fields forwarded to the optimizer. Run contract version 31 rejects missing or
+fields forwarded to the optimizer. Run contract version 32 rejects missing or
 changed policies on resume and before final comparison. This preserves the
 prior runtime defaults while recording the approved experiment identity.
 
@@ -482,15 +487,16 @@ three test repetitions of each frozen harness. This follows
 evolution run and three test executions, reporting mean and standard deviation
 of Pass@1.
 
-The final evaluation command requires all twelve completed runs with matching
-benchmark, model, decoding, optimization seed, and splits. Each must have the
-correct scope, method, and budget for its campaign cell. It rejects partial
-training/validation selections and runs that stopped before completing their
-four or eight epochs. It selects each winner independently by mean validation
-reward, with GEPA's earliest-candidate tie break, and freezes all twelve winners
-and their common initial harness before running any test task. Standard and
-double-budget results retain separate labels within each scope; no selection
-across budgets or scopes uses test results.
+Testing follows each completed ablation, matching the HotPotQA campaign. The
+next ablation starts after that cell's testing succeeds. Each winner is selected
+independently by mean validation reward, with GEPA's earliest-candidate tie break,
+and frozen before its test tasks run. Later ablations join the same comparison
+without replacing earlier winners or their evidence. All cells must match the
+benchmark data, ordered splits, model, decoding, optimization seed, and shared
+runtime settings. Each must have the correct scope, method, and budget. Partial
+training/validation selections and runs stopped before four or eight epochs are
+rejected. Test scores never determine prompts, settings, budgets, or selection
+for subsequent ablations.
 
 Each repetition starts a distinct Harbor job over the entire test split with
 `n_attempts=1` and fresh task environments. Training and validation evaluations
@@ -507,44 +513,46 @@ validation-selected winners:
 | --- | --- | --- | --- | --- |
 | TB2.1 | 40 | 3 | 120 | 1,560 |
 
-That is 39 Harbor jobs per model, or 3,120 task attempts across both models.
-Run final testing only after all twelve matching optimization runs have completed:
+With the shared test directory, that is 39 Harbor jobs per model, or 3,120 task
+attempts across both models. The common initial harness is tested once per model
+(three repetitions); each ablation still gets its own three fresh repetitions,
+even if its validation winner equals the initial harness.
+
+`examples.terminalbench.main` tests automatically after optimization. For
+individually launched cells, pass the same `--test-output-dir` for all of that
+model's ablations; it defaults to `RUN_DIR/heldout` for a standalone run. The
+campaign launcher supplies `RUN_ROOT/test` automatically. To resume testing a
+completed cell directly, without waiting for any other optimization run:
 
 ```bash
 uv run python -m examples.terminalbench.evaluate \
   --runtime-record runs/servers/qwen.json \
   --run-dir system_prompt__vanilla=runs/tb2.1/qwen/system_prompt/vanilla \
-  --run-dir system_prompt__react_v2=runs/tb2.1/qwen/system_prompt/react_v2 \
-  --run-dir system_prompt__react_v2_random=runs/tb2.1/qwen/system_prompt/react_v2_random \
-  --run-dir system_prompt__action=runs/tb2.1/qwen/system_prompt/action \
-  --run-dir system_prompt__vanilla_2x=runs/tb2.1/qwen/system_prompt/vanilla_2x \
-  --run-dir system_prompt__react_v2_2x=runs/tb2.1/qwen/system_prompt/react_v2_2x \
-  --run-dir all_text__vanilla=runs/tb2.1/qwen/all_text/vanilla \
-  --run-dir all_text__react_v2=runs/tb2.1/qwen/all_text/react_v2 \
-  --run-dir all_text__react_v2_random=runs/tb2.1/qwen/all_text/react_v2_random \
-  --run-dir all_text__action=runs/tb2.1/qwen/all_text/action \
-  --run-dir all_text__vanilla_2x=runs/tb2.1/qwen/all_text/vanilla_2x \
-  --run-dir all_text__react_v2_2x=runs/tb2.1/qwen/all_text/react_v2_2x \
   --output-dir runs/tb2.1/qwen/test
 ```
 
+Repeat `--run-dir CELL=PATH` to include more completed cells, or supply just the
+next one using the same output directory. Already-frozen cells are retained.
 Use separate corresponding directories for the DeepSeek arm.
 The command reads student model, endpoint, decoding, and concurrency from the
 optimization contracts. `--harbor-executable` and `--docker-executable` optionally
 select installed binaries. Checkpoints must be trusted local optimization
 artifacts because GEPA's checkpoint format uses Python pickle.
 
-`frozen-comparison.json` version 3 contains all thirteen harnesses and their
-source contracts, including each winner's editable scope.
+`frozen-comparison.json` version 4 accumulates the common baseline and completed
+cells' immutable harnesses and source contracts, including each winner's scope.
 Each completed repetition gets a JSON file with per-task verifier rewards and
 its distinct Harbor job identity. Rerunning the same command reuses completed
 repetitions and runs only missing ones; an interrupted, unrecorded repetition
 starts again in fresh environments. Frozen harness or configuration changes
 are rejected. The CLI locks the output directory against concurrent writers.
-`summary.json` is written only after all 39 repetitions finish and contains
+`summary.json` is written after all currently frozen harnesses finish testing and contains
 the scope, three Pass@1 values, their mean and sample standard deviation, and the
 completed task-attempt count for each harness. Scores are fractions in JSON
-and percentages in console output. Failed or incomplete Harbor jobs stop the
+and percentages in console output. `completed_cells`, `pending_cells`, and
+`campaign_complete` distinguish partial campaign coverage from a finished
+twelve-cell comparison. Adding a new cell invalidates the earlier summary until
+the added tests finish. Failed or incomplete Harbor jobs stop the
 evaluation instead of becoming fabricated zero scores.
 
 This aligns the repetition protocol with the paper; the previously documented
@@ -625,7 +633,7 @@ evidence stops execution before Harbor. A changed task runtime requires new
 matching pilot evidence and a fresh campaign; changes to either role also reject
 resume and mixed final comparisons. All twelve cells in a model arm must share
 both role configurations. Historical contracts lacking this evidence are rejected
-by run schema 31 and pilot schema 9.
+by run schema 32 and pilot schema 9.
 
 #### Run
 
@@ -645,6 +653,7 @@ uv run python -m examples.terminalbench.main \
   --reviewed-pilot runs/canaries/tb2.1/qwen/full \
   --runtime-record runs/servers/qwen.json \
   --run-dir runs/tb2.1/qwen/system_prompt/vanilla \
+  --test-output-dir runs/tb2.1/qwen/test \
   --harbor-work-dir runs/tb2.1/qwen/system_prompt/vanilla/harbor
 ```
 
@@ -663,6 +672,7 @@ uv run python -m examples.terminalbench.main \
   --reviewed-pilot runs/canaries/tb2.1/qwen/full \
   --runtime-record runs/servers/qwen.json \
   --run-dir runs/tb2.1/qwen/system_prompt/vanilla_2x \
+  --test-output-dir runs/tb2.1/qwen/test \
   --harbor-work-dir runs/tb2.1/qwen/system_prompt/vanilla_2x/harbor
 ```
 
@@ -688,15 +698,18 @@ uv run --no-sync python -m examples.terminalbench.run_ablations \
 
 `--dry-run` prints commands without creating runs or invoking Harbor. Omit it
 to execute sequentially: all six `system_prompt` configurations first, then all
-six `all_text` configurations. The launcher uses the same ordered campaign
-matrix as final evaluation and stops if a command fails. Each scope and cell
-has its own directory. Rerunning forwards to the existing run-contract and
-checkpoint checks; it does not grant extra epochs or run held-out tests.
+six `all_text` configurations. Each cell completes optimization and held-out
+testing before the next starts. The launcher uses the same ordered campaign
+matrix as final evaluation and stops if either phase fails. Each scope and cell
+has its own optimization directory; all cells share `RUN_ROOT/test` for matched,
+incremental testing. Rerunning resumes the existing optimization and test
+checkpoints without granting extra epochs or repeating completed test evidence.
 
 Other optimization options, including homogeneous student/proposer models,
 endpoints, runtime records, reviewed pilot, concurrency, seed, and text limits,
 are forwarded to every cell.
-Scope, condition, budget, and per-run directories are owned by the matrix.
+Scope, condition, budget, per-run directories, and the shared test directory
+are owned by the matrix. Partial train/validation limits are rejected.
 Use a separate `--run-root runs/tb2.1/deepseek` with both DeepSeek model flags
 and its endpoints for that model's campaign. Every model's campaign starts
 with system-prompt optimization.
@@ -723,6 +736,7 @@ uv run python -m examples.terminalbench.main \
   --reviewed-pilot runs/canaries/tb2.1/deepseek/full \
   --runtime-record runs/servers/deepseek.json \
   --run-dir runs/tb2.1/deepseek/vanilla \
+  --test-output-dir runs/tb2.1/deepseek/test \
   --harbor-work-dir runs/tb2.1/deepseek/vanilla/harbor
 ```
 
@@ -828,7 +842,7 @@ launcher. Supplying this flag explicitly records that review. The campaign
 verifies the stage chain, complete task coverage, artifact hashes, and matching
 runtime settings before contacting Harbor. The evidence is embedded in run
 contracts, reused on resume without another review flag, and required again
-at final comparison. Run contract version 31 and
+at final comparison. Run contract version 32 and
 pilot configuration version 9 reject older or changed policies; use fresh runs.
 Partial-data diagnostic optimizations can still run without qualifying a final
 comparison. A dry run only prints commands and does not attest review.

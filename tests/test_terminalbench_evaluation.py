@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import sys
 from collections import Counter
+from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -147,11 +149,14 @@ def _fake_runner(manifest, comparison, output_dir: Path, *, fail_on_call: int | 
         """Require freezing first and emit one binary reward per held-out task."""
         nonlocal attempts
         attempts += 1
-        assert json.loads((output_dir / evaluate.FROZEN_COMPARISON_FILENAME).read_text()) == comparison
+        frozen = json.loads((output_dir / evaluate.FROZEN_COMPARISON_FILENAME).read_text())
+        assert frozen["shared_configuration"] == comparison["shared_configuration"]
+        assert all(value == comparison["harnesses"][label] for label, value in frozen["harnesses"].items())
         assert task_ids == manifest.splits["test"]
         if attempts == fail_on_call:
             raise HarborExecutionError("simulated interrupted Harbor job")
         digest = manifest.candidate_digest(candidate)
+        assert digest in {harness["candidate_digest"] for harness in frozen["harnesses"].values()}
         label = by_digest[digest]
         completed[label] += 1
         passes = (completed[label] - 1) * len(task_ids) // 2
@@ -338,7 +343,6 @@ def test_unchanged_winners_still_receive_separate_test_repetitions(tmp_path: Pat
         "different_seed",
         "different_model",
         "different_selector",
-        "missing_cell",
         "wrong_budget",
         "incomplete_double",
         "different_condition",
@@ -361,9 +365,7 @@ def test_invalid_source_runs_are_rejected_before_test_execution(tmp_path: Path, 
     if damage == "different_model":
         forest = _write_run(tmp_path / "other-model", "tb2.1", "react_v2", DEEPSEEK_V4_1_FLASH_MODEL)
         run_dirs["all_text__react_v2"] = forest
-    if damage == "missing_cell":
-        run_dirs.pop("all_text__action")
-    elif damage == "wrong_budget":
+    if damage == "wrong_budget":
         run_dirs["all_text__react_v2_2x"] = forest
     elif damage == "incomplete_double":
         state = GEPAState.load(str(run_dirs["all_text__react_v2_2x"]))
@@ -486,14 +488,12 @@ def test_adapter_drift_cannot_resume_or_enter_final_test(tmp_path: Path, damage:
         evaluate.freeze_comparison(run_dirs)
 
 
-@pytest.mark.parametrize("damage", ["missing_scope", "changed_scope", "swapped_label", "extra_component", "one_scope"])
+@pytest.mark.parametrize("damage", ["missing_scope", "changed_scope", "swapped_label", "extra_component"])
 def test_final_comparison_enforces_both_scope_boundaries(tmp_path: Path, damage: str) -> None:
-    """Require both completed scope arms and reject mislabeled or expanded prompt-only edits."""
+    """Reject mislabeled scope arms and expanded prompt-only edits."""
     run_dirs = _write_comparison(tmp_path, "tb2.1")
     run_dir = run_dirs["system_prompt__react_v2"]
-    if damage == "one_scope":
-        run_dirs = {label: path for label, path in run_dirs.items() if label.startswith("all_text__")}
-    elif damage == "swapped_label":
+    if damage == "swapped_label":
         run_dirs["all_text__react_v2"] = run_dir
     elif damage == "extra_component":
         state = GEPAState.load(str(run_dir))
@@ -698,6 +698,112 @@ def test_frozen_output_rejects_a_changed_validation_winner(tmp_path: Path) -> No
     with pytest.raises(ValueError, match="different frozen comparison"):
         evaluate.evaluate_comparison(manifest, changed, output_dir, runner)
     assert runner.run.call_count == 2
+
+
+@pytest.mark.parametrize("cell", SCOPE_CAMPAIGN_CELLS)
+def test_one_completed_ablation_can_test_before_the_other_runs_exist(tmp_path: Path, cell: str) -> None:
+    """Evaluate the common baseline and one validation winner on exactly the same test tasks."""
+    scope, condition, budget = SCOPE_CAMPAIGN_CELLS[cell]
+    run_dir = _write_run(tmp_path, "tb2.1", condition, budget=budget, optimization_scope=scope)
+    manifest, comparison = evaluate.freeze_comparison({cell: run_dir})
+    assert set(comparison["source_runs"]) == {cell}
+    output_dir = tmp_path / "test"
+    runner = _fake_runner(manifest, comparison, output_dir)
+    summary = evaluate.evaluate_comparison(manifest, comparison, output_dir, runner)
+    assert runner.run.call_count == 6
+    assert set(summary["harnesses"]) == {"initial", cell}
+    assert summary["complete"] is True
+    assert summary["campaign_complete"] is False
+    assert summary["completed_cells"] == [cell]
+    assert set(summary["pending_cells"]) == set(SCOPE_CAMPAIGN_CELLS) - {cell}
+    assert all(row["task_attempts"] == 120 for row in summary["harnesses"].values())
+
+
+def test_incremental_campaign_reuses_baseline_and_keeps_every_cell_on_identical_data(tmp_path: Path) -> None:
+    """Add twelve cells one by one without repeating, replacing, or dropping completed test evidence."""
+    run_dirs = _write_comparison(tmp_path, "tb2.1")
+    manifest, full_comparison = evaluate.freeze_comparison(run_dirs)
+    output_dir = tmp_path / "test"
+    runner = _fake_runner(manifest, full_comparison, output_dir)
+    saved = {}
+    for index, (cell, run_dir) in enumerate(run_dirs.items(), start=1):
+        _, comparison = evaluate.freeze_comparison({cell: run_dir})
+        summary = evaluate.evaluate_comparison(manifest, comparison, output_dir, runner)
+        assert runner.run.call_count == 3 * (index + 1)
+        assert len(summary["completed_cells"]) == index
+        assert summary["campaign_complete"] is (index == len(run_dirs))
+        assert len(summary["pending_cells"]) == len(run_dirs) - index
+        assert all((output_dir / name).read_bytes() == value for name, value in saved.items())
+        saved = {path.name: path.read_bytes() for path in output_dir.glob("*-repetition-*.json")}
+        assert evaluate.evaluate_comparison(manifest, comparison, output_dir, runner) == summary
+        assert runner.run.call_count == 3 * (index + 1)
+    assert json.loads((output_dir / evaluate.FROZEN_COMPARISON_FILENAME).read_text()) == full_comparison
+    assert len(saved) == 39
+
+
+def test_new_ablation_cannot_change_shared_settings_after_earlier_testing(tmp_path: Path) -> None:
+    """Keep cross-ablation matching checks when cells arrive in separate invocations."""
+    first = _write_run(tmp_path, "tb2.1", "vanilla", optimization_scope="system_prompt")
+    manifest, comparison = evaluate.freeze_comparison({"system_prompt__vanilla": first})
+    output_dir = tmp_path / "test"
+    runner = _fake_runner(manifest, comparison, output_dir)
+    evaluate.evaluate_comparison(manifest, comparison, output_dir, runner)
+    frozen = (output_dir / evaluate.FROZEN_COMPARISON_FILENAME).read_bytes()
+    changed = _write_run(tmp_path, "tb2.1", "react_v2", n_concurrent=2, optimization_scope="all_text")
+    _, incoming = evaluate.freeze_comparison({"all_text__react_v2": changed})
+    with pytest.raises(ValueError, match="shared configuration changed"):
+        evaluate.evaluate_comparison(manifest, incoming, output_dir, runner)
+    assert runner.run.call_count == 6
+    assert (output_dir / evaluate.FROZEN_COMPARISON_FILENAME).read_bytes() == frozen
+
+
+def test_interrupted_new_cell_invalidates_previous_summary_and_resumes(tmp_path: Path) -> None:
+    """Never report the expanded comparison complete while the new cell's tests are unfinished."""
+    run_dirs = _write_comparison(tmp_path, "tb2.1")
+    manifest, full_comparison = evaluate.freeze_comparison(run_dirs)
+    output_dir = tmp_path / "test"
+    runner = _fake_runner(manifest, full_comparison, output_dir, fail_on_call=8)
+    first, second = list(run_dirs)[:2]
+    _, comparison = evaluate.freeze_comparison({first: run_dirs[first]})
+    evaluate.evaluate_comparison(manifest, comparison, output_dir, runner)
+    saved = {path.name: path.read_bytes() for path in output_dir.glob("*-repetition-*.json")}
+    _, incoming = evaluate.freeze_comparison({second: run_dirs[second]})
+    with pytest.raises(HarborExecutionError):
+        evaluate.evaluate_comparison(manifest, incoming, output_dir, runner)
+    assert not (output_dir / "summary.json").exists()
+    summary = evaluate.evaluate_comparison(manifest, incoming, output_dir, runner)
+    assert runner.run.call_count == 10
+    assert summary["completed_cells"] == [first, second]
+    assert all((output_dir / name).read_bytes() == value for name, value in saved.items())
+
+
+@pytest.mark.parametrize("field", ["dataset", "task_refs", "train", "val", "test"])
+def test_testing_rejects_changed_data_or_split_order_before_running_tasks(tmp_path: Path, field: str) -> None:
+    """Equal split sizes cannot hide changed task content, membership, or ordering."""
+    run_dir = _write_run(tmp_path, "tb2.1", "vanilla", optimization_scope="system_prompt")
+    manifest, comparison = evaluate.freeze_comparison({"system_prompt__vanilla": run_dir})
+    if field in ("train", "val", "test"):
+        splits = deepcopy(manifest.splits)
+        splits[field].reverse()
+        changed = replace(manifest, splits=splits)
+    elif field == "task_refs":
+        refs = dict(manifest.task_refs)
+        refs[manifest.splits["test"][0]] = "changed-task-content"
+        changed = replace(manifest, task_refs=refs)
+    else:
+        changed = replace(manifest, dataset={**manifest.dataset, "registry_content_hash": "changed-dataset"})
+    runner = Mock()
+    with pytest.raises(ValueError, match="identical train/validation/test splits"):
+        evaluate.evaluate_comparison(changed, comparison, tmp_path / "test", runner)
+    runner.run.assert_not_called()
+    assert not (tmp_path / "test").exists()
+
+
+@pytest.mark.parametrize("run_dirs", [{}, {"unknown": Path("unused")}])
+def test_freezing_requires_at_least_one_known_cell(run_dirs: dict[str, Path]) -> None:
+    """Reject empty and mislabeled requests before loading any checkpoints."""
+    with pytest.raises(ValueError, match="one or more supported campaign cells"):
+        evaluate.freeze_comparison(run_dirs)
 
 
 @pytest.mark.parametrize(

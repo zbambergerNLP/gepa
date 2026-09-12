@@ -21,7 +21,7 @@ the merge. The existing branches are preserved; consolidation is local.
 | Setup | Adopt checked-in remote stages, detached downloads, scratch storage, SSH helpers, CUDA-header precedence, and rsync environment exclusions. Propagate custom Wiki-2017 paths and use this checkout's source in uninstalled remote environments. |
 | Wiki-2017 | Adopt corrected extracted-corpus size, 1,780,742,620 bytes. Corpus/archive hashes, document count, retrieval parameters, and split stay fixed. |
 | Text/editor behavior | Preserve configurable unlimited-by-default character limits, context deduplication, actionable tool-error feedback, repeated selected-section edits, and explicit finish. |
-| Run identity | HotPotQA schema 25 records timeout and new serving provenance. Terminal-Bench schema 31, runtime freeze, and pilot schema 9 are preserved. Old runtime contracts cannot be silently resumed. |
+| Run identity | HotPotQA schema 25 records timeout and new serving provenance. Terminal-Bench schema 32 records test-after-each-ablation timing; runtime freeze and pilot schema 9 are preserved. Old runtime contracts cannot be silently resumed. |
 | Della skill/runbook | Include and reconcile PR #62's skill and runbook with the current decisions. Remove obsolete instructions to launch the old commit; use the approved V4.1 arm. |
 
 The user explicitly approved V4.1 during integration. Its published instruct
@@ -32,6 +32,13 @@ approved smaller output caps. See the provider review for sources.
 
 ## Decisions preserved across benchmarks
 
+- Within each benchmark, every ablation and model arm uses identical pinned
+  data and exact ordered train/validation/test examples. Match content and
+  source revisions as well as IDs and counts. This is also required for future
+  benchmark integrations; a method, scope, or budget must never resample splits.
+- Evaluate the validation-selected winner after each ablation finishes, using
+  the same held-out test set. Freeze each winner before its test calls, and
+  keep test scores out of all later optimization and configuration decisions.
 - The model executing the benchmark is also the optimizer model within each arm.
 - Provider guidance determines role-specific sampling and reasoning: temperature
   1.0 and top-p 0.95 for both models; Qwen xhigh and DeepSeek V4.1 numeric effort 100.
@@ -59,6 +66,9 @@ metric calls; expanded independent `vanilla`, `react_v2` at 13,742 calls.
 This gives six cells per model, 12 total. Preserve single mutation, merge off,
 Pareto parent selection, strict training improvement, and validation-based final
 selection. Start operational work with HotPotQA after this consolidation review.
+The scientific launcher runs one cell per job and evaluates test at the end of
+that cell. Its preflight checks the pinned dataset revision and the ordered
+content hash of each of the three splits; keep these checks for every ablation.
 
 The approved training-only pilot has two stages for each model: first three
 training questions to check the complete task pipeline, then all 150 training
@@ -96,13 +106,21 @@ output cutoffs require their own investigation.
 | Budget accounting | Training passes normalized to each benchmark; validation and agent costs reported separately. More draws are not claimed to be equal compute. |
 | Pilot | Per model, three training tasks then all 30, initial harness only, with usage/cutoff/timeout/throughput review. Same pilot may serve identical initial text in both scopes. |
 | Runtime | Verified local model-server identity at pilot, optimization, resume, and final evaluation. Freeze concurrency/hardware/settings per model after training calibration. |
-| Final evaluation | Complete all 12 optimization cells per model before test. Initial plus 12 selected harnesses, three test repetitions each; report execution variability. |
+| Final evaluation | Evaluate each completed ablation before starting the next. Accumulate the common initial harness and 12 immutable validation winners in one matched test directory per model, three repetitions each; report execution variability. Exact data and splits must match throughout. |
 | Execution backend | Existing Docker runner retained. Proposed Della Apptainer work explicitly paused; no backend compatibility or live pilot qualification is claimed. |
 
 Canonical detailed protocol and commands:
 [`terminal_bench_adapter/README.md`](../src/gepa/adapters/terminal_bench_adapter/README.md).
 
 ## Local verification
+
+The subsequent test-after-each-ablation update passes **512 focused offline
+tests**, Ruff on the changed Python files, and Pyright on all three changed
+Terminal-Bench entry points. Coverage includes optimize/test ordering, incomplete
+run rejection, incremental resume, unchanged baseline evidence, exact split
+matching, and HotPotQA content-hash drift checks. No benchmark jobs were launched.
+
+The original consolidation was verified as follows:
 
 - Installed the unchanged `uv.lock` with `dev`, `wiki17`, and the pinned
   `hotpotqa-task-program` dependency group. No GPU serving packages or model

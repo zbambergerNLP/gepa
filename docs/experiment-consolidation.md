@@ -67,6 +67,17 @@ approved smaller output caps. See the provider review for sources.
   checkpoints and optimizer response journals remain supported.
 - Training batches use their own seeded random stream, independent of method
   decisions; larger budgets continue the same batch sequence.
+- Determine model-arm scheduling separately for HotPotQA and TB2.1 from their
+  training pilots. Attempt overlapping Qwen and DeepSeek execution on separate
+  allocations, with independent servers and output directories. Record job IDs,
+  actual inference overlap, resource availability, throughput, timeouts, errors,
+  and output cutoffs. Concurrent submission alone does not establish overlap.
+  Use concurrent production scheduling only when both arms pass their existing
+  pilot checks while overlapping. Otherwise use sequential scheduling and
+  complete the required full training pilots in that mode. Review and record
+  the selected schedule before production; neither schedule is selected yet.
+  This is separate from workers/tasks within an arm. Ablations within each
+  model remain sequential, with testing after each ablation.
 
 ## HotPotQA
 

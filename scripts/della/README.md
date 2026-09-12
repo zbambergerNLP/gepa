@@ -46,6 +46,14 @@ HotPotQA requests have a 3,600-second deadline shared across the bounded
 provider attempts. Initial worker defaults are 12 for Qwen and 4 for DeepSeek;
 training calibration must precede freezing them for a comparison.
 
+For both HotPotQA and TB2.1, try overlapping Qwen and DeepSeek execution during
+their training pilots on separate allocations. Record actual inference overlap
+and the existing pilot reliability/throughput measurements. Decide model-arm
+scheduling from those results: concurrent if qualified, otherwise sequential
+with the required full pilots completed in that mode. This decision remains
+pending until live pilot review and is separate from each arm's worker count.
+Follow the benchmark pilot protocols; ablations within a model stay sequential.
+
 DeepSeek is pinned to revision `dba1be0a40aa45a94ad051997016db3960a90277`.
 The V4.1 arm uses the exact vLLM commit wheel `e77daef89` (version
 `0.1.1.dev5+ge77daef89`) with native `deepseek_v41` tokenizer, reasoning, and
@@ -76,11 +84,14 @@ diagnostic text. Set `HOTPOTQA_TEXT_LIMITS_JSON` for this launcher or pass
 `--text-limits` to the Python CLI. Model context and per-call output limits still
 apply. Resolved settings are recorded in run contracts for resume validation.
 
-After configuring `scripts/della/.env` from `.env.example`, prepare and submit:
+After configuring `scripts/della/.env` from `.env.example`, prepare artifacts,
+complete the pilots, and apply their reviewed schedule when submitting:
 
 ```bash
 scripts/della/build_env.sh
+# After completing the pilots and reviewing their scheduling evidence:
 MODEL_PROFILE=qwen3.8-27b scripts/della/submit_hotpotqa.sh
+# For sequential scheduling, wait for Qwen's chain to finish first.
 MODEL_PROFILE=deepseek-v4.1-flash scripts/della/submit_hotpotqa.sh
 ```
 
@@ -90,11 +101,10 @@ Use a fresh campaign ID after changing models or serving environments. Previous
 GLM results and checkpoints cannot be resumed as DeepSeek runs.
 
 HotPotQA reflection uses the configured model context window without an
-additional 8,000-character Manifestor trace cap. Exact repeated long text and
-paragraphs are shown once per request with references for later occurrences;
-long identical-line runs retain one line and a repetition count. Distinct
-passages, reasoning, task outcomes, and gold feedback remain available. FOREST
-reads feedback once in the per-example traces. Original evaluation records are
-unchanged. Context overflow remains a provider error that stops the run; it
-does not silently truncate evidence. The reflection policy is part of run
-identity, so earlier checkpoints require a fresh campaign.
+additional 8,000-character Manifestor trace cap. All supplied passages,
+reasoning, task outcomes, and feedback remain intact, including repeated text
+and log lines. FOREST receives feedback in its dedicated field and per-example
+traces. Original evaluation records are unchanged. Context overflow remains a
+provider error that stops the run; it does not silently truncate evidence.
+Reflection-context policy version 2 records the removal of our deduplication;
+earlier incompatible checkpoints require a fresh campaign.

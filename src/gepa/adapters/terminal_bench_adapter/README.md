@@ -782,6 +782,23 @@ Both model arms use the same compatibility handling.
 
 #### Concurrency review
 
+Model-arm scheduling is a separate pilot decision from `--n-concurrent`.
+Attempt overlapping Qwen and DeepSeek training pilots on separate allocations,
+with independent model endpoints, runtime records, and output directories.
+Retain each model's three-task smoke and full 30-task stages; coordinate the
+full stages to overlap where capacity allows. Record job/evaluation IDs, actual
+inference overlap, resource availability, throughput, timeouts, errors, and
+output cutoffs. Concurrent submission alone does not qualify the schedule.
+
+Decide after reviewing the pilot evidence. Use concurrent model-arm scheduling
+only if both models pass the existing pilot checks while overlapping. If
+overlap is unavailable or fails those checks, use sequential scheduling and
+complete the required full training pilots in that mode. Record the selected
+schedule and apply it consistently to the campaign; no schedule is selected in
+advance. Within each model, ablations and their test evaluations remain
+sequential. HotPotQA remains the first benchmark to run; this protocol does not
+resume the paused Terminal-Bench Della backend work.
+
 Choose task concurrency using training-only measurements before freezing each
 benchmark/model comparison. Start the pilot with `--n-concurrent 1`, then test
 higher values on the actual hardware with the same tasks, initial harness,

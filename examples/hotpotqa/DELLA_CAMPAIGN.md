@@ -177,6 +177,23 @@ reduce concurrency and repeat the affected model's 150-question training
 pilot. Investigate parsing failures and output cutoffs separately. Freeze the
 successful setting across that model's six experiment cells.
 
+Test Qwen and DeepSeek pilot execution concurrently on separate allocations,
+using independent model servers, runtime records, and output directories. Keep
+the approved three-question and full 150-question stages for each model, and
+coordinate the full stages to overlap where capacity allows. Start with the
+existing 12 Qwen / 4 DeepSeek workers; this scheduling trial does not authorize
+a search for higher worker counts.
+
+Record both job IDs and actual inference start/end times, including whether
+model calls overlapped, plus resource availability and each arm's throughput,
+timeouts, errors, and output cutoffs. Two queued or submitted jobs are not proof
+of concurrent execution. If overlapping pilots pass the existing checks, their
+results can qualify concurrent model-arm scheduling. If capacity prevents the
+trial or overlapping execution fails the checks, use sequential scheduling and
+complete the required full training pilots in that mode. Serial execution must
+still pass the same checks. Review and record the final schedule from the pilot
+evidence before production; the schedule remains undecided until then.
+
 ## Campaign and results
 
 Per model: standard `vanilla`, `react_v2`, `react_v2_random`, and `action` at
@@ -192,6 +209,11 @@ export HOTPOTQA_CAMPAIGN_ID=<new-campaign-id>
 MODEL_PROFILE=qwen3.8-27b scripts/della/submit_hotpotqa.sh
 MODEL_PROFILE=deepseek-v4.1-flash scripts/della/submit_hotpotqa.sh
 ```
+
+These commands submit independent model chains. Apply the schedule selected
+from the pilots: submit both chains for concurrent scheduling, or wait for one
+model's chain to finish before submitting the other for sequential scheduling.
+Each model's six ablations and their test evaluations remain sequential.
 
 Jobs request one node, eight H200 GPUs, 64 CPUs, and 768G on `ailab`. Qwen standard
 caps are 72 hours; expanded and DeepSeek caps are 144 hours. These are limits,

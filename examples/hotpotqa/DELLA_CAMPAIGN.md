@@ -156,6 +156,12 @@ Check execution evidence separately from scores: the normal evaluator assigns
 zero to malformed task output, which is a pilot reliability issue. An ordinary
 wrong answer remains a valid baseline result.
 
+Keep 12 Qwen / 4 DeepSeek workers if the pilot passes; the approved plan does
+not include a search for higher parallelism. If queueing causes timeouts,
+reduce concurrency and repeat the affected model's 150-question training
+pilot. Investigate parsing failures and output cutoffs separately. Freeze the
+successful setting across that model's six experiment cells.
+
 ## Campaign and results
 
 Per model: standard `vanilla`, `react_v2`, `react_v2_random`, and `action` at

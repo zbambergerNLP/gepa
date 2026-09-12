@@ -73,6 +73,12 @@ accuracy threshold. A wrong answer is a valid baseline observation; malformed
 task output is a reliability issue even when the normal evaluator scores it as
 zero. Pilot execution remains pending.
 
+The approved calibration stopping rule is to retain 12 Qwen / 4 DeepSeek
+workers when the pilot passes. Do not search for higher parallelism. If
+queueing causes timeouts, reduce concurrency and repeat the affected model's
+150-question training pilot before freezing its setting. Other errors and
+output cutoffs require their own investigation.
+
 ## Terminal-Bench
 
 | Decision | Preserved setting |

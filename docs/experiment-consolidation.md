@@ -66,7 +66,12 @@ questions to measure throughput, timeouts, token usage, and output cutoffs.
 Both stages use the initial prompts and the fixed two-stage task program.
 Validation and test examples are excluded from calibration. Review the pilot
 evidence before freezing runtime settings across that model's six cells.
-Pilot execution remains pending.
+Approved acceptance criteria: every question must complete the pipeline with a
+usable prediction. Unresolved provider/parsing errors or output cutoffs require
+investigation before the full campaign. Record baseline EM/F1 without a minimum
+accuracy threshold. A wrong answer is a valid baseline observation; malformed
+task output is a reliability issue even when the normal evaluator scores it as
+zero. Pilot execution remains pending.
 
 ## Terminal-Bench
 

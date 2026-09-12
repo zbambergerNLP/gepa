@@ -145,6 +145,17 @@ runtime settings across the six experiment cells per model. These stages
 evaluate the initial prompts without optimizing them. Pilot execution remains
 pending; the production optimization launcher is not a training-only pilot.
 
+The approved pilot acceptance criteria are:
+
+- Every question completes the pipeline and returns a usable prediction.
+- Unresolved provider or parsing errors, and output cutoffs, require
+  investigation before proceeding to the full campaign.
+- Record EM/F1 as baseline measurements with no minimum accuracy threshold.
+
+Check execution evidence separately from scores: the normal evaluator assigns
+zero to malformed task output, which is a pilot reliability issue. An ordinary
+wrong answer remains a valid baseline result.
+
 ## Campaign and results
 
 Per model: standard `vanilla`, `react_v2`, `react_v2_random`, and `action` at

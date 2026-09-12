@@ -132,6 +132,19 @@ Its marker is written only on success. A failed canary or native-tool preflight
 cannot freeze campaign locks. Every optimization job verifies source, model
 bytes, environment, H200 hardware, and native tool calls before training.
 
+The approved HotPotQA calibration pilot then evaluates, for each model:
+
+1. Three training questions to check the complete two-stage task pipeline.
+2. All 150 training questions to measure throughput, timeouts, token usage,
+   and output cutoffs with the initial prompts.
+
+Use the pinned training split, Wiki-2017 BM25 k=7, and approved model settings.
+Start with 12 Qwen workers / 4 DeepSeek workers. Keep validation and test
+examples outside calibration, and review the evidence before freezing the
+runtime settings across the six experiment cells per model. These stages
+evaluate the initial prompts without optimizing them. Pilot execution remains
+pending; the production optimization launcher is not a training-only pilot.
+
 ## Campaign and results
 
 Per model: standard `vanilla`, `react_v2`, `react_v2_random`, and `action` at

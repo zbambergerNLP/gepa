@@ -60,6 +60,14 @@ This gives six cells per model, 12 total. Preserve single mutation, merge off,
 Pareto parent selection, strict training improvement, and validation-based final
 selection. Start operational work with HotPotQA after this consolidation review.
 
+The approved training-only pilot has two stages for each model: first three
+training questions to check the complete task pipeline, then all 150 training
+questions to measure throughput, timeouts, token usage, and output cutoffs.
+Both stages use the initial prompts and the fixed two-stage task program.
+Validation and test examples are excluded from calibration. Review the pilot
+evidence before freezing runtime settings across that model's six cells.
+Pilot execution remains pending.
+
 ## Terminal-Bench
 
 | Decision | Preserved setting |

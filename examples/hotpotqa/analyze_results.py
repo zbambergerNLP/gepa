@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from examples.common.react_v2 import WIKIPEDIA_RUN_CONTRACT_FILENAME
+from examples.hotpotqa.baseline import load_baseline_record
 
 _BUDGET_LABELS = {6_871: "standard", 13_742: "expanded"}
 _CONDITION_ORDER = {
@@ -444,6 +445,21 @@ def analyze_run(run_dir: Path, fallback_tau: float) -> dict[str, Any]:
         if heldout_value != final_value:
             raise ValueError(f"Held-out {heldout_field} mismatch in {run_dir}.")
 
+    baseline_metrics = {}
+    if contract.get("schema_version", 0) >= 26 or "baseline_protocol" in contract:
+        baseline = load_baseline_record(run_dir, contract)
+        if (
+            final_metrics.get("baseline") != baseline
+            or baseline["test_example_count"] != final_metrics["test_example_count"]
+        ):
+            raise ValueError(f"Starting-baseline evidence mismatch in {run_dir}.")
+        baseline_metrics["baseline"] = baseline
+        for metric in ("test_exact_match", "test_f1"):
+            gain = float(final_metrics[metric]) - baseline[metric]
+            if not math.isclose(float(final_metrics.get(f"{metric}_gain", math.nan)), gain, abs_tol=1e-12):
+                raise ValueError(f"Starting-baseline {metric} gain mismatch in {run_dir}.")
+            baseline_metrics[f"{metric}_gain"] = gain
+
     semantic_space = optimizer.get("semantic_action_space")
     semantic_action_count = 0
     if isinstance(semantic_space, Mapping):
@@ -493,6 +509,7 @@ def analyze_run(run_dir: Path, fallback_tau: float) -> dict[str, Any]:
         "test_exact_match": float(final_metrics["test_exact_match"]),
         "test_f1": float(final_metrics["test_f1"]),
         "test_example_count": int(final_metrics["test_example_count"]),
+        **baseline_metrics,
         "candidate_diversity": candidate_diversity(raw_candidates),
         "proposal_diversity": proposal_diversity(proposal_records),
         "action_stats": action_stats,
@@ -559,11 +576,18 @@ def discover_completed_runs(
 
     reports.sort(key=report_order)
     seen_cells: set[tuple[str, int, str]] = set()
+    baselines: dict[tuple[str, str, str], dict] = {}
     for report in reports:
         cell = (str(report["model"]), int(report["max_metric_calls"]), str(report["condition"]))
         if cell in seen_cells:
             raise ValueError(f"Duplicate HotPotQA campaign cell: {cell!r}.")
         seen_cells.add(cell)
+        baseline = report.get("baseline")
+        if baseline is not None:
+            arm = (report["campaign_id"], report["source_commit"], report["model"])
+            if arm in baselines and baselines[arm] != baseline:
+                raise ValueError("A model's HotPotQA ablations must share the same starting baseline.")
+            baselines[arm] = baseline
     return reports, incomplete
 
 
@@ -577,15 +601,20 @@ def render_markdown(reports: Sequence[Mapping[str, Any]]) -> str:
         Two GitHub-flavored Markdown tables.
     """
     lines = [
-        "| model | tree | condition | calls | candidates | best val EM | test EM | test F1 |",
-        "|---|---|---|---:|---:|---:|---:|---:|",
+        "| model | tree | condition | calls | candidates | best val EM | test EM | test F1 | baseline EM/F1 | gain EM/F1 (pp) |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for report in reports:
+        baseline = report.get("baseline")
+        baseline_scores = gains = "-"
+        if baseline is not None:
+            baseline_scores = f"{baseline['test_exact_match']:.2%} / {baseline['test_f1']:.2%}"
+            gains = f"{report['test_exact_match_gain'] * 100:+.2f} / {report['test_f1_gain'] * 100:+.2f}"
         lines.append(
             f"| {report['model_label']} | {report['budget_profile']} | `{report['condition']}` "
             f"| {report['total_metric_calls']:,} | {report['candidates_explored']} "
             f"| {report['best_validation_exact_match']:.2%} | {report['test_exact_match']:.2%} "
-            f"| {report['test_f1']:.2%} |"
+            f"| {report['test_f1']:.2%} | {baseline_scores} | {gains} |"
         )
 
     lines.extend(

@@ -23,6 +23,7 @@ Usage:
 """
 
 import argparse
+import fcntl
 import hashlib
 import itertools
 import json
@@ -57,6 +58,14 @@ from examples.common.react_v2 import (
 )
 from examples.common.wiki17_bm25 import DEFAULT_WIKI17_ROOT, GEPA_ARTIFACT_COMMIT, Wiki17BM25Retriever
 from examples.common.wikipedia import WikipediaRetriever
+from examples.hotpotqa.baseline import (
+    BASELINE_CONTRACT_FILENAME,
+    BASELINE_PROTOCOL,
+    baseline_digest,
+    baseline_directory,
+    build_baseline_contract,
+    load_baseline_record,
+)
 from examples.hotpotqa.utils import (
     HOTPOTQA_DSPY_COMMIT,
     HOTPOTQA_DSPY_VERSION,
@@ -561,7 +570,8 @@ def build_run_contract(condition: str, args) -> dict:
         else:
             semantic_controller_policy = deepcopy(CONTROLLER_POLICY_CONTRACT)
     return {
-        "schema_version": 25,
+        "schema_version": 26,
+        "baseline_protocol": dict(BASELINE_PROTOCOL),
         "provider_retry_policy": deepcopy(PROVIDER_RETRY_POLICY),
         "benchmark": "hotpotqa-fullwiki-wiki17",
         "reference_artifact_commit": GEPA_ARTIFACT_COMMIT,
@@ -1040,6 +1050,74 @@ def evaluate_on_set(
         temporary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         temporary_path.replace(summary_path)
     return mean_em, mean_f1
+
+
+def evaluate_starting_baseline(
+    run_dir: Path,
+    run_contract: dict,
+    testset: list[dict],
+    retriever: WikipediaRetriever,
+    api_base: str | None,
+    solver_lm_kwargs: dict[str, object],
+) -> dict:
+    """Evaluate or resume the shared starting prompts on the exact held-out test set.
+
+    Args:
+        run_dir: Optimization directory sharing its parent with the other ablations.
+        run_contract: Recorded model, data, initial prompts, and runtime settings.
+        testset: Ordered held-out examples used by the optimized candidate.
+        retriever: The same retriever used by the ablation.
+        api_base: Current task-server endpoint.
+        solver_lm_kwargs: Resolved task-model request settings.
+
+    Returns:
+        Verified baseline identity and test EM/F1 for the final comparison.
+
+    Raises:
+        ValueError: The baseline identity or test examples have changed.
+        RuntimeError: Another process is evaluating this same baseline.
+    """
+    contract = build_baseline_contract(run_contract)
+    test_identity = benchmark_data_identity(source={}, trainset=[], valset=[], testset=testset)["splits"]["test"]
+    if test_identity != contract["data"]["splits"]["test"]:
+        raise ValueError("Shared baseline requires the exact ordered HotPotQA test examples and content.")
+    directory = baseline_directory(run_dir, contract)
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / ".baseline.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError("Another process is evaluating this shared HotPotQA baseline.") from exc
+        path = directory / BASELINE_CONTRACT_FILENAME
+        if path.exists():
+            if json.loads(path.read_text()) != contract:
+                raise ValueError("Shared HotPotQA baseline configuration changed.")
+        else:
+            if (directory / "heldout").exists():
+                raise ValueError("Shared HotPotQA baseline results have no frozen configuration.")
+            temporary = path.with_suffix(f".{os.getpid()}.part")
+            temporary.write_text(json.dumps(contract, indent=2, sort_keys=True) + "\n")
+            temporary.replace(path)
+        summary_path = directory / "heldout" / baseline_digest(contract["candidate"]) / "summary.json"
+        if summary_path.exists():
+            return load_baseline_record(run_dir, run_contract)
+        print(f"Evaluating/resuming shared HotPotQA starting baseline: {directory}", flush=True)
+        evaluate_on_set(
+            contract["candidate"],
+            testset,
+            contract["models"]["solver"],
+            retriever,
+            api_base=api_base,
+            max_workers=contract["program"]["parallel_workers"],
+            program=contract["program"]["name"],
+            retrieval_k=contract["program"]["retrieval_k"],
+            solver_lm_kwargs={
+                **solver_lm_kwargs,
+                **provider_retry_kwargs(directory / "provider-attempts.jsonl", "baseline_solver"),
+            },
+            checkpoint_dir=directory / "heldout",
+        )
+        return load_baseline_record(run_dir, run_contract)
 
 
 def prompt_diversity(candidates: list[dict]) -> dict[str, dict[str, float]]:
@@ -1526,9 +1604,11 @@ def main():
 
     results = {}
     run_dirs: dict[str, str] = {}
+    run_contracts: dict[str, dict] = {}
     trackers: dict[str, ActionDiversityCallback] = {}
     for condition in conditions:
         run_contract = build_run_contract(condition, args)
+        run_contracts[condition] = run_contract
         run_dir = condition_run_dir(condition, args.program, args.tag, _run_key(condition, args))
         run_dirs[condition] = run_dir
         ensure_wikipedia_run_contract(run_dir, run_contract)
@@ -1599,6 +1679,9 @@ def main():
     print(f"{'=' * 60}\n")
 
     for name, result in results.items():
+        baseline = evaluate_starting_baseline(
+            Path(run_dirs[name]), run_contracts[name], testset, retriever, solver_api_base, solver_lm_kwargs
+        )
         test_em, test_f1 = evaluate_on_set(
             result.best_candidate,
             testset,
@@ -1616,7 +1699,7 @@ def main():
         )
         diversity = prompt_diversity(result.candidates)
         final_metrics = {
-            "schema_version": 1,
+            "schema_version": 2,
             "condition": name,
             "candidate_sha256": hashlib.sha256(
                 json.dumps(
@@ -1631,6 +1714,9 @@ def main():
             "test_exact_match": float(test_em),
             "test_f1": float(test_f1),
             "test_example_count": len(testset),
+            "baseline": baseline,
+            "test_exact_match_gain": test_em - baseline["test_exact_match"],
+            "test_f1_gain": test_f1 - baseline["test_f1"],
             "diversity": diversity,
         }
         final_metrics_path = Path(run_dirs[name]) / "final_metrics.json"
@@ -1645,6 +1731,11 @@ def main():
         print(f"  best val score (EM):      {result.val_aggregate_scores[result.best_idx]:.4f}")
         print(f"  test EM:                  {test_em:.2%}")
         print(f"  test F1:                  {test_f1:.2%}")
+        print(f"  starting baseline EM/F1: {baseline['test_exact_match']:.2%} / {baseline['test_f1']:.2%}")
+        print(
+            f"  test gain EM/F1:         {final_metrics['test_exact_match_gain'] * 100:+.2f} pp / "
+            f"{final_metrics['test_f1_gain'] * 100:+.2f} pp"
+        )
         print(f"  final metrics:            {final_metrics_path}")
         for component, stats in diversity.items():
             print(

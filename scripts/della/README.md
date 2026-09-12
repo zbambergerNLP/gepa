@@ -21,8 +21,15 @@ shuffled training epochs for the same ordered dataset and seed, independent of
 parent selection or reflection draws. Larger budgets continue that sequence;
 metric-call budgets do not guarantee the same number of optimization iterations.
 Checkpoints save the permutation, cursor, and private RNG state. Run-contract
-schema 25 records this policy and the consolidated serving provenance; use a fresh
+schema 26 records this policy, the starting baseline, and serving provenance; use a fresh
 campaign for older checkpoints.
+
+Each HotPotQA model has one shared unoptimized starting-prompt baseline on the
+same 300 test examples used by all six ablations. It runs alongside the first
+completed ablation's test; later cells reuse that recorded reference and report
+EM/F1 gains. Baseline task executions are separate from optimization budgets.
+`outputs/hotpotqa-baselines/` contains the frozen identities and resumable
+per-question evidence, which the existing fetcher includes and analyzer verifies.
 
 | Arm | Student and proposer | Serving |
 | --- | --- | --- |

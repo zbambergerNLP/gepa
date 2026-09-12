@@ -21,7 +21,7 @@ the merge. The existing branches are preserved; consolidation is local.
 | Setup | Adopt checked-in remote stages, detached downloads, scratch storage, SSH helpers, CUDA-header precedence, and rsync environment exclusions. Propagate custom Wiki-2017 paths and use this checkout's source in uninstalled remote environments. |
 | Wiki-2017 | Adopt corrected extracted-corpus size, 1,780,742,620 bytes. Corpus/archive hashes, document count, retrieval parameters, and split stay fixed. |
 | Text/editor behavior | Preserve configurable unlimited-by-default character limits, context deduplication, actionable tool-error feedback, repeated selected-section edits, and explicit finish. |
-| Run identity | HotPotQA schema 25 records timeout and new serving provenance. Terminal-Bench schema 32 records test-after-each-ablation timing; runtime freeze and pilot schema 9 are preserved. Old runtime contracts cannot be silently resumed. |
+| Run identity | HotPotQA schema 26 records the shared starting-baseline protocol, timeout, and serving provenance. Terminal-Bench schema 32 records test-after-each-ablation timing; runtime freeze and pilot schema 9 are preserved. Old runtime contracts cannot be silently resumed. |
 | Della skill/runbook | Include and reconcile PR #62's skill and runbook with the current decisions. Remove obsolete instructions to launch the old commit; use the approved V4.1 arm. |
 
 The user explicitly approved V4.1 during integration. Its published instruct
@@ -39,6 +39,9 @@ approved smaller output caps. See the provider review for sources.
 - Evaluate the validation-selected winner after each ablation finishes, using
   the same held-out test set. Freeze each winner before its test calls, and
   keep test scores out of all later optimization and configuration decisions.
+- Keep a shared unoptimized starting baseline per benchmark/model, using the
+  same test examples and task runtime as its ablations. Preserve each benchmark's
+  repetition protocol: one test pass for HotPotQA, three for Terminal-Bench.
 - The model executing the benchmark is also the optimizer model within each arm.
 - Provider guidance determines role-specific sampling and reasoning: temperature
   1.0 and top-p 0.95 for both models; Qwen xhigh and DeepSeek V4.1 numeric effort 100.
@@ -69,6 +72,15 @@ selection. Start operational work with HotPotQA after this consolidation review.
 The scientific launcher runs one cell per job and evaluates test at the end of
 that cell. Its preflight checks the pinned dataset revision and the ordered
 content hash of each of the three splits; keep these checks for every ablation.
+
+Each model's starting prompts receive one evaluation on the same 300 held-out
+questions alongside its first completed ablation's test. All six ablations share
+that baseline and report test EM/F1 gains against it. The baseline adds 300
+question executions per model outside the optimization budget. It is separate
+from the training-only pilot. Baseline contracts include initial prompts, exact
+data, retrieval, model settings, and campaign/runtime identity; per-question
+checkpoints support interruption recovery. Fetched analysis verifies the baseline
+evidence and rejects inconsistent references within a model's campaign.
 
 The approved training-only pilot has two stages for each model: first three
 training questions to check the complete task pipeline, then all 150 training
@@ -113,6 +125,11 @@ Canonical detailed protocol and commands:
 [`terminal_bench_adapter/README.md`](../src/gepa/adapters/terminal_bench_adapter/README.md).
 
 ## Local verification
+
+The shared HotPotQA baseline update passes **252 focused offline tests** and
+Ruff. The new baseline module and result analyzer have no Pyright errors;
+HotPotQA's main module retains its two pre-existing selector/config type errors,
+verified against the previous committed source. No benchmark jobs were launched.
 
 The subsequent test-after-each-ablation update passes **512 focused offline
 tests**, Ruff on the changed Python files, and Pyright on all three changed

@@ -47,6 +47,9 @@ benchmarks too; use a shared manifest or ordered-record fingerprints such as
 Evaluate each ablation's validation-selected winner after that ablation finishes.
 Freeze that winner before testing; test scores must not affect later prompts,
 selection, budgets, or settings. Runtime calibration uses training examples only.
+Include a shared unoptimized starting baseline per benchmark/model on the same
+test set and runtime, following that benchmark's repetition protocol. Report
+improvement against that reference and preserve its identity and execution evidence.
 
 ## Code Style
 

@@ -20,6 +20,14 @@ from examples.hotpotqa.analyze_results import (
     render_markdown,
     write_campaign_analysis,
 )
+from examples.hotpotqa.baseline import (
+    BASELINE_CONTRACT_FILENAME,
+    BASELINE_PROTOCOL,
+    baseline_digest,
+    baseline_directory,
+    build_baseline_contract,
+    load_baseline_record,
+)
 
 
 def write_json(path: Path, payload: dict) -> None:
@@ -39,6 +47,7 @@ def create_completed_run(
     condition: str = "react_v2",
     model: str = "hosted_vllm/Qwen/Qwen3.8-27B",
     budget: int = 6_871,
+    with_baseline: bool = False,
 ) -> Path:
     """Create one internally consistent completed-run fixture.
 
@@ -47,6 +56,7 @@ def create_completed_run(
         condition: Scientific condition stored in every artifact.
         model: Homogeneous solver and proposer model identifier.
         budget: Requested metric-call budget.
+        with_baseline: Include current shared starting-prompt evidence.
 
     Returns:
         Created run directory.
@@ -72,6 +82,19 @@ def create_completed_run(
         {"summarize1": "alpha beta"},
         {"summarize1": "alpha gamma"},
     ]
+    if with_baseline:
+        contract.update(
+            {
+                "schema_version": 26,
+                "baseline_protocol": BASELINE_PROTOCOL,
+                "reference_artifact_commit": "pinned-artifact",
+                "provider_retry_policy": {"max_attempts": 3},
+                "program": {"name": "2stage"},
+                "retrieval": {"corpus_sha256": "fixed-corpus"},
+                "data": {"splits": {"test": {"count": 300, "sha256": "fixed-test-content"}}},
+            }
+        )
+        contract["optimizer"]["rendered_seed"] = candidate_values[0]
     best_candidate_sha256 = hashlib.sha256(
         json.dumps(
             candidate_values[2],
@@ -187,7 +210,94 @@ def create_completed_run(
             "f1": final_metrics["test_f1"],
         },
     )
+    if with_baseline:
+        baseline_contract = build_baseline_contract(contract)
+        directory = baseline_directory(run_dir, baseline_contract)
+        write_json(directory / BASELINE_CONTRACT_FILENAME, baseline_contract)
+        write_json(
+            directory / "heldout" / baseline_digest(candidate_values[0]) / "summary.json",
+            {
+                "schema_version": 1,
+                "candidate_sha256": baseline_digest(candidate_values[0]),
+                "example_count": 300,
+                "exact_match": 0.2,
+                "f1": 0.3,
+            },
+        )
+        final_metrics.update(
+            {
+                "schema_version": 2,
+                "baseline": load_baseline_record(run_dir, contract),
+                "test_exact_match_gain": 0.2,
+                "test_f1_gain": 0.25,
+            }
+        )
+        write_json(run_dir / "final_metrics.json", final_metrics)
     return run_dir
+
+
+def test_analysis_verifies_and_reports_the_shared_baseline(tmp_path: Path) -> None:
+    """Show baseline-relative improvements from verified evidence in JSON and Markdown."""
+    first = create_completed_run(tmp_path, condition="vanilla", with_baseline=True)
+    second = create_completed_run(tmp_path, condition="react_v2", budget=13742, with_baseline=True)
+    reports, incomplete = discover_completed_runs(tmp_path, fallback_tau=0.1)
+    assert incomplete == []
+    assert len(reports) == 2
+    assert reports[0]["baseline"] == reports[1]["baseline"]
+    for path in (first, second):
+        report = analyze_run(path, fallback_tau=0.1)
+        assert report["baseline"]["test_exact_match"] == 0.2
+        assert report["baseline"]["test_f1"] == 0.3
+        assert report["test_exact_match_gain"] == pytest.approx(0.2)
+        assert report["test_f1_gain"] == pytest.approx(0.25)
+    markdown = render_markdown(reports)
+    assert "20.00% / 30.00%" in markdown
+    assert "+20.00 / +25.00" in markdown
+
+
+@pytest.mark.parametrize("damage", ["missing", "summary", "identity", "gain", "count", "unrecorded"])
+def test_analysis_rejects_missing_or_inconsistent_baseline_evidence(tmp_path: Path, damage: str) -> None:
+    """Fail a comparison instead of reporting an unverified starting score or gain."""
+    run_dir = create_completed_run(tmp_path, with_baseline=True)
+    contract = json.loads((run_dir / "wikipedia-run-contract.json").read_text())
+    directory = baseline_directory(run_dir, build_baseline_contract(contract))
+    summary_path = next(directory.glob("heldout/*/summary.json"))
+    final_path = run_dir / "final_metrics.json"
+    final = json.loads(final_path.read_text())
+    if damage == "missing":
+        summary_path.unlink()
+    elif damage in ("summary", "count"):
+        summary = json.loads(summary_path.read_text())
+        summary["exact_match" if damage == "summary" else "example_count"] = 0
+        write_json(summary_path, summary)
+    elif damage == "identity":
+        final["baseline"]["contract_sha256"] = "different-baseline"
+    elif damage == "unrecorded":
+        del final["baseline"]
+    else:
+        final["test_exact_match_gain"] = 0.4
+    write_json(final_path, final)
+    with pytest.raises((ValueError, FileNotFoundError)):
+        analyze_run(run_dir, fallback_tau=0.1)
+
+
+def test_campaign_rejects_different_baseline_scores_for_the_same_model(tmp_path: Path) -> None:
+    """Prevent individually valid runs from silently using different reference evaluations."""
+    create_completed_run(tmp_path / "first", condition="vanilla", with_baseline=True)
+    second = create_completed_run(tmp_path / "second", with_baseline=True)
+    contract = json.loads((second / "wikipedia-run-contract.json").read_text())
+    directory = baseline_directory(second, build_baseline_contract(contract))
+    path = next(directory.glob("heldout/*/summary.json"))
+    summary = json.loads(path.read_text())
+    summary["exact_match"] = 0.1
+    write_json(path, summary)
+    final_path = second / "final_metrics.json"
+    final = json.loads(final_path.read_text())
+    final["baseline"] = load_baseline_record(second, contract)
+    final["test_exact_match_gain"] = 0.3
+    write_json(final_path, final)
+    with pytest.raises(ValueError, match="must share the same starting baseline"):
+        discover_completed_runs(tmp_path, fallback_tau=0.1)
 
 
 def test_entropy_and_jaccard_match_till_metrics() -> None:

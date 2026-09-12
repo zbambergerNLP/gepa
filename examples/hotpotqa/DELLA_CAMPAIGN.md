@@ -22,7 +22,7 @@ export HOTPOTQA_SOURCE_COMMIT="$(git rev-parse HEAD)"
 ```
 
 Keep this SHA fixed during a campaign. Source, checkpoint, runtime, or experiment
-changes require a fresh campaign. HotPotQA's consolidated run contract is schema 25.
+changes require a fresh campaign. HotPotQA's consolidated run contract is schema 26.
 
 Reuse the working Della connection configuration. If this checkout's ignored
 `scripts/della/.env` is absent, create it from `.env.example`, fill in the real
@@ -112,6 +112,20 @@ Wiki-2017 BM25 k=7, and minibatches of three. Evaluation and response caches sta
 off. Text feedback and exact deduplication remain enabled. Character limits
 default to unlimited and can be set with `HOTPOTQA_TEXT_LIMITS_JSON`; model token
 limits remain. See [shared decisions](../../scripts/della/README.md).
+
+Final testing includes one shared starting-prompt baseline per model. Alongside
+the first completed cell's held-out evaluation, run the original prompts once
+over the same 300 test questions using that model's frozen task runtime. All six
+cells reference those same baseline scores and report EM/F1 gains. This adds 300
+question executions per model, accounted separately from optimization. Training
+pilot scores continue to serve calibration only.
+
+Baseline artifacts live under `outputs/hotpotqa-baselines/<identity-sha256>/`
+and are fetched with the other run outputs. The identity includes the campaign,
+source/runtime, starting prompts, model settings, retriever, and exact data.
+Completed per-question records are reused on resume; changed identities require
+separate evidence. The result analyzer verifies each cell's baseline and gains,
+then checks that all of a model's cells share the same reference evaluation.
 
 ## Verify before optimization
 

@@ -578,19 +578,22 @@ uv run --no-project --python "$VLLM_PY" python -m examples.terminalbench.runtime
   --no-enable-prefix-caching --language-model-only
 ```
 
-For DeepSeek, use its prepared checkpoint and interpreter, with its TP8/EP8 flags:
+For DeepSeek V4.1, use its separate prepared serving interpreter from
+`.serving-venv-deepseek-v4.1-flash` and its verified checkpoint. The pinned build
+is `0.1.1.dev5+ge77daef89`; older V4 releases do not qualify. Use its TP8/EP8 flags:
 
 ```bash
+FLASHINFER_NO_DOWNLOAD=1 VLLM_ENGINE_READY_TIMEOUT_S=3600 \
 uv run --no-project --python "$VLLM_PY" python -m examples.terminalbench.runtime \
-  --model hosted_vllm/deepseek-ai/DeepSeek-V4-Flash-0731 \
+  --model hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash \
   --model-path "$SOLVER_MODEL_PATH" \
   --runtime-record runs/servers/deepseek.json --port 8000 -- \
-  --trust-remote-code --tokenizer-mode deepseek_v4 \
-  --reasoning-parser deepseek_v4 --enable-auto-tool-choice --tool-call-parser deepseek_v4 \
+  --language-model-only --tokenizer-mode deepseek_v41 \
+  --reasoning-parser deepseek_v41 --enable-auto-tool-choice --tool-call-parser deepseek_v41 \
   --tensor-parallel-size 8 --enable-expert-parallel --data-parallel-size 1 --api-server-count 1 \
-  --gpu-memory-utilization 0.92 --max-model-len 393216 \
-  --max-num-seqs 8 --max-num-batched-tokens 16384 \
-  --dtype auto --kv-cache-dtype fp8 --block-size 256 --seed 0 --no-enable-prefix-caching
+  --gpu-memory-utilization 0.92 --max-model-len 262144 \
+  --max-num-seqs 1 --max-num-batched-tokens 16384 \
+  --dtype bfloat16 --kv-cache-dtype fp8 --seed 0 --no-enable-prefix-caching
 ```
 
 Keep the existing [Della serving environment](../../../../scripts/della/README.md)
@@ -699,10 +702,11 @@ and its endpoints for that model's campaign. Every model's campaign starts
 with system-prompt optimization.
 
 The campaign supports two separate model arms: Qwen3.8-27B with Qwen3.8-27B
-(the model default), and DeepSeek V4 Flash with DeepSeek V4 Flash. Student,
+(the model default), and DeepSeek V4.1 Flash with DeepSeek V4.1 Flash. Student,
 proposer, and Controller use the same model within an arm. Both are served through
-local vLLM. DeepSeek uses the pinned July 31 checkpoint, maximum thinking, and the
-native `deepseek_v4` tokenizer and parsers on vLLM 0.25.0 or newer; see the
+local vLLM. DeepSeek uses revision `dba1be0a40aa45a94ad051997016db3960a90277`,
+numeric effort 100, and native `deepseek_v41` tokenizer/parsers on the exact
+vLLM commit wheel `e77daef89`; see the
 [serving configuration](../../../../scripts/della/README.md).
 
 For the DeepSeek arm, point both roles at the prepared endpoint and use separate
@@ -712,8 +716,8 @@ output directories:
 uv run python -m examples.terminalbench.main \
   --experiment tb2.1 \
   --condition vanilla \
-  --student-model hosted_vllm/deepseek-ai/DeepSeek-V4-Flash-0731 \
-  --proposer-model hosted_vllm/deepseek-ai/DeepSeek-V4-Flash-0731 \
+  --student-model hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash \
+  --proposer-model hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash \
   --student-api-base http://localhost:8000/v1 \
   --proposer-api-base http://localhost:8000/v1 \
   --reviewed-pilot runs/canaries/tb2.1/deepseek/full \
@@ -731,25 +735,24 @@ the current recommendation is 1.0 for task execution and every optimizer role,
 including the Manifestor. The [provider source review](../../../../examples/common/temperature_policy.md)
 records the HotPotQA, TB2.1, Controller, Manifestor, and proposer mappings.
 The previous Manifestor-0.0 policy cannot resume or enter a final comparison
-under the new contract. Qwen uses top-p 0.95 for every role. DeepSeek uses 0.95
-for the terminal agent and ReAct editor, and 1.0 for single-call rewriting,
-action selection, and Manifestor guidance. Separate Controller and editor
-clients preserve these settings. Role-specific decoding is recorded and
+under the new contract. Both models use top-p 0.95 for every role, following
+V4.1's instruct and agentic evaluation settings. Role decoding is recorded and
 validated before resume or final comparison. These values apply at both
 optimization budgets and during final task evaluation.
 
 Every role explicitly enables thinking: Qwen requests `xhigh`, its provider
-default, and DeepSeek requests `max`, the setting used in its published
+default, and DeepSeek V4.1 requests numeric effort `100`, used in its published
 code-agent evaluations. Both pass the controls through
 `extra_body.chat_template_kwargs`; Qwen uses `enable_thinking=true` and
-DeepSeek uses `thinking=true`. Applying DeepSeek `max` to optimizer roles and
+DeepSeek uses `thinking=true`. Applying DeepSeek effort `100` to optimizer roles and
 HotPotQA is our approved experimental choice, documented in the provider source
 review. Contracts and final evaluation preserve these fields and reject
 missing or changed reasoning settings. Every TB2.1 role uses a **32,768-token
 output ceiling per call**, including reasoning and final output. HotPotQA keeps
 16,384. This is the approved practical budget, not the providers' larger
-maximum-performance recommendation. Context capacities and the serving scripts
-stay unchanged; the cap does not force a model to generate that many tokens.
+maximum-performance recommendation. The consolidated Della profiles configure
+262,144 context tokens for both models, below the provider's advertised maximum.
+The output cap does not force a model to generate that many tokens.
 
 Harbor 0.22 requires short model names for its local metadata registry. The
 runtime registers the checkpoint basename there and retains the full original
@@ -803,7 +806,7 @@ uv run --no-sync python -m examples.terminalbench.canary \
   --output-dir runs/canaries/tb2.1/qwen/full
 ```
 
-Repeat both stages with `--model hosted_vllm/deepseek-ai/DeepSeek-V4-Flash-0731`
+Repeat both stages with `--model hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash`
 with `--runtime-record runs/servers/deepseek.json` and separate directories under
 `runs/canaries/tb2.1/deepseek`. This is 33 task
 attempts per model: **60 full-stage attempts plus six smoke attempts** across

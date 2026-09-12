@@ -14,7 +14,7 @@ from terminalbench_pilot_helpers import write_pilot_fixture
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
-from examples.common.experiment_models import DEEPSEEK_V4_FLASH_MODEL, QWEN3_8_27B_MODEL
+from examples.common.experiment_models import DEEPSEEK_V4_1_FLASH_MODEL, QWEN3_8_27B_MODEL
 from examples.terminalbench import evaluate
 from examples.terminalbench.main import (
     EXPERIMENT_MANIFESTS,
@@ -182,7 +182,7 @@ def _fake_runner(manifest, comparison, output_dir: Path, *, fail_on_call: int | 
 
 
 @pytest.mark.parametrize("experiment", EXPERIMENT_MANIFESTS)
-@pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_FLASH_MODEL])
+@pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL])
 @pytest.mark.parametrize("configured", [False, True])
 def test_evaluation_cli_freezes_validation_winners_and_repeats_test_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, experiment: str, model: str, configured: bool
@@ -252,7 +252,7 @@ def test_evaluation_cli_freezes_validation_winners_and_repeats_test_only(
     assert kwargs["student_agent_kwargs"]["llm_kwargs"]["extra_body"]["chat_template_kwargs"] == (
         {"enable_thinking": True, "reasoning_effort": "xhigh"}
         if model == QWEN3_8_27B_MODEL
-        else {"thinking": True, "reasoning_effort": "max"}
+        else {"thinking": True, "reasoning_effort": 100}
     )
     evaluate.main()
     assert runner.run.call_count == 39
@@ -359,7 +359,7 @@ def test_invalid_source_runs_are_rejected_before_test_execution(tmp_path: Path, 
     run_dirs = _write_comparison(tmp_path, "tb2.1")
     forest = run_dirs["all_text__react_v2"]
     if damage == "different_model":
-        forest = _write_run(tmp_path / "other-model", "tb2.1", "react_v2", DEEPSEEK_V4_FLASH_MODEL)
+        forest = _write_run(tmp_path / "other-model", "tb2.1", "react_v2", DEEPSEEK_V4_1_FLASH_MODEL)
         run_dirs["all_text__react_v2"] = forest
     if damage == "missing_cell":
         run_dirs.pop("all_text__action")

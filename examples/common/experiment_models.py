@@ -13,27 +13,27 @@ QWEN3_8_27B_MODEL_INFO = {
     "input_cost_per_token": 0.0,
     "output_cost_per_token": 0.0,
 }
-DEEPSEEK_V4_FLASH_REPO = "deepseek-ai/DeepSeek-V4-Flash-0731"
-DEEPSEEK_V4_FLASH_MODEL = f"hosted_vllm/{DEEPSEEK_V4_FLASH_REPO}"
-DEEPSEEK_V4_FLASH_REVISION = "7872f01b1d1fe23eabc4c98b48bffcef5a386062"
-DEEPSEEK_V4_FLASH_MODEL_INFO = {
-    "max_input_tokens": 393_216,
+DEEPSEEK_V4_1_FLASH_REPO = "deepseek-ai/DeepSeek-V4.1-Flash"
+DEEPSEEK_V4_1_FLASH_MODEL = f"hosted_vllm/{DEEPSEEK_V4_1_FLASH_REPO}"
+DEEPSEEK_V4_1_FLASH_REVISION = "dba1be0a40aa45a94ad051997016db3960a90277"
+DEEPSEEK_V4_1_FLASH_MODEL_INFO = {
+    "max_input_tokens": 262_144,
     "max_output_tokens": 16_384,
     "input_cost_per_token": 0.0,
     "output_cost_per_token": 0.0,
 }
-EXPERIMENT_MODELS = (QWEN3_8_27B_MODEL, DEEPSEEK_V4_FLASH_MODEL)
+EXPERIMENT_MODELS = (QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL)
 EXPERIMENT_NUM_RETRIES = 0
 
 _EXPERIMENT_MODEL_VERSIONS = {
     QWEN3_8_27B_MODEL: QWEN3_8_27B_REVISION,
-    DEEPSEEK_V4_FLASH_MODEL: DEEPSEEK_V4_FLASH_REVISION,
+    DEEPSEEK_V4_1_FLASH_MODEL: DEEPSEEK_V4_1_FLASH_REVISION,
 }
 
 # These settings follow each checkpoint's published generation configuration;
 # the lower output limit is the fixed experiment contract for both model arms.
 # Sources: https://huggingface.co/Qwen/Qwen3.8-27B
-#          https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731
+#          https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash
 _EXPERIMENT_DECODING = {
     QWEN3_8_27B_MODEL: {
         "temperature": 1.0,
@@ -41,7 +41,7 @@ _EXPERIMENT_DECODING = {
         "top_k": 20,
         "max_tokens": 16_384,
     },
-    DEEPSEEK_V4_FLASH_MODEL: {
+    DEEPSEEK_V4_1_FLASH_MODEL: {
         "temperature": 1.0,
         "top_p": 0.95,
         "max_tokens": 16_384,
@@ -57,10 +57,10 @@ _EXPERIMENT_REQUEST_OVERRIDES: dict[str, dict[str, object]] = {
             },
         }
     },
-    DEEPSEEK_V4_FLASH_MODEL: {
+    DEEPSEEK_V4_1_FLASH_MODEL: {
         "extra_body": {
             "chat_template_kwargs": {
-                "reasoning_effort": "max",
+                "reasoning_effort": 100,
                 "thinking": True,
             },
         }
@@ -71,16 +71,16 @@ _EXPERIMENT_REQUEST_OVERRIDES: dict[str, dict[str, object]] = {
 def experiment_decoding(model: str, *, agentic: bool = True) -> dict[str, int | float | str]:
     """Return provider decoding settings for the model and kind of work.
 
-    Qwen3.8-27B and DeepSeek-V4-Flash-0731 use their published thinking-mode sampling
+    Qwen3.8-27B and DeepSeek-V4.1-Flash use their published thinking-mode sampling
     parameters. Maximum DeepSeek reasoning is carried separately in its request
     override so the local serving runtime applies it through the checkpoint's
     template.
 
     Args:
         model: Exact LiteLLM model identifier used by a benchmark run.
-        agentic: Whether the role iteratively uses tools. DeepSeek recommends
-            top-p 0.95 for agentic work and 1.0 otherwise. The default preserves
-            existing callers; reviewed benchmarks classify each role explicitly.
+        agentic: Whether the role iteratively uses tools. Retained for caller
+            compatibility; the current V4.1 instruct and agent evaluations use
+            top-p 0.95, so both role classes now use the same sampling setting.
 
     Returns:
         Independent decoding-parameter mapping for the requested model.
@@ -93,8 +93,6 @@ def experiment_decoding(model: str, *, agentic: bool = True) -> dict[str, int | 
     except KeyError as exc:
         supported = ", ".join(_EXPERIMENT_DECODING)
         raise ValueError(f"Unsupported experiment model {model!r}; expected one of: {supported}") from exc
-    if model == DEEPSEEK_V4_FLASH_MODEL and not agentic:
-        decoding["top_p"] = 1.0
     return decoding
 
 
@@ -176,7 +174,12 @@ def validate_experiment_vllm_version(model: str, version: str) -> None:
         ValueError: The model or installed serving version is unsupported.
     """
     validate_experiment_model_pair(model, model)
-    minimum = "0.25.0" if model == DEEPSEEK_V4_FLASH_MODEL else "0.17.0"
+    if model == DEEPSEEK_V4_1_FLASH_MODEL:
+        expected = "0.1.1.dev5+ge77daef89"
+        if Version(version) != Version(expected):
+            raise ValueError(f"{model} requires the pinned vLLM build {expected}; found {version}.")
+        return
+    minimum = "0.17.0"
     if Version(version) < Version(minimum):
         raise ValueError(f"{model} requires vLLM>={minimum}; found {version}.")
 
@@ -192,6 +195,6 @@ def experiment_model_info(model: str) -> dict[str, int | float] | None:
     """
     if model == QWEN3_8_27B_MODEL:
         return dict(QWEN3_8_27B_MODEL_INFO)
-    if model == DEEPSEEK_V4_FLASH_MODEL:
-        return dict(DEEPSEEK_V4_FLASH_MODEL_INFO)
+    if model == DEEPSEEK_V4_1_FLASH_MODEL:
+        return dict(DEEPSEEK_V4_1_FLASH_MODEL_INFO)
     return None

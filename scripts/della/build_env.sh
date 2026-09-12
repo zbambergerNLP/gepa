@@ -1,202 +1,42 @@
 #!/bin/bash
-# Build the Della environment and stage frozen data, model, and runtime artifacts
-# on the internet-connected visualization node.
+# Build everything the HotPotQA jobs need on Della, from the laptop. Syncs the checkout,
+# then runs these steps on della-vis1 (the only node with internet). Each one also runs
+# on its own from the synced checkout:
+#   scripts/della/remote/setup_env.sh         GEPA venv and one vLLM serving venv per model
+#   scripts/della/remote/download_dataset.sh  Wiki-2017 BM25 index and the HotpotQA split
+#   scripts/della/remote/download_model.sh    one pinned checkpoint, byte-verified
+# The model downloads run detached (DeepSeek-V4.1-Flash alone is 510 GB), so a dropped
+# laptop connection cannot stop them; the script prints their log.
+#
+# Usage: scripts/della/build_env.sh [model ...]   (default: qwen3.8-27b deepseek-v4.1-flash)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="${SCRIPT_DIR}/.env"
-
-if [[ ! -f "${ENV_FILE}" ]]; then
-    echo "ERROR: ${ENV_FILE} not found." >&2
-    exit 1
-fi
+# .env holds cluster credentials and is sourced as code, so it must be yours alone.
 if [[ -L "${ENV_FILE}" || ! -O "${ENV_FILE}" ]]; then
-    echo "ERROR: ${ENV_FILE} must be a regular file owned by the current user" >&2
-    exit 1
+    echo "ERROR: ${ENV_FILE} must be a regular file you own" >&2; exit 1
 fi
-if ENV_MODE="$(stat -f '%Lp' "${ENV_FILE}" 2>/dev/null)"; then
-    :
-elif ENV_MODE="$(stat -c '%a' "${ENV_FILE}" 2>/dev/null)"; then
-    :
-else
-    echo "ERROR: could not verify permissions for ${ENV_FILE}" >&2
-    exit 1
-fi
-if [[ ! "${ENV_MODE}" =~ ^[0-7]{3,4}$ ]] || (( (8#${ENV_MODE} & 8#077) != 0 )); then
-    echo "ERROR: ${ENV_FILE} contains credentials and must not grant group or other access; run chmod 600 ${ENV_FILE}" >&2
-    exit 1
-fi
-
+ENV_MODE="$(stat -f '%Lp' "${ENV_FILE}" 2>/dev/null || stat -c '%a' "${ENV_FILE}")"
+(( (8#${ENV_MODE} & 8#077) == 0 )) || { echo "ERROR: run chmod 600 ${ENV_FILE}" >&2; exit 1; }
 source "${ENV_FILE}"
-
-WIKI17_DIR="${WIKI17_DIR:-${SCRATCH_BASE}/.cache/gepa/wiki17}"
 MODEL_STORAGE="${MODEL_STORAGE:-/projects/BSTEWART/model_storage}"
-QWEN_MODEL_DIR="${MODEL_STORAGE}/Qwen3.8-27B"
-DEEPSEEK_MODEL_DIR="${MODEL_STORAGE}/DeepSeek-V4-Flash-0731"
-POSIT_DIR="${POSIT_DIR:-/home/${REMOTE_USER}/posit}"
-HOTPOTQA_PYTHON_VERSION="3.11.13"
-HOTPOTQA_UV_VERSION="0.9.13"
-GEPA_UV_DIR="${REMOTE_DIR%/}/.tools/uv-${HOTPOTQA_UV_VERSION}"
+WIKI17_DIR="${WIKI17_DIR:-${SCRATCH_BASE}/.cache/gepa/wiki17}"
+(( $# )) || set -- qwen3.8-27b deepseek-v4.1-flash
+for model in "$@"; do
+    case "${model}" in
+        qwen3.8-27b|deepseek-v4.1-flash) ;;
+        *) echo "ERROR: unsupported model profile: ${model}" >&2; exit 1 ;;
+    esac
+done
+VIS=(ssh -o BatchMode=yes -o StrictHostKeyChecking=yes "${REMOTE_USER}@${REMOTE_VIS_HOST}")
+IN_CHECKOUT="cd '${REMOTE_DIR}' && export SCRATCH_BASE='${SCRATCH_BASE}' MODEL_STORAGE='${MODEL_STORAGE}' WIKI17_DIR='${WIKI17_DIR}'"
+LOG="${SCRATCH_BASE}/logs/build/download-models-$(date +%Y%m%dT%H%M%S).log"
 
-echo "==> syncing code to Della"
 "${SCRIPT_DIR}/sync_to_della.sh"
-
-echo "==> building the environment on ${REMOTE_VIS_HOST}"
-ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
-    "${REMOTE_USER}@${REMOTE_VIS_HOST}" bash -l <<REMOTE_SCRIPT
-set -euo pipefail
-cd "${REMOTE_DIR}"
-
-export XDG_CACHE_HOME="${SCRATCH_BASE}/.cache"
-export HF_HOME="${SCRATCH_BASE}/.cache/huggingface"
-export UV_CACHE_DIR="${SCRATCH_BASE}/.cache/uv"
-export DSPY_CACHEDIR="${SCRATCH_BASE}/.cache/dspy"
-HOTPOTQA_PYTHON_VERSION="${HOTPOTQA_PYTHON_VERSION}"
-HOTPOTQA_UV_VERSION="${HOTPOTQA_UV_VERSION}"
-GEPA_UV_DIR="${GEPA_UV_DIR}"
-GEPA_UV_BIN="\${GEPA_UV_DIR}/uv"
-export UV_PROJECT_ENVIRONMENT="${REMOTE_DIR%/}/.venv"
-POSIT_DIR="${POSIT_DIR}"
-mkdir -p "\${XDG_CACHE_HOME}" "\${HF_HOME}" "\${UV_CACHE_DIR}" "\${DSPY_CACHEDIR}" \
-    "${WIKI17_DIR}" "${QWEN_MODEL_DIR}" "${DEEPSEEK_MODEL_DIR}"
-
-ARTIFACT_LOCK_PATH="${SCRATCH_BASE}/.cache/gepa/hotpotqa-artifacts.lock"
-mkdir -p "\$(dirname "\${ARTIFACT_LOCK_PATH}")"
-exec {ARTIFACT_LOCK_FD}>"\${ARTIFACT_LOCK_PATH}"
-if ! flock -n "\${ARTIFACT_LOCK_FD}"; then
-    echo "ERROR: HotPotQA artifacts are in use by a running job; rebuild after it finishes" >&2
-    exit 1
-fi
-
-echo "==> installing GEPA, development, and Wiki-2017 dependencies"
-if [[ ! -x "\${GEPA_UV_BIN}" || "\$("\${GEPA_UV_BIN}" --version 2>/dev/null)" != "uv \${HOTPOTQA_UV_VERSION}"* ]]; then
-    mkdir -p "\${GEPA_UV_DIR}"
-    curl -LsSf "https://astral.sh/uv/\${HOTPOTQA_UV_VERSION}/install.sh" \
-        | env UV_UNMANAGED_INSTALL="\${GEPA_UV_DIR}" sh
-fi
-if [[ "\$("\${GEPA_UV_BIN}" --version)" != "uv \${HOTPOTQA_UV_VERSION}"* ]]; then
-    echo "ERROR: exact uv \${HOTPOTQA_UV_VERSION} is unavailable at \${GEPA_UV_BIN}" >&2
-    exit 1
-fi
-HOTPOTQA_UV_SHA256="\$(sha256sum "\${GEPA_UV_BIN}" | cut -d' ' -f1)"
-"\${GEPA_UV_BIN}" python install "\${HOTPOTQA_PYTHON_VERSION}"
-"\${GEPA_UV_BIN}" sync --python "\${HOTPOTQA_PYTHON_VERSION}" --frozen --no-install-project \
-    --extra dev --extra wiki17 --group hotpotqa-task-program
-"\${GEPA_UV_BIN}" sync --python "\${HOTPOTQA_PYTHON_VERSION}" --frozen --check --no-install-project \
-    --extra dev --extra wiki17 --group hotpotqa-task-program
-ACTUAL_PYTHON_VERSION="\$(.venv/bin/python -c 'import platform; print(platform.python_version())')"
-if [[ "\${ACTUAL_PYTHON_VERSION}" != "\${HOTPOTQA_PYTHON_VERSION}" ]]; then
-    echo "ERROR: expected Python \${HOTPOTQA_PYTHON_VERSION}, found \${ACTUAL_PYTHON_VERSION}" >&2
-    exit 1
-fi
-HOTPOTQA_ENV_SPEC_SHA256="\$(
-    {
-        sha256sum pyproject.toml uv.lock
-        printf 'python=%s\n' "\${HOTPOTQA_PYTHON_VERSION}"
-        printf 'uv=%s\n' "\${HOTPOTQA_UV_VERSION}"
-    } | sha256sum | cut -d' ' -f1
-)"
-printf '%s\n' "\${HOTPOTQA_ENV_SPEC_SHA256}" > .venv/.gepa-env-spec.sha256
-printf '%s\n' "\${ACTUAL_PYTHON_VERSION}" > .venv/.gepa-python-version
-printf '%s\n' "\${HOTPOTQA_UV_VERSION}" > .venv/.gepa-uv-version
-printf '%s\n' "\${HOTPOTQA_UV_SHA256}" > .venv/.gepa-uv-sha256
-echo "==> environment specification: \${HOTPOTQA_ENV_SPEC_SHA256}"
-
-echo "==> freezing the realized GEPA task environment"
-GEPA_ENV_MANIFEST_DIR="${SCRATCH_BASE}/.cache/gepa/python-environments"
-GEPA_ENV_MANIFEST="\${GEPA_ENV_MANIFEST_DIR}/gepa-\${HOTPOTQA_ENV_SPEC_SHA256}.json"
-mkdir -p "\${GEPA_ENV_MANIFEST_DIR}"
-HOTPOTQA_GEPA_ENV_SHA256="\$(
-    .venv/bin/python -m examples.common.python_environment prepare --path "\${GEPA_ENV_MANIFEST}"
-)"
-if [[ ! "\${HOTPOTQA_GEPA_ENV_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
-    echo "ERROR: GEPA environment freeze did not produce a valid digest" >&2
-    exit 1
-fi
-echo "==> realized GEPA environment: \${HOTPOTQA_GEPA_ENV_SHA256}"
-
-echo "==> verifying the artifact-compatible DSPy task-program runtime"
-.venv/bin/python - <<'PY'
-from examples.hotpotqa.utils import validate_hotpotqa_dspy_runtime
-
-version, commit = validate_hotpotqa_dspy_runtime()
-print(f"DSPy task-program runtime: {version} ({commit[:8]})")
-PY
-
-echo "==> freezing the realized POSIT vLLM environment for both models"
-VLLM_PY="\${POSIT_DIR}/src/.venv/bin/python"
-if [[ ! -x "\${VLLM_PY}" ]]; then
-    echo "ERROR: missing \${VLLM_PY} -- build the POSIT venv first" >&2
-    exit 1
-fi
-if [[ -n "\$(git -C "\${POSIT_DIR}" status --porcelain --untracked-files=normal)" ]]; then
-    echo "ERROR: commit or remove local POSIT changes before preparing production artifacts" >&2
-    exit 1
-fi
-"\${GEPA_UV_BIN}" run --no-project --python "\${VLLM_PY}" python - <<'PY'
-from importlib.metadata import version
-from examples.common.experiment_models import DEEPSEEK_V4_FLASH_MODEL, validate_experiment_vllm_version
-
-validate_experiment_vllm_version(DEEPSEEK_V4_FLASH_MODEL, version("vllm"))
-PY
-HOTPOTQA_POSIT_COMMIT="\$(git -C "\${POSIT_DIR}" rev-parse HEAD)"
-if [[ ! "\${HOTPOTQA_POSIT_COMMIT}" =~ ^[0-9a-f]{40}$ ]]; then
-    echo "ERROR: POSIT source does not resolve to an exact Git commit" >&2
-    exit 1
-fi
-if ! "\${GEPA_UV_BIN}" pip check --python "\${VLLM_PY}"; then
-    echo "ERROR: POSIT serving environment has inconsistent dependencies" >&2
-    exit 1
-fi
-POSIT_ENV_MANIFEST="${SCRATCH_BASE}/.cache/gepa/posit-environments/\${HOTPOTQA_POSIT_COMMIT}.json"
-HOTPOTQA_POSIT_ENV_SHA256="\$(
-    "\${VLLM_PY}" -m examples.common.python_environment prepare --path "\${POSIT_ENV_MANIFEST}"
-)"
-if [[ ! "\${HOTPOTQA_POSIT_ENV_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
-    echo "ERROR: POSIT environment freeze did not produce a valid digest" >&2
-    exit 1
-fi
-echo "==> POSIT environment: \${HOTPOTQA_POSIT_COMMIT}/\${HOTPOTQA_POSIT_ENV_SHA256}"
-
-echo "==> preparing the frozen Wiki-2017 BM25 index"
-.venv/bin/python -m examples.common.wiki17_bm25 prepare --root "${WIKI17_DIR}"
-.venv/bin/python -m examples.common.wiki17_bm25 verify --deep --root "${WIKI17_DIR}"
-
-echo "==> preparing the pinned Qwen3.8-27B checkpoint"
-(
-    exec {MODEL_LOCK_FD}<"${QWEN_MODEL_DIR}"
-    if ! flock -n "\${MODEL_LOCK_FD}"; then
-        echo "ERROR: another user is preparing or serving the shared Qwen3.8-27B checkpoint" >&2
-        exit 1
-    fi
-    .venv/bin/python -m examples.common.model_snapshot prepare \
-        --model-profile qwen3.8-27b --root "${QWEN_MODEL_DIR}"
-    .venv/bin/python -m examples.common.model_snapshot verify \
-        --model-profile qwen3.8-27b --root "${QWEN_MODEL_DIR}"
-)
-
-echo "==> preparing the pinned DeepSeek-V4-Flash-0731 checkpoint"
-(
-    exec {MODEL_LOCK_FD}<"${DEEPSEEK_MODEL_DIR}"
-    if ! flock -n "\${MODEL_LOCK_FD}"; then
-        echo "ERROR: another user is preparing or serving the shared DeepSeek-V4-Flash-0731 checkpoint" >&2
-        exit 1
-    fi
-    .venv/bin/python -m examples.common.model_snapshot prepare \
-        --model-profile deepseek-v4-flash --root "${DEEPSEEK_MODEL_DIR}"
-    .venv/bin/python -m examples.common.model_snapshot verify \
-        --model-profile deepseek-v4-flash --root "${DEEPSEEK_MODEL_DIR}"
-)
-
-echo "==> caching the HotpotQA fullwiki split"
-.venv/bin/python - <<'PY'
-from examples.hotpotqa.utils import load_hotpotqa_dataset
-
-train, val, test = load_hotpotqa_dataset(seed=0)
-print(f"HotpotQA data: {len(train)} train / {len(val)} val / {len(test)} test")
-PY
-
-echo "==> environment ready at ${REMOTE_DIR}/.venv"
-REMOTE_SCRIPT
-
-echo "==> build complete"
+"${VIS[@]}" "${IN_CHECKOUT} && bash scripts/della/remote/setup_env.sh && bash scripts/della/remote/download_dataset.sh"
+"${VIS[@]}" "${IN_CHECKOUT} && mkdir -p '${LOG%/*}' && nohup setsid bash -c \
+    'for model in $*; do bash scripts/della/remote/download_model.sh \${model} || exit 1; done; echo MODELS_DONE' \
+    > '${LOG}' 2>&1 < /dev/null &"
+echo "==> venvs and datasets ready; downloading $* on ${REMOTE_VIS_HOST} (prints MODELS_DONE when finished)"
+echo "    log: ssh ${REMOTE_USER}@${REMOTE_VIS_HOST} tail -f ${LOG}"

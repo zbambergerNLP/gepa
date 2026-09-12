@@ -21,47 +21,36 @@ shuffled training epochs for the same ordered dataset and seed, independent of
 parent selection or reflection draws. Larger budgets continue that sequence;
 metric-call budgets do not guarantee the same number of optimization iterations.
 Checkpoints save the permutation, cursor, and private RNG state. Run-contract
-schema 24 records this policy and requires a fresh campaign for older checkpoints.
+schema 25 records this policy and the consolidated serving provenance; use a fresh
+campaign for older checkpoints.
 
 | Arm | Student and proposer | Serving |
 | --- | --- | --- |
-| Qwen | `Qwen/Qwen3.8-27B` | Local POSIT/vLLM |
-| DeepSeek | `deepseek-ai/DeepSeek-V4-Flash-0731` | Local POSIT/vLLM |
+| Qwen | `Qwen/Qwen3.8-27B` | Self-contained local vLLM |
+| DeepSeek | `deepseek-ai/DeepSeek-V4.1-Flash` | Self-contained local vLLM |
 
-DeepSeek is pinned to revision `7872f01b1d1fe23eabc4c98b48bffcef5a386062`.
-The July 31 release preserves the previous DeepSeek experiment's release identity.
-Its local runtime requires vLLM 0.25.0 or newer, with the `deepseek_v4`
-tokenizer, reasoning parser, and tool parser. The launcher uses eight H200 GPUs,
-TP8/EP8, one API server, FP8 KV cache, and no speculative decoding.
-The serving environment and checkpoint bytes are frozen before a campaign.
+The consolidated [Della runbook](../../examples/hotpotqa/DELLA_CAMPAIGN.md)
+and [Della skill](../../.claude/skills/della/SKILL.md) include Zach's setup,
+SSH, smoke-test, and launch fixes. Qwen uses the committed
+vLLM 0.25.1 lock; DeepSeek V4.1 uses Zach's separate commit-wheel lock. A POSIT checkout is no longer required for HotPotQA.
+V4.1 is the approved DeepSeek model for both benchmarks.
 
-DeepSeek uses temperature 1.0, top-p 0.95 for iterative tool use and 1.0 for
-single-call text generation or action selection, and maximum reasoning through
-`chat_template_kwargs`. The context limit is 393,216 tokens; the shared
-experiment output limit remains 16,384 tokens per call. This output budget is
-smaller than the model author's recommendation for unrestricted maximum reasoning.
-See the [model card](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731)
-and [vLLM recipe](https://recipes.vllm.ai/deepseek-ai/DeepSeek-V4-Flash).
+HotPotQA requests have a 3,600-second deadline shared across the bounded
+provider attempts. Initial worker defaults are 12 for Qwen and 4 for DeepSeek;
+training calibration must precede freezing them for a comparison.
 
-HotPotQA uses provider-recommended thinking-mode temperatures for every role,
-including the Manifestor: 1.0 for both pinned models. Qwen uses top-p 0.95
-throughout. DeepSeek uses top-p 1.0 for HotPotQA execution, stateless rewriting,
-the Controller, and the Manifestor; its ReAct editor uses 0.95. The sampling policy
-prefers applicable task-specific provider guidance and otherwise uses the
-model/mode default. The [source review](../../examples/common/temperature_policy.md)
-records the factual-QA, terminal-agent, and optimizer-role decisions, with links
-to the exact checkpoint model cards. The prior Manifestor temperature of 0.0
-is superseded for HotPotQA and TB2.1. Changed role settings require fresh
-run contracts and campaign checkpoints.
+DeepSeek is pinned to revision `dba1be0a40aa45a94ad051997016db3960a90277`.
+The V4.1 arm uses the exact vLLM commit wheel `e77daef89` (version
+`0.1.1.dev5+ge77daef89`) with native `deepseek_v41` tokenizer, reasoning, and
+tool parsers. It runs TP8/EP8 with one active sequence, FP8 KV cache and automatic
+block size, no speculative decoding, and prebuilt offline FlashInfer kernels.
 
-Thinking mode and effort are explicit in every HotPotQA request: Qwen uses
-`enable_thinking=true` with `reasoning_effort=xhigh`; DeepSeek uses
-`thinking=true` with `reasoning_effort=max`. They reach vLLM through
-`extra_body.chat_template_kwargs` and are recorded for resume validation.
-Qwen follows its provider default; DeepSeek's code-agent setting is also our
-chosen setting for QA and optimizer roles, as explained in the source review.
-The same reasoning policy applies to TB2.1. The per-call output ceiling is
-16,384 tokens for HotPotQA and 32,768 for TB2.1, independently of the effort setting.
+Provider guidance sets temperature 1.0 and top-p 0.95 for every role in both
+models. Thinking is explicit: Qwen `xhigh`; DeepSeek V4.1 numeric effort 100.
+The [provider review](../../examples/common/temperature_policy.md) records the
+sources. Context is 262,144 for both Della servers. Output caps remain 16,384
+for HotPotQA and 32,768 for TB2.1. These practical runtime limits are below
+the providers' largest recommended budgets and require training-only review.
 
 The FOREST ReAct editor has no assistant-turn or tool-call limit in HotPotQA
 or TB2.1. It may make multiple edits within the Controller-selected section,
@@ -85,7 +74,7 @@ After configuring `scripts/della/.env` from `.env.example`, prepare and submit:
 ```bash
 scripts/della/build_env.sh
 MODEL_PROFILE=qwen3.8-27b scripts/della/submit_hotpotqa.sh
-MODEL_PROFILE=deepseek-v4-flash scripts/della/submit_hotpotqa.sh
+MODEL_PROFILE=deepseek-v4.1-flash scripts/della/submit_hotpotqa.sh
 ```
 
 Each HotPotQA arm contains the existing six optimization cells. DeepSeek first

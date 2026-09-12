@@ -190,7 +190,7 @@ def collect_identity(model: str, model_path: Path, arguments: list[str], options
 
     from examples.common.model_snapshot import verify_model_snapshot
 
-    profile = "qwen3.8-27b" if model == QWEN3_8_27B_MODEL else "deepseek-v4-flash"
+    profile = "qwen3.8-27b" if model == QWEN3_8_27B_MODEL else "deepseek-v4.1-flash"
     manifest = verify_model_snapshot(model_path, profile)
     driver_versions = subprocess.run(
         ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader,nounits"],

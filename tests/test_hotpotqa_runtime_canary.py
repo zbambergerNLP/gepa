@@ -115,7 +115,7 @@ def test_run_runtime_canary_requires_twenty_attempts_before_model_setup(monkeypa
 
     with pytest.raises(runtime_canary.RuntimeCanaryError, match="at least 20 repetitions"):
         runtime_canary.run_runtime_canary(
-            "hosted_vllm/deepseek-ai/DeepSeek-V4-Flash-0731",
+            "hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash",
             "http://127.0.0.1:8000/v1",
             19,
         )
@@ -142,7 +142,7 @@ def test_run_runtime_canary_cycles_all_four_tools_for_twenty_attempts(monkeypatc
     monkeypatch.setattr(runtime_canary, "_tool_continuation_probe", continuation_probe)
     monkeypatch.setattr(runtime_canary, "_edit_probe", edit_probe)
 
-    model = "hosted_vllm/deepseek-ai/DeepSeek-V4-Flash-0731"
+    model = "hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash"
     api_base = "http://127.0.0.1:8000/v1"
     summary = runtime_canary.run_runtime_canary(model, api_base, 20)
 
@@ -186,7 +186,7 @@ def test_run_runtime_canary_propagates_probe_failure_and_stops(monkeypatch) -> N
 
     with pytest.raises(runtime_canary.RuntimeCanaryError) as exc_info:
         runtime_canary.run_runtime_canary(
-            "hosted_vllm/deepseek-ai/DeepSeek-V4-Flash-0731",
+            "hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash",
             "http://127.0.0.1:8000/v1",
             20,
         )

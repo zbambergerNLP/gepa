@@ -25,7 +25,7 @@ _CONDITION_ORDER = {
 }
 _MODEL_LABELS = {
     "hosted_vllm/Qwen/Qwen3.8-27B": "Qwen3.8-27B",
-    "hosted_vllm/deepseek-ai/DeepSeek-V4-Flash-0731": "DeepSeek-V4-Flash-0731",
+    "hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash": "DeepSeek-V4.1-Flash",
 }
 _APPROVED_CELLS = {
     (6_871, "vanilla"),
@@ -552,7 +552,7 @@ def discover_completed_runs(
             Stable tuple used to order printed and serialized runs.
         """
         model_label = str(report["model_label"])
-        model_rank = {"Qwen3.8-27B": 0, "DeepSeek-V4-Flash-0731": 1}.get(model_label, 2)
+        model_rank = {"Qwen3.8-27B": 0, "DeepSeek-V4.1-Flash": 1}.get(model_label, 2)
         budget_rank = {"standard": 0, "expanded": 1}.get(str(report["budget_profile"]), 2)
         condition_rank = _CONDITION_ORDER.get(str(report["condition"]), len(_CONDITION_ORDER))
         return model_rank, model_label, budget_rank, condition_rank, str(report["run"])

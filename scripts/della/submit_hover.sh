@@ -4,7 +4,7 @@
 # Usage:
 #   scripts/della/submit_hover.sh
 #
-# Use MODEL_PROFILE=qwen3.8-27b or MODEL_PROFILE=deepseek-v4-flash. Each
+# Use MODEL_PROFILE=qwen3.8-27b or MODEL_PROFILE=deepseek-v4.1-flash. Each
 # profile uses the same model for the student and proposer.
 set -euo pipefail
 
@@ -53,18 +53,18 @@ case "${MODEL_PROFILE}" in
         SOLVER_API_BASE=""
         REFLECTION_API_BASE=""
         ;;
-    deepseek-v4-flash)
-        MODEL="DeepSeek-V4-Flash-0731"
+    deepseek-v4.1-flash)
+        MODEL="DeepSeek-V4.1-Flash"
         SOLVER_MODEL_PATH="${MODEL_STORAGE}/${MODEL}"
-        SOLVER_SERVED_NAME="deepseek-ai/DeepSeek-V4-Flash-0731"
-        SOLVER_MODEL="hosted_vllm/deepseek-ai/DeepSeek-V4-Flash-0731"
+        SOLVER_SERVED_NAME="deepseek-ai/DeepSeek-V4.1-Flash"
+        SOLVER_MODEL="hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash"
         SOLVER_API_BASE=""
-        GEN_MAX_LEN=393216
+        GEN_MAX_LEN=262144
         MAX_WORKERS=8
         MODEL_RESOURCE_COMMAND="--gres=gpu:8 --cpus-per-task=64 --mem=768G"
         ;;
     *)
-        echo "ERROR: MODEL_PROFILE must be qwen3.8-27b or deepseek-v4-flash" >&2
+        echo "ERROR: MODEL_PROFILE must be qwen3.8-27b or deepseek-v4.1-flash" >&2
         exit 1
         ;;
 esac

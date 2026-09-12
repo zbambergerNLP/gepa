@@ -1,0 +1,173 @@
+"""Exercise the consolidated laptop launchers without contacting Della."""
+
+import os
+import re
+import shlex
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).parents[1]
+
+
+def executable(path: Path, body: str) -> None:
+    path.write_text("#!/bin/bash\nset -eu\n" + body)
+    path.chmod(0o700)
+
+
+@pytest.mark.parametrize("profile,workers", [("qwen3.8-27b", 12), ("deepseek-v4.1-flash", 4)])
+def test_submit_expands_the_remote_script_without_running_jobs(tmp_path, profile, workers):
+    """Catch laptop-side heredoc expansion errors before any real submission."""
+    script_dir = tmp_path / "scripts" / "della"
+    script_dir.mkdir(parents=True)
+    shutil.copy2(ROOT / "scripts/della/submit_hotpotqa.sh", script_dir)
+    config = script_dir / ".env"
+    config.write_text(
+        "REMOTE_USER=testuser\nREMOTE_HOST=login.example\nREMOTE_VIS_HOST=vis.example\n"
+        "REMOTE_DIR=/scratch/test/gepa\nSCRATCH_BASE=/scratch/test/gepa\n"
+        "MODEL_STORAGE=/projects/test/models\nGPU_PARTITION=ailab\n"
+    )
+    config.chmod(0o600)
+    executable(script_dir / "sync_to_della.sh", 'printf "%064d\\n" 1 > "${SYNC_MANIFEST_OUTPUT}"\n')
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    executable(bin_dir / "git", '[[ "$*" == *status* ]] || printf "%040d\\n" 2\n')
+    executable(bin_dir / "ssh", 'cat > "${CAPTURE_REMOTE_SCRIPT}"\n')
+    capture = tmp_path / "remote.sh"
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "MODEL_PROFILE": profile,
+        "CAPTURE_REMOTE_SCRIPT": str(capture),
+        "HOTPOTQA_CAMPAIGN_ID": "integration-test",
+        "HOTPOTQA_TEXT_LIMITS_JSON": '{"component_chars":12345}',
+    }
+    for key in ("MAX_WORKERS", "HOTPOTQA_LOG_DIR", "BUDGET_PROFILE", "CONDITION"):
+        env.pop(key, None)
+    result = subprocess.run(["bash", str(script_dir / "submit_hotpotqa.sh")], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    remote = capture.read_text()
+    assert 'local run_condition="$3"' in remote
+    assert 'local canary_only="$4"' in remote
+    assert f'"MAX_WORKERS={workers}"' in remote
+    assert '"HOTPOTQA_TEXT_LIMITS_JSON=${HOTPOTQA_TEXT_LIMITS_JSON}"' in remote
+    suffix = "-deepseek-v4.1-flash" if profile == "deepseek-v4.1-flash" else ""
+    assert f'"SERVING_VENV_DIR=/scratch/test/gepa/.serving-venv{suffix}"' in remote
+    assert "POSIT" not in remote
+    assert "logs/hotpotqa/integration-test/" in remote
+    subprocess.run(["bash", "-n", str(capture)], check=True, capture_output=True)
+
+
+@pytest.mark.parametrize(
+    "profile,canary_only,probe_status,qualified",
+    [
+        ("deepseek-v4.1-flash", "1", 1, False),
+        ("deepseek-v4.1-flash", "1", 0, True),
+        ("qwen3.8-27b", "0", 1, False),
+        ("qwen3.8-27b", "0", 0, True),
+    ],
+)
+def test_failed_probes_cannot_freeze_campaign(tmp_path, profile, canary_only, probe_status, qualified):
+    """Execute the actual gate/lock block with a controlled local model process."""
+    source = (ROOT / "examples/hotpotqa/run_hotpotqa.sbatch").read_text()
+    block = source[source.index("CAMPAIGN_IDENTITY_SHA256=") : source.index('echo "==> running GEPA experiment:')]
+    env = {**os.environ, **dict.fromkeys(re.findall(r"\$\{([A-Z][A-Z_0-9]*)", block), "fixture")}
+    fake_python = tmp_path / "fake-python"
+    executable(fake_python, f"exit {probe_status}\n")
+    env.update(
+        SCRATCH_BASE=str(tmp_path),
+        MODEL_PROFILE=profile,
+        HOTPOTQA_CANARY_ONLY=canary_only,
+        HOTPOTQA_CAMPAIGN_ID="fixture",
+        PY=str(fake_python),
+        LOG_DIR=str(tmp_path),
+    )
+    result = subprocess.run(
+        ["bash", "-c", "set -euo pipefail\nGEN_PID=$$\ngenerator_reports_expected_model() { return 0; }\n" + block],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert (result.returncode == 0) is qualified, result.stderr
+    locks = list((tmp_path / ".cache/gepa/hotpotqa-campaign").rglob("*.sha256"))
+    markers = list((tmp_path / ".cache/gepa/hotpotqa-canaries").rglob("*.ok"))
+    if canary_only == "1":
+        assert not locks
+        assert bool(markers) is qualified
+    else:
+        assert len(locks) == (2 if qualified else 0)
+
+
+def test_deepseek_smoke_uses_the_campaign_serving_arguments():
+    """Compare parsed invocations so a diagnostic cannot qualify different flags."""
+    campaign = (ROOT / "examples/hotpotqa/run_hotpotqa.sbatch").read_text()
+    smoke = (ROOT / "scripts/della/verify_deepseek_serving.sh").read_text()
+
+    def arguments(script):
+        start = script.index('echo "==> serving DeepSeek') if 'echo "==> serving DeepSeek' in script else 0
+        start = script.index('"${VLLM_BIN}" serve "${SOLVER_MODEL_PATH}"', start)
+        end = script.index('> "${GEN_LOG}"', start)
+        tokens = shlex.split(script[start:end].replace("\\\n", " "))
+        flags = {}
+        for token in tokens[3:]:
+            if token.startswith("--"):
+                assert token not in flags
+                key = token
+                flags[key] = True
+            else:
+                flags[key] = token
+        return flags
+
+    assert arguments(campaign) == arguments(smoke)
+    for setting in ("GEN_MAX_LEN=262144", "GEN_GMU=0.92"):
+        assert setting in campaign and setting in smoke
+
+
+@pytest.mark.parametrize("reply,success", [("31415;cluster", True), ("submission failed", False)])
+def test_smoke_submission_forwards_custom_paths(tmp_path, reply, success):
+    """Expand the real SSH command and preserve paths containing spaces."""
+    script_dir = tmp_path / "scripts" / "della"
+    script_dir.mkdir(parents=True)
+    shutil.copy2(ROOT / "scripts/della/submit_deepseek_smoke.sh", script_dir)
+    config = script_dir / ".env"
+    config.write_text(
+        "REMOTE_USER=testuser\nREMOTE_HOST=login.example\nREMOTE_DIR='/scratch/source checkout'\n"
+        "SCRATCH_BASE='/scratch/custom cache'\nMODEL_STORAGE='/projects/custom models'\n"
+    )
+    config.chmod(0o600)
+    executable(script_dir / "sync_to_della.sh", "exit 0\n")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    executable(bin_dir / "ssh", 'printf "%s\\n" "$@" > "${CAPTURE_COMMAND}"\nprintf "%s\\n" "${SUBMIT_REPLY}"\n')
+    capture = tmp_path / "command.txt"
+    result = subprocess.run(
+        ["bash", str(script_dir / "submit_deepseek_smoke.sh"), "submit"],
+        env={
+            **os.environ,
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "CAPTURE_COMMAND": str(capture),
+            "SUBMIT_REPLY": reply,
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert (result.returncode == 0) is success, result.stderr
+    command = shlex.split(capture.read_text().splitlines()[-1])
+    assert "SCRATCH_BASE=/scratch/custom cache" in command
+    assert "MODEL_STORAGE=/projects/custom models" in command
+    assert "GEPA_VENV_DIR=/scratch/source checkout/.venv" in command
+    assert "SERVING_VENV_DIR=/scratch/source checkout/.serving-venv-deepseek-v4.1-flash" in command
+    assert "--output=/scratch/custom cache/logs/hotpotqa/verify/smoke-%j.out" in command
+    if success:
+        assert "job 31415" in result.stdout
+    else:
+        assert "invalid job id" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "path", sorted((ROOT / "scripts/della").rglob("*.sh")) + [ROOT / "scripts/della/smoke_deepseek_serving.sbatch"]
+)
+def test_della_scripts_parse(path):
+    subprocess.run(["bash", "-n", str(path)], check=True, capture_output=True)

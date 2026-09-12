@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from examples.common.experiment_models import experiment_model_version
+from examples.common.experiment_models import DEEPSEEK_V4_1_FLASH_MODEL, experiment_model_version
 from examples.terminalbench import canary, evaluate, runtime
 from examples.terminalbench.pilot import (
     PILOT_PROTOCOL,
@@ -26,7 +26,7 @@ def runtime_fixture(model: str):
         "model_integrity_sha256": "a" * 64,
         "software": {
             "python": "3.12.8",
-            "vllm": "0.25.0",
+            "vllm": "0.1.1.dev5+ge77daef89" if model == DEEPSEEK_V4_1_FLASH_MODEL else "0.25.1",
             "torch": "2.10.0",
             "cuda": "13.0",
             "transformers": "5.0.0",

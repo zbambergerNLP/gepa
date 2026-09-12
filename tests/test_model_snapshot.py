@@ -12,7 +12,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
 from examples.common import model_snapshot
-from examples.common.experiment_models import DEEPSEEK_V4_FLASH_REVISION, QWEN3_8_27B_REVISION
+from examples.common.experiment_models import DEEPSEEK_V4_1_FLASH_REVISION, QWEN3_8_27B_REVISION
 
 
 @pytest.mark.parametrize(
@@ -24,9 +24,9 @@ from examples.common.experiment_models import DEEPSEEK_V4_FLASH_REVISION, QWEN3_
             QWEN3_8_27B_REVISION,
         ),
         (
-            model_snapshot.DEEPSEEK_V4_FLASH_PROFILE,
-            model_snapshot.DEEPSEEK_V4_FLASH_REPO,
-            DEEPSEEK_V4_FLASH_REVISION,
+            model_snapshot.DEEPSEEK_V4_1_FLASH_PROFILE,
+            model_snapshot.DEEPSEEK_V4_1_FLASH_REPO,
+            DEEPSEEK_V4_1_FLASH_REVISION,
         ),
     ],
 )

@@ -10,17 +10,17 @@ from pathlib import Path
 from huggingface_hub import HfApi, snapshot_download  # type: ignore[import-not-found]
 
 from examples.common.experiment_models import (
-    DEEPSEEK_V4_FLASH_REPO,
-    DEEPSEEK_V4_FLASH_REVISION,
+    DEEPSEEK_V4_1_FLASH_REPO,
+    DEEPSEEK_V4_1_FLASH_REVISION,
     QWEN3_8_27B_REPO,
     QWEN3_8_27B_REVISION,
 )
 
 QWEN3_8_27B_PROFILE = "qwen3.8-27b"
-DEEPSEEK_V4_FLASH_PROFILE = "deepseek-v4-flash"
+DEEPSEEK_V4_1_FLASH_PROFILE = "deepseek-v4.1-flash"
 MODEL_SNAPSHOT_SPECS = {
     QWEN3_8_27B_PROFILE: (QWEN3_8_27B_REPO, QWEN3_8_27B_REVISION),
-    DEEPSEEK_V4_FLASH_PROFILE: (DEEPSEEK_V4_FLASH_REPO, DEEPSEEK_V4_FLASH_REVISION),
+    DEEPSEEK_V4_1_FLASH_PROFILE: (DEEPSEEK_V4_1_FLASH_REPO, DEEPSEEK_V4_1_FLASH_REVISION),
 }
 MODEL_INTEGRITY_NAME = ".gepa-model-integrity.json"
 

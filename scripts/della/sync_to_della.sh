@@ -90,6 +90,9 @@ RSYNC_EXCLUDES=()
 if [[ -z "${SYNC_SOURCE_COMMIT}" ]]; then
     RSYNC_EXCLUDES=(
         --exclude '.venv/'
+        --exclude '.serving-venv/'
+        --exclude '.serving-venv-*/'
+        --exclude '.tools/'
         --exclude '__pycache__/'
         --exclude '.mypy_cache/'
         --exclude '.pytest_cache/'

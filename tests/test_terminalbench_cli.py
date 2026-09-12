@@ -15,7 +15,7 @@ from terminalbench_pilot_helpers import write_pilot_fixture
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
 from examples.common.experiment_models import (
-    DEEPSEEK_V4_FLASH_MODEL,
+    DEEPSEEK_V4_1_FLASH_MODEL,
     EXPERIMENT_NUM_RETRIES,
     QWEN3_8_27B_MODEL,
     experiment_model_version,
@@ -95,7 +95,7 @@ def test_qwen_student_uses_alibaba_user_prompt_template() -> None:
 
 def test_deepseek_student_uses_generic_user_prompt_template() -> None:
     """Render the DeepSeek seed as a sparse generic user prompt."""
-    candidate, family = seed_candidate(DEEPSEEK_V4_FLASH_MODEL, "auto", "tb2.1")
+    candidate, family = seed_candidate(DEEPSEEK_V4_1_FLASH_MODEL, "auto", "tb2.1")
     prompt = candidate["instruction_prompt"]
     bodies = TEMPLATE_FAMILIES[family]["user_prompt"].parse(prompt)
 
@@ -228,7 +228,7 @@ def test_deepseek_run_contract_uses_the_separate_same_model_condition(tmp_path: 
     Args:
         tmp_path: Pytest directory used for parsed output paths.
     """
-    args = _model_args(tmp_path, DEEPSEEK_V4_FLASH_MODEL, DEEPSEEK_V4_FLASH_MODEL)
+    args = _model_args(tmp_path, DEEPSEEK_V4_1_FLASH_MODEL, DEEPSEEK_V4_1_FLASH_MODEL)
     manifest = load_terminalbench_manifest(MANIFEST_PATH)
 
     contract = build_run_contract(
@@ -240,16 +240,16 @@ def test_deepseek_run_contract_uses_the_separate_same_model_condition(tmp_path: 
         "generic",
     )
 
-    assert contract["student_model"] == DEEPSEEK_V4_FLASH_MODEL
-    assert contract["proposer_model"] == DEEPSEEK_V4_FLASH_MODEL
-    assert contract["student_decoding"] == terminalbench_decoding(DEEPSEEK_V4_FLASH_MODEL)
-    assert contract["student_model_info"] == terminalbench_model_info(DEEPSEEK_V4_FLASH_MODEL)
-    assert contract["proposer_decoding"] == terminalbench_decoding(DEEPSEEK_V4_FLASH_MODEL, agentic=False)
+    assert contract["student_model"] == DEEPSEEK_V4_1_FLASH_MODEL
+    assert contract["proposer_model"] == DEEPSEEK_V4_1_FLASH_MODEL
+    assert contract["student_decoding"] == terminalbench_decoding(DEEPSEEK_V4_1_FLASH_MODEL)
+    assert contract["student_model_info"] == terminalbench_model_info(DEEPSEEK_V4_1_FLASH_MODEL)
+    assert contract["proposer_decoding"] == terminalbench_decoding(DEEPSEEK_V4_1_FLASH_MODEL, agentic=False)
 
 
 @pytest.mark.parametrize("experiment", EXPERIMENT_MANIFESTS)
 @pytest.mark.parametrize("condition,budget", list(terminalbench_main.CAMPAIGN_CELLS.values()))
-@pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_FLASH_MODEL])
+@pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL])
 @pytest.mark.parametrize("configured", [False, True])
 @pytest.mark.parametrize("optimization_scope", OPTIMIZATION_SCOPES)
 def test_provider_settings_reach_all_runtime_roles(
@@ -691,7 +691,7 @@ def test_run_contract_rejects_a_cross_model_pair(tmp_path: Path) -> None:
     Args:
         tmp_path: Pytest directory used for parsed output paths.
     """
-    args = _model_args(tmp_path, QWEN3_8_27B_MODEL, DEEPSEEK_V4_FLASH_MODEL)
+    args = _model_args(tmp_path, QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL)
     manifest = load_terminalbench_manifest(MANIFEST_PATH)
 
     with pytest.raises(ValueError, match="same model"):

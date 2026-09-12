@@ -39,7 +39,7 @@ WIKI17_CORPUS_NAME = "wiki.abstracts.2017.jsonl"
 WIKI17_ARCHIVE_URL = f"https://huggingface.co/dspy/cache/resolve/{WIKI17_HF_REVISION}/{WIKI17_ARCHIVE_NAME}"
 WIKI17_ARCHIVE_SHA256 = "744183e61af986bde9b25c880b59c1502618a8b673671e189cbc0ee684fceb42"
 WIKI17_ARCHIVE_SIZE = 608_448_121
-WIKI17_CORPUS_SIZE = 1_780_746_240
+WIKI17_CORPUS_SIZE = 1_780_742_620
 WIKI17_CORPUS_SHA256 = "c006527c7c600f85ed594afa36d2a34d0598996405f560474227738342463724"
 WIKI17_DOCUMENT_COUNT = 5_233_330
 WIKI17_BM25_VERSION = "0.2.12"
@@ -259,13 +259,9 @@ class Wiki17BM25Retriever:
             self._corpus = corpus
             if self.preparation_label == "Wiki-2017":
                 if not self.integrity_path.is_file():
-                    raise Wiki17PreparationError(
-                        f"Wiki-2017 integrity manifest is missing under {self.root}."
-                    )
+                    raise Wiki17PreparationError(f"Wiki-2017 integrity manifest is missing under {self.root}.")
                 integrity_digest = self._file_sha256(self.integrity_path)
-                self.cache_path = self.root / (
-                    f"retriever_cache_{WIKI17_CORPUS_SHA256}_{integrity_digest}"
-                )
+                self.cache_path = self.root / (f"retriever_cache_{WIKI17_CORPUS_SHA256}_{integrity_digest}")
             self._cache = Cache(str(self.cache_path))
 
     def _require_dependencies(self) -> None:
@@ -380,9 +376,7 @@ class Wiki17BM25Retriever:
         """
         corpus_digest = self._file_sha256(self.corpus_path)
         if corpus_digest != WIKI17_CORPUS_SHA256:
-            raise Wiki17PreparationError(
-                f"Wiki-2017 corpus failed integrity validation: sha256={corpus_digest}."
-            )
+            raise Wiki17PreparationError(f"Wiki-2017 corpus failed integrity validation: sha256={corpus_digest}.")
         index_files = []
         for path in sorted(candidate for candidate in self.index_path.rglob("*") if candidate.is_file()):
             index_files.append(

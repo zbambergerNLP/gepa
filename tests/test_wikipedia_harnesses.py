@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).parents[1]))
 
 from examples.common import provider_retries
 from examples.common.experiment_models import (
-    DEEPSEEK_V4_FLASH_MODEL,
+    DEEPSEEK_V4_1_FLASH_MODEL,
     EXPERIMENT_NUM_RETRIES,
     QWEN3_8_27B_MODEL,
     experiment_decoding,
@@ -72,7 +72,7 @@ class FakeRetriever:
         return self.pages_by_query.get(query, [])[:limit]
 
 
-@pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_FLASH_MODEL])
+@pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL])
 def test_hotpot_lm_uses_local_campaign_decoding(monkeypatch, model: str) -> None:
     """Keep sparse messages and local campaign settings in HotPotQA calls.
 
@@ -106,7 +106,8 @@ def test_hotpot_lm_uses_local_campaign_decoding(monkeypatch, model: str) -> None
         **experiment_request_overrides(model, explicit_reasoning=True),
     }
     expected_request["seed"] = hotpot_utils.HOTPOTQA_SCIENTIFIC_REQUEST_SEED
-    assert {key: value for key, value in calls[0].items() if key not in {"model", "messages"}} == {
+    assert 3599 < calls[0]["timeout"] <= 3600
+    assert {key: value for key, value in calls[0].items() if key not in {"model", "messages", "timeout"}} == {
         **expected_request,
         "max_retries": 0,
         "cache": {"no-cache": True, "no-store": True},
@@ -114,7 +115,7 @@ def test_hotpot_lm_uses_local_campaign_decoding(monkeypatch, model: str) -> None
     assert calls[0].get("extra_body") == experiment_request_overrides(model, explicit_reasoning=True).get("extra_body")
 
 
-@pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_FLASH_MODEL])
+@pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL])
 def test_hover_lm_uses_local_decoding_and_thinking(monkeypatch, model: str) -> None:
     """Send the selected model decoding and thinking controls for HoVer.
 
@@ -140,7 +141,7 @@ def test_hover_lm_uses_local_decoding_and_thinking(monkeypatch, model: str) -> N
 
     assert hover_utils._call_lm("", "question", model, None) == "answer"
     assert calls[0]["messages"] == [{"role": "user", "content": "question"}]
-    assert {key: value for key, value in calls[0].items() if key not in {"model", "messages"}} == {
+    assert {key: value for key, value in calls[0].items() if key not in {"model", "messages", "timeout"}} == {
         "num_retries": EXPERIMENT_NUM_RETRIES,
         **experiment_decoding(model),
         **experiment_request_overrides(model),
@@ -149,7 +150,7 @@ def test_hover_lm_uses_local_decoding_and_thinking(monkeypatch, model: str) -> N
     assert calls[0].get("extra_body") == experiment_request_overrides(model).get("extra_body")
 
 
-@pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_FLASH_MODEL])
+@pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL])
 def test_litellm_preserves_local_thinking_and_effort_settings(model: str) -> None:
     """Keep both providers' explicit thinking controls in the outgoing vLLM request."""
     request_overrides = experiment_request_overrides(model, explicit_reasoning=True)
@@ -446,7 +447,7 @@ def test_hotpot_heldout_evaluation_scores_only_task_parse_errors_as_zero(monkeyp
 
 
 @pytest.mark.skipif(hotpot_utils.dspy is None, reason="HotPotQA's locked DSPy group is not installed")
-@pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_FLASH_MODEL])
+@pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL])
 @pytest.mark.parametrize("asynchronous", [False, True])
 def test_real_dspy_provider_requests_use_three_attempts(tmp_path, monkeypatch, model, asynchronous):
     """Exercise the pinned DSPy transport with the same bounded retry policy."""
@@ -472,7 +473,7 @@ def test_real_dspy_provider_requests_use_three_attempts(tmp_path, monkeypatch, m
 
 
 @pytest.mark.skipif(hotpot_utils.dspy is None, reason="HotPotQA's locked DSPy group is not installed")
-@pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_FLASH_MODEL])
+@pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL])
 @pytest.mark.parametrize("asynchronous", [False, True])
 def test_repeated_hotpot_dspy_requests_are_fresh(tmp_path, monkeypatch, model, asynchronous):
     """Bypass both DSPy caches and call the provider for identical new requests."""
@@ -621,7 +622,7 @@ def test_hotpot_task_lm_requires_the_locked_dspy_runtime(monkeypatch) -> None:
         hotpot_utils.build_hotpotqa_task_lm(QWEN3_8_27B_MODEL, None)
 
 
-@pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_FLASH_MODEL])
+@pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL])
 def test_hotpot_dspy_lm_uses_the_selected_experiment_profile(monkeypatch, model: str) -> None:
     """Apply the selected solver's exact decoding settings to DSPy.
 
@@ -680,7 +681,7 @@ def test_hotpot_dspy_lm_uses_the_standard_local_deepseek_client(monkeypatch) -> 
         Mock(return_value=(hotpot_utils.HOTPOTQA_DSPY_VERSION, hotpot_utils.HOTPOTQA_DSPY_COMMIT)),
     )
 
-    result = hotpot_utils.build_hotpotqa_task_lm(DEEPSEEK_V4_FLASH_MODEL, "http://127.0.0.1:8000/v1")
+    result = hotpot_utils.build_hotpotqa_task_lm(DEEPSEEK_V4_1_FLASH_MODEL, "http://127.0.0.1:8000/v1")
 
     assert result is lm_constructor.return_value
     lm_constructor.assert_called_once()
@@ -1282,7 +1283,7 @@ def test_wikipedia_sbatch_exposes_both_homogeneous_model_profiles(benchmark: str
 
     assert 'MODEL_PROFILE="${MODEL_PROFILE:-qwen3.8-27b}"' in script
     assert 'SOLVER_MODEL="hosted_vllm/Qwen/Qwen3.8-27B"' in script
-    assert 'SOLVER_MODEL="hosted_vllm/deepseek-ai/DeepSeek-V4-Flash-0731"' in script
+    assert 'SOLVER_MODEL="hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash"' in script
     assert 'REFLECTION_MODEL="${SOLVER_MODEL}"' in script
     if benchmark == "hover":
         assert 'if [[ "${LOCAL_SOLVER}" == "1" ]]' in script
@@ -1308,15 +1309,15 @@ def test_hotpotqa_della_submit_scales_resources_by_model_profile() -> None:
     assert 'DELLA_CPUS_PER_TASK="${DELLA_CPUS_PER_TASK:-64}"' in submit
     assert 'DELLA_MEMORY="${DELLA_MEMORY:-768G}"' in submit
     assert 'JOB_PARTITION="${GPU_PARTITION}"' in submit
-    assert 'MAX_WORKERS="${MAX_WORKERS:-128}"' in submit
+    assert 'MAX_WORKERS="${MAX_WORKERS:-12}"' in submit
     assert 'VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-${DELLA_GPUS}}"' in submit
     assert 'VLLM_API_SERVER_COUNT="${VLLM_API_SERVER_COUNT:-${VLLM_DATA_PARALLEL_SIZE}}"' in submit
     assert "DELLA_GPUS=0" not in submit
-    assert "deepseek-v4-flash)" in submit
+    assert "deepseek-v4.1-flash)" in submit
     assert 'VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-8}"' in submit
     assert 'VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-1}"' in submit
     assert 'VLLM_API_SERVER_COUNT="${VLLM_API_SERVER_COUNT:-1}"' in submit
-    assert 'MAX_WORKERS="${MAX_WORKERS:-8}"' in submit
+    assert 'MAX_WORKERS="${MAX_WORKERS:-4}"' in submit
     assert '"--cpus-per-task=${DELLA_CPUS_PER_TASK}"' in submit
     assert '"--mem=${DELLA_MEMORY}"' in submit
     assert 'if [[ -n "${JOB_PARTITION}" ]]; then' in submit
@@ -1420,13 +1421,13 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert "scientific Qwen runs require 8 H200 data-parallel replicas and 8 API servers" in submit
     assert 'SOLVER_MODEL_PATH="${MODEL_STORAGE}/${MODEL}"' in submit
     assert 'MODEL_SNAPSHOT_PROFILE="qwen3.8-27b"' in submit
-    assert 'MODEL_SNAPSHOT_PROFILE="deepseek-v4-flash"' in submit
+    assert 'MODEL_SNAPSHOT_PROFILE="deepseek-v4.1-flash"' in submit
     assert 'MODEL_INTEGRITY_MANIFEST="${SOLVER_MODEL_PATH}/.gepa-model-integrity.json"' in submit
     assert '[[ ! -d "${SOLVER_MODEL_PATH}" || ! -s "\\${MODEL_INTEGRITY_MANIFEST}" ]]' in submit
     assert "checkpoint is not staged at ${SOLVER_MODEL_PATH}" in submit
     assert "found staged local ${MODEL_SNAPSHOT_PROFILE} checkpoint" in submit
     assert 'SOLVER_MODEL="hosted_vllm/Qwen/Qwen3.8-27B"' in submit
-    assert 'SOLVER_MODEL="hosted_vllm/deepseek-ai/DeepSeek-V4-Flash-0731"' in submit
+    assert 'SOLVER_MODEL="hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash"' in submit
     assert 'REFLECTION_MODEL="${SOLVER_MODEL}"' in submit
     assert "DEEPSEEK_API_KEY" not in submit
     assert r'"BUDGET_PROFILE=\${run_budget_profile}"' in submit
@@ -1497,7 +1498,7 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert '"${GEPA_VENV_DIR}/.gepa-uv-sha256"' in submit
     assert "HOTPOTQA_ENV_SPEC_SHA256=\\${HOTPOTQA_ENV_SPEC_SHA256}" in submit
     assert "HOTPOTQA_GEPA_ENV_SHA256=\\${HOTPOTQA_GEPA_ENV_SHA256}" in submit
-    assert "HOTPOTQA_POSIT_ENV_SHA256=\\${HOTPOTQA_POSIT_ENV_SHA256}" in submit
+    assert "HOTPOTQA_SERVING_ENV_SHA256=\\${HOTPOTQA_SERVING_ENV_SHA256}" in submit
     assert 'examples.common.python_environment verify --path "\\${GEPA_ENV_MANIFEST}"' in submit
     assert "load_hotpotqa_dataset(seed=0)" in submit
     assert "SUBMIT_BUDGET_PROFILES=(standard standard standard standard expanded expanded)" in submit
@@ -1517,12 +1518,12 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert r'"CONDITION=\${run_condition}"' in submit
     assert r'--job-name="gepa-hp-${MODEL_PROFILE}-\${RUN_BUDGET_PROFILE}-\${RUN_CONDITION}"' in submit
     assert r'--time="\${RUN_TIME}"' in submit
-    assert 'sha256sum "\\${POSIT_ENV_MANIFEST}"' in submit
+    assert 'sha256sum "\\${SERVING_ENV_MANIFEST}"' in submit
     assert 'pip check --python "\\${VLLM_PY}"' in submit
     assert ".gepa-source-commit" in submit
     assert ".gepa-source-manifest.sha256sums" in submit
     assert "HOTPOTQA_SOURCE_MANIFEST_SHA256=${HOTPOTQA_SOURCE_MANIFEST_SHA256}" in submit
-    assert 'if [[ "${MODEL_PROFILE}" == "deepseek-v4-flash" ]]' in submit
+    assert 'if [[ "${MODEL_PROFILE}" == "deepseek-v4.1-flash" ]]' in submit
     assert "commit the complete experiment source" in submit
     assert '"${SCRIPT_DIR}/sync_to_della.sh"' in submit
     assert "NO_SYNC" not in submit
@@ -1553,7 +1554,7 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert 'MODEL="Qwen3.8-27B"' in sbatch
     assert 'SOLVER_MODEL_PATH="${MODEL_STORAGE}/${MODEL}"' in sbatch
     assert 'QWEN_REVISION="1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"' in sbatch
-    assert 'DEEPSEEK_REVISION="7872f01b1d1fe23eabc4c98b48bffcef5a386062"' in sbatch
+    assert 'DEEPSEEK_REVISION="dba1be0a40aa45a94ad051997016db3960a90277"' in sbatch
     assert "sglang" not in sbatch
     assert 'HOTPOTQA_MODEL_REVISION="${QWEN_REVISION}"' in sbatch
     assert 'HOTPOTQA_MODEL_REVISION="${DEEPSEEK_REVISION}"' in sbatch
@@ -1614,8 +1615,8 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert "export HOTPOTQA_CUDA_VERSION" in sbatch
     assert "export HOTPOTQA_CUDA_MODULE" in sbatch
     assert "export HOTPOTQA_TRANSFORMERS_VERSION" in sbatch
-    assert "export HOTPOTQA_POSIT_COMMIT" in sbatch
-    assert "export HOTPOTQA_POSIT_ENV_SHA256" in sbatch
+    assert "export HOTPOTQA_SERVING_LOCK_SHA256" in sbatch
+    assert "export HOTPOTQA_SERVING_ENV_SHA256" in sbatch
     assert "export HOTPOTQA_GPU_RUNTIME" in sbatch
     assert "export HOTPOTQA_SOURCE_COMMIT" in sbatch
     assert "export HOTPOTQA_SOURCE_MANIFEST_SHA256" in sbatch
@@ -1649,9 +1650,9 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert "rope_scaling=none" in sbatch
     assert "--rope-scaling" not in sbatch
     assert "max_num_seqs=1" in sbatch
-    assert "posit_env=${HOTPOTQA_POSIT_ENV_SHA256}" in sbatch
+    assert "serving_env=${HOTPOTQA_SERVING_ENV_SHA256}" in sbatch
     assert "gpu=${HOTPOTQA_GPU_RUNTIME}" in sbatch
-    assert 'examples.common.python_environment verify --path "${POSIT_ENV_MANIFEST}"' in sbatch
+    assert 'examples.common.python_environment verify --path "${SERVING_ENV_MANIFEST}"' in sbatch
     assert 'pip check --python "${VLLM_PY}"' in sbatch
     assert '"H200" not in name.upper() or capability != "9.0"' in sbatch
     assert '"nvidia-smi", "--query-gpu=driver_version"' in sbatch
@@ -1711,30 +1712,38 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert "sshpass" not in sync
     assert "REMOTE_PASSWORD" not in sync
     assert sync.count("-o BatchMode=yes -o StrictHostKeyChecking=yes") == 2
-    assert 'HOTPOTQA_PYTHON_VERSION="3.11.13"' in build
-    assert 'HOTPOTQA_UV_VERSION="0.9.13"' in build
-    assert "UV_UNMANAGED_INSTALL" in build
-    assert "--frozen --no-install-project" in build
-    assert "--frozen --check --no-install-project" in build
-    assert 'if ! flock -n "\\${ARTIFACT_LOCK_FD}"' in build
-    assert "validate_hotpotqa_dspy_runtime" in build
-    assert 'examples.common.python_environment prepare --path "\\${POSIT_ENV_MANIFEST}"' in build
-    assert 'examples.common.python_environment prepare --path "\\${GEPA_ENV_MANIFEST}"' in build
-    assert 'pip check --python "\\${VLLM_PY}"' in build
-    assert 'git -C "\\${POSIT_DIR}" status --porcelain --untracked-files=normal' in build
-    assert 'HOTPOTQA_ENV_SPEC_SHA256="\\$(' in build
-    assert ".venv/.gepa-env-spec.sha256" in build
-    assert ".venv/.gepa-python-version" in build
-    assert ".venv/.gepa-uv-version" in build
-    assert ".venv/.gepa-uv-sha256" in build
-    assert "examples.common.model_snapshot prepare" in build
-    assert "examples.common.model_snapshot verify" in build
-    assert '--model-profile qwen3.8-27b --root "${QWEN_MODEL_DIR}"' in build
-    assert '--model-profile deepseek-v4-flash --root "${DEEPSEEK_MODEL_DIR}"' in build
-    assert 'exec {MODEL_LOCK_FD}<"${QWEN_MODEL_DIR}"' in build
-    assert 'if ! flock -n "\\${MODEL_LOCK_FD}"' in build
-    assert 'examples.common.wiki17_bm25 verify --deep --root "${WIKI17_DIR}"' in build
-    assert "load_hotpotqa_dataset(seed=0)" in build
+    remote = REPO_ROOT / "scripts" / "della" / "remote"
+    setup = (remote / "setup_env.sh").read_text()
+    dataset = (remote / "download_dataset.sh").read_text()
+    model = (remote / "download_model.sh").read_text()
+    assert 'PYTHON_VERSION="3.11.13"' in setup
+    assert 'UV_VERSION="0.9.13"' in setup
+    assert "UV_UNMANAGED_INSTALL" in setup
+    assert "--frozen --no-install-project" in setup
+    assert "--check" in setup
+    assert 'flock -n "${ARTIFACT_LOCK_FD}"' in setup
+    assert 'flock -n "${ARTIFACT_LOCK_FD}"' in dataset
+    assert "validate_hotpotqa_dspy_runtime" in setup
+    assert "examples.common.python_environment prepare" in setup
+    assert "python-environments/gepa-${ENV_SPEC}.json" in setup
+    assert "serving-environments/${LOCK_SHA}.json" in setup
+    assert "pip check" in setup
+    assert "--require-hashes" in setup
+    for marker in (".gepa-env-spec.sha256", ".gepa-python-version", ".gepa-uv-version", ".gepa-uv-sha256"):
+        assert marker in setup
+    assert "examples.common.model_snapshot prepare" in model
+    assert "examples.common.model_snapshot verify" in model
+    assert 'qwen3.8-27b) MODEL_DIR="${MODEL_STORAGE}/Qwen3.8-27B"' in model
+    assert 'deepseek-v4.1-flash) MODEL_DIR="${MODEL_STORAGE}/DeepSeek-V4.1-Flash"' in model
+    assert 'exec {MODEL_LOCK_FD}<"${MODEL_DIR}"' in model
+    assert 'flock -n "${MODEL_LOCK_FD}"' in model
+    assert 'examples.common.wiki17_bm25 verify --deep --root "${WIKI17_DIR}"' in dataset
+    assert "load(seed=0)" in dataset
+    assert "nohup setsid" in build
+    for name in ("setup_env.sh", "download_dataset.sh", "download_model.sh"):
+        assert f"scripts/della/remote/{name}" in build
+    for pattern in (".serving-venv/", ".serving-venv-*/", ".tools/"):
+        assert f"--exclude '{pattern}'" in sync
     assert "load_hover_dataset" not in build
     assert "--exclude '.cache/'" in sync
     assert "--exclude 'logs/'" in sync
@@ -1789,7 +1798,7 @@ def test_hover_della_submit_preserves_artifact_methodology() -> None:
     assert 'FINAL_RETRIEVAL_K="${FINAL_RETRIEVAL_K:-10}"' in submit
     assert 'MODEL="${MODEL:-Qwen3.8-27B}"' in submit
     assert 'SOLVER_MODEL="hosted_vllm/Qwen/Qwen3.8-27B"' in submit
-    assert 'SOLVER_MODEL="hosted_vllm/deepseek-ai/DeepSeek-V4-Flash-0731"' in submit
+    assert 'SOLVER_MODEL="hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash"' in submit
     assert 'REFLECTION_MODEL="${SOLVER_MODEL}"' in submit
     assert "DEEPSEEK_API_KEY" not in submit
     assert "examples.common.wiki17_bm25 verify" in submit

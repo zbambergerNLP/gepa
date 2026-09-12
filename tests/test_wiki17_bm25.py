@@ -353,7 +353,7 @@ def test_provenance_locks_artifact_source_versions_and_retrieval_parameters() ->
         "archive_sha256": "744183e61af986bde9b25c880b59c1502618a8b673671e189cbc0ee684fceb42",
         "archive_size": 608_448_121,
         "corpus_sha256": "c006527c7c600f85ed594afa36d2a34d0598996405f560474227738342463724",
-        "corpus_size": 1_780_746_240,
+        "corpus_size": 1_780_742_620,
         "document_count": 5_233_330,
         "bm25s_version": "0.2.12",
         "pystemmer_version": "2.2.0.3",

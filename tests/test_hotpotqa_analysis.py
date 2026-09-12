@@ -227,7 +227,7 @@ def test_discovery_reports_incomplete_runs_and_orders_the_campaign(tmp_path: Pat
     Args:
         tmp_path: Isolated artifact root.
     """
-    create_completed_run(tmp_path, condition="react_v2", model="hosted_vllm/deepseek-ai/DeepSeek-V4-Flash-0731")
+    create_completed_run(tmp_path, condition="react_v2", model="hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash")
     create_completed_run(tmp_path, condition="vanilla")
     incomplete_dir = tmp_path / "incomplete"
     write_json(
@@ -239,7 +239,7 @@ def test_discovery_reports_incomplete_runs_and_orders_the_campaign(tmp_path: Pat
 
     assert [(report["model_label"], report["condition"]) for report in reports] == [
         ("Qwen3.8-27B", "vanilla"),
-        ("DeepSeek-V4-Flash-0731", "react_v2"),
+        ("DeepSeek-V4.1-Flash", "react_v2"),
     ]
     assert incomplete == [f"{incomplete_dir}: missing candidates.json, final_metrics.json, action_summary.json"]
 

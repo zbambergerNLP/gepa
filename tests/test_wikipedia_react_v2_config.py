@@ -17,8 +17,8 @@ from gepa.strategies.text_limits import TextLimits
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
 from examples.common.experiment_models import (
-    DEEPSEEK_V4_FLASH_MODEL,
-    DEEPSEEK_V4_FLASH_REVISION,
+    DEEPSEEK_V4_1_FLASH_MODEL,
+    DEEPSEEK_V4_1_FLASH_REVISION,
     EXPERIMENT_NUM_RETRIES,
     QWEN3_8_27B_MODEL,
     QWEN3_8_27B_REVISION,
@@ -98,10 +98,10 @@ QWEN_SERVE_ARGUMENTS = (
     "single_sequence_replicas=true"
 )
 DEEPSEEK_SERVE_ARGUMENTS = (
-    "tp=8;ep=8;dp=1;api_servers=1;gpu_memory_utilization=0.92;max_model_len=393216;max_num_seqs=8;"
-    "dtype=auto;weight_dtype=fp4_fp8_mixed;kv_cache_dtype=fp8;block_size=256;prefix_caching=false;"
-    "tokenizer_mode=deepseek_v4;reasoning_parser=deepseek_v4;auto_tool_choice=true;tool_parser=deepseek_v4;"
-    "speculative_decoding=false;seed=0;batch_invariant=false;single_sequence_replicas=false"
+    "tp=8;ep=8;dp=1;api_servers=1;gpu_memory_utilization=0.92;max_model_len=262144;max_num_seqs=1;"
+    "dtype=bfloat16;weight_dtype=fp8;expert_dtype=fp4;kv_cache_dtype=fp8;block_size=auto;prefix_caching=false;"
+    "tokenizer_mode=deepseek_v41;reasoning_parser=deepseek_v41;auto_tool_choice=true;tool_parser=deepseek_v41;"
+    "speculative_decoding=false;seed=0;batch_invariant=false;single_sequence_replicas=true"
 )
 COMMON_SCIENTIFIC_RUNTIME = {
     "HOTPOTQA_MODEL_INTEGRITY_SHA256": "c" * 64,
@@ -126,21 +126,21 @@ QWEN_SCIENTIFIC_RUNTIME = {
     "HOTPOTQA_VLLM_BATCH_INVARIANT": "false",
     "HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS": "true",
     "HOTPOTQA_VLLM_VERSION": "0.17.0",
-    "HOTPOTQA_POSIT_COMMIT": "b" * 40,
-    "HOTPOTQA_POSIT_ENV_SHA256": "1" * 64,
+    "HOTPOTQA_SERVING_LOCK_SHA256": "b" * 64,
+    "HOTPOTQA_SERVING_ENV_SHA256": "1" * 64,
     "HOTPOTQA_SERVE_ARGUMENTS": QWEN_SERVE_ARGUMENTS,
 }
 DEEPSEEK_SCIENTIFIC_RUNTIME = {
     **COMMON_SCIENTIFIC_RUNTIME,
-    "HOTPOTQA_MODEL_REVISION": DEEPSEEK_V4_FLASH_REVISION,
-    "HOTPOTQA_WEIGHT_DTYPE": "fp4_fp8_mixed",
+    "HOTPOTQA_MODEL_REVISION": DEEPSEEK_V4_1_FLASH_REVISION,
+    "HOTPOTQA_WEIGHT_DTYPE": "fp8",
     "HOTPOTQA_KV_CACHE_DTYPE": "fp8",
     "HOTPOTQA_SERVING_ENGINE": "vllm",
-    "HOTPOTQA_VLLM_VERSION": "0.25.0",
-    "HOTPOTQA_POSIT_COMMIT": "b" * 40,
-    "HOTPOTQA_POSIT_ENV_SHA256": "1" * 64,
+    "HOTPOTQA_VLLM_VERSION": "0.1.1.dev5+ge77daef89",
+    "HOTPOTQA_SERVING_LOCK_SHA256": "b" * 64,
+    "HOTPOTQA_SERVING_ENV_SHA256": "1" * 64,
     "HOTPOTQA_VLLM_BATCH_INVARIANT": "false",
-    "HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS": "false",
+    "HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS": "true",
     "HOTPOTQA_SERVE_ARGUMENTS": DEEPSEEK_SERVE_ARGUMENTS,
 }
 
@@ -227,7 +227,7 @@ def test_structured_prompt_populates_only_the_role_specific_task_section(
 
 @pytest.mark.parametrize(
     ("model", "expected_family"),
-    [(QWEN3_8_27B_MODEL, "alibaba"), (DEEPSEEK_V4_FLASH_MODEL, "generic")],
+    [(QWEN3_8_27B_MODEL, "alibaba"), (DEEPSEEK_V4_1_FLASH_MODEL, "generic")],
 )
 def test_experiment_model_pairs_build_without_running_an_experiment(model: str, expected_family: str) -> None:
     """Build each homogeneous model condition without calling its model.
@@ -262,7 +262,7 @@ def test_experiment_model_pairs_build_without_running_an_experiment(model: str, 
 
 
 @pytest.mark.parametrize("condition", ["vanilla", "react_v2", "react_v2_random", "action"])
-@pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_FLASH_MODEL])
+@pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL])
 def test_hotpotqa_text_limits_reach_roles_and_contracts(condition: str, model: str, tmp_path: Path) -> None:
     """Keep optional limits identical in actual role wiring and saved run identity."""
     limits = TextLimits(
@@ -294,7 +294,7 @@ def test_hotpotqa_text_limits_reach_roles_and_contracts(condition: str, model: s
         ensure_wikipedia_run_contract(tmp_path, build_hotpotqa_run_contract(condition, args))
 
 
-@pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_FLASH_MODEL])
+@pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL])
 @pytest.mark.parametrize(
     ("budget", "condition"),
     [
@@ -369,6 +369,18 @@ def test_hotpot_provider_sampling_reaches_every_model_role(model: str, budget: i
             assert roles["controller"]["requested"] == {**general, "seed": 0}
         else:
             assert roles["controller"] is None
+
+
+@pytest.mark.parametrize("role", ["solver", "reflection"])
+def test_hotpot_rejects_resume_with_changed_request_timeout(tmp_path: Path, role: str) -> None:
+    """Keep a request-deadline change from silently altering a resumed run."""
+    contract = build_hotpotqa_run_contract("react_v2", _hotpot_args())
+    assert contract["models"][f"{role}_request_timeout_seconds"] == 3600
+    old = deepcopy(contract)
+    old["models"][f"{role}_request_timeout_seconds"] = 600
+    ensure_wikipedia_run_contract(tmp_path, old)
+    with pytest.raises(ValueError, match="different Wikipedia benchmark configuration"):
+        ensure_wikipedia_run_contract(tmp_path, contract)
 
 
 @pytest.mark.parametrize("damage", ["missing", "shared", "seed"])
@@ -452,7 +464,7 @@ def test_hotpot_rejects_resume_with_the_previous_manifestor_temperature(tmp_path
 @pytest.mark.parametrize("role", ["controller", "manifestor", "react_v2_proposer"])
 def test_hotpot_rejects_resume_with_changed_role_top_p(tmp_path: Path, role: str) -> None:
     """Reject sampling drift in any FOREST role before continuing optimization."""
-    args = _hotpot_args(solver_model=DEEPSEEK_V4_FLASH_MODEL, reflection_model=DEEPSEEK_V4_FLASH_MODEL)
+    args = _hotpot_args(solver_model=DEEPSEEK_V4_1_FLASH_MODEL, reflection_model=DEEPSEEK_V4_1_FLASH_MODEL)
     contract = build_hotpotqa_run_contract("react_v2", args)
     old = deepcopy(contract)
     old["models"]["reflection_role_decoding"][role]["requested"]["top_p"] = 0.5
@@ -480,7 +492,7 @@ def test_hotpot_rejects_missing_or_changed_reasoning_settings(tmp_path: Path, ro
         ensure_wikipedia_run_contract(tmp_path, contract)
 
 
-@pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_FLASH_MODEL])
+@pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL])
 def test_role_specific_sampling_keeps_distinct_journal_namespaces(tmp_path: Path, model: str) -> None:
     """Share identical Controller/editor clients and isolate different sampling profiles."""
     strategy, family = build_react_v2_strategy(
@@ -496,12 +508,8 @@ def test_role_specific_sampling_keeps_distinct_journal_namespaces(tmp_path: Path
         react_top_p=float(experiment_decoding(model, agentic=True)["top_p"]),
         manifestor_temperature=1.0,
     )
-    assert (strategy.controller_lm is strategy.base_lm) is (model == QWEN3_8_27B_MODEL)
-    expected_namespaces = (
-        ("controller-proposer", "controller-proposer", "manifestor")
-        if model == QWEN3_8_27B_MODEL
-        else ("proposer", "controller", "manifestor")
-    )
+    assert strategy.controller_lm is strategy.base_lm
+    expected_namespaces = ("controller-proposer", "controller-proposer", "manifestor")
     assert (
         tuple(
             client._response_journal.namespace
@@ -587,7 +595,7 @@ def _scientific_data_identity() -> dict[str, object]:
     ("model", "expected_version"),
     [
         (QWEN3_8_27B_MODEL, QWEN3_8_27B_REVISION),
-        (DEEPSEEK_V4_FLASH_MODEL, DEEPSEEK_V4_FLASH_REVISION),
+        (DEEPSEEK_V4_1_FLASH_MODEL, DEEPSEEK_V4_1_FLASH_REVISION),
     ],
 )
 def test_experiment_models_resolve_to_declared_runtime_identities(model: str, expected_version: str) -> None:
@@ -678,8 +686,8 @@ def test_hotpot_scientific_contract_accepts_the_pinned_deepseek_runtime(monkeypa
         condition="react_v2",
         enforce_scientific_contract=True,
         max_metric_calls=13_742,
-        solver_model=DEEPSEEK_V4_FLASH_MODEL,
-        reflection_model=DEEPSEEK_V4_FLASH_MODEL,
+        solver_model=DEEPSEEK_V4_1_FLASH_MODEL,
+        reflection_model=DEEPSEEK_V4_1_FLASH_MODEL,
         solver_api_base=LOCAL_API_BASE,
         reflection_api_base=LOCAL_API_BASE,
         train_limit=None,
@@ -701,8 +709,8 @@ def test_hotpot_scientific_contract_accepts_the_pinned_deepseek_runtime(monkeypa
         ({"HOTPOTQA_KV_CACHE_DTYPE": "bfloat16"}, "HOTPOTQA_KV_CACHE_DTYPE"),
         ({"HOTPOTQA_SERVING_ENGINE": "sglang"}, "HOTPOTQA_SERVING_ENGINE"),
         ({"HOTPOTQA_VLLM_VERSION": "0.24.0"}, "HOTPOTQA_VLLM_VERSION"),
-        ({"HOTPOTQA_POSIT_COMMIT": "moving-main"}, "HOTPOTQA_POSIT_COMMIT"),
-        ({"HOTPOTQA_POSIT_ENV_SHA256": "moving-env"}, "HOTPOTQA_POSIT_ENV_SHA256"),
+        ({"HOTPOTQA_SERVING_LOCK_SHA256": "moving-main"}, "HOTPOTQA_SERVING_LOCK_SHA256"),
+        ({"HOTPOTQA_SERVING_ENV_SHA256": "moving-env"}, "HOTPOTQA_SERVING_ENV_SHA256"),
         ({"HOTPOTQA_TRANSFORMERS_VERSION": ""}, "HOTPOTQA_TRANSFORMERS_VERSION"),
         ({"HOTPOTQA_GPU_RUNTIME": "{}"}, "HOTPOTQA_GPU_RUNTIME"),
         ({"HOTPOTQA_SERVE_ARGUMENTS": "tp=8"}, "HOTPOTQA_SERVE_ARGUMENTS"),
@@ -726,8 +734,8 @@ def test_hotpot_scientific_contract_rejects_deepseek_runtime_drift(
         condition="react_v2",
         enforce_scientific_contract=True,
         max_metric_calls=13_742,
-        solver_model=DEEPSEEK_V4_FLASH_MODEL,
-        reflection_model=DEEPSEEK_V4_FLASH_MODEL,
+        solver_model=DEEPSEEK_V4_1_FLASH_MODEL,
+        reflection_model=DEEPSEEK_V4_1_FLASH_MODEL,
         solver_api_base=LOCAL_API_BASE,
         reflection_api_base=LOCAL_API_BASE,
         train_limit=None,
@@ -766,8 +774,8 @@ def test_hotpot_scientific_contract_rejects_nonlocal_deepseek_endpoints(
     values = {
         "enforce_scientific_contract": True,
         "max_metric_calls": 13_742,
-        "solver_model": DEEPSEEK_V4_FLASH_MODEL,
-        "reflection_model": DEEPSEEK_V4_FLASH_MODEL,
+        "solver_model": DEEPSEEK_V4_1_FLASH_MODEL,
+        "reflection_model": DEEPSEEK_V4_1_FLASH_MODEL,
         "solver_api_base": LOCAL_API_BASE,
         "reflection_api_base": LOCAL_API_BASE,
         "train_limit": None,
@@ -848,8 +856,8 @@ def test_hotpot_scientific_contract_rejects_methodology_drift(
         ),
         ({"HOTPOTQA_VLLM_VERSION": ""}, "HOTPOTQA_VLLM_VERSION"),
         ({"HOTPOTQA_TRANSFORMERS_VERSION": ""}, "HOTPOTQA_TRANSFORMERS_VERSION"),
-        ({"HOTPOTQA_POSIT_COMMIT": "moving-main"}, "HOTPOTQA_POSIT_COMMIT"),
-        ({"HOTPOTQA_POSIT_ENV_SHA256": "moving-environment"}, "HOTPOTQA_POSIT_ENV_SHA256"),
+        ({"HOTPOTQA_SERVING_LOCK_SHA256": "moving-main"}, "HOTPOTQA_SERVING_LOCK_SHA256"),
+        ({"HOTPOTQA_SERVING_ENV_SHA256": "moving-environment"}, "HOTPOTQA_SERVING_ENV_SHA256"),
         ({"HOTPOTQA_GPU_RUNTIME": "{}"}, "HOTPOTQA_GPU_RUNTIME"),
         ({"HOTPOTQA_SOURCE_COMMIT": "moving-main"}, "HOTPOTQA_SOURCE_COMMIT"),
         ({"HOTPOTQA_SOURCE_MANIFEST_SHA256": "moving-manifest"}, "HOTPOTQA_SOURCE_MANIFEST_SHA256"),
@@ -1004,7 +1012,7 @@ def test_complete_run_keys_cover_budget_seed_retrieval_and_data_identity() -> No
         hotpotqa_run_key("vanilla", _hotpot_args(max_metric_calls=101)),
         hotpotqa_run_key(
             "vanilla",
-            _hotpot_args(solver_model=DEEPSEEK_V4_FLASH_MODEL, reflection_model=DEEPSEEK_V4_FLASH_MODEL),
+            _hotpot_args(solver_model=DEEPSEEK_V4_1_FLASH_MODEL, reflection_model=DEEPSEEK_V4_1_FLASH_MODEL),
         ),
         hotpotqa_run_key("vanilla", _hotpot_args(solver_api_base="https://solver.example/v1")),
         hotpotqa_run_key("vanilla", _hotpot_args(reflection_api_base="https://other-reflection.example/v1")),
@@ -1162,7 +1170,7 @@ def test_hotpot_and_hover_contracts_record_exact_model_pair() -> None:
     assert hover["models"]["solver_decoding"] == experiment_decoding(QWEN3_8_27B_MODEL)
     assert hover["models"]["reflection_decoding"] == experiment_decoding(QWEN3_8_27B_MODEL)
 
-    assert hotpot["schema_version"] == 24
+    assert hotpot["schema_version"] == 25
     assert hotpot["optimizer"]["react_execution"]["completion"] == "explicit_finish"
     assert hotpot["optimizer"]["react_execution"]["max_iterations"] is None
     assert hotpot["optimizer"]["react_execution"]["max_tool_calls"] is None
@@ -1207,8 +1215,8 @@ def test_hotpot_and_hover_contracts_record_exact_model_pair() -> None:
         "env_spec_sha256": None,
         "gepa_env_sha256": None,
         "serving_engine": None,
-        "posit_commit": None,
-        "posit_env_sha256": None,
+        "serving_lock_sha256": None,
+        "serving_env_sha256": None,
         "gpu_runtime": None,
         "vllm_version": None,
         "torch_version": None,
@@ -1262,25 +1270,26 @@ def test_hotpot_and_hover_contracts_record_exact_model_pair() -> None:
 def test_deepseek_contract_uses_the_deepseek_pair_and_local_request_settings() -> None:
     """Record DeepSeek decoding and maximum-reasoning template arguments."""
     args = _hotpot_args(
-        solver_model=DEEPSEEK_V4_FLASH_MODEL,
-        reflection_model=DEEPSEEK_V4_FLASH_MODEL,
+        solver_model=DEEPSEEK_V4_1_FLASH_MODEL,
+        reflection_model=DEEPSEEK_V4_1_FLASH_MODEL,
         solver_api_base=LOCAL_API_BASE,
         reflection_api_base=LOCAL_API_BASE,
     )
 
     contract = build_hotpotqa_run_contract("react_v2", args)
-    deepseek_decoding = {**experiment_decoding(DEEPSEEK_V4_FLASH_MODEL, agentic=False), "seed": 0}
-    deepseek_request_overrides = experiment_request_overrides(DEEPSEEK_V4_FLASH_MODEL)
+    deepseek_decoding = {**experiment_decoding(DEEPSEEK_V4_1_FLASH_MODEL, agentic=False), "seed": 0}
+    deepseek_request_overrides = experiment_request_overrides(DEEPSEEK_V4_1_FLASH_MODEL)
 
     assert contract["models"] == {
-        "solver": DEEPSEEK_V4_FLASH_MODEL,
-        "solver_version": DEEPSEEK_V4_FLASH_REVISION,
+        "solver": DEEPSEEK_V4_1_FLASH_MODEL,
+        "solver_version": DEEPSEEK_V4_1_FLASH_REVISION,
         "solver_api_base": LOCAL_API_BASE,
         "solver_decoding": deepseek_decoding,
         "solver_request_overrides": deepseek_request_overrides,
         "solver_num_retries": 0,
-        "reflection": DEEPSEEK_V4_FLASH_MODEL,
-        "reflection_version": DEEPSEEK_V4_FLASH_REVISION,
+        "solver_request_timeout_seconds": 3600,
+        "reflection": DEEPSEEK_V4_1_FLASH_MODEL,
+        "reflection_version": DEEPSEEK_V4_1_FLASH_REVISION,
         "reflection_api_base": LOCAL_API_BASE,
         "reflection_decoding": deepseek_decoding,
         "reflection_role_decoding": {
@@ -1293,12 +1302,13 @@ def test_deepseek_contract_uses_the_deepseek_pair_and_local_request_settings() -
                 "provider_ignored_fields": [],
             },
             "react_v2_proposer": {
-                "requested": {**experiment_decoding(DEEPSEEK_V4_FLASH_MODEL, agentic=True), "seed": 0},
+                "requested": {**experiment_decoding(DEEPSEEK_V4_1_FLASH_MODEL, agentic=True), "seed": 0},
                 "provider_ignored_fields": [],
             },
         },
         "reflection_request_overrides": deepseek_request_overrides,
         "reflection_num_retries": 0,
+        "reflection_request_timeout_seconds": 3600,
     }
 
 
@@ -1311,8 +1321,8 @@ def test_deepseek_serving_environment_is_material_to_contract_and_run_key(monkey
     for name, value in DEEPSEEK_SCIENTIFIC_RUNTIME.items():
         monkeypatch.setenv(name, value)
     args = _hotpot_args(
-        solver_model=DEEPSEEK_V4_FLASH_MODEL,
-        reflection_model=DEEPSEEK_V4_FLASH_MODEL,
+        solver_model=DEEPSEEK_V4_1_FLASH_MODEL,
+        reflection_model=DEEPSEEK_V4_1_FLASH_MODEL,
         solver_api_base=LOCAL_API_BASE,
         reflection_api_base=LOCAL_API_BASE,
     )
@@ -1320,9 +1330,9 @@ def test_deepseek_serving_environment_is_material_to_contract_and_run_key(monkey
     first_key = hotpotqa_run_key("react_v2", args)
 
     assert first_contract["execution_runtime"]["serving_engine"] == "vllm"
-    assert first_contract["execution_runtime"]["posit_env_sha256"] == "1" * 64
+    assert first_contract["execution_runtime"]["serving_env_sha256"] == "1" * 64
 
-    monkeypatch.setenv("HOTPOTQA_POSIT_ENV_SHA256", "4" * 64)
+    monkeypatch.setenv("HOTPOTQA_SERVING_ENV_SHA256", "4" * 64)
 
     assert hotpotqa_run_key("react_v2", args) != first_key
 
@@ -1330,7 +1340,7 @@ def test_deepseek_serving_environment_is_material_to_contract_and_run_key(monkey
 def test_experiment_model_pair_rejects_cross_model_runs() -> None:
     """Reject a Qwen student paired with the DeepSeek proposer."""
     with pytest.raises(ValueError, match="same model"):
-        validate_experiment_model_pair(QWEN3_8_27B_MODEL, DEEPSEEK_V4_FLASH_MODEL)
+        validate_experiment_model_pair(QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL)
 
 
 def test_experiment_model_pair_rejects_unknown_models() -> None:
@@ -1597,7 +1607,7 @@ def test_stateless_action_menu_contract_matches_between_wikipedia_benchmarks() -
     expected = build_hotpotqa_run_contract("random", args)["optimizer"]["stateless_action_menu"]
 
     for build_contract, schema_version in (
-        (build_hotpotqa_run_contract, 24),
+        (build_hotpotqa_run_contract, 25),
         (build_hover_run_contract, 4),
     ):
         contract = build_contract("random", args)

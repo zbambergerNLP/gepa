@@ -20,7 +20,7 @@ except ImportError:
     dspy = None  # type: ignore[assignment]
 
 from examples.common.experiment_models import (
-    DEEPSEEK_V4_FLASH_MODEL,
+    DEEPSEEK_V4_1_FLASH_MODEL,
     EXPERIMENT_NUM_RETRIES,
     QWEN3_8_27B_MODEL,
     experiment_decoding,
@@ -45,6 +45,7 @@ HOTPOTQA_SCIENTIFIC_SPLIT_SHA256 = {
     "test": "55cd1c7a999476ea4c7ec67f964ad4fa0ae662a2b9f7ade59c64108e659add31",
 }
 HOTPOTQA_SCIENTIFIC_REQUEST_SEED = 0
+HOTPOTQA_REQUEST_TIMEOUT_SECONDS = 3600
 
 
 if dspy is not None:
@@ -166,11 +167,12 @@ def resolve_hotpotqa_lm_kwargs(
     """
     kwargs: dict[str, object] = {
         "num_retries": EXPERIMENT_NUM_RETRIES,
+        "timeout": HOTPOTQA_REQUEST_TIMEOUT_SECONDS,
         **provider_retry_kwargs(role="solver"),
         **experiment_decoding(model, agentic=False),
         **experiment_request_overrides(model, explicit_reasoning=True),
     }
-    if model in {QWEN3_8_27B_MODEL, DEEPSEEK_V4_FLASH_MODEL}:
+    if model in {QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL}:
         kwargs["seed"] = HOTPOTQA_SCIENTIFIC_REQUEST_SEED
     if api_base is not None:
         kwargs["api_base"] = api_base

@@ -35,7 +35,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from examples.common.experiment_models import (
-    DEEPSEEK_V4_FLASH_MODEL,
+    DEEPSEEK_V4_1_FLASH_MODEL,
     EXPERIMENT_MODELS,
     EXPERIMENT_NUM_RETRIES,
     QWEN3_8_27B_MODEL,
@@ -294,12 +294,14 @@ def _validate_scientific_contract(args) -> None:
                 )
         if not os.environ.get("HOTPOTQA_VLLM_VERSION"):
             changed_axes.append("HOTPOTQA_VLLM_VERSION must identify the serving runtime")
-        posit_commit = os.environ.get("HOTPOTQA_POSIT_COMMIT", "")
-        if len(posit_commit) != 40 or any(character not in "0123456789abcdef" for character in posit_commit):
-            changed_axes.append("HOTPOTQA_POSIT_COMMIT must identify the exact serving source")
-        posit_environment = os.environ.get("HOTPOTQA_POSIT_ENV_SHA256", "")
-        if len(posit_environment) != 64 or any(character not in "0123456789abcdef" for character in posit_environment):
-            changed_axes.append("HOTPOTQA_POSIT_ENV_SHA256 must identify the frozen serving environment")
+        serving_lock = os.environ.get("HOTPOTQA_SERVING_LOCK_SHA256", "")
+        if len(serving_lock) != 64 or any(character not in "0123456789abcdef" for character in serving_lock):
+            changed_axes.append("HOTPOTQA_SERVING_LOCK_SHA256 must identify the exact serving dependency lock")
+        serving_environment = os.environ.get("HOTPOTQA_SERVING_ENV_SHA256", "")
+        if len(serving_environment) != 64 or any(
+            character not in "0123456789abcdef" for character in serving_environment
+        ):
+            changed_axes.append("HOTPOTQA_SERVING_ENV_SHA256 must identify the frozen serving environment")
         if os.environ.get("HOTPOTQA_SERVING_ENGINE") != "vllm":
             changed_axes.append("HOTPOTQA_SERVING_ENGINE must be 'vllm'")
         try:
@@ -335,36 +337,37 @@ def _validate_scientific_contract(args) -> None:
             for setting in required_serve_settings:
                 if setting not in serve_arguments.split(";"):
                     changed_axes.append(f"HOTPOTQA_SERVE_ARGUMENTS must include {setting!r}")
-        elif args.solver_model == DEEPSEEK_V4_FLASH_MODEL:
-            if os.environ.get("HOTPOTQA_WEIGHT_DTYPE") != "fp4_fp8_mixed":
-                changed_axes.append("HOTPOTQA_WEIGHT_DTYPE must be 'fp4_fp8_mixed'")
+        elif args.solver_model == DEEPSEEK_V4_1_FLASH_MODEL:
+            if os.environ.get("HOTPOTQA_WEIGHT_DTYPE") != "fp8":
+                changed_axes.append("HOTPOTQA_WEIGHT_DTYPE must be 'fp8'")
             if os.environ.get("HOTPOTQA_KV_CACHE_DTYPE") != "fp8":
                 changed_axes.append("HOTPOTQA_KV_CACHE_DTYPE must be 'fp8'")
             if os.environ.get("HOTPOTQA_VLLM_BATCH_INVARIANT") != "false":
                 changed_axes.append("HOTPOTQA_VLLM_BATCH_INVARIANT must be 'false'")
-            if os.environ.get("HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS") != "false":
-                changed_axes.append("HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS must be 'false'")
+            if os.environ.get("HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS") != "true":
+                changed_axes.append("HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS must be 'true'")
             required_serve_settings = (
                 "tp=8",
                 "ep=8",
                 "dp=1",
                 "api_servers=1",
                 "gpu_memory_utilization=0.92",
-                "max_model_len=393216",
-                "max_num_seqs=8",
-                "dtype=auto",
-                "weight_dtype=fp4_fp8_mixed",
+                "max_model_len=262144",
+                "max_num_seqs=1",
+                "dtype=bfloat16",
+                "weight_dtype=fp8",
+                "expert_dtype=fp4",
                 "kv_cache_dtype=fp8",
-                "block_size=256",
+                "block_size=auto",
                 "prefix_caching=false",
-                "tokenizer_mode=deepseek_v4",
-                "reasoning_parser=deepseek_v4",
+                "tokenizer_mode=deepseek_v41",
+                "reasoning_parser=deepseek_v41",
                 "auto_tool_choice=true",
-                "tool_parser=deepseek_v4",
+                "tool_parser=deepseek_v41",
                 "speculative_decoding=false",
                 "seed=0",
                 "batch_invariant=false",
-                "single_sequence_replicas=false",
+                "single_sequence_replicas=true",
             )
             for setting in required_serve_settings:
                 if setting not in serve_arguments.split(";"):
@@ -558,7 +561,7 @@ def build_run_contract(condition: str, args) -> dict:
         else:
             semantic_controller_policy = deepcopy(CONTROLLER_POLICY_CONTRACT)
     return {
-        "schema_version": 24,
+        "schema_version": 25,
         "provider_retry_policy": deepcopy(PROVIDER_RETRY_POLICY),
         "benchmark": "hotpotqa-fullwiki-wiki17",
         "reference_artifact_commit": GEPA_ARTIFACT_COMMIT,
@@ -571,6 +574,7 @@ def build_run_contract(condition: str, args) -> dict:
             "solver_decoding": {field: deepcopy(solver_lm_kwargs[field]) for field in solver_decoding_fields},
             "solver_request_overrides": {field: deepcopy(solver_lm_kwargs[field]) for field in solver_request_fields},
             "solver_num_retries": EXPERIMENT_NUM_RETRIES,
+            "solver_request_timeout_seconds": solver_lm_kwargs["timeout"],
             "reflection": args.reflection_model,
             "reflection_version": experiment_model_version(args.reflection_model),
             "reflection_api_base": reflection_api_identity,
@@ -580,6 +584,7 @@ def build_run_contract(condition: str, args) -> dict:
                 field: deepcopy(reflection_lm_kwargs[field]) for field in reflection_request_fields
             },
             "reflection_num_retries": EXPERIMENT_NUM_RETRIES,
+            "reflection_request_timeout_seconds": reflection_lm_kwargs["timeout"],
         },
         "optimizer": {
             "max_metric_calls": args.max_metric_calls,
@@ -681,8 +686,8 @@ def build_run_contract(condition: str, args) -> dict:
             "env_spec_sha256": os.environ.get("HOTPOTQA_ENV_SPEC_SHA256"),
             "gepa_env_sha256": os.environ.get("HOTPOTQA_GEPA_ENV_SHA256"),
             "serving_engine": os.environ.get("HOTPOTQA_SERVING_ENGINE"),
-            "posit_commit": os.environ.get("HOTPOTQA_POSIT_COMMIT"),
-            "posit_env_sha256": os.environ.get("HOTPOTQA_POSIT_ENV_SHA256"),
+            "serving_lock_sha256": os.environ.get("HOTPOTQA_SERVING_LOCK_SHA256"),
+            "serving_env_sha256": os.environ.get("HOTPOTQA_SERVING_ENV_SHA256"),
             "gpu_runtime": (
                 json.loads(os.environ["HOTPOTQA_GPU_RUNTIME"]) if os.environ.get("HOTPOTQA_GPU_RUNTIME") else None
             ),
@@ -1426,7 +1431,9 @@ def main():
     )
     parser.add_argument("--tag", type=str, default="", help="Suffix appended to run dirs (e.g. rev2, 6871)")
     parser.add_argument(
-        "--text-limits", type=parse_text_limits, default=None,
+        "--text-limits",
+        type=parse_text_limits,
+        default=None,
         help="JSON object of optional character limits; omitted or null fields are unlimited",
     )
     args = parser.parse_args()

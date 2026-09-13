@@ -22,8 +22,9 @@ old `169ddda` commit or switch to a separate tooling branch.
   exact commands first; local implementation work does not authorize them.
 - Use the repository scripts for connections, setup, sync, submission, and
   fetching. Do not invent alternate submission paths.
-- Launch from the reviewed clean source. Preflight requires explicit
-  `HOTPOTQA_SOURCE_COMMIT`; production stages `git archive HEAD` into
+- Launch from the reviewed clean consolidated branch. Preflight uses its latest
+  committed `HEAD` automatically; an optional `HOTPOTQA_SOURCE_COMMIT` asserts
+  a specific expected revision. Production stages `git archive HEAD` into
   `$REMOTE_DIR/sources/<sha>` and records the source manifest.
 - Source, runtime, checkpoint, or experiment changes require a fresh campaign.
   Keep the same configuration for resume.

@@ -17,6 +17,62 @@ def executable(path: Path, body: str) -> None:
     path.chmod(0o700)
 
 
+@pytest.mark.parametrize("case", ["current", "stale_commit", "other_branch", "dirty"])
+def test_preflight_uses_clean_consolidated_head_before_any_ssh(tmp_path, case):
+    """Default to HEAD and reject source drift before contacting either host."""
+    script_dir = tmp_path / "scripts" / "della"
+    script_dir.mkdir(parents=True)
+    shutil.copy2(ROOT / "scripts/della/preflight_hotpotqa.sh", script_dir)
+    config = script_dir / ".env"
+    config.write_text(
+        "REMOTE_USER=testuser\nREMOTE_HOST=login.example\nREMOTE_VIS_HOST=vis.example\n"
+        "REMOTE_DIR=/scratch/test/gepa\nSCRATCH_BASE=/scratch/test/gepa\n"
+        "MODEL_STORAGE=/projects/test/models\nGPU_PARTITION=ailab\n"
+    )
+    config.chmod(0o600)
+    serving = tmp_path / "examples" / "hotpotqa" / "serving"
+    serving.mkdir(parents=True)
+    for name in ("requirements-x86_64-linux-py312.txt", "requirements-deepseek-v4.1-flash-x86_64-linux-py312.txt"):
+        (serving / name).write_text("fixture\n")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    executable(
+        bin_dir / "git",
+        """case "$*" in
+        *--show-current*) printf '%s\\n' "$TEST_BRANCH" ;;
+        *rev-parse*) printf '%s\\n' "$TEST_COMMIT" ;;
+        *status*) printf '%s' "$TEST_DIRTY" ;;
+        *) exit 1 ;;
+    esac
+    """,
+    )
+    executable(bin_dir / "ssh", 'printf "%s\\n" "$*" >> "$SSH_CAPTURE"\ncat >/dev/null\n')
+    for command in ("rsync", "sha256sum", "uv"):
+        executable(bin_dir / command, 'printf "%064d\\n" 1\n')
+    capture = tmp_path / "ssh-calls"
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "TEST_COMMIT": "a" * 40,
+        "TEST_BRANCH": "other" if case == "other_branch" else "codex/consolidated-della-experiments",
+        "TEST_DIRTY": " M file" if case == "dirty" else "",
+        "SSH_CAPTURE": str(capture),
+    }
+    env.pop("HOTPOTQA_SOURCE_COMMIT", None)
+    if case == "stale_commit":
+        env["HOTPOTQA_SOURCE_COMMIT"] = "b" * 40
+    result = subprocess.run(
+        ["bash", str(script_dir / "preflight_hotpotqa.sh")], env=env, input="", capture_output=True, text=True
+    )
+    if case == "current":
+        assert result.returncode == 0, result.stderr
+        assert "a" * 40 in result.stdout
+        assert len(capture.read_text().splitlines()) == 3
+    else:
+        assert result.returncode != 0
+        assert not capture.exists()
+
+
 @pytest.mark.parametrize("verification_status", [0, 1])
 def test_existing_shared_model_is_verified_without_preparing_it(tmp_path, verification_status):
     """Reuse Zach's pinned bytes read-only and never repair a failed shared checkpoint silently."""
@@ -34,7 +90,8 @@ def test_existing_shared_model_is_verified_without_preparing_it(tmp_path, verifi
         ["bash", "-c", "set -eu\n" + block],
         cwd=tmp_path,
         env={**os.environ, "CALLS": str(calls), "MODEL": "qwen3.8-27b", "MODEL_DIR": str(model)},
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     assert result.returncode == verification_status
     assert len(calls.read_text().splitlines()) == 1

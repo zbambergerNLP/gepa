@@ -18,10 +18,13 @@ manifest. No branch switching is needed between experiment and Della tooling.
 ```bash
 cd /path/to/gepa-consolidated
 git status --short --branch
-export HOTPOTQA_SOURCE_COMMIT="$(git rev-parse HEAD)"
 ```
 
-Keep this SHA fixed during a campaign. Source, checkpoint, runtime, or experiment
+Preflight and submission automatically record the latest committed `HEAD`;
+no manual source hash is required. Preflight requires the consolidated branch
+and rejects uncommitted changes. An optional `HOTPOTQA_SOURCE_COMMIT` asserts
+a particular expected revision. Keep the recorded SHA fixed during a campaign.
+Source, checkpoint, runtime, or experiment
 changes require a fresh campaign. HotPotQA's consolidated run contract is schema 26.
 
 Reuse the working Della connection configuration. If this checkout's ignored
@@ -42,8 +45,8 @@ scripts/della/preflight_hotpotqa.sh
 
 The helper uses the existing SSH configuration: `ControlMaster auto`,
 `ControlPath ~/.ssh/cm/%r@%h:%p`, and `ControlPersist yes` for both configured
-hosts. Preflight is read-only and requires the explicit `HOTPOTQA_SOURCE_COMMIT`
-above. It checks source, permissions, SSH, CUDA, storage, and serving locks.
+hosts. Preflight is read-only and uses the current consolidated branch tip.
+It checks source, permissions, SSH, CUDA, storage, and serving locks.
 
 ## Prepare the exact artifacts
 

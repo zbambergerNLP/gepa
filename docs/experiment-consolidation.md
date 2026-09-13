@@ -1,6 +1,8 @@
 # Consolidated experiment decisions
 
 Local branch: `codex/consolidated-della-experiments`.
+Use this branch's latest clean commit for preflight and submission; both record
+the source revision automatically. A manually supplied source hash is optional.
 
 This integration combines the complete reviewed HotPotQA/Terminal-Bench branch
 `af602f3d7a7949f199883ff5a6a34afbd1580fcf` (PR #60, including HotPotQA PR #59 at

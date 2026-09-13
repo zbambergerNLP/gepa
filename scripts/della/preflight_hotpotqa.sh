@@ -6,14 +6,15 @@
 # node. Read-only; run before build_env.sh.
 #
 # Usage:
-#   HOTPOTQA_SOURCE_COMMIT=<sha> scripts/della/preflight_hotpotqa.sh
-# (required; must be the reviewed consolidated commit)
+#   scripts/della/preflight_hotpotqa.sh
+# Uses the current clean consolidated branch tip. An optional
+# HOTPOTQA_SOURCE_COMMIT additionally checks a specific expected revision.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 ENV_FILE="${SCRIPT_DIR}/.env"
-EXPECTED_COMMIT="${HOTPOTQA_SOURCE_COMMIT:?set HOTPOTQA_SOURCE_COMMIT to the reviewed consolidated commit}"
+EXPECTED_BRANCH="codex/consolidated-della-experiments"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -24,12 +25,16 @@ done
 echo "ok"
 
 echo "== 2. source commit and worktree"
+CURRENT_BRANCH="$(git -C "${REPO_ROOT}" branch --show-current)"
+[[ "${CURRENT_BRANCH}" == "${EXPECTED_BRANCH}" ]] \
+    || fail "use the consolidated branch ${EXPECTED_BRANCH}; current branch is ${CURRENT_BRANCH:-detached HEAD}"
 HEAD_COMMIT="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
+EXPECTED_COMMIT="${HOTPOTQA_SOURCE_COMMIT:-${HEAD_COMMIT}}"
 [[ "${HEAD_COMMIT}" == "${EXPECTED_COMMIT}" ]] \
-    || fail "HEAD is ${HEAD_COMMIT}, expected ${EXPECTED_COMMIT} (git switch --detach ${EXPECTED_COMMIT})"
+    || fail "HEAD is ${HEAD_COMMIT}, expected ${EXPECTED_COMMIT}; review the current branch tip"
 [[ -z "$(git -C "${REPO_ROOT}" status --porcelain --untracked-files=normal)" ]] \
     || fail "worktree is dirty; the launcher rejects it"
-echo "Source is exact and clean."
+echo "Source is exact and clean: ${CURRENT_BRANCH} at ${HEAD_COMMIT}."
 
 echo "== 3. scripts/della/.env"
 [[ -f "${ENV_FILE}" ]] || fail "${ENV_FILE} missing (copy .env.example)"

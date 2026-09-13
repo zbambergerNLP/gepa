@@ -65,6 +65,21 @@ approved smaller output caps. See the provider review for sources.
   output, summarization, and usage accounting remain as previously configured.
 - Evaluation caching is off. HotPotQA DSPy response caches are off. Recovery
   checkpoints and optimizer response journals remain supported.
+- For both HotPotQA and TB2.1, automatically request a continuation allocation
+  after scheduler-confirmed cluster allocation time expiry, provided the run
+  has a verified recoverable checkpoint and newly persisted work since the
+  allocation began. Progress means completed evaluations or iterations, not
+  improved metrics or accepted candidates. Resume the same logical run with
+  the same source, campaign, data, model, and material runtime settings; retain
+  saved optimizer/random-sampler state and the remaining original budget.
+  Preserve completed evaluation evidence and record recovery costs separately.
+  Keep dependent ablations waiting until the current optimization and its test
+  finish successfully. Stop for unresolved execution errors, user cancellation,
+  missing or incompatible checkpoints, or no saved progress. Provider retries
+  and official Terminal-Bench task-timeout scoring retain their own policies;
+  they do not trigger allocation continuation. This policy is approved;
+  automatic submission wiring and live verification remain pending for both
+  benchmarks. Terminal-Bench's Della backend work remains paused.
 - Training batches use their own seeded random stream, independent of method
   decisions; larger budgets continue the same batch sequence.
 - Add a small training-only optimizer-flow check for each model and distinct

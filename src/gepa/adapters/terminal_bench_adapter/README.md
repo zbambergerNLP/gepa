@@ -291,7 +291,7 @@ also scores its specific malformed task-output case as zero. Terminal-Bench's
 timeout handling uses Harbor's verifier instead of assigning an automatic zero.
 
 Every Harbor job explicitly uses `n_attempts=1` and `retry.max_retries=0`.
-There are no automatic retries of failed jobs or extra attempts to improve a
+There are no automatic retries of failed Harbor jobs or extra attempts to improve a
 completed score. Repair infrastructure before explicitly resuming. Completed
 test repetitions remain reusable; an interrupted, unrecorded repetition starts
 again as described below. Failed-job logs and any Harbor-recorded token/cost
@@ -315,6 +315,23 @@ existing `token-usage.jsonl` files, including failures with unknown usage.
 The two files describe the same requests, so their totals must not be added.
 The policy is pinned in run contract version 32 and pilot configuration version
 9; older or changed policies cannot resume or enter final evaluation.
+
+For cluster execution, the approved policy matches HotPotQA: after
+scheduler-confirmed allocation time expiry, automatically request a continuation
+only when a verified recoverable checkpoint contains newly persisted work from
+that allocation. Completed evaluations or iterations count as progress even
+with zero, unchanged, or lower rewards or rejected candidates. Resume the same
+logical run with matching source, campaign, data, model, runtime settings, saved
+state, and remaining original budget. Preserve completed test evidence and
+report recovery costs separately. Subsequent ablations wait for the current
+optimization and test to finish successfully.
+
+Unresolved execution errors, cancellation, missing/incompatible checkpoints,
+or no saved progress stop continuation. Official task timeouts and provider or
+Harbor process failures keep the policies above; they are not cluster allocation
+expiry. Automatic allocation continuation is approved, but scheduler wiring and
+live verification remain pending. This decision does not resume the paused
+Terminal-Bench Della backend work.
 
 #### Reference protocol and pending confirmation
 

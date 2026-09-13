@@ -62,6 +62,14 @@ Standard and doubled budgets share these checks.
 Implementation and live execution of this additional check remain pending; see
 the benchmark runbooks for coverage and acceptance criteria.
 
+Both benchmarks also have an approved automatic allocation-continuation policy:
+resume after scheduler-confirmed allocation time expiry when a verified
+checkpoint contains new saved work, preserving run identity and the remaining
+budget. Metric improvement is not required. Unresolved errors, cancellation,
+missing/incompatible checkpoints, or no saved progress stop continuation.
+Scheduler wiring and live verification remain pending; see the benchmark
+runbooks. Terminal-Bench's Della backend remains paused.
+
 DeepSeek is pinned to revision `dba1be0a40aa45a94ad051997016db3960a90277`.
 The V4.1 arm uses the exact vLLM commit wheel `e77daef89` (version
 `0.1.1.dev5+ge77daef89`) with native `deepseek_v41` tokenizer, reasoning, and

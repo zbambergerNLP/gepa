@@ -243,7 +243,19 @@ Jobs request one node, eight H200 GPUs, 64 CPUs, and 768G on `ailab`. Qwen stand
 caps are 72 hours; expanded and DeepSeek caps are 144 hours. These are limits,
 not estimates. Logs live at `$SCRATCH_BASE/logs/hotpotqa/<campaign>/<commit>/`.
 
-Resume only with the same source/campaign/model/settings, using
+The approved allocation-recovery policy is to request a continuation
+automatically after scheduler-confirmed allocation time expiry, using a
+verified checkpoint with newly persisted work from that allocation. Completed
+evaluations or iterations count as progress even when scores do not improve
+or candidates are rejected. Preserve the same logical run, source/campaign,
+data, model, runtime settings, saved state, and remaining original budget.
+Keep downstream ablations waiting for this cell's optimization and test to
+finish successfully. Stop for unresolved execution errors, cancellation,
+missing/incompatible checkpoints, or no saved progress; retain recovery usage.
+Automatic continuation is approved but not yet wired into the launcher or
+verified on Della. The existing launcher still requires explicit resubmission.
+
+For the current manual path, resume only with the same source/campaign/model/settings, using
 `BUDGET_PROFILE=standard|expanded CONDITION=<cell>`. Inspect orphaned dependency
 chains before resubmission. Fetch and validate completed evidence with
 `scripts/della/fetch_hotpotqa_results.sh` under the same campaign ID. Its output

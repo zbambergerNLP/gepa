@@ -53,6 +53,11 @@ scheduling from those results: concurrent if qualified, otherwise sequential
 with the required full pilots completed in that mode. This decision remains
 pending until live pilot review and is separate from each arm's worker count.
 Follow the benchmark pilot protocols; ablations within a model stay sequential.
+Both protocols also include an approved training-only optimizer-flow check per
+model and distinct method, covering both Terminal-Bench scopes. Correct process
+completion qualifies even with unchanged/worse scores or a rejected candidate.
+Implementation and live execution of this additional check remain pending; see
+the benchmark runbooks for coverage and acceptance criteria.
 
 DeepSeek is pinned to revision `dba1be0a40aa45a94ad051997016db3960a90277`.
 The V4.1 arm uses the exact vLLM commit wheel `e77daef89` (version

@@ -171,6 +171,23 @@ Check execution evidence separately from scores: the normal evaluator assigns
 zero to malformed task output, which is a pilot reliability issue. An ordinary
 wrong answer remains a valid baseline result.
 
+Also include a small training-only optimizer-flow check per model for `vanilla`,
+`react_v2`, `react_v2_random`, and `action`. Exercise real task feedback through
+reflection/proposal and candidate reevaluation, including each method's actual
+Manifestor, Controller, and Editor stages where applicable. Save the stage
+evidence and the resulting normal acceptance or rejection decision separately
+from the initial-prompt calibration measurements and production runs.
+
+The check passes when that process completes correctly. Tied or lower EM/F1,
+wrong answers, and rejected candidates are valid outcomes, with no minimum
+score or improvement requirement. Recovered editor tool errors are acceptable
+when normal feedback allows completion. Investigate unresolved execution errors
+and missing stage evidence; do not retry for an improved metric or change the
+optimizer's acceptance rule. Keep validation/test examples out, and start every
+production cell from the approved initial prompts, not a pilot revision.
+This additional check is approved; its implementation and live execution remain
+pending. The serving canary alone does not exercise this complete flow.
+
 Keep 12 Qwen / 4 DeepSeek workers if the pilot passes; the approved plan does
 not include a search for higher parallelism. If queueing causes timeouts,
 reduce concurrency and repeat the affected model's 150-question training

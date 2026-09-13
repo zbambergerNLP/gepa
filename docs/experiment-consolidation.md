@@ -67,6 +67,22 @@ approved smaller output caps. See the provider review for sources.
   checkpoints and optimizer response journals remain supported.
 - Training batches use their own seeded random stream, independent of method
   decisions; larger budgets continue the same batch sequence.
+- Add a small training-only optimizer-flow check for each model and distinct
+  method (`vanilla`, `react_v2`, `react_v2_random`, `action`), covering both
+  Terminal-Bench text scopes with `system_prompt` first. Exercise real task
+  feedback, reflection/proposal, and candidate reevaluation, including the
+  Manifestor, Controller, and Editor where used by the method. Record the
+  resulting normal acceptance or rejection decision. A tied or lower score,
+  wrong task answer, or rejected candidate is not a pilot failure; no minimum
+  score or improvement is required. Recovered tool errors are acceptable when
+  the normal feedback path lets the process complete. Unresolved execution
+  errors or missing stage evidence require investigation. Do not retry for a
+  better metric or change the optimizer's acceptance rule to pass the check.
+  Keep these diagnostics separate from initial-prompt throughput calibration
+  and production budgets; preserve their artifacts, but start every production
+  cell from the approved initial prompts. Validation and test data remain
+  excluded. This additional check is approved; implementation and live
+  execution remain pending.
 - Determine model-arm scheduling separately for HotPotQA and TB2.1 from their
   training pilots. Attempt overlapping Qwen and DeepSeek execution on separate
   allocations, with independent servers and output directories. Record job IDs,
@@ -135,7 +151,7 @@ output cutoffs require their own investigation.
 | Failures | Genuine task failures score zero; verified task timeout uses actual reward. Infrastructure/provider failures abort rather than invent scores. |
 | Context | Automatic summary enabled at the agreed remaining-context trigger; traces retained. Summary text editable only in all-text. |
 | Budget accounting | Training passes normalized to each benchmark; validation and agent costs reported separately. More draws are not claimed to be equal compute. |
-| Pilot | Per model, three training tasks then all 30, initial harness only, with usage/cutoff/timeout/throughput review. Same pilot may serve identical initial text in both scopes. |
+| Pilot | Per model, three training tasks then all 30 with the initial harness for usage/cutoff/timeout/throughput review; this calibration evidence may serve identical initial text in both scopes. Add the separate optimizer-flow check above for each method and scope, with no score-improvement requirement. |
 | Runtime | Verified local model-server identity at pilot, optimization, resume, and final evaluation. Freeze concurrency/hardware/settings per model after training calibration. |
 | Final evaluation | Evaluate each completed ablation before starting the next. Accumulate the common initial harness and 12 immutable validation winners in one matched test directory per model, three repetitions each; report execution variability. Exact data and splits must match throughout. |
 | Execution backend | Existing Docker runner retained. Proposed Della Apptainer work explicitly paused; no backend compatibility or live pilot qualification is claimed. |

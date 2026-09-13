@@ -848,8 +848,9 @@ Repeat both stages with `--model hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash`
 with `--runtime-record runs/servers/deepseek.json` and separate directories under
 `runs/canaries/tb2.1/deepseek`. This is 33 task
 attempts per model: **60 full-stage attempts plus six smoke attempts** across
-both arms, before any additional calibration runs. All tasks come from training;
-no optimization, validation, or held-out testing runs in these pilots. This
+both arms, before additional calibration runs or the optimizer-flow checks
+below. All tasks come from training; these two initial-harness stages do not
+optimize prompts or use validation/held-out data. This
 coverage is our experimental choice, not a requirement from the reference paper.
 
 Review `pilot-summary.json` for elapsed time, tasks/hour, and verified task
@@ -877,6 +878,29 @@ serves every method, budget, and scope within a model arm. The pilot defaults to
 server configuration between calibration, the full stage, and the campaign.
 The command does not adjust caps or concurrency automatically. If settings need
 to change, collect matching pilot evidence and start a fresh campaign.
+
+In addition, include a small training-only optimizer-flow check for each model
+and distinct method (`vanilla`, `react_v2`, `react_v2_random`, `action`) in both
+text scopes, with `system_prompt` first. Exercise real task feedback through
+reflection/proposal and candidate reevaluation, including each method's actual
+Manifestor, Controller, and Editor stages where applicable. Preserve the stage
+evidence and the resulting normal acceptance or rejection decision. Identical
+initial text permits sharing task-calibration evidence above; it does not cover
+the different optimizer paths and editing scopes.
+
+The optimizer-flow check passes when the process completes correctly. Zero,
+tied, or lower rewards and rejected candidates are valid outcomes; there is no
+minimum score or improvement requirement. Recovered editor tool errors are
+acceptable when normal feedback allows completion. Investigate unresolved
+execution errors or missing stage evidence. Do not retry for a better reward
+or change the optimizer's acceptance rule. Keep validation/test tasks out and
+preserve the existing task-failure and verified-timeout policies. Save these
+diagnostics separately from throughput calibration and production budgets, and
+start every production cell from the approved initial harness.
+
+This additional optimizer-flow check is approved; implementation and live
+execution remain pending. The current `canary` command and `--reviewed-pilot`
+validation cover the two initial-harness stages, not this additional check.
 
 Optimization writes `token-usage.jsonl` beside the run contract. Every Harbor
 trial writes another in its agent log directory, including main-agent and

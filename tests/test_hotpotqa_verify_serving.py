@@ -1,5 +1,6 @@
 """Tests for the standalone local HotPotQA serving verification."""
 
+import shlex
 import sys
 from pathlib import Path
 from unittest.mock import Mock, call
@@ -13,6 +14,20 @@ from examples.hotpotqa import verify_serving
 from gepa.strategies.edit_tools import EDIT_TOOL_SETS
 
 LOCAL_API_BASE = "http://127.0.0.1:8000/v1"
+
+
+def test_diagnostic_package_inventory_python_executes(capsys) -> None:
+    """Execute the embedded inventory snippet that runs before model startup."""
+    script = Path(__file__).parents[1] / "scripts/della/verify_deepseek_serving.sh"
+    line = next(line for line in script.read_text().splitlines() if "m.distributions()" in line)
+    command = shlex.split(line.rstrip().removesuffix("\\"))
+    snippet = command[command.index("-c") + 1]
+
+    exec(compile(snippet, str(script), "exec"), {})
+
+    packages = capsys.readouterr().out.splitlines()
+    assert packages == sorted(packages)
+    assert any(package.startswith("pytest==") for package in packages)
 
 
 @pytest.mark.parametrize(

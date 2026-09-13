@@ -178,6 +178,13 @@ Manifestor, Controller, and Editor stages where applicable. Save the stage
 evidence and the resulting normal acceptance or rejection decision separately
 from the initial-prompt calibration measurements and production runs.
 
+Run one completed proposal-and-reevaluation cycle on the normal three-example
+training minibatch per method/model combination: four methods times two models
+gives eight checks. Standard and doubled budgets share this process coverage;
+their execution paths are the same. Stop after the completed cycle regardless
+of metric direction or candidate acceptance. The three-question and full
+150-question initial-prompt calibration stages remain separate.
+
 The check passes when that process completes correctly. Tied or lower EM/F1,
 wrong answers, and rejected candidates are valid outcomes, with no minimum
 score or improvement requirement. Recovered editor tool errors are acceptable

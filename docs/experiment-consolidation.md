@@ -83,6 +83,13 @@ approved smaller output caps. See the provider review for sources.
   cell from the approved initial prompts. Validation and test data remain
   excluded. This additional check is approved; implementation and live
   execution remain pending.
+- Size each optimizer-flow check at one completed proposal-and-reevaluation
+  cycle on the normal three-example training minibatch. Cover four methods
+  and two models for HotPotQA (eight checks), and both text scopes as well for
+  TB2.1 (16 checks). Standard and doubled budgets share this process coverage
+  because they use the same execution paths. Stop after the completed cycle
+  regardless of metric direction or candidate acceptance. Keep the separate
+  three-example and full-training-set initial-prompt calibration stages.
 - Determine model-arm scheduling separately for HotPotQA and TB2.1 from their
   training pilots. Attempt overlapping Qwen and DeepSeek execution on separate
   allocations, with independent servers and output directories. Record job IDs,

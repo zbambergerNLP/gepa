@@ -888,6 +888,14 @@ evidence and the resulting normal acceptance or rejection decision. Identical
 initial text permits sharing task-calibration evidence above; it does not cover
 the different optimizer paths and editing scopes.
 
+Run one completed proposal-and-reevaluation cycle on the normal three-example
+training minibatch per method/model/scope combination: four methods times two
+models times two scopes gives 16 checks. Standard and doubled budgets share
+this process coverage because they use the same execution paths. Stop after
+the completed cycle regardless of reward direction or candidate acceptance.
+The three-task and full 30-task initial-harness calibration stages remain
+separate, and the 16 checks are additional to their task-attempt counts.
+
 The optimizer-flow check passes when the process completes correctly. Zero,
 tied, or lower rewards and rejected candidates are valid outcomes; there is no
 minimum score or improvement requirement. Recovered editor tool errors are

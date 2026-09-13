@@ -56,6 +56,9 @@ Follow the benchmark pilot protocols; ablations within a model stay sequential.
 Both protocols also include an approved training-only optimizer-flow check per
 model and distinct method, covering both Terminal-Bench scopes. Correct process
 completion qualifies even with unchanged/worse scores or a rejected candidate.
+Use one completed proposal-and-reevaluation cycle on a three-example training
+minibatch per combination: eight HotPotQA checks and 16 Terminal-Bench checks.
+Standard and doubled budgets share these checks.
 Implementation and live execution of this additional check remain pending; see
 the benchmark runbooks for coverage and acceptance criteria.
 

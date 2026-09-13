@@ -75,8 +75,8 @@ unverified. Terminal-Bench's Della backend remains paused.
 DeepSeek is pinned to revision `dba1be0a40aa45a94ad051997016db3960a90277`.
 The V4.1 arm uses the exact vLLM commit wheel `e77daef89` (version
 `0.1.1.dev5+ge77daef89`) with native `deepseek_v41` tokenizer, reasoning, and
-tool parsers. It runs TP8/EP8 with one active sequence, FP8 KV cache and automatic
-block size, no speculative decoding, and prebuilt offline FlashInfer kernels.
+tool parsers. It runs TP4/EP4 on four H200s (32 CPUs, 512G), with Engram CPU offload
+explicit, one active sequence, FP8 KV cache and automatic block size, no speculative decoding, and prebuilt offline FlashInfer kernels.
 
 Provider guidance sets temperature 1.0 and top-p 0.95 for every role in both
 models. Thinking is explicit: Qwen `xhigh`; DeepSeek V4.1 numeric effort 100.

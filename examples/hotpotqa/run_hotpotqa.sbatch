@@ -6,7 +6,7 @@
 #
 # Prerequisites:
 #   1. GEPA repo synced and all pinned artifacts built with build_env.sh
-#   2. Eight H200 GPUs allocated by scripts/della/submit_hotpotqa.sh
+#   2. One Qwen or four DeepSeek H200 GPUs allocated by scripts/della/submit_hotpotqa.sh
 #
 # Submit through scripts/della/submit_hotpotqa.sh. It supplies the complete
 # model-specific resource request and is the only supported production entry.
@@ -230,7 +230,7 @@ export TRITON_CACHE_DIR="${SCRATCH_BASE}/.cache/triton"
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export JAX_PLATFORMS=cpu
-export VLLM_LOGGING_LEVEL=WARNING
+export VLLM_LOGGING_LEVEL=INFO
 export VLLM_USE_FLASHINFER_SAMPLER=0
 
 LOG_DIR="${SCRATCH_BASE}/logs/hotpotqa/${HOTPOTQA_CAMPAIGN_ID}/${HOTPOTQA_SOURCE_COMMIT}"
@@ -370,16 +370,99 @@ from examples.common.experiment_models import validate_experiment_vllm_version
 
 validate_experiment_vllm_version(sys.argv[1], sys.argv[2])
 PY
-RUNTIME_PY=("${VLLM_PY}")
+RUNTIME_PY=("${GEPA_UV_BIN}" run --no-project --python "${VLLM_PY}" python)
 unset VLLM_BATCH_INVARIANT
 HOTPOTQA_VLLM_BATCH_INVARIANT="false"
 
+GPU_INVENTORY="${LOG_DIR}/gpu-inventory-${SLURM_JOB_ID:-local}.json"
+GPU_IDS_FILE="${LOG_DIR}/gpu-ids-${SLURM_JOB_ID:-local}.txt"
+HOTPOTQA_GPU_RUNTIME="$("${RUNTIME_PY[@]}" - \
+    "$((VLLM_TENSOR_PARALLEL_SIZE * VLLM_DATA_PARALLEL_SIZE))" "${GPU_INVENTORY}" "${GPU_IDS_FILE}" <<'PY'
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import torch
+
+device_count = torch.cuda.device_count()
+expected_count = int(sys.argv[1])
+if device_count != expected_count:
+    raise SystemExit(f"This profile requires exactly {expected_count} visible H200 GPUs; found {device_count}.")
+names = []
+capabilities = []
+devices = []
+for device_index in range(device_count):
+    name = torch.cuda.get_device_name(device_index).strip()
+    capability = ".".join(str(part) for part in torch.cuda.get_device_capability(device_index))
+    if "H200" not in name.upper() or capability != "9.0":
+        raise SystemExit(
+            f"CUDA device {device_index} must be an H200 with compute capability 9.0; "
+            f"found {name!r} with {capability}."
+        )
+    names.append(name)
+    capabilities.append(capability)
+    properties = torch.cuda.get_device_properties(device_index)
+    uuid = str(properties.uuid)
+    if not uuid.startswith("GPU-"):
+        uuid = f"GPU-{uuid}"
+    devices.append({"cuda_index": device_index, "uuid": uuid, "memory_total_bytes": properties.total_memory})
+gpu_ids = ",".join(device["uuid"] for device in devices)
+driver_lines = subprocess.run(
+    ["nvidia-smi", "--id", gpu_ids, "--query-gpu=driver_version", "--format=csv,noheader,nounits"],
+    check=True,
+    capture_output=True,
+    text=True,
+).stdout.splitlines()
+driver_versions = sorted({line.strip() for line in driver_lines if line.strip()})
+if len(driver_versions) != 1:
+    raise SystemExit(f"Expected one NVIDIA driver version; found {driver_versions!r}.")
+Path(sys.argv[2]).write_text(json.dumps({"devices": devices, "driver_version": driver_versions[0]}, indent=2) + "\n")
+Path(sys.argv[3]).write_text(gpu_ids + "\n")
+# Physical UUIDs belong in telemetry, not the identity that survives job rescheduling.
+print(
+    json.dumps(
+        {
+            "compute_capabilities": capabilities,
+            "count": device_count,
+            "driver_version": driver_versions[0],
+            "names": names,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+)
+PY
+)"
+
+GEN_PID=""
+GPU_MONITOR_PID=""
+cleanup() {
+    echo "==> tearing down local ${SERVING_ENGINE} endpoint"
+    for process_id in "${GEN_PID}" "${GPU_MONITOR_PID}"; do
+        if [[ -n "${process_id}" ]]; then
+            kill "${process_id}" 2>/dev/null || true
+            wait "${process_id}" 2>/dev/null || true
+        fi
+    done
+}
+trap cleanup EXIT
+
+GPU_IDS="$(cat "${GPU_IDS_FILE}")"
+GPU_MEMORY_LOG="${LOG_DIR}/gpu-memory-${SLURM_JOB_ID:-local}.csv"
+GPU_QUERY=(nvidia-smi --id "${GPU_IDS}" \
+    --query-gpu=timestamp,uuid,memory.total,memory.used,utilization.gpu,utilization.memory,power.draw)
+"${GPU_QUERY[@]}" --format=csv > "${GPU_MEMORY_LOG}"
+"${GPU_QUERY[@]}" --format=csv,noheader --loop=5 >> "${GPU_MEMORY_LOG}" 2> "${GPU_MEMORY_LOG}.err" &
+GPU_MONITOR_PID=$!
+echo "==> sampling allocated GPU memory every five seconds: ${GPU_MEMORY_LOG}"
+
 if [[ "${MODEL_PROFILE}" == "qwen3.8-27b" ]]; then
     if [[ "${VLLM_TENSOR_PARALLEL_SIZE}" != "1" \
-        || "${VLLM_DATA_PARALLEL_SIZE}" != "8" \
-        || "${VLLM_API_SERVER_COUNT}" != "8" \
+        || "${VLLM_DATA_PARALLEL_SIZE}" != "1" \
+        || "${VLLM_API_SERVER_COUNT}" != "1" \
         || "${VLLM_MAX_NUM_SEQS}" != "1" ]]; then
-        echo "ERROR: Qwen requires TP1/DP8, eight API servers, and one sequence per replica" >&2
+        echo "ERROR: Qwen requires TP1/DP1, one API server, and one sequence per replica" >&2
         exit 1
     fi
     HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS="true"
@@ -397,11 +480,10 @@ if [[ "${MODEL_PROFILE}" == "qwen3.8-27b" ]]; then
             exit 1
         fi
     done
-    RUNTIME_PY=("${VLLM_PY}")
     export HOTPOTQA_WEIGHT_DTYPE="bfloat16"
     export HOTPOTQA_KV_CACHE_DTYPE="auto"
-    HOTPOTQA_SERVE_ARGUMENTS="tp=1;dp=8;api_servers=8;gpu_memory_utilization=${GEN_GMU};max_model_len=${GEN_MAX_LEN};rope_scaling=none;max_num_seqs=1;max_num_batched_tokens=${VLLM_MAX_NUM_BATCHED_TOKENS};dtype=bfloat16;kv_cache_dtype=auto;prefix_caching=false;language_model_only=true;reasoning_parser=qwen3;auto_tool_choice=true;tool_parser=qwen3_coder;seed=0;batch_invariant=false;single_sequence_replicas=true"
-    echo "==> serving Qwen with vLLM TP1/DP8 on :${GEN_PORT}; log: ${GEN_LOG}"
+    HOTPOTQA_SERVE_ARGUMENTS="tp=1;dp=1;api_servers=1;gpu_memory_utilization=${GEN_GMU};max_model_len=${GEN_MAX_LEN};rope_scaling=none;max_num_seqs=1;max_num_batched_tokens=${VLLM_MAX_NUM_BATCHED_TOKENS};dtype=bfloat16;kv_cache_dtype=auto;prefix_caching=false;language_model_only=true;reasoning_parser=qwen3;auto_tool_choice=true;tool_parser=qwen3_coder;seed=0;batch_invariant=false;single_sequence_replicas=true"
+    echo "==> serving Qwen with vLLM TP1/DP1 on :${GEN_PORT}; log: ${GEN_LOG}"
     env \
         -u OMP_NUM_THREADS \
         -u MKL_NUM_THREADS \
@@ -416,8 +498,8 @@ if [[ "${MODEL_PROFILE}" == "qwen3.8-27b" ]]; then
         --host 127.0.0.1 \
         --port "${GEN_PORT}" \
         --tensor-parallel-size 1 \
-        --data-parallel-size 8 \
-        --api-server-count 8 \
+        --data-parallel-size 1 \
+        --api-server-count 1 \
         --gpu-memory-utilization "${GEN_GMU}" \
         --max-model-len "${GEN_MAX_LEN}" \
         --max-num-seqs 1 \
@@ -430,20 +512,20 @@ if [[ "${MODEL_PROFILE}" == "qwen3.8-27b" ]]; then
         > "${GEN_LOG}" 2>&1 &
     GEN_PID=$!
 else
-    if [[ "${VLLM_TENSOR_PARALLEL_SIZE}" != "8" \
+    if [[ "${VLLM_TENSOR_PARALLEL_SIZE}" != "4" \
         || "${VLLM_DATA_PARALLEL_SIZE}" != "1" \
         || "${VLLM_API_SERVER_COUNT}" != "1" \
         || "${VLLM_MAX_NUM_SEQS}" != "1" ]]; then
-        echo "ERROR: DeepSeek requires TP8/EP8, one API server, and max_num_seqs=1" >&2
+        echo "ERROR: DeepSeek requires TP4/EP4, one API server, and max_num_seqs=1" >&2
         exit 1
     fi
     HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS="true"
     export HOTPOTQA_WEIGHT_DTYPE="fp8"
     export HOTPOTQA_KV_CACHE_DTYPE="fp8"
-    HOTPOTQA_SERVE_ARGUMENTS="tp=8;ep=8;dp=1;api_servers=1;gpu_memory_utilization=${GEN_GMU};max_model_len=${GEN_MAX_LEN};max_num_seqs=1;max_num_batched_tokens=${VLLM_MAX_NUM_BATCHED_TOKENS};dtype=bfloat16;weight_dtype=fp8;expert_dtype=fp4;kv_cache_dtype=fp8;block_size=auto;prefix_caching=false;tokenizer_mode=deepseek_v41;reasoning_parser=deepseek_v41;auto_tool_choice=true;tool_parser=deepseek_v41;speculative_decoding=false;seed=0;batch_invariant=false;single_sequence_replicas=true"
+    HOTPOTQA_SERVE_ARGUMENTS="tp=4;ep=4;dp=1;api_servers=1;gpu_memory_utilization=${GEN_GMU};max_model_len=${GEN_MAX_LEN};max_num_seqs=1;max_num_batched_tokens=${VLLM_MAX_NUM_BATCHED_TOKENS};dtype=bfloat16;weight_dtype=fp8;expert_dtype=fp4;engram_cpu_offload=true;kv_cache_dtype=fp8;block_size=auto;prefix_caching=false;tokenizer_mode=deepseek_v41;reasoning_parser=deepseek_v41;auto_tool_choice=true;tool_parser=deepseek_v41;speculative_decoding=false;seed=0;batch_invariant=false;single_sequence_replicas=true"
     export FLASHINFER_NO_DOWNLOAD=1
     export VLLM_ENGINE_READY_TIMEOUT_S=3600
-    echo "==> serving DeepSeek with vLLM TP8/EP8 on :${GEN_PORT}; log: ${GEN_LOG}"
+    echo "==> serving DeepSeek with vLLM TP4/EP4 on :${GEN_PORT}; log: ${GEN_LOG}"
     env \
         -u OMP_NUM_THREADS \
         -u MKL_NUM_THREADS \
@@ -459,7 +541,7 @@ else
         --tool-call-parser deepseek_v41 \
         --host 127.0.0.1 \
         --port "${GEN_PORT}" \
-        --tensor-parallel-size 8 \
+        --tensor-parallel-size 4 \
         --enable-expert-parallel \
         --data-parallel-size 1 \
         --api-server-count 1 \
@@ -469,63 +551,12 @@ else
         --max-num-batched-tokens "${VLLM_MAX_NUM_BATCHED_TOKENS}" \
         --dtype bfloat16 \
         --kv-cache-dtype fp8 \
+        --engram-config '{"cpu_offload":true}' \
         --seed 0 \
         --no-enable-prefix-caching \
         > "${GEN_LOG}" 2>&1 &
     GEN_PID=$!
 fi
-
-HOTPOTQA_GPU_RUNTIME="$("${RUNTIME_PY[@]}" - <<'PY'
-import json
-import subprocess
-
-import torch
-
-device_count = torch.cuda.device_count()
-if device_count != 8:
-    raise SystemExit(f"Scientific runs require exactly eight visible H200 GPUs; found {device_count}.")
-names = []
-capabilities = []
-for device_index in range(device_count):
-    name = torch.cuda.get_device_name(device_index).strip()
-    capability = ".".join(str(part) for part in torch.cuda.get_device_capability(device_index))
-    if "H200" not in name.upper() or capability != "9.0":
-        raise SystemExit(
-            f"CUDA device {device_index} must be an H200 with compute capability 9.0; "
-            f"found {name!r} with {capability}."
-        )
-    names.append(name)
-    capabilities.append(capability)
-driver_lines = subprocess.run(
-    ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader,nounits"],
-    check=True,
-    capture_output=True,
-    text=True,
-).stdout.splitlines()
-driver_versions = sorted({line.strip() for line in driver_lines if line.strip()})
-if len(driver_versions) != 1:
-    raise SystemExit(f"Expected one NVIDIA driver version; found {driver_versions!r}.")
-print(
-    json.dumps(
-        {
-            "compute_capabilities": capabilities,
-            "count": device_count,
-            "driver_version": driver_versions[0],
-            "names": names,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-)
-PY
-)"
-
-cleanup() {
-    echo "==> tearing down local ${SERVING_ENGINE} endpoint"
-    kill "${GEN_PID}" 2>/dev/null || true
-    wait "${GEN_PID}" 2>/dev/null || true
-}
-trap cleanup EXIT
 
 generator_reports_expected_model() {
     curl -sf "http://127.0.0.1:${GEN_PORT}/v1/models" \

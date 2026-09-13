@@ -43,7 +43,8 @@ Host keys must already be verified. Close sessions only when requested.
 
 - Login: brief operations, sync, submission, and Slurm status.
 - `della-vis1`: internet-dependent builds, datasets, model downloads.
-- Allocated `ailab` nodes: eight H200s, model serving and optimization, with
+- Allocated `ailab` GPUs: one H200 for Qwen or four H200s on one node for
+  DeepSeek, model serving and optimization, with
   `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1`.
 - Put environments, caches, logs, and outputs on configured `SCRATCH_BASE`.
   Check current quota before large operations. Scratch is not backed up.
@@ -85,11 +86,12 @@ Qwen uses `.serving-venv` (vLLM 0.25.1 / Torch 2.11); DeepSeek V4.1 uses
 (`0.1.1.dev5+ge77daef89`), Torch 2.13, and prebuilt FlashInfer kernel wheels.
 HotPotQA does not depend on POSIT.
 
-- Qwen: TP1/DP8, eight API servers, one sequence/replica, context 262,144,
+- Qwen: TP1/DP1, one API server, one sequence/replica, context 262,144,
   thinking `xhigh`.
-- DeepSeek V4.1: TP8/EP8/DP1, one API server and one active sequence, context
+- DeepSeek V4.1: TP4/EP4/DP1, one API server and one active sequence, context
   262,144, numeric thinking effort 100, native `deepseek_v41` parsers, FP8 KV,
-  automatic block size (64 on SM90), original weight formats, no speculation.
+  automatic block size (64 on SM90), original weight formats, explicit Engram
+  CPU offload (`--engram-config '{"cpu_offload":true}'`), no speculation.
   `FLASHINFER_NO_DOWNLOAD=1`; use the serving wheels' CUDA headers first.
 - Temperature 1.0 / top-p 0.95 for every role. Output caps: 16,384 HotPotQA,
   32,768 Terminal-Bench. Server context is the Della setting, not the provider's
@@ -121,6 +123,10 @@ perfect-batch skips remain uncovered. Pilot evidence stays outside production
 campaign locks and starting baselines. Review request overlap, throughput,
 usage, cutoffs, and errors before choosing the model-arm schedule.
 
-Jobs request one node, eight H200s, 64 CPUs, 768G on `ailab`; caps are 72 hours
+Qwen requests one H200, 8 CPUs, 128G; DeepSeek requests four H200s, 32 CPUs,
+512G on one `ailab` node. These calculator-supported starting allocations await
+empirical pilot qualification. Allocated-GPU inventory and five-second VRAM
+samples are stored with the job logs; vLLM INFO logs retain startup memory
+allocations and throughput. Caps are 72 hours
 for Qwen standard and 144 hours for expanded/DeepSeek. They are not estimates.
 Use Slurm accounting and output artifacts to prove completion, not submission IDs.

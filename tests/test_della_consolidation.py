@@ -1,11 +1,14 @@
 """Exercise the consolidated laptop launchers without contacting Della."""
 
+import json
 import os
 import re
 import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -100,7 +103,8 @@ def test_existing_shared_model_is_verified_without_preparing_it(tmp_path, verifi
 
 @pytest.mark.parametrize("profile,workers", [("qwen3.8-27b", 12), ("deepseek-v4.1-flash", 4)])
 @pytest.mark.parametrize("kind", ["experiment", "pilot"])
-def test_submit_expands_the_remote_script_without_running_jobs(tmp_path, profile, workers, kind):
+@pytest.mark.parametrize("invalid_setting", [None, "DELLA_GPUS", "DELLA_CPUS_PER_TASK", "VLLM_TENSOR_PARALLEL_SIZE"])
+def test_submit_expands_the_remote_script_without_running_jobs(tmp_path, profile, workers, kind, invalid_setting):
     """Catch laptop-side heredoc expansion errors before any real submission."""
     script_dir = tmp_path / "scripts" / "della"
     script_dir.mkdir(parents=True)
@@ -127,14 +131,38 @@ def test_submit_expands_the_remote_script_without_running_jobs(tmp_path, profile
         "HOTPOTQA_CAMPAIGN_ID": "integration-test",
         "HOTPOTQA_TEXT_LIMITS_JSON": '{"component_chars":12345}',
     }
-    for key in ("MAX_WORKERS", "HOTPOTQA_LOG_DIR", "BUDGET_PROFILE", "CONDITION"):
+    for key in (
+        "MAX_WORKERS",
+        "HOTPOTQA_LOG_DIR",
+        "BUDGET_PROFILE",
+        "CONDITION",
+        "DELLA_GPUS",
+        "DELLA_CPUS_PER_TASK",
+        "DELLA_MEMORY",
+        "VLLM_TENSOR_PARALLEL_SIZE",
+        "VLLM_DATA_PARALLEL_SIZE",
+        "VLLM_API_SERVER_COUNT",
+        "VLLM_MAX_NUM_SEQS",
+    ):
         env.pop(key, None)
+    if invalid_setting:
+        env[invalid_setting] = "64"
     result = subprocess.run(["bash", str(script_dir / "submit_hotpotqa.sh")], env=env, capture_output=True, text=True)
+    if invalid_setting:
+        assert result.returncode != 0
+        assert "ERROR:" in result.stderr
+        assert not capture.exists()
+        return
     assert result.returncode == 0, result.stderr
     remote = capture.read_text()
     assert 'local run_condition="$3"' in remote
     assert 'local canary_only="$4"' in remote
     assert f'"MAX_WORKERS={workers}"' in remote
+    gpus, cpus, memory, tp = (1, 8, "128G", 1) if profile == "qwen3.8-27b" else (4, 32, "512G", 4)
+    for resource in (f"--gres=gpu:{gpus}", f"--cpus-per-task={cpus}", f"--mem={memory}"):
+        assert resource in remote
+    for setting in (f"VLLM_TENSOR_PARALLEL_SIZE={tp}", "VLLM_DATA_PARALLEL_SIZE=1", "VLLM_API_SERVER_COUNT=1"):
+        assert f'"{setting}"' in remote
     assert f'"HOTPOTQA_PILOT_ONLY={int(kind == "pilot")}"' in remote
     assert "examples.common.slurm_continuation add" in remote
     assert "examples.common.slurm_continuation start" in remote
@@ -207,8 +235,49 @@ def test_deepseek_smoke_uses_the_campaign_serving_arguments():
         return flags
 
     assert arguments(campaign) == arguments(smoke)
+    assert arguments(campaign)["--tensor-parallel-size"] == "4"
+    assert json.loads(arguments(campaign)["--engram-config"]) == {"cpu_offload": True}
     for setting in ("GEN_MAX_LEN=262144", "GEN_GMU=0.92"):
         assert setting in campaign and setting in smoke
+
+
+@pytest.mark.parametrize("expected,visible", [(1, 1), (4, 4), (1, 8), (4, 2)])
+def test_gpu_inventory_uses_only_allocated_devices(tmp_path, monkeypatch, capsys, expected, visible):
+    """Reject mismatched allocations and keep physical UUIDs out of the resumable identity."""
+    script = (ROOT / "examples/hotpotqa/run_hotpotqa.sbatch").read_text()
+    start = script.index('HOTPOTQA_GPU_RUNTIME="$(')
+    start = script.index("<<'PY'\n", start) + len("<<'PY'\n")
+    block = script[start : script.index("\nPY\n", start)]
+    inventory = tmp_path / "inventory.json"
+    ids = tmp_path / "ids.txt"
+    monkeypatch.setattr(sys, "argv", ["inventory", str(expected), str(inventory), str(ids)])
+    cuda = SimpleNamespace(
+        device_count=lambda: visible,
+        get_device_name=lambda _: "NVIDIA H200",
+        get_device_capability=lambda _: (9, 0),
+        get_device_properties=lambda index: SimpleNamespace(uuid=f"allocated-{index}", total_memory=140_000_000_000),
+    )
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(cuda=cuda))
+
+    def driver_query(command, **kwargs):
+        assert command[command.index("--id") + 1] == ",".join(f"GPU-allocated-{i}" for i in range(visible))
+        return SimpleNamespace(stdout="590.00\n" * visible)
+
+    monkeypatch.setattr(subprocess, "run", driver_query)
+    if visible != expected:
+        with pytest.raises(SystemExit, match=f"exactly {expected} visible H200 GPUs"):
+            exec(compile(block, "gpu_inventory", "exec"), {})
+        assert not inventory.exists() and not ids.exists()
+        return
+    exec(compile(block, "gpu_inventory", "exec"), {})
+    runtime = json.loads(capsys.readouterr().out)
+    assert runtime["count"] == expected
+    assert "allocated-" not in json.dumps(runtime)
+    devices = json.loads(inventory.read_text())["devices"]
+    assert len(devices) == expected
+    assert devices[0]["memory_total_bytes"] == 140_000_000_000
+    assert ids.read_text().strip() == ",".join(device["uuid"] for device in devices)
+    assert script.index("GPU_MONITOR_PID=$!") < script.index('"${VLLM_BIN}" serve "${SOLVER_MODEL_PATH}"')
 
 
 @pytest.mark.parametrize("reply,success", [("31415;cluster", True), ("submission failed", False)])

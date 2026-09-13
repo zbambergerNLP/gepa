@@ -140,19 +140,20 @@ case "${MODEL_PROFILE}" in
             echo "ERROR: Qwen3.8-27B production runs require GPU_PARTITION=ailab" >&2
             exit 1
         fi
-        DELLA_GPUS="${DELLA_GPUS:-8}"
-        DELLA_CPUS_PER_TASK="${DELLA_CPUS_PER_TASK:-64}"
-        DELLA_MEMORY="${DELLA_MEMORY:-768G}"
+        DELLA_GPUS="${DELLA_GPUS:-1}"
+        DELLA_CPUS_PER_TASK="${DELLA_CPUS_PER_TASK:-8}"
+        DELLA_MEMORY="${DELLA_MEMORY:-128G}"
         JOB_PARTITION="${GPU_PARTITION}"
         MAX_WORKERS="${MAX_WORKERS:-12}"
         VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-1}"
         VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-${DELLA_GPUS}}"
         VLLM_API_SERVER_COUNT="${VLLM_API_SERVER_COUNT:-${VLLM_DATA_PARALLEL_SIZE}}"
         VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-1}"
-        if [[ "${DELLA_GPUS}" != "8" \
-            || "${VLLM_DATA_PARALLEL_SIZE}" != "8" \
-            || "${VLLM_API_SERVER_COUNT}" != "8" ]]; then
-            echo "ERROR: scientific Qwen runs require 8 H200 data-parallel replicas and 8 API servers" >&2
+        if [[ "${DELLA_GPUS}" != "1" \
+            || "${VLLM_TENSOR_PARALLEL_SIZE}" != "1" \
+            || "${VLLM_DATA_PARALLEL_SIZE}" != "1" \
+            || "${VLLM_API_SERVER_COUNT}" != "1" ]]; then
+            echo "ERROR: scientific Qwen runs require one H200, TP1/DP1, and one API server" >&2
             exit 1
         fi
         if [[ "${VLLM_MAX_NUM_SEQS}" != "1" ]]; then
@@ -176,12 +177,12 @@ case "${MODEL_PROFILE}" in
             echo "ERROR: DeepSeek-V4.1-Flash production runs require GPU_PARTITION=ailab" >&2
             exit 1
         fi
-        DELLA_GPUS="${DELLA_GPUS:-8}"
-        DELLA_CPUS_PER_TASK="${DELLA_CPUS_PER_TASK:-64}"
-        DELLA_MEMORY="${DELLA_MEMORY:-768G}"
+        DELLA_GPUS="${DELLA_GPUS:-4}"
+        DELLA_CPUS_PER_TASK="${DELLA_CPUS_PER_TASK:-32}"
+        DELLA_MEMORY="${DELLA_MEMORY:-512G}"
         JOB_PARTITION="${GPU_PARTITION}"
         MAX_WORKERS="${MAX_WORKERS:-4}"
-        VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-8}"
+        VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-4}"
         VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-1}"
         VLLM_API_SERVER_COUNT="${VLLM_API_SERVER_COUNT:-1}"
         VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-1}"
@@ -193,12 +194,12 @@ case "${MODEL_PROFILE}" in
         SOLVER_MODEL="hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash"
         SOLVER_API_BASE=""
         REFLECTION_API_BASE=""
-        if [[ "${DELLA_GPUS}" != "8" \
-            || "${VLLM_TENSOR_PARALLEL_SIZE}" != "8" \
+        if [[ "${DELLA_GPUS}" != "4" \
+            || "${VLLM_TENSOR_PARALLEL_SIZE}" != "4" \
             || "${VLLM_DATA_PARALLEL_SIZE}" != "1" \
             || "${VLLM_API_SERVER_COUNT}" != "1" \
             || "${VLLM_MAX_NUM_SEQS}" != "1" ]]; then
-            echo "ERROR: scientific DeepSeek runs require one TP8 replica on one eight-H200 node" >&2
+            echo "ERROR: scientific DeepSeek runs require one TP4 replica on four H200s on one node" >&2
             exit 1
         fi
         STANDARD_TIME="${STANDARD_TIME:-${TIME:-144:00:00}}"
@@ -253,6 +254,7 @@ validate_della_wall_time "${STANDARD_TIME}" "STANDARD_TIME"
 validate_della_wall_time "${EXPANDED_TIME}" "EXPANDED_TIME"
 
 for positive_integer in \
+    "${DELLA_GPUS}" \
     "${DELLA_CPUS_PER_TASK}" \
     "${MAX_WORKERS}" \
     "${VLLM_TENSOR_PARALLEL_SIZE}" \
@@ -262,14 +264,10 @@ for positive_integer in \
     "${VLLM_MAX_NUM_BATCHED_TOKENS}"
 do
     if [[ ! "${positive_integer}" =~ ^[1-9][0-9]*$ ]]; then
-        echo "ERROR: concurrency and CPU settings must be positive integers" >&2
+        echo "ERROR: concurrency, GPU, and CPU settings must be positive integers" >&2
         exit 1
     fi
 done
-if [[ "${DELLA_GPUS}" != "8" ]]; then
-    echo "ERROR: DELLA_GPUS must be 8 for either scientific model profile" >&2
-    exit 1
-fi
 if (( DELLA_CPUS_PER_TASK > DELLA_GPUS * 8 )); then
     echo "ERROR: Della permits at most 8 CPU cores per AI Lab H200" >&2
     exit 1
@@ -281,7 +279,7 @@ if [[ "${MODEL_PROFILE}" == "qwen3.8-27b" ]]; then
     fi
 fi
 if (( VLLM_TENSOR_PARALLEL_SIZE * VLLM_DATA_PARALLEL_SIZE != DELLA_GPUS )); then
-    echo "ERROR: tensor-parallel size times data-parallel size must use all eight allocated GPUs" >&2
+    echo "ERROR: tensor-parallel size times data-parallel size must use all allocated GPUs" >&2
     exit 1
 fi
 
@@ -317,9 +315,9 @@ echo "==> scientific contract: budget_profile=${BUDGET_PROFILE} budget=${CAMPAIG
 echo "==> method: frozen Wiki-2017/BM25 k=7 seed=0 workers=${MAX_WORKERS} two-stage structured prompts"
 echo "==> Della resources: partition=${JOB_PARTITION:-cluster-default} gpus=${DELLA_GPUS} cpus=${DELLA_CPUS_PER_TASK} memory=${DELLA_MEMORY}"
 if [[ "${MODEL_PROFILE}" == "qwen3.8-27b" ]]; then
-    echo "==> Qwen vLLM: tp=1 dp=8 api_servers=8 max_num_seqs=1/replica max_batched_tokens=${VLLM_MAX_NUM_BATCHED_TOKENS}"
+    echo "==> Qwen vLLM: tp=1 dp=1 api_servers=1 max_num_seqs=1/replica max_batched_tokens=${VLLM_MAX_NUM_BATCHED_TOKENS}"
 else
-    echo "==> DeepSeek vLLM: tp=8 ep=8 dp=1 max_num_seqs=1 FP8-KV deepseek_v41 parsers no-speculation"
+    echo "==> DeepSeek vLLM: tp=4 ep=4 dp=1 max_num_seqs=1 FP8-KV Engram-CPU-offload deepseek_v41 parsers no-speculation"
 fi
 
 ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \

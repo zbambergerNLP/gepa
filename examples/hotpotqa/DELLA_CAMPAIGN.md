@@ -51,7 +51,7 @@ It checks source, permissions, SSH, CUDA, storage, and serving locks.
 ## Prepare the exact artifacts
 
 Login nodes handle brief operations and submissions. `della-vis1` handles
-builds and downloads. Allocated eight-H200 nodes run inference and optimization
+builds and downloads. Allocated H200 GPUs run inference and optimization
 with Hugging Face offline mode. Keep environments, caches, and outputs on
 `SCRATCH_BASE`; checkpoints use the configured shared `MODEL_STORAGE`.
 
@@ -91,13 +91,18 @@ FlashInfer builds use the serving environment's CUDA headers first.
 | --- | --- | --- |
 | Model, all roles | Qwen3.8-27B | DeepSeek-V4.1-Flash |
 | Revision | `1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0` | `dba1be0a40aa45a94ad051997016db3960a90277` |
-| Serving | TP1 / DP8 / eight API servers | TP8 / EP8 / DP1 / one API server |
+| Serving | TP1 / DP1 / one API server | TP4 / EP4 / DP1 / one API server |
+| Della allocation | 1 H200, 8 CPUs, 128G | 4 H200s on one node, 32 CPUs, 512G |
+| Weights / KV cache | BF16 / BF16 (`auto`) | Native FP4 experts + FP8 / FP8 |
+| Engram tables | Not applicable | Explicit CPU offload |
 | Active sequences | One per replica | One |
 | Context / output cap | 262,144 / 16,384 | 262,144 / 16,384 |
 | Thinking effort | `xhigh` | `100` |
 | Approved initial pilot workers | 12 | 4 |
 
-The approved starting values incorporate Zach's observed queue timeout. Check
+The initial client-worker values incorporate Zach's observed queue timeout.
+The smaller GPU allocations follow the checkpoint-byte sizing review and await
+empirical qualification. Client workers may queue behind one active sequence. Check
 throughput and timeouts on training examples, then freeze the chosen concurrency
 across all six cells per model. This calibration remains pending. The
 new V4.1 runtime uses one sequence per replica, as in Zach's branch.
@@ -270,9 +275,16 @@ from the pilots: submit both chains for concurrent scheduling, or wait for one
 model's chain to finish before submitting the other for sequential scheduling.
 Each model's six ablations and their test evaluations remain sequential.
 
-Jobs request one node, eight H200 GPUs, 64 CPUs, and 768G on `ailab`. Qwen standard
+Qwen requests one H200, 8 CPUs, and 128G; DeepSeek requests four H200s, 32 CPUs,
+and 512G on one `ailab` node, with Engram tables explicitly offloaded to CPU.
+Qwen standard
 caps are 72 hours; expanded and DeepSeek caps are 144 hours. These are limits,
 not estimates. Logs live at `$SCRATCH_BASE/logs/hotpotqa/<campaign>/<commit>/`.
+Each allocation records its CUDA-visible GPU inventory and VRAM/utilization every
+five seconds in `gpu-inventory-<job>.json` and `gpu-memory-<job>.csv`. Physical
+UUIDs stay outside the resumable experiment identity. vLLM INFO logs retain
+weight, KV-cache, and startup allocation details; reserved VRAM alone is not the
+working memory needed by a request.
 
 The approved allocation-recovery policy is to request a continuation
 automatically after scheduler-confirmed allocation time expiry, using a

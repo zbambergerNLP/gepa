@@ -3,11 +3,11 @@
 # DeepSeek-V4.1-Flash exactly the way examples/hotpotqa/run_hotpotqa.sbatch
 # does, and that the served model handles the HotPotQA ReAct V2 tool protocol.
 #
-# Run it yourself, once, on an allocated eight-H200 node from the synced checkout
+# Run it yourself, once, with four H200s allocated on one node from the synced checkout
 # (REMOTE_DIR) after scripts/della/build_env.sh has built both venvs and staged the
 # checkpoint:
 #
-#   salloc --partition=ailab --nodes=1 --gres=gpu:8 --cpus-per-task=64 --mem=768G --time=02:00:00
+#   salloc --partition=ailab --nodes=1 --gres=gpu:4 --cpus-per-task=32 --mem=512G --time=02:00:00
 #   cd /scratch/gpfs/BSTEWART/$USER/gepa     # REMOTE_DIR
 #   scripts/della/verify_deepseek_serving.sh
 #
@@ -22,7 +22,7 @@
 # runs it as a batch job and fetches that directory.
 #
 # Checks, in order: the frozen vLLM registers DeepseekV41ForCausalLM; vLLM starts
-# with the campaign's TP8/EP8 single-sequence invocation and reports the served
+# with the campaign's TP4/EP4 single-sequence invocation and reports the served
 # name; the smoke exchange returns reasoning and content; then
 # examples/hotpotqa/verify_serving.py exercises an ordinary completion,
 # a native tool call plus its tool-result continuation, and one ReAct V2 proposal
@@ -88,8 +88,9 @@ if [[ "$(cat "${SERVING_VENV_DIR}/.gepa-serving-lock.sha256")" != "${SERVING_LOC
 fi
 "${VLLM_PY}" -m examples.common.python_environment verify \
     --path "${SCRATCH_BASE}/.cache/gepa/serving-environments/${SERVING_LOCK_SHA256}.json" >/dev/null
-if ! command -v nvidia-smi >/dev/null 2>&1 || [[ "$(nvidia-smi --list-gpus 2>/dev/null | wc -l | tr -d ' ')" != "8" ]]; then
-    echo "ERROR: run this on an allocated node with eight visible GPUs (salloc --partition=ailab --gres=gpu:8)" >&2
+if ! command -v nvidia-smi >/dev/null 2>&1 || ! "${GEPA_UV_BIN:-uv}" run --no-project --python "${VLLM_PY}" python -c \
+    'import torch; raise SystemExit(0 if torch.cuda.device_count() == 4 and all("H200" in torch.cuda.get_device_name(i) for i in range(4)) else 1)'; then
+    echo "ERROR: run this with four CUDA-visible H200 GPUs (salloc --partition=ailab --gres=gpu:4)" >&2
     exit 1
 fi
 
@@ -103,7 +104,7 @@ export TRITON_CACHE_DIR="${SCRATCH_BASE}/.cache/triton"
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export JAX_PLATFORMS=cpu
-export VLLM_LOGGING_LEVEL=WARNING
+export VLLM_LOGGING_LEVEL=INFO
 export VLLM_USE_FLASHINFER_SAMPLER=0
 export FLASHINFER_WORKSPACE_BASE="${SCRATCH_BASE}"
 export FLASHINFER_NO_DOWNLOAD=1
@@ -168,7 +169,7 @@ PY
 )"
 
 # --- The campaign's DeepSeek invocation, verbatim ----------------------------
-echo "==> serving ${MODEL} with vLLM TP8/EP8 on :${GEN_PORT}; log: ${GEN_LOG}"
+echo "==> serving ${MODEL} with vLLM TP4/EP4 on :${GEN_PORT}; log: ${GEN_LOG}"
 env \
     -u OMP_NUM_THREADS \
     -u MKL_NUM_THREADS \
@@ -191,11 +192,12 @@ env \
     --tokenizer-mode deepseek_v41 \
     --reasoning-parser deepseek_v41 \
     --tool-call-parser deepseek_v41 \
-    --tensor-parallel-size 8 \
+    --tensor-parallel-size 4 \
     --enable-expert-parallel \
     --data-parallel-size 1 \
     --api-server-count 1 \
     --kv-cache-dtype fp8 \
+    --engram-config '{"cpu_offload":true}' \
     > "${GEN_LOG}" 2>&1 &
 GEN_PID=$!
 

@@ -1305,16 +1305,19 @@ def test_hotpotqa_della_submit_scales_resources_by_model_profile() -> None:
     assert 'DELLA_GPUS="${DELLA_GPUS:-}"' in submit
     assert 'DELLA_CPUS_PER_TASK="${DELLA_CPUS_PER_TASK:-}"' in submit
     assert 'DELLA_MEMORY="${DELLA_MEMORY:-}"' in submit
-    assert 'DELLA_GPUS="${DELLA_GPUS:-8}"' in submit
-    assert 'DELLA_CPUS_PER_TASK="${DELLA_CPUS_PER_TASK:-64}"' in submit
-    assert 'DELLA_MEMORY="${DELLA_MEMORY:-768G}"' in submit
+    assert 'DELLA_GPUS="${DELLA_GPUS:-1}"' in submit
+    assert 'DELLA_GPUS="${DELLA_GPUS:-4}"' in submit
+    assert 'DELLA_CPUS_PER_TASK="${DELLA_CPUS_PER_TASK:-8}"' in submit
+    assert 'DELLA_CPUS_PER_TASK="${DELLA_CPUS_PER_TASK:-32}"' in submit
+    assert 'DELLA_MEMORY="${DELLA_MEMORY:-128G}"' in submit
+    assert 'DELLA_MEMORY="${DELLA_MEMORY:-512G}"' in submit
     assert 'JOB_PARTITION="${GPU_PARTITION}"' in submit
     assert 'MAX_WORKERS="${MAX_WORKERS:-12}"' in submit
     assert 'VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-${DELLA_GPUS}}"' in submit
     assert 'VLLM_API_SERVER_COUNT="${VLLM_API_SERVER_COUNT:-${VLLM_DATA_PARALLEL_SIZE}}"' in submit
     assert "DELLA_GPUS=0" not in submit
     assert "deepseek-v4.1-flash)" in submit
-    assert 'VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-8}"' in submit
+    assert 'VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-4}"' in submit
     assert 'VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-1}"' in submit
     assert 'VLLM_API_SERVER_COUNT="${VLLM_API_SERVER_COUNT:-1}"' in submit
     assert 'MAX_WORKERS="${MAX_WORKERS:-4}"' in submit
@@ -1328,7 +1331,7 @@ def test_hotpotqa_della_submit_scales_resources_by_model_profile() -> None:
 
 
 def test_hotpotqa_sbatch_configures_within_run_vllm_throughput() -> None:
-    """Batch independent examples across data-parallel Qwen replicas."""
+    """Queue independent examples against the single-sequence Qwen server."""
     script = (REPO_ROOT / "examples" / "hotpotqa" / "run_hotpotqa.sbatch").read_text()
 
     assert "#SBATCH --cpus-per-task=8" in script
@@ -1339,8 +1342,8 @@ def test_hotpotqa_sbatch_configures_within_run_vllm_throughput() -> None:
     assert 'VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-1}"' in script
     assert 'VLLM_MAX_NUM_BATCHED_TOKENS="${VLLM_MAX_NUM_BATCHED_TOKENS:-16384}"' in script
     assert "--tensor-parallel-size 1" in script
-    assert "--data-parallel-size 8" in script
-    assert "--api-server-count 8" in script
+    assert "--data-parallel-size 1" in script
+    assert "--api-server-count 1" in script
     assert "--max-num-seqs 1" in script
     assert '--max-num-batched-tokens "${VLLM_MAX_NUM_BATCHED_TOKENS}"' in script
     assert "--no-enable-prefix-caching" in script
@@ -1418,7 +1421,7 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert 'MODEL="Qwen3.8-27B"' in submit
     assert 'if [[ "${GPU_PARTITION}" != "ailab" ]]' in submit
     assert "Qwen3.8-27B production runs require GPU_PARTITION=ailab" in submit
-    assert "scientific Qwen runs require 8 H200 data-parallel replicas and 8 API servers" in submit
+    assert "scientific Qwen runs require one H200, TP1/DP1, and one API server" in submit
     assert 'SOLVER_MODEL_PATH="${MODEL_STORAGE}/${MODEL}"' in submit
     assert 'MODEL_SNAPSHOT_PROFILE="qwen3.8-27b"' in submit
     assert 'MODEL_SNAPSHOT_PROFILE="deepseek-v4.1-flash"' in submit
@@ -1464,13 +1467,11 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
         'HOTPOTQA_LOG_DIR="${SCRATCH_BASE}/logs/hotpotqa/${HOTPOTQA_CAMPAIGN_ID}/${HOTPOTQA_SOURCE_COMMIT}"' in submit
     )
     assert 'LOG_DIR="${SCRATCH_BASE}/logs/hotpotqa/${HOTPOTQA_CAMPAIGN_ID}/${HOTPOTQA_SOURCE_COMMIT}"' in sbatch
-    assert 'SBATCH_EXPORT_FILE="\\$(mktemp)"' in submit
+    assert r'SBATCH_EXPORT_FILE="\${CONTINUATION_DIR}/\${CELL_NAME}.env"' in submit
     assert "cleanup_export_file()" in submit
     assert 'rm -f -- "\\${SBATCH_EXPORT_FILE}"' in submit
     assert "printf '%s\\0'" in submit
-    assert "env -i" in submit
-    assert 'HOME="\\${HOME}"' in submit
-    assert 'PATH="\\${PATH}"' in submit
+    assert "trap cleanup_export_file EXIT" in submit
     assert "LANG=C.UTF-8" in submit
     assert "LC_ALL=C.UTF-8" in submit
     assert '"HOME=\\${HOME}"' in submit
@@ -1481,7 +1482,8 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert 'HOTPOTQA_SOURCE_COMMIT="$(git -C "${REPO_ROOT}" rev-parse HEAD)"' in submit
     assert 'REMOTE_SOURCE_DIR="${REMOTE_DIR%/}/sources/${HOTPOTQA_SOURCE_COMMIT}"' in submit
     assert 'GEPA_VENV_DIR="${REMOTE_DIR%/}/.venv"' in submit
-    assert submit.count('"${GEPA_VENV_DIR}/bin/python"') == 5
+    assert '"${GEPA_VENV_DIR}/bin/python" -m examples.common.slurm_continuation add' in submit
+    assert '"${GEPA_VENV_DIR}/bin/python" -m examples.common.slurm_continuation start' in submit
     assert 'SYNC_SOURCE_COMMIT="${HOTPOTQA_SOURCE_COMMIT}"' in submit
     assert 'SYNC_REMOTE_DIR="${REMOTE_SOURCE_DIR}"' in submit
     assert 'SYNC_MANIFEST_OUTPUT="${SOURCE_MANIFEST_OUTPUT}"' in submit
@@ -1513,10 +1515,10 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert "RUN_MAX_METRIC_CALLS=13742" in submit
     assert 'RUN_TIME="${STANDARD_TIME}"' in submit
     assert 'RUN_TIME="${EXPANDED_TIME}"' in submit
-    assert 'DEPENDENCY_ARGS+=("--dependency=afterok:\\${PREVIOUS_JOB_ID}")' in submit
+    assert r'--plan "\${PLAN_PATH}" --source-commit "${HOTPOTQA_SOURCE_COMMIT}"' in submit
     assert "afterany:" not in submit
     assert r'"CONDITION=\${run_condition}"' in submit
-    assert r'--job-name="gepa-hp-${MODEL_PROFILE}-\${RUN_BUDGET_PROFILE}-\${RUN_CONDITION}"' in submit
+    assert r'--job-name="gepa-hp-${MODEL_PROFILE}-${HOTPOTQA_JOB_KIND}-\${CELL_NAME}"' in submit
     assert r'--time="\${RUN_TIME}"' in submit
     assert 'sha256sum "\\${SERVING_ENV_MANIFEST}"' in submit
     assert 'pip check --python "\\${VLLM_PY}"' in submit
@@ -1578,7 +1580,10 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
         "expanded:react_v2_random",
     ):
         assert rejected_cell not in sbatch
-    assert 'RUN_LOCK_PATH="${RUN_LOCK_DIR}/${MODEL_PROFILE}-${BUDGET_PROFILE}-${CONDITION}.lock"' in sbatch
+    assert (
+        'RUN_LOCK_PATH="${RUN_LOCK_DIR}/${MODEL_PROFILE}-${BUDGET_PROFILE}-${CONDITION}-pilot${HOTPOTQA_PILOT_ONLY}.lock"'
+        in sbatch
+    )
     assert 'if ! flock -n "${RUN_LOCK_FD}"' in sbatch
     assert "another HotPotQA job is already writing" in sbatch
     assert "proxy/default" not in sbatch
@@ -1655,7 +1660,7 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert 'examples.common.python_environment verify --path "${SERVING_ENV_MANIFEST}"' in sbatch
     assert 'pip check --python "${VLLM_PY}"' in sbatch
     assert '"H200" not in name.upper() or capability != "9.0"' in sbatch
-    assert '"nvidia-smi", "--query-gpu=driver_version"' in sbatch
+    assert '"nvidia-smi", "--id", gpu_ids, "--query-gpu=driver_version"' in sbatch
     assert 'exec {MODEL_LOCK_FD}<"${SOLVER_MODEL_PATH}"' in sbatch
     assert 'if ! flock -s -n "${MODEL_LOCK_FD}"' in sbatch
     assert 'HOTPOTQA_VLLM_VERSION=""' in sbatch

@@ -284,12 +284,13 @@ def _validate_scientific_contract(args) -> None:
             changed_axes.append("HOTPOTQA_GPU_RUNTIME must identify the allocated H200 runtime")
         else:
             gpu_count = gpu_runtime.get("count")
+            expected_gpu_count = 4 if args.solver_model == DEEPSEEK_V4_1_FLASH_MODEL else 1
             gpu_names = gpu_runtime.get("names")
             gpu_capabilities = gpu_runtime.get("compute_capabilities")
             driver_version = gpu_runtime.get("driver_version")
             canonical_runtime = json.dumps(gpu_runtime, sort_keys=True, separators=(",", ":"))
             if (
-                gpu_count != 8
+                gpu_count != expected_gpu_count
                 or not isinstance(gpu_names, list)
                 or len(gpu_names) != gpu_count
                 or not all(isinstance(name, str) and "H200" in name.upper() for name in gpu_names)
@@ -300,7 +301,7 @@ def _validate_scientific_contract(args) -> None:
                 or canonical_runtime != gpu_runtime_text
             ):
                 changed_axes.append(
-                    "HOTPOTQA_GPU_RUNTIME must record only H200 devices with compute capability 9.0 "
+                    f"HOTPOTQA_GPU_RUNTIME must record exactly {expected_gpu_count} H200 devices with compute capability 9.0 "
                     "and one NVIDIA driver version"
                 )
         if not os.environ.get("HOTPOTQA_VLLM_VERSION"):
@@ -358,8 +359,8 @@ def _validate_scientific_contract(args) -> None:
             if os.environ.get("HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS") != "true":
                 changed_axes.append("HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS must be 'true'")
             required_serve_settings = (
-                "tp=8",
-                "ep=8",
+                "tp=4",
+                "ep=4",
                 "dp=1",
                 "api_servers=1",
                 "gpu_memory_utilization=0.92",
@@ -368,6 +369,7 @@ def _validate_scientific_contract(args) -> None:
                 "dtype=bfloat16",
                 "weight_dtype=fp8",
                 "expert_dtype=fp4",
+                "engram_cpu_offload=true",
                 "kv_cache_dtype=fp8",
                 "block_size=auto",
                 "prefix_caching=false",

@@ -81,16 +81,22 @@ from gepa.strategies.proposal_sampling import SingleMutationSampling
 from gepa.strategies.proposal_selection import AllImprovements
 
 LOCAL_API_BASE = "http://127.0.0.1:8000/v1"
-H200_GPU_RUNTIME = json.dumps(
-    {
-        "compute_capabilities": ["9.0"] * 8,
-        "count": 8,
-        "driver_version": "580.82",
-        "names": ["NVIDIA H200"] * 8,
-    },
-    sort_keys=True,
-    separators=(",", ":"),
-)
+
+
+def h200_gpu_runtime(count: int) -> str:
+    """Build the canonical hardware record for a model's allocated GPU count."""
+    return json.dumps(
+        {
+            "compute_capabilities": ["9.0"] * count,
+            "count": count,
+            "driver_version": "580.82",
+            "names": ["NVIDIA H200"] * count,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 QWEN_SERVE_ARGUMENTS = (
     "tp=1;gpu_memory_utilization=0.92;max_model_len=262144;rope_scaling=none;max_num_seqs=1;"
     "dtype=bfloat16;kv_cache_dtype=auto;prefix_caching=false;reasoning_parser=qwen3;"
@@ -98,15 +104,14 @@ QWEN_SERVE_ARGUMENTS = (
     "single_sequence_replicas=true"
 )
 DEEPSEEK_SERVE_ARGUMENTS = (
-    "tp=8;ep=8;dp=1;api_servers=1;gpu_memory_utilization=0.92;max_model_len=262144;max_num_seqs=1;"
-    "dtype=bfloat16;weight_dtype=fp8;expert_dtype=fp4;kv_cache_dtype=fp8;block_size=auto;prefix_caching=false;"
+    "tp=4;ep=4;dp=1;api_servers=1;gpu_memory_utilization=0.92;max_model_len=262144;max_num_seqs=1;"
+    "dtype=bfloat16;weight_dtype=fp8;expert_dtype=fp4;engram_cpu_offload=true;kv_cache_dtype=fp8;block_size=auto;prefix_caching=false;"
     "tokenizer_mode=deepseek_v41;reasoning_parser=deepseek_v41;auto_tool_choice=true;tool_parser=deepseek_v41;"
     "speculative_decoding=false;seed=0;batch_invariant=false;single_sequence_replicas=true"
 )
 COMMON_SCIENTIFIC_RUNTIME = {
     "HOTPOTQA_MODEL_INTEGRITY_SHA256": "c" * 64,
     "HOTPOTQA_TRANSFORMERS_VERSION": "5.8.0",
-    "HOTPOTQA_GPU_RUNTIME": H200_GPU_RUNTIME,
     "HOTPOTQA_SOURCE_COMMIT": "a" * 40,
     "HOTPOTQA_SOURCE_MANIFEST_SHA256": "e" * 64,
     "HOTPOTQA_PYTHON_VERSION": "3.11.13",
@@ -119,6 +124,7 @@ COMMON_SCIENTIFIC_RUNTIME = {
 }
 QWEN_SCIENTIFIC_RUNTIME = {
     **COMMON_SCIENTIFIC_RUNTIME,
+    "HOTPOTQA_GPU_RUNTIME": h200_gpu_runtime(1),
     "HOTPOTQA_MODEL_REVISION": QWEN3_8_27B_REVISION,
     "HOTPOTQA_WEIGHT_DTYPE": "bfloat16",
     "HOTPOTQA_KV_CACHE_DTYPE": "auto",
@@ -132,6 +138,7 @@ QWEN_SCIENTIFIC_RUNTIME = {
 }
 DEEPSEEK_SCIENTIFIC_RUNTIME = {
     **COMMON_SCIENTIFIC_RUNTIME,
+    "HOTPOTQA_GPU_RUNTIME": h200_gpu_runtime(4),
     "HOTPOTQA_MODEL_REVISION": DEEPSEEK_V4_1_FLASH_REVISION,
     "HOTPOTQA_WEIGHT_DTYPE": "fp8",
     "HOTPOTQA_KV_CACHE_DTYPE": "fp8",
@@ -701,6 +708,33 @@ def test_hotpot_scientific_contract_accepts_the_pinned_deepseek_runtime(monkeypa
 
 
 @pytest.mark.parametrize(
+    "model,runtime,expected_count",
+    [(QWEN3_8_27B_MODEL, QWEN_SCIENTIFIC_RUNTIME, 1), (DEEPSEEK_V4_1_FLASH_MODEL, DEEPSEEK_SCIENTIFIC_RUNTIME, 4)],
+)
+@pytest.mark.parametrize("gpu_count", [1, 4, 8])
+def test_hotpot_scientific_contract_enforces_model_gpu_count(monkeypatch, model, runtime, expected_count, gpu_count):
+    """Reject the former eight-GPU default and allocations meant for the other model."""
+    for name, value in {**runtime, "HOTPOTQA_GPU_RUNTIME": h200_gpu_runtime(gpu_count)}.items():
+        monkeypatch.setenv(name, value)
+    args = _hotpot_args(
+        enforce_scientific_contract=True,
+        max_metric_calls=6_871,
+        solver_model=model,
+        reflection_model=model,
+        solver_api_base=LOCAL_API_BASE,
+        reflection_api_base=LOCAL_API_BASE,
+        train_limit=None,
+        val_limit=None,
+        test_limit=None,
+    )
+    if gpu_count == expected_count:
+        _validate_scientific_contract(args)
+    else:
+        with pytest.raises(ValueError, match=f"exactly {expected_count} H200"):
+            _validate_scientific_contract(args)
+
+
+@pytest.mark.parametrize(
     ("environment", "message"),
     [
         ({"HOTPOTQA_MODEL_REVISION": "moving-main"}, "HOTPOTQA_MODEL_REVISION"),
@@ -714,6 +748,14 @@ def test_hotpot_scientific_contract_accepts_the_pinned_deepseek_runtime(monkeypa
         ({"HOTPOTQA_TRANSFORMERS_VERSION": ""}, "HOTPOTQA_TRANSFORMERS_VERSION"),
         ({"HOTPOTQA_GPU_RUNTIME": "{}"}, "HOTPOTQA_GPU_RUNTIME"),
         ({"HOTPOTQA_SERVE_ARGUMENTS": "tp=8"}, "HOTPOTQA_SERVE_ARGUMENTS"),
+        (
+            {
+                "HOTPOTQA_SERVE_ARGUMENTS": DEEPSEEK_SERVE_ARGUMENTS.replace(
+                    "engram_cpu_offload=true", "engram_cpu_offload=false"
+                )
+            },
+            "engram_cpu_offload=true",
+        ),
     ],
 )
 def test_hotpot_scientific_contract_rejects_deepseek_runtime_drift(

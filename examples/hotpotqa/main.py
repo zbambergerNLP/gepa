@@ -321,6 +321,15 @@ def _validate_scientific_contract(args) -> None:
         except ValueError as exc:
             changed_axes.append(f"HOTPOTQA_VLLM_VERSION: {exc}")
         serve_arguments = os.environ.get("HOTPOTQA_SERVE_ARGUMENTS", "")
+        sequence_settings = [item for item in serve_arguments.split(";") if item.startswith("max_num_seqs=")]
+        if len(sequence_settings) != 1 or sequence_settings[0] not in {
+            "max_num_seqs=1",
+            "max_num_seqs=2",
+            "max_num_seqs=4",
+        }:
+            changed_axes.append("HOTPOTQA_SERVE_ARGUMENTS must record one max_num_seqs setting in {1, 2, 4}")
+        sequence_setting = sequence_settings[0] if sequence_settings else "max_num_seqs=1"
+        single_sequence = "true" if sequence_setting == "max_num_seqs=1" else "false"
         if args.solver_model == QWEN3_8_27B_MODEL:
             if os.environ.get("HOTPOTQA_WEIGHT_DTYPE") != "bfloat16":
                 changed_axes.append("HOTPOTQA_WEIGHT_DTYPE must be 'bfloat16'")
@@ -328,14 +337,14 @@ def _validate_scientific_contract(args) -> None:
                 changed_axes.append("HOTPOTQA_KV_CACHE_DTYPE must be 'auto'")
             if os.environ.get("HOTPOTQA_VLLM_BATCH_INVARIANT") != "false":
                 changed_axes.append("HOTPOTQA_VLLM_BATCH_INVARIANT must be 'false'")
-            if os.environ.get("HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS") != "true":
-                changed_axes.append("HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS must be 'true'")
+            if os.environ.get("HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS") != single_sequence:
+                changed_axes.append("HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS must match max_num_seqs")
             required_serve_settings = (
                 "tp=1",
                 "gpu_memory_utilization=0.92",
                 "max_model_len=262144",
                 "rope_scaling=none",
-                "max_num_seqs=1",
+                sequence_setting,
                 "dtype=bfloat16",
                 "kv_cache_dtype=auto",
                 "prefix_caching=false",
@@ -344,7 +353,7 @@ def _validate_scientific_contract(args) -> None:
                 "tool_parser=qwen3_coder",
                 "seed=0",
                 "batch_invariant=false",
-                "single_sequence_replicas=true",
+                f"single_sequence_replicas={single_sequence}",
             )
             for setting in required_serve_settings:
                 if setting not in serve_arguments.split(";"):
@@ -356,8 +365,8 @@ def _validate_scientific_contract(args) -> None:
                 changed_axes.append("HOTPOTQA_KV_CACHE_DTYPE must be 'fp8'")
             if os.environ.get("HOTPOTQA_VLLM_BATCH_INVARIANT") != "false":
                 changed_axes.append("HOTPOTQA_VLLM_BATCH_INVARIANT must be 'false'")
-            if os.environ.get("HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS") != "true":
-                changed_axes.append("HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS must be 'true'")
+            if os.environ.get("HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS") != single_sequence:
+                changed_axes.append("HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS must match max_num_seqs")
             required_serve_settings = (
                 "tp=4",
                 "ep=4",
@@ -365,7 +374,7 @@ def _validate_scientific_contract(args) -> None:
                 "api_servers=1",
                 "gpu_memory_utilization=0.92",
                 "max_model_len=262144",
-                "max_num_seqs=1",
+                sequence_setting,
                 "dtype=bfloat16",
                 "weight_dtype=fp8",
                 "expert_dtype=fp4",
@@ -380,7 +389,7 @@ def _validate_scientific_contract(args) -> None:
                 "speculative_decoding=false",
                 "seed=0",
                 "batch_invariant=false",
-                "single_sequence_replicas=true",
+                f"single_sequence_replicas={single_sequence}",
             )
             for setting in required_serve_settings:
                 if setting not in serve_arguments.split(";"):
@@ -495,7 +504,7 @@ def build_run_contract(condition: str, args) -> dict:
     reflection_api_identity = _contract_api_base(reflection_api_base, scientific_contract=scientific_contract)
     _validate_scientific_contract(args)
     solver_lm_kwargs = resolve_hotpotqa_lm_kwargs(args.solver_model, None)
-    reflection_lm_kwargs = resolve_hotpotqa_lm_kwargs(args.reflection_model, None)
+    reflection_lm_kwargs = resolve_hotpotqa_lm_kwargs(args.reflection_model, None, role="optimizer")
     solver_decoding_fields = list(experiment_decoding(args.solver_model, agentic=False))
     if "seed" in solver_lm_kwargs:
         solver_decoding_fields.append("seed")
@@ -574,7 +583,7 @@ def build_run_contract(condition: str, args) -> dict:
         else:
             semantic_controller_policy = deepcopy(CONTROLLER_POLICY_CONTRACT)
     return {
-        "schema_version": 26,
+        "schema_version": 27,
         "baseline_protocol": dict(BASELINE_PROTOCOL),
         "provider_retry_policy": deepcopy(PROVIDER_RETRY_POLICY),
         "benchmark": "hotpotqa-fullwiki-wiki17",
@@ -1604,6 +1613,7 @@ def main():
     reflection_lm_kwargs = resolve_hotpotqa_lm_kwargs(
         args.reflection_model,
         reflection_api_base,
+        role="optimizer",
     )
     if args.condition == "all" and args.enforce_scientific_contract:
         conditions = list(_SCIENTIFIC_CONDITIONS_BY_BUDGET[args.max_metric_calls])

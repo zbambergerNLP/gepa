@@ -17,7 +17,7 @@ from gepa.proposer.reflective_mutation.react_v2_proposer import ReActV2Proposer
 from gepa.strategies.document_template import TEMPLATE_FAMILIES, EditTarget
 from gepa.strategies.edit_tools import EDIT_TOOL_SETS, EditTool
 
-_CANARY_TIMEOUT_SECONDS = 600
+_CANARY_TIMEOUT_SECONDS = 3600
 _MINIMUM_ATTEMPTS = 20
 _REPEATED_CHARACTER_RE = re.compile(r"(\S)\1{31,}")
 _EDIT_REGION = (
@@ -26,8 +26,7 @@ _EDIT_REGION = (
 )
 _EDIT_STEERING = {
     EditTool.INSERT_TEXT: (
-        'Use INSERT_TEXT with anchor "Verify every claim.", where "after", and text '
-        '" State uncertainty explicitly."'
+        'Use INSERT_TEXT with anchor "Verify every claim.", where "after", and text " State uncertainty explicitly."'
     ),
     EditTool.DELETE_TEXT: 'Use DELETE_TEXT with target "Avoid unsupported conclusions."',
     EditTool.REPLACE_TEXT: (
@@ -119,9 +118,7 @@ def _ordinary_completion_probe(lm: LM) -> None:
     )
     response = _require_healthy_text(response, "Ordinary completion probe")
     if "CANARY_READY" not in response:
-        raise RuntimeCanaryError(
-            f"Ordinary completion probe did not return the readiness token: {response!r}"
-        )
+        raise RuntimeCanaryError(f"Ordinary completion probe did not return the readiness token: {response!r}")
 
 
 def _tool_continuation_probe(lm: LM) -> None:
@@ -208,9 +205,7 @@ def _tool_continuation_probe(lm: LM) -> None:
         "Tool-result continuation",
     )
     if "CANARY_CONTINUED" not in continuation_text:
-        raise RuntimeCanaryError(
-            f"Tool-result continuation did not incorporate the observation: {continuation_text!r}"
-        )
+        raise RuntimeCanaryError(f"Tool-result continuation did not incorporate the observation: {continuation_text!r}")
 
 
 def _validate_edit_result(tool: EditTool, edited_text: str) -> None:
@@ -229,8 +224,7 @@ def _validate_edit_result(tool: EditTool, edited_text: str) -> None:
     if tool is EditTool.DELETE_TEXT and "Avoid unsupported conclusions." in edited_text:
         raise RuntimeCanaryError("DELETE_TEXT probe retained the requested deletion target.")
     if tool is EditTool.REPLACE_TEXT and (
-        "Cite primary sources inline." not in edited_text
-        or "Cite primary sources. " in edited_text
+        "Cite primary sources inline." not in edited_text or "Cite primary sources. " in edited_text
     ):
         raise RuntimeCanaryError("REPLACE_TEXT probe did not apply the exact replacement.")
     if tool is EditTool.MOVE_TEXT:
@@ -264,8 +258,7 @@ def _edit_probe(lm: LM, tool: EditTool, attempt: int) -> None:
         edit_target=EditTarget("final_answer", "Task"),
         preferred_tool=tool,
         steering_message=(
-            "This compatibility probe requires one literal operation followed by <finish>: "
-            f"{_EDIT_STEERING[tool]}"
+            f"This compatibility probe requires one literal operation followed by <finish>: {_EDIT_STEERING[tool]}"
         ),
         feedback_summary=(
             "The current answer sometimes overlooks uncertainty and source attribution. Preserve the task's "
@@ -296,7 +289,10 @@ def _edit_probe(lm: LM, tool: EditTool, attempt: int) -> None:
 
 
 def run_runtime_canary(
-    model: str, api_base: str, attempts: int, attempt_log: Path | None = None,
+    model: str,
+    api_base: str,
+    attempts: int,
+    attempt_log: Path | None = None,
 ) -> dict[str, object]:
     """Run the complete local completion and ReAct V2 compatibility gate.
 
@@ -319,7 +315,7 @@ def run_runtime_canary(
         raise RuntimeCanaryError(
             f"The fail-closed runtime gate requires at least {_MINIMUM_ATTEMPTS} repetitions; received {attempts}."
         )
-    lm_kwargs: dict[str, Any] = dict(resolve_hotpotqa_lm_kwargs(model, api_base))
+    lm_kwargs: dict[str, Any] = dict(resolve_hotpotqa_lm_kwargs(model, api_base, role="optimizer"))
     lm_kwargs.update(provider_retry_kwargs(attempt_log, "runtime_canary"))
     lm_kwargs["timeout"] = _CANARY_TIMEOUT_SECONDS
     lm = LM(model, **lm_kwargs)
@@ -334,9 +330,7 @@ def run_runtime_canary(
         tool_counts[tool.value] += 1
     missing_tools = [tool.value for tool in tools if tool_counts[tool.value] == 0]
     if missing_tools:
-        raise RuntimeCanaryError(
-            f"Runtime canary did not exercise every broad edit tool: {', '.join(missing_tools)}"
-        )
+        raise RuntimeCanaryError(f"Runtime canary did not exercise every broad edit tool: {', '.join(missing_tools)}")
     return {
         "status": "passed",
         "provider_retry_policy": PROVIDER_RETRY_POLICY,

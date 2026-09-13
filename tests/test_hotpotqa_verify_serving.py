@@ -127,12 +127,12 @@ def test_run_serving_verification_cycles_every_tool_and_reports_pass(monkeypatch
 
     report = verify_serving.run_serving_verification(DEEPSEEK_V4_1_FLASH_MODEL, LOCAL_API_BASE, 8)
 
-    resolve_kwargs.assert_called_once_with(DEEPSEEK_V4_1_FLASH_MODEL, LOCAL_API_BASE)
+    resolve_kwargs.assert_called_once_with(DEEPSEEK_V4_1_FLASH_MODEL, LOCAL_API_BASE, role="optimizer")
     lm_factory.assert_called_once()
     assert lm_factory.call_args.args == (DEEPSEEK_V4_1_FLASH_MODEL,)
     assert lm_factory.call_args.kwargs == {
         "temperature": 1.0,
-        "timeout": 600,
+        "timeout": 3600,
         "num_retries": 0,
         "max_retries": 0,
         "_gepa_provider_retry": {"log_path": None, "role": "serving_verification"},
@@ -211,7 +211,7 @@ def test_main_exits_nonzero_only_when_a_check_failed(monkeypatch, capsys, status
         verify_serving.main()
 
     assert exc_info.value.code == exit_code
-    run.assert_called_once_with(DEEPSEEK_V4_1_FLASH_MODEL, LOCAL_API_BASE, 4, 600, None)
+    run.assert_called_once_with(DEEPSEEK_V4_1_FLASH_MODEL, LOCAL_API_BASE, 4, 3600, None)
     output = capsys.readouterr().out
     assert f"RESULT: {status}" in output
     assert ("PASS  ordinary_completion" if status == "PASS" else "FAIL  ordinary_completion") in output

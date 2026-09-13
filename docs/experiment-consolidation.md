@@ -23,7 +23,7 @@ the merge. The existing branches are preserved; consolidation is local.
 | Setup | Adopt checked-in remote stages, detached downloads, scratch storage, SSH helpers, CUDA-header precedence, and rsync environment exclusions. Propagate custom Wiki-2017 paths and use this checkout's source in uninstalled remote environments. |
 | Wiki-2017 | Adopt corrected extracted-corpus size, 1,780,742,620 bytes. Corpus/archive hashes, document count, retrieval parameters, and split stay fixed. |
 | Text/editor behavior | Preserve configurable unlimited-by-default character limits, repeated reflection evidence without deduplication, actionable tool-error feedback, repeated selected-section edits, and explicit finish. |
-| Run identity | HotPotQA schema 26 records the shared starting-baseline protocol, timeout, and serving provenance. Terminal-Bench schema 32 records test-after-each-ablation timing; runtime freeze and pilot schema 9 are preserved. Old runtime contracts cannot be silently resumed. |
+| Run identity | HotPotQA schema 27 records the shared starting-baseline protocol, timeout, and serving provenance. Terminal-Bench schema 32 records test-after-each-ablation timing; runtime freeze and pilot schema 9 are preserved. Old runtime contracts cannot be silently resumed. |
 | Della skill/runbook | Include and reconcile PR #62's skill and runbook with the current decisions. Remove obsolete instructions to launch the old commit; use the approved V4.1 arm. |
 
 The user explicitly approved V4.1 during integration. Its published instruct
@@ -253,3 +253,9 @@ The original consolidation was verified as follows:
 No messages to collaborators or Della jobs are sent by this consolidation.
 The source integration does not establish GPU runtime compatibility or successful
 benchmark execution; those require actual subsequent runtime evidence.
+
+September 13 follow-up: DeepSeek HotPotQA optimizer calls use 131,072 output
+tokens; solver calls and all Qwen roles retain 16,384. The approved qualification
+compares server active-request limits 1/2/4 on the same twelve training examples,
+with client workers fixed. Four small optimizer checks precede full calibration.
+Source/runtime changes require new run identities; see the current Della runbook.

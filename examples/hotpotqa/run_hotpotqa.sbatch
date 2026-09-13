@@ -63,6 +63,10 @@ VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-1}"
 VLLM_API_SERVER_COUNT="${VLLM_API_SERVER_COUNT:-${VLLM_DATA_PARALLEL_SIZE}}"
 VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-1}"
 VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-1}"
+case "${VLLM_MAX_NUM_SEQS}" in
+    1|2|4) ;;
+    *) echo "ERROR: VLLM_MAX_NUM_SEQS must be 1, 2, or 4" >&2; exit 1 ;;
+esac
 VLLM_MAX_NUM_BATCHED_TOKENS="${VLLM_MAX_NUM_BATCHED_TOKENS:-16384}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-1800}"
 SERVING_VENV_DIR="${SERVING_VENV_DIR:-}"
@@ -440,6 +444,10 @@ GEN_PID=""
 GPU_MONITOR_PID=""
 cleanup() {
     echo "==> tearing down local ${SERVING_ENGINE} endpoint"
+    if [[ -n "${GEN_PID}" ]]; then
+        curl --max-time 5 -fsS "http://127.0.0.1:${GEN_PORT}/metrics" \
+            > "${LOG_DIR}/server-metrics-${SLURM_JOB_ID:-local}.prom" || true
+    fi
     for process_id in "${GEN_PID}" "${GPU_MONITOR_PID}"; do
         if [[ -n "${process_id}" ]]; then
             kill "${process_id}" 2>/dev/null || true
@@ -458,15 +466,17 @@ GPU_QUERY=(nvidia-smi --id "${GPU_IDS}" \
 GPU_MONITOR_PID=$!
 echo "==> sampling allocated GPU memory every five seconds: ${GPU_MEMORY_LOG}"
 
+HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS="false"
+if [[ "${VLLM_MAX_NUM_SEQS}" == "1" ]]; then
+    HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS="true"
+fi
 if [[ "${MODEL_PROFILE}" == "qwen3.8-27b" ]]; then
     if [[ "${VLLM_TENSOR_PARALLEL_SIZE}" != "1" \
         || "${VLLM_DATA_PARALLEL_SIZE}" != "1" \
-        || "${VLLM_API_SERVER_COUNT}" != "1" \
-        || "${VLLM_MAX_NUM_SEQS}" != "1" ]]; then
-        echo "ERROR: Qwen requires TP1/DP1, one API server, and one sequence per replica" >&2
+        || "${VLLM_API_SERVER_COUNT}" != "1" ]]; then
+        echo "ERROR: Qwen requires TP1/DP1 and one API server" >&2
         exit 1
     fi
-    HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS="true"
     VLLM_HELP="$("${VLLM_BIN}" serve --help=all 2>&1)"
     for required_option in \
         --api-server-count \
@@ -483,7 +493,7 @@ if [[ "${MODEL_PROFILE}" == "qwen3.8-27b" ]]; then
     done
     export HOTPOTQA_WEIGHT_DTYPE="bfloat16"
     export HOTPOTQA_KV_CACHE_DTYPE="auto"
-    HOTPOTQA_SERVE_ARGUMENTS="tp=1;dp=1;api_servers=1;gpu_memory_utilization=${GEN_GMU};max_model_len=${GEN_MAX_LEN};rope_scaling=none;max_num_seqs=1;max_num_batched_tokens=${VLLM_MAX_NUM_BATCHED_TOKENS};dtype=bfloat16;kv_cache_dtype=auto;prefix_caching=false;language_model_only=true;reasoning_parser=qwen3;auto_tool_choice=true;tool_parser=qwen3_coder;seed=0;batch_invariant=false;single_sequence_replicas=true"
+    HOTPOTQA_SERVE_ARGUMENTS="tp=1;dp=1;api_servers=1;gpu_memory_utilization=${GEN_GMU};max_model_len=${GEN_MAX_LEN};rope_scaling=none;max_num_seqs=${VLLM_MAX_NUM_SEQS};max_num_batched_tokens=${VLLM_MAX_NUM_BATCHED_TOKENS};dtype=bfloat16;kv_cache_dtype=auto;prefix_caching=false;language_model_only=true;reasoning_parser=qwen3;auto_tool_choice=true;tool_parser=qwen3_coder;seed=0;batch_invariant=false;single_sequence_replicas=${HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS}"
     echo "==> serving Qwen with vLLM TP1/DP1 on :${GEN_PORT}; log: ${GEN_LOG}"
     env \
         -u OMP_NUM_THREADS \
@@ -503,7 +513,7 @@ if [[ "${MODEL_PROFILE}" == "qwen3.8-27b" ]]; then
         --api-server-count 1 \
         --gpu-memory-utilization "${GEN_GMU}" \
         --max-model-len "${GEN_MAX_LEN}" \
-        --max-num-seqs 1 \
+        --max-num-seqs "${VLLM_MAX_NUM_SEQS}" \
         --max-num-batched-tokens "${VLLM_MAX_NUM_BATCHED_TOKENS}" \
         --dtype bfloat16 \
         --kv-cache-dtype auto \
@@ -515,15 +525,13 @@ if [[ "${MODEL_PROFILE}" == "qwen3.8-27b" ]]; then
 else
     if [[ "${VLLM_TENSOR_PARALLEL_SIZE}" != "4" \
         || "${VLLM_DATA_PARALLEL_SIZE}" != "1" \
-        || "${VLLM_API_SERVER_COUNT}" != "1" \
-        || "${VLLM_MAX_NUM_SEQS}" != "1" ]]; then
-        echo "ERROR: DeepSeek requires TP4/EP4, one API server, and max_num_seqs=1" >&2
+        || "${VLLM_API_SERVER_COUNT}" != "1" ]]; then
+        echo "ERROR: DeepSeek requires TP4/EP4 and one API server" >&2
         exit 1
     fi
-    HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS="true"
     export HOTPOTQA_WEIGHT_DTYPE="fp8"
     export HOTPOTQA_KV_CACHE_DTYPE="fp8"
-    HOTPOTQA_SERVE_ARGUMENTS="tp=4;ep=4;dp=1;api_servers=1;gpu_memory_utilization=${GEN_GMU};max_model_len=${GEN_MAX_LEN};max_num_seqs=1;max_num_batched_tokens=${VLLM_MAX_NUM_BATCHED_TOKENS};dtype=bfloat16;weight_dtype=fp8;expert_dtype=fp4;engram_cpu_offload=true;kv_cache_dtype=fp8;block_size=auto;prefix_caching=false;tokenizer_mode=deepseek_v41;reasoning_parser=deepseek_v41;auto_tool_choice=true;tool_parser=deepseek_v41;speculative_decoding=false;seed=0;batch_invariant=false;single_sequence_replicas=true"
+    HOTPOTQA_SERVE_ARGUMENTS="tp=4;ep=4;dp=1;api_servers=1;gpu_memory_utilization=${GEN_GMU};max_model_len=${GEN_MAX_LEN};max_num_seqs=${VLLM_MAX_NUM_SEQS};max_num_batched_tokens=${VLLM_MAX_NUM_BATCHED_TOKENS};dtype=bfloat16;weight_dtype=fp8;expert_dtype=fp4;engram_cpu_offload=true;kv_cache_dtype=fp8;block_size=auto;prefix_caching=false;tokenizer_mode=deepseek_v41;reasoning_parser=deepseek_v41;auto_tool_choice=true;tool_parser=deepseek_v41;speculative_decoding=false;seed=0;batch_invariant=false;single_sequence_replicas=${HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS}"
     export FLASHINFER_NO_DOWNLOAD=1
     export VLLM_ENGINE_READY_TIMEOUT_S=3600
     echo "==> serving DeepSeek with vLLM TP4/EP4 on :${GEN_PORT}; log: ${GEN_LOG}"
@@ -548,7 +556,7 @@ else
         --api-server-count 1 \
         --gpu-memory-utilization "${GEN_GMU}" \
         --max-model-len "${GEN_MAX_LEN}" \
-        --max-num-seqs 1 \
+        --max-num-seqs "${VLLM_MAX_NUM_SEQS}" \
         --max-num-batched-tokens "${VLLM_MAX_NUM_BATCHED_TOKENS}" \
         --dtype bfloat16 \
         --kv-cache-dtype fp8 \
@@ -636,7 +644,8 @@ if [[ "${MODEL_PROFILE}" == "deepseek-v4.1-flash" ]]; then
     DEEPSEEK_CANARY_DIR="${SCRATCH_BASE}/.cache/gepa/hotpotqa-canaries/${HOTPOTQA_CAMPAIGN_ID}"
     DEEPSEEK_CANARY_MARKER="${DEEPSEEK_CANARY_DIR}/${CAMPAIGN_IDENTITY_SHA256}.ok"
     mkdir -p "${DEEPSEEK_CANARY_DIR}"
-    if [[ "${HOTPOTQA_CANARY_ONLY}" == "1" ]]; then
+    if [[ "${HOTPOTQA_CANARY_ONLY}" == "1" \
+        || ( "${HOTPOTQA_PILOT_ONLY}" == "1" && ! -f "${DEEPSEEK_CANARY_MARKER}" ) ]]; then
         echo "==> running the fail-closed DeepSeek multi-tool canary"
         "${PY}" -m examples.hotpotqa.runtime_canary \
             --model "${SOLVER_MODEL}" \
@@ -651,7 +660,9 @@ if [[ "${MODEL_PROFILE}" == "deepseek-v4.1-flash" ]]; then
         printf '%s\n' "${CAMPAIGN_IDENTITY_SHA256}" > "${DEEPSEEK_CANARY_TEMP}"
         mv "${DEEPSEEK_CANARY_TEMP}" "${DEEPSEEK_CANARY_MARKER}"
         echo "==> DeepSeek runtime canary passed: ${CAMPAIGN_IDENTITY_SHA256}"
-        exit 0
+        if [[ "${HOTPOTQA_CANARY_ONLY}" == "1" ]]; then
+            exit 0
+        fi
     fi
     if [[ ! -f "${DEEPSEEK_CANARY_MARKER}" \
         || "$(tr -d '\n' < "${DEEPSEEK_CANARY_MARKER}")" != "${CAMPAIGN_IDENTITY_SHA256}" ]]; then
@@ -699,11 +710,30 @@ print("Native tool-call preflight passed.")
 PY
 
 if [[ "${HOTPOTQA_PILOT_ONLY}" == "1" ]]; then
+    if [[ "${MODEL_PROFILE}" == "qwen3.8-27b" ]]; then
+        QWEN_VERIFY_DIR="${SCRATCH_BASE}/.cache/gepa/hotpotqa-tool-verification/${HOTPOTQA_CAMPAIGN_ID}"
+        QWEN_VERIFY_MARKER="${QWEN_VERIFY_DIR}/${CAMPAIGN_IDENTITY_SHA256}.ok"
+        mkdir -p "${QWEN_VERIFY_DIR}"
+        if [[ ! -f "${QWEN_VERIFY_MARKER}" \
+            || "$(tr -d '\n' < "${QWEN_VERIFY_MARKER}")" != "${CAMPAIGN_IDENTITY_SHA256}" ]]; then
+            "${PY}" -m examples.hotpotqa.verify_serving \
+                --model "${SOLVER_MODEL}" --api-base "${SOLVER_API_BASE}" --attempts 4 \
+                --attempt-log "${LOG_DIR}/tool-verification-${SLURM_JOB_ID:-local}.jsonl" \
+                | tee "${LOG_DIR}/tool-verification-${SLURM_JOB_ID:-local}.log"
+            if ! kill -0 "${GEN_PID}" 2>/dev/null || ! generator_reports_expected_model; then
+                echo "ERROR: Qwen endpoint failed after tool verification" >&2
+                exit 1
+            fi
+            QWEN_VERIFY_TEMP="$(mktemp "${QWEN_VERIFY_DIR}/.verification.XXXXXX")"
+            printf '%s\n' "${CAMPAIGN_IDENTITY_SHA256}" > "${QWEN_VERIFY_TEMP}"
+            mv "${QWEN_VERIFY_TEMP}" "${QWEN_VERIFY_MARKER}"
+        fi
+    fi
     "${PY}" -m examples.hotpotqa.pilot \
         --model "${SOLVER_MODEL}" --api-base "${SOLVER_API_BASE}" \
         --wiki17-dir "${WIKI17_DIR}" --workers "${MAX_WORKERS}" \
         --output-dir "${HOTPOTQA_PILOT_ROOT:?pilot output root required}" \
-        --text-limits "${HOTPOTQA_TEXT_LIMITS_JSON:-null}" --stage all
+        --text-limits "${HOTPOTQA_TEXT_LIMITS_JSON:-null}" --stage "${HOTPOTQA_PILOT_STAGE:-all}"
     exit 0
 fi
 

@@ -85,6 +85,7 @@ class ReActV2Result:
     final_output: str = ""
     steps: list[ReActV2Step] = field(default_factory=list)
 
+
 _TOOL_SCHEMAS: dict[EditTool, str] = {
     EditTool.INSERT_TEXT: (
         "<tool_call>\n"
@@ -607,9 +608,7 @@ class ReActV2Proposer:
         validated_history = _validated_branch_history(branch_history)
         model = getattr(self.lm, "model", "")
         direct_deepseek_native_tools = (
-            native_tools
-            and isinstance(model, str)
-            and model.startswith("deepseek/deepseek-v4-")
+            native_tools and isinstance(model, str) and model.startswith("deepseek/deepseek-v4-")
         )
         if validated_history and direct_deepseek_native_tools:
             history_json = json.dumps(validated_history, ensure_ascii=False)
@@ -799,7 +798,10 @@ class ReActV2Proposer:
             action_text = ""
             assistant_history_content = ""
             if use_native_tools:
-                completion = cast(Any, native_complete)(messages, provider_tools, tool_choice="auto")
+                tool_budget_spent = self.max_tool_calls is not None and valid_calls >= self.max_tool_calls
+                completion = cast(Any, native_complete)(
+                    messages, provider_tools, tool_choice="none" if tool_budget_spent else "auto"
+                )
                 if not isinstance(completion, ToolCompletion):
                     raise TypeError("complete_with_tools must return gepa.lm.ToolCompletion.")
                 content = completion.content.strip()
@@ -1009,7 +1011,12 @@ class ReActV2Proposer:
                     region_text=current,
                 )
             )
-            self._append_observation(messages, f"{observation}\nContinue with one action.", native_call)
+            next_action = (
+                "The configured tool-call budget is exhausted. Emit <finish>Done.</finish> without another tool call."
+                if self.max_tool_calls is not None and valid_calls >= self.max_tool_calls
+                else "Continue with one action."
+            )
+            self._append_observation(messages, f"{observation}\n{next_action}", native_call)
 
         reason = f"No completed revision within {self.max_iterations} ReAct V2 turns."
         if self.logger is not None:

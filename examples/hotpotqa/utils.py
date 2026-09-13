@@ -155,23 +155,30 @@ def validate_hotpotqa_dspy_runtime() -> tuple[str, str]:
 def resolve_hotpotqa_lm_kwargs(
     model: str,
     api_base: str | None,
+    *,
+    role: str = "solver",
 ) -> dict[str, object]:
     """Resolve the fixed HotPotQA scientific request settings.
 
     Args:
         model: Exact LiteLLM runtime model identifier.
         api_base: Optional role-specific API endpoint.
+        role: Solver or optimizer; DeepSeek optimization needs more output room.
 
     Returns:
         Independent LM keyword arguments for the requested local runtime.
     """
+    if role not in {"solver", "optimizer"}:
+        raise ValueError(f"Unknown HotPotQA model role: {role!r}")
     kwargs: dict[str, object] = {
         "num_retries": EXPERIMENT_NUM_RETRIES,
         "timeout": HOTPOTQA_REQUEST_TIMEOUT_SECONDS,
-        **provider_retry_kwargs(role="solver"),
+        **provider_retry_kwargs(role=role),
         **experiment_decoding(model, agentic=False),
         **experiment_request_overrides(model, explicit_reasoning=True),
     }
+    if role == "optimizer" and model == DEEPSEEK_V4_1_FLASH_MODEL:
+        kwargs["max_tokens"] = 131_072
     if model in {QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL}:
         kwargs["seed"] = HOTPOTQA_SCIENTIFIC_REQUEST_SEED
     if api_base is not None:

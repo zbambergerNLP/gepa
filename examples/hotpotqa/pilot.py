@@ -17,6 +17,7 @@ from examples.common.pilot_checks import (
     CycleEvidence,
     atomic_json,
     digest,
+    load_cycle,
     require_contract,
 )
 from examples.common.provider_retries import PROVIDER_RETRY_KEY, provider_retry_kwargs
@@ -44,17 +45,27 @@ from examples.hotpotqa.utils import (
 )
 from examples.terminalbench.token_usage import summarize_usage
 
-PILOT_PROTOCOL = {"version": 1, "split": "train", "smoke": 3, "full": 150, "optimizer": OPTIMIZER_PILOT_PROTOCOL}
+PILOT_PROTOCOL = {
+    "version": 2,
+    "split": "train",
+    "smoke": 3,
+    "throughput": 12,
+    "full": 150,
+    "optimizer": OPTIMIZER_PILOT_PROTOCOL,
+}
 LIMITS = {"max_output_tokens": 16384, "context_tokens": 262144}
 
 
 def observed_kwargs(model: str, api_base: str, directory: Path, role: str) -> dict:
     """Apply the production decoding/retry policy and retain raw usage."""
-    kwargs = resolve_hotpotqa_lm_kwargs(model, api_base)
+    kwargs = resolve_hotpotqa_lm_kwargs(model, api_base, role="solver" if role == "solver" else "optimizer")
     kwargs.update(provider_retry_kwargs(directory / "provider-attempts.jsonl", role))
     retry_settings = kwargs[PROVIDER_RETRY_KEY]
     assert isinstance(retry_settings, dict)
-    retry_settings.update(token_usage_log=str(directory / "token-usage.jsonl"), token_limits=LIMITS)
+    retry_settings.update(
+        token_usage_log=str(directory / "token-usage.jsonl"),
+        token_limits={**LIMITS, "max_output_tokens": kwargs["max_tokens"]},
+    )
     return kwargs
 
 
@@ -197,11 +208,16 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--wiki17-dir", type=Path, required=True)
     parser.add_argument("--workers", type=int, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--stage", choices=("all", "smoke", "full", "optimizer"), default="all")
+    parser.add_argument("--stage", choices=("all", "smoke", "throughput", "full", "optimizer"), default="all")
+    parser.add_argument(
+        "--method", choices=METHODS, help="Run one optimizer check before resuming the remaining methods"
+    )
     parser.add_argument("--text-limits", default="null")
     args = parser.parse_args(argv)
     if args.workers < 1:
         parser.error("--workers must be positive")
+    if args.method and args.stage != "optimizer":
+        parser.error("--method is only valid with --stage optimizer")
     settings = build_parser().parse_args(
         [
             "--solver-model",
@@ -245,11 +261,9 @@ def main(argv: list[str] | None = None) -> None:
     require_contract(args.output_dir, {"protocol": PILOT_PROTOCOL, "runtime": runtime_contract})
     family = resolve_template_family("auto", args.model)
     candidate = seed_candidate("2stage", "structured", family)
-    for stage, count in (("smoke", 3), ("full", 150)):
-        if args.stage not in ("all", stage):
-            continue
-        if stage == "full":
-            validate_calibration(args.output_dir / "smoke", 3)
+
+    def calibrate(stage: str, count: int) -> None:
+        """Measure the unchanged seed on the same ordered training examples."""
         directory = args.output_dir / stage
         kwargs = observed_kwargs(args.model, args.api_base, directory, "solver")
         lm = build_hotpotqa_task_lm(args.model, args.api_base, kwargs)
@@ -269,9 +283,12 @@ def main(argv: list[str] | None = None) -> None:
             contract={"runtime": runtime_contract, "stage": stage},
             workers=args.workers,
         )
+
+    if args.stage in ("all", "smoke"):
+        calibrate("smoke", 3)
     if args.stage in ("all", "optimizer"):
-        validate_calibration(args.output_dir / "full", 150)
-        for method in METHODS:
+        validate_calibration(args.output_dir / "smoke", 3)
+        for method in (args.method,) if args.method else METHODS:
             directory = args.output_dir / "optimizer" / method
             contract = {
                 "protocol": OPTIMIZER_PILOT_PROTOCOL,
@@ -281,6 +298,9 @@ def main(argv: list[str] | None = None) -> None:
             }
             contract["runtime"]["optimizer"].update(max_metric_calls=None, max_candidate_proposals=1)
             require_contract(directory, contract)
+            if (directory / "optimizer-pilot-complete.json").exists():
+                load_cycle(directory)
+                continue
             evidence = CycleEvidence(directory)
             kwargs = observed_kwargs(args.model, args.api_base, directory, "solver")
             evaluator = strict_evaluator(make_evaluator(args.model, retriever, args.api_base, solver_lm_kwargs=kwargs))
@@ -304,6 +324,14 @@ def main(argv: list[str] | None = None) -> None:
                 atomic_json(
                     directory / "token-usage-summary.json", summarize_usage([directory / "provider-attempts.jsonl"])
                 )
+    if args.stage in ("all", "throughput"):
+        validate_calibration(args.output_dir / "smoke", 3)
+        calibrate("throughput", PILOT_PROTOCOL["throughput"])
+    if args.stage in ("all", "full"):
+        validate_calibration(args.output_dir / "smoke", 3)
+        for method in METHODS:
+            load_cycle(args.output_dir / "optimizer" / method)
+        calibrate("full", 150)
     print(f"Pilot evidence ready for review: {args.output_dir}")
 
 

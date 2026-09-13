@@ -6,7 +6,7 @@ if [[ "${1:-}" == "--dry-run" ]]; then
     for profile in qwen3.8-27b deepseek-v4.1-flash; do
         printf 'HOTPOTQA_JOB_KIND=pilot MODEL_PROFILE=%s HOTPOTQA_CAMPAIGN_ID=<pilot-id> bash %q\n' "$profile" "${SCRIPT_DIR}/submit_hotpotqa.sh"
     done
-    echo "Each arm runs the 3-question smoke, 150-question training calibration, and four optimizer cycles. DeepSeek first runs its serving canary. No validation or test execution."
+    echo "Each arm runs the 3-question smoke, four optimizer cycles, 12-question throughput check, and 150-question training calibration. DeepSeek first runs its serving canary. No validation or test execution."
     exit 0
 fi
 if [[ $# != 0 ]]; then

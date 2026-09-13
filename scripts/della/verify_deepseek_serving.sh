@@ -52,6 +52,11 @@ VERIFY_TIMEOUT="${VERIFY_TIMEOUT:-3600}"
 # Same serving values as run_hotpotqa.sbatch.
 GEN_GMU=0.92
 GEN_MAX_LEN=262144
+VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-1}"
+case "${VLLM_MAX_NUM_SEQS}" in
+    1|2|4) ;;
+    *) echo "ERROR: VLLM_MAX_NUM_SEQS must be 1, 2, or 4" >&2; exit 1 ;;
+esac
 VLLM_MAX_NUM_BATCHED_TOKENS="${VLLM_MAX_NUM_BATCHED_TOKENS:-16384}"
 
 VLLM_PY="${SERVING_VENV_DIR}/bin/python"
@@ -184,7 +189,7 @@ env \
     --port "${GEN_PORT}" \
     --gpu-memory-utilization "${GEN_GMU}" \
     --max-model-len "${GEN_MAX_LEN}" \
-    --max-num-seqs 1 \
+    --max-num-seqs "${VLLM_MAX_NUM_SEQS}" \
     --max-num-batched-tokens "${VLLM_MAX_NUM_BATCHED_TOKENS}" \
     --dtype bfloat16 \
     --seed 0 \

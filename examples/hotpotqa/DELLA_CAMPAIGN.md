@@ -25,7 +25,7 @@ no manual source hash is required. Preflight requires the consolidated branch
 and rejects uncommitted changes. An optional `HOTPOTQA_SOURCE_COMMIT` asserts
 a particular expected revision. Keep the recorded SHA fixed during a campaign.
 Source, checkpoint, runtime, or experiment
-changes require a fresh campaign. HotPotQA's consolidated run contract is schema 26.
+changes require a fresh campaign. HotPotQA's consolidated run contract is schema 27.
 
 Reuse the working Della connection configuration. If this checkout's ignored
 `scripts/della/.env` is absent, create it from `.env.example`, fill in the real
@@ -95,8 +95,8 @@ FlashInfer builds use the serving environment's CUDA headers first.
 | Della allocation | 1 H200, 8 CPUs, 128G | 4 H200s on one node, 32 CPUs, 512G |
 | Weights / KV cache | BF16 / BF16 (`auto`) | Native FP4 experts + FP8 / FP8 |
 | Engram tables | Not applicable | Explicit CPU offload |
-| Active sequences | One per replica | One |
-| Context / output cap | 262,144 / 16,384 | 262,144 / 16,384 |
+| Active sequences | Calibrate 1, 2, 4 | Calibrate 1, 2, 4 |
+| Context / output caps | 262,144 / 16,384 | 262,144 / 16,384 solver; 131,072 optimizer |
 | Thinking effort | `xhigh` | `100` |
 | Approved initial pilot workers | 12 | 4 |
 
@@ -105,7 +105,7 @@ The smaller GPU allocations follow the checkpoint-byte sizing review and await
 empirical qualification. Client workers may queue behind one active sequence. Check
 throughput and timeouts on training examples, then freeze the chosen concurrency
 across all six cells per model. This calibration remains pending. The
-new V4.1 runtime uses one sequence per replica, as in Zach's branch.
+September 13 qualification now compares 1, 2, and 4 active requests on the same 12 training questions. This revises the earlier single-sequence profile.
 
 Temperature is 1.0 and top-p is 0.95 for both models and all roles. DeepSeek uses
 numeric effort 100, matching its published instruct/agentic evaluations.
@@ -159,18 +159,22 @@ bytes, environment, H200 hardware, and native tool calls before training.
 The approved HotPotQA calibration pilot then evaluates, for each model:
 
 1. Three training questions to check the complete two-stage task pipeline.
-2. All 150 training questions to measure throughput, timeouts, token usage,
-   and output cutoffs with the initial prompts.
+2. One real cycle for each of the four optimizer methods.
+3. Twelve fixed training questions to compare active-request limits 1, 2, and 4.
+4. All 150 training questions at the selected profile to measure throughput,
+   timeouts, token usage, and output cutoffs with the initial prompts.
 
 Use the pinned training split, Wiki-2017 BM25 k=7, and approved model settings.
 Start with 12 Qwen workers / 4 DeepSeek workers. Keep validation and test
 examples outside calibration, and review the evidence before freezing the
 runtime settings across the six experiment cells per model. These stages
 evaluate the initial prompts without optimizing them. The dedicated
-`submit_hotpotqa_pilots.sh` launcher runs them before four optimizer checks on
+`submit_hotpotqa_pilots.sh` launcher runs smoke and the four optimizer checks before throughput and full calibration on
 each model. It uses the production serving gates and writes isolated outputs
 under `outputs/hotpotqa-pilots/<pilot-id>/<model>/`. It does not freeze production
-campaign locks. Live pilot execution remains pending.
+campaign locks. Qwen first verifies all four native edit tools; DeepSeek runs
+its 20-attempt canary. Successful checks are recorded for the exact runtime.
+Live pilot execution remains pending.
 
 The approved pilot acceptance criteria are:
 
@@ -211,28 +215,19 @@ stop condition. `optimizer-cycle.json` retains callback evidence;
 skip does not count as an exercised cycle. The serving canary alone does not
 exercise this complete flow. Live qualification remains pending.
 
-Keep 12 Qwen / 4 DeepSeek workers if the pilot passes; the approved plan does
-not include a search for higher parallelism. If queueing causes timeouts,
+Keep client workers fixed at 12 Qwen / 4 DeepSeek while comparing server
+active-request limits 1, 2, and 4. Rank completed questions per hour using
+`examples.hotpotqa.batching_report`; inspect memory, queueing, preemptions, and
+request errors before selecting a profile. A timing winner alone is not production qualification. If queueing causes timeouts,
 reduce concurrency and repeat the affected model's 150-question training
 pilot. Investigate parsing failures and output cutoffs separately. Freeze the
 successful setting across that model's six experiment cells.
 
-Test Qwen and DeepSeek pilot execution concurrently on separate allocations,
-using independent model servers, runtime records, and output directories. Keep
-the approved three-question and full 150-question stages for each model, and
-coordinate the full stages to overlap where capacity allows. Start with the
-existing 12 Qwen / 4 DeepSeek workers; this scheduling trial does not authorize
-a search for higher worker counts.
-
-Record both job IDs and actual inference start/end times, including whether
-model calls overlapped, plus resource availability and each arm's throughput,
-timeouts, errors, and output cutoffs. Two queued or submitted jobs are not proof
-of concurrent execution. If overlapping pilots pass the existing checks, their
-results can qualify concurrent model-arm scheduling. If capacity prevents the
-trial or overlapping execution fails the checks, use sequential scheduling and
-complete the required full training pilots in that mode. Serial execution must
-still pass the same checks. Review and record the final schedule from the pilot
-evidence before production; the schedule remains undecided until then.
+Use one interactive allocation at a time, following the user's updated resource
+instructions. Qwen and DeepSeek qualification runs are sequential; concurrency
+calibration compares active requests within each model server. Record each job
+ID, inference start/end times, throughput, errors, output cutoffs, and resource
+peaks. Cross-model overlap has not been qualified.
 
 After artifact preparation, commit the exact source and use a fresh pilot ID:
 
@@ -313,3 +308,41 @@ is `outputs/hotpotqa-campaigns/<campaign>/<commit>/`.
 
 PR #62's previous job numbers and artifact-readiness claims are historical.
 Check the actual connection and runtime before using this consolidated source.
+
+## Interactive qualification after the September 13 measurements
+
+DeepSeek optimizer roles now use a 131,072-token ceiling, uniformly across
+vanilla, FOREST, random Controller, and action-only. Solver calls retain 16,384;
+Qwen retains 16,384 for all roles. The 262,144 context and provider sampling
+settings are unchanged. Run contracts use schema 27; pilot protocol uses version 2.
+
+Set `HOTPOTQA_JOB_KIND=pilot HOTPOTQA_PREPARE_ONLY=1` with a fresh campaign ID
+and `MODEL_PROFILE`, then run `scripts/della/submit_hotpotqa.sh`. This verifies
+and stages the clean current source and prints `INTERACTIVE_EXPORT_FILE` without
+submitting jobs. Inside an approved allocation, run the staged
+`scripts/della/remote/run_hotpotqa_interactive.sh <export-file> all` through
+`srun`. Stages `smoke`, `optimizer`, `throughput`, and `full` are individually
+resumable. Request one allocation at a time with `salloc`, for 55 minutes, using
+the model's resource profile. The DeepSeek interactive pilot runs its required
+20-attempt runtime canary before inference when its exact-runtime marker is absent.
+
+Store each batching profile under its own pilot ID. Run the small optimizer
+checks first, compare the three server settings on training only, then finish
+the complete optimizer and 150-question checks at the selected setting.
+`--stage optimizer --method <name>` can resume a single method through the
+Python CLI against an already running endpoint. Completed checks are hash-verified
+and reused only for the same run identity. Standard and doubled budgets share
+method coverage; production candidates always start from the original prompts.
+
+The bounded one-edit native diagnostic now requests `tool_choice=none` and an
+explicit finish after spending its configured edit allowance. Its strict two-turn
+check still requires a valid edit and finish. Production's unlimited tool/turn
+policy is unchanged. Keep failed historical probes as evidence.
+
+Qualify interruption and resume with saved records, optimizer checkpoints, and
+response journals before long runs. Check that original metric budgets remain
+unchanged and completed work is not rerun. Compiler caches remain on scratch;
+model-response and evaluation caches remain disabled. See
+`DELLA_QUALIFICATION_2026-09-13.md` for the original measurements; the new batching
+comparison, larger-token DeepSeek cycle, full calibration, and live recovery
+are not established by that earlier report.

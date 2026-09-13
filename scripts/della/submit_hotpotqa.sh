@@ -57,6 +57,11 @@ trap cleanup_local_files EXIT
 
 # Tunable knobs (env overrides).
 MODEL_PROFILE="${MODEL_PROFILE:-qwen3.8-27b}"
+HOTPOTQA_PREPARE_ONLY="${HOTPOTQA_PREPARE_ONLY:-0}"
+if [[ "${HOTPOTQA_PREPARE_ONLY}" != "0" && "${HOTPOTQA_PREPARE_ONLY}" != "1" ]]; then
+    echo "ERROR: HOTPOTQA_PREPARE_ONLY must be 0 or 1" >&2
+    exit 1
+fi
 HOTPOTQA_JOB_KIND="${HOTPOTQA_JOB_KIND:-experiment}"
 HOTPOTQA_PILOT_ONLY=0
 if [[ "${HOTPOTQA_JOB_KIND}" != "experiment" && "${HOTPOTQA_JOB_KIND}" != "pilot" ]]; then
@@ -67,6 +72,10 @@ if [[ "${HOTPOTQA_JOB_KIND}" == "pilot" ]]; then
     BUDGET_PROFILE=standard
     CONDITION=vanilla
     HOTPOTQA_PILOT_ONLY=1
+fi
+if [[ "${HOTPOTQA_PREPARE_ONLY}" == "1" && "${HOTPOTQA_JOB_KIND}" != "pilot" ]]; then
+    echo "ERROR: interactive preparation requires HOTPOTQA_JOB_KIND=pilot" >&2
+    exit 1
 fi
 BUDGET_PROFILE="${BUDGET_PROFILE:-campaign}"
 CONDITION="${CONDITION:-all}"
@@ -156,8 +165,8 @@ case "${MODEL_PROFILE}" in
             echo "ERROR: scientific Qwen runs require one H200, TP1/DP1, and one API server" >&2
             exit 1
         fi
-        if [[ "${VLLM_MAX_NUM_SEQS}" != "1" ]]; then
-            echo "ERROR: scientific Qwen runs require VLLM_MAX_NUM_SEQS=1" >&2
+        if [[ ! "${VLLM_MAX_NUM_SEQS}" =~ ^(1|2|4)$ ]]; then
+            echo "ERROR: VLLM_MAX_NUM_SEQS must be 1, 2, or 4" >&2
             exit 1
         fi
         MODEL="Qwen3.8-27B"
@@ -198,7 +207,7 @@ case "${MODEL_PROFILE}" in
             || "${VLLM_TENSOR_PARALLEL_SIZE}" != "4" \
             || "${VLLM_DATA_PARALLEL_SIZE}" != "1" \
             || "${VLLM_API_SERVER_COUNT}" != "1" \
-            || "${VLLM_MAX_NUM_SEQS}" != "1" ]]; then
+            || ! "${VLLM_MAX_NUM_SEQS}" =~ ^(1|2|4)$ ]]; then
             echo "ERROR: scientific DeepSeek runs require one TP4 replica on four H200s on one node" >&2
             exit 1
         fi
@@ -309,15 +318,19 @@ if [[ ! "${HOTPOTQA_SOURCE_MANIFEST_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
     exit 1
 fi
 
-# Step 2: submit sbatch on della login node.
-echo "==> submitting HotpotQA: profile=${MODEL_PROFILE} solver=${SOLVER_MODEL} reflection=${REFLECTION_MODEL}"
+# Resolve the same environment before either interactive execution or submission.
+if [[ "${HOTPOTQA_PREPARE_ONLY}" == "1" ]]; then
+    echo "==> preparing HotpotQA for salloc: profile=${MODEL_PROFILE} solver=${SOLVER_MODEL} reflection=${REFLECTION_MODEL}"
+else
+    echo "==> submitting HotpotQA: profile=${MODEL_PROFILE} solver=${SOLVER_MODEL} reflection=${REFLECTION_MODEL}"
+fi
 echo "==> scientific contract: budget_profile=${BUDGET_PROFILE} budget=${CAMPAIGN_BUDGET_LABEL} condition=${CONDITION} merge=off"
 echo "==> method: frozen Wiki-2017/BM25 k=7 seed=0 workers=${MAX_WORKERS} two-stage structured prompts"
 echo "==> Della resources: partition=${JOB_PARTITION:-cluster-default} gpus=${DELLA_GPUS} cpus=${DELLA_CPUS_PER_TASK} memory=${DELLA_MEMORY}"
 if [[ "${MODEL_PROFILE}" == "qwen3.8-27b" ]]; then
-    echo "==> Qwen vLLM: tp=1 dp=1 api_servers=1 max_num_seqs=1/replica max_batched_tokens=${VLLM_MAX_NUM_BATCHED_TOKENS}"
+    echo "==> Qwen vLLM: tp=1 dp=1 api_servers=1 max_num_seqs=${VLLM_MAX_NUM_SEQS} max_batched_tokens=${VLLM_MAX_NUM_BATCHED_TOKENS}"
 else
-    echo "==> DeepSeek vLLM: tp=4 ep=4 dp=1 max_num_seqs=1 FP8-KV Engram-CPU-offload deepseek_v41 parsers no-speculation"
+    echo "==> DeepSeek vLLM: tp=4 ep=4 dp=1 max_num_seqs=${VLLM_MAX_NUM_SEQS} FP8-KV Engram-CPU-offload deepseek_v41 parsers no-speculation"
 fi
 
 ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
@@ -539,6 +552,15 @@ write_sbatch_export_file() {
 }
 
 CANARY_FLAGS=()
+if [[ "${HOTPOTQA_PREPARE_ONLY}" == "1" ]]; then
+    CELL_NAME=interactive
+    RECOVERY_REGISTRY="\${CONTINUATION_DIR}/interactive-registry.json"
+    RECOVERY_ERROR_FILE="\${CONTINUATION_DIR}/interactive-error.json"
+    write_sbatch_export_file standard 6871 vanilla 0
+    echo "INTERACTIVE_EXPORT_FILE=\${SBATCH_EXPORT_FILE}"
+    SBATCH_EXPORT_FILE=""
+    exit 0
+fi
 for _ in "\${SUBMIT_CONDITIONS[@]}"; do CANARY_FLAGS+=(0); done
 if [[ "${MODEL_PROFILE}" == "deepseek-v4.1-flash" ]]; then
     SUBMIT_BUDGET_PROFILES=(standard "\${SUBMIT_BUDGET_PROFILES[@]}")

@@ -66,8 +66,8 @@ https://researchcomputing.princeton.edu/support/knowledge-base/data-storage.
 - `submit_deepseek_smoke.sh submit|fetch <id>`: independent transcript and
   four-tool diagnostic; no campaign qualification marker.
 - `submit_hotpotqa.sh`: exact-source submission with verified allocation continuation.
-- `submit_hotpotqa_pilots.sh [--dry-run]`: independent model pilots, three then
-  150 training questions followed by four real optimizer checks per model.
+- `submit_hotpotqa_pilots.sh [--dry-run]`: independent model pilots, three training questions, four real optimizer checks, a 12-question throughput
+  measurement, then the full 150-question calibration per model.
 - `fetch_hotpotqa_results.sh`: validated local results under
   `outputs/hotpotqa-campaigns/<campaign>/<commit>/`. Set `HOTPOTQA_JOB_KIND=pilot`
   for `outputs/hotpotqa-pilot-fetches/<campaign>/<commit>/pilot-report.json`.
@@ -86,15 +86,15 @@ Qwen uses `.serving-venv` (vLLM 0.25.1 / Torch 2.11); DeepSeek V4.1 uses
 (`0.1.1.dev5+ge77daef89`), Torch 2.13, and prebuilt FlashInfer kernel wheels.
 HotPotQA does not depend on POSIT.
 
-- Qwen: TP1/DP1, one API server, one sequence/replica, context 262,144,
+- Qwen: TP1/DP1, one API server, a training-selected active-request limit (1, 2, or 4), context 262,144,
   thinking `xhigh`.
-- DeepSeek V4.1: TP4/EP4/DP1, one API server and one active sequence, context
+- DeepSeek V4.1: TP4/EP4/DP1, one API server and a training-selected active-request limit (1, 2, or 4), context
   262,144, numeric thinking effort 100, native `deepseek_v41` parsers, FP8 KV,
   automatic block size (64 on SM90), original weight formats, explicit Engram
   CPU offload (`--engram-config '{"cpu_offload":true}'`), no speculation.
-  `FLASHINFER_NO_DOWNLOAD=1`; use the serving wheels' CUDA headers first.
-- Temperature 1.0 / top-p 0.95 for every role. Output caps: 16,384 HotPotQA,
-  32,768 Terminal-Bench. Server context is the Della setting, not the provider's
+  `FLASHINFER_NO_DOWNLOAD=1`; keep compiler CUDA headers first; use wheel headers through C_INCLUDE_PATH/CPLUS_INCLUDE_PATH as fallbacks.
+- Temperature 1.0 / top-p 0.95 for every role. Output caps: 16,384 HotPotQA solver and all Qwen roles; 131,072 for
+  DeepSeek HotPotQA optimizer roles; 32,768 Terminal-Bench. Server context is the Della setting, not the provider's
   maximum. See `examples/common/temperature_policy.md`.
 - Initial workers: 12 Qwen / 4 DeepSeek. Calibrate on training and freeze across
   methods/budgets; defaults are not evidence of completed calibration.
@@ -130,3 +130,10 @@ samples are stored with the job logs; vLLM INFO logs retain startup memory
 allocations and throughput. Caps are 72 hours
 for Qwen standard and 144 hours for expanded/DeepSeek. They are not estimates.
 Use Slurm accounting and output artifacts to prove completion, not submission IDs.
+
+For approved interactive qualification, use HOTPOTQA_PREPARE_ONLY=1 with
+HOTPOTQA_JOB_KIND=pilot in submit_hotpotqa.sh, then the staged
+scripts/della/remote/run_hotpotqa_interactive.sh inside salloc/srun. Preparation
+stages verified source and an export file without submitting jobs. Compare
+server active-request limits 1, 2, 4 with fixed clients and training examples;
+freeze the selected profile after full calibration and optimizer checks.

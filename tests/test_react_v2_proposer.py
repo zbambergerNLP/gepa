@@ -406,6 +406,20 @@ def test_production_path_exposes_every_configured_tool_with_auto_choice() -> Non
     assert "<tool_call>" not in lm.calls[0][0]["content"]
 
 
+def test_explicit_tool_budget_disables_more_calls_but_allows_finish() -> None:
+    """Tell the model it must finish once a bounded diagnostic spends its edit budget."""
+    lm = NativeScriptedLM(
+        [
+            ToolCompletion("", (NativeToolCall("edit", "REPLACE_TEXT", '{"target":"be nice","text":"be kind"}'),)),
+            ToolCompletion("<finish>Done.</finish>", ()),
+        ]
+    )
+    result = run(lm, preferred_tool=EditTool.REPLACE_TEXT, max_tool_calls=1, max_iterations=2)
+    assert result.changed and result.tool_calls == 1
+    assert lm.tool_choices == ["auto", "none"]
+    assert "budget is exhausted" in lm.calls[1][-1]["content"]
+
+
 def test_custom_callable_uses_explicit_text_tool_compatibility_protocol() -> None:
     """Retain a documented fallback for callables without native-tool support."""
     lm = ScriptedLM([tool_call(EditTool.REPLACE_TEXT, target="be nice", text="be kind"), "<finish>Done.</finish>"])
@@ -574,7 +588,9 @@ def test_minimal_basis_composes_delete_and_insert_then_finishes() -> None:
     assert result.executed_edit == ["DELETE 'old|'", "INSERT 'new|' before 'anchor'"]
     assert "new|anchor|tail" in result.new_text
     assert "old|" not in result.new_text
-    assert "For each replacement, use one DELETE_TEXT call followed by one INSERT_TEXT call" in lm.calls[0][0]["content"]
+    assert (
+        "For each replacement, use one DELETE_TEXT call followed by one INSERT_TEXT call" in lm.calls[0][0]["content"]
+    )
 
 
 def test_minimal_replace_rejects_insert_before_delete_without_advancing_state() -> None:

@@ -48,6 +48,36 @@ def test_missing_prediction_never_qualifies(tmp_path):
     assert not (tmp_path / "pilot-complete.json").exists()
 
 
+def test_partial_calibration_resumes_only_unfinished_questions(tmp_path):
+    """Keep saved predictions after an interrupted request without counting it twice."""
+    examples = [{"id": str(i), "answer": "gold"} for i in range(3)]
+    calls = []
+
+    def interrupted(candidate, example):
+        calls.append(example["id"])
+        if example["id"] == "1":
+            raise ConnectionError("simulated allocation interruption")
+        return "wrong", {}
+
+    with pytest.raises(ConnectionError):
+        run_calibration(tmp_path, examples, {}, interrupted, contract={"stage": "smoke"}, workers=1)
+    assert not (tmp_path / "pilot-complete.json").exists()
+    saved = {path.name: path.read_bytes() for path in (tmp_path / "records").glob("*.json")}
+    resumed = []
+
+    def complete(candidate, example):
+        resumed.append(example["id"])
+        return "wrong", {}
+
+    result = run_calibration(tmp_path, examples, {}, complete, contract={"stage": "smoke"}, workers=1)
+    assert result["completed_questions"] == 3
+    assert "0" not in resumed
+    assert "1" in resumed
+    for name, data in saved.items():
+        assert (tmp_path / "records" / name).read_bytes() == data
+    assert validate_calibration(tmp_path, 3)["qualified"]
+
+
 @pytest.mark.parametrize("new_score,accepted", [(0.0, False), (0.5, False), (1.0, True)])
 def test_real_engine_cycle_accepts_any_metric_direction(tmp_path, new_score, accepted, monkeypatch):
     """Run the actual mutation, evaluation, and strict acceptance path."""
@@ -166,7 +196,7 @@ def test_completed_cycle_cannot_be_reused_after_contract_change(tmp_path):
         load_cycle(tmp_path)
 
 
-def test_hotpotqa_pilot_cli_runs_both_stages_then_all_four_methods(tmp_path, monkeypatch):
+def test_hotpotqa_pilot_checks_optimizers_before_throughput_and_full_calibration(tmp_path, monkeypatch):
     """Use real config builders and isolate only dataset, model transport, and GPU validation."""
     training = [{"id": f"train-{i}", "question": f"question-{i}", "answer": "gold"} for i in range(150)]
     heldout = [{"id": "never-execute", "question": "heldout", "answer": "gold"}]
@@ -200,7 +230,7 @@ def test_hotpotqa_pilot_cli_runs_both_stages_then_all_four_methods(tmp_path, mon
     methods = []
 
     def optimize(method, candidate, train, val, config, evaluator, callbacks):
-        assert len(executed) == 153
+        assert len(executed) == 3
         assert train == val == training[:3]
         assert config.engine.max_candidate_proposals == 1 and config.engine.max_metric_calls is None
         assert config.reflection.reflection_lm_kwargs["_gepa_provider_retry"]["token_limits"] == pilot.LIMITS
@@ -225,4 +255,5 @@ def test_hotpotqa_pilot_cli_runs_both_stages_then_all_four_methods(tmp_path, mon
         ]
     )
     assert methods == list(METHODS)
+    assert len(executed) == 165
     assert validate_calibration(tmp_path / "pilot" / "full", 150)["qualified"]

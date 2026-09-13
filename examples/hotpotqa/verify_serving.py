@@ -1,9 +1,9 @@
 """Manually verify that a locally served HotPotQA model handles ReAct V2 tools.
 
-This is a standalone diagnostic run once, by hand, on a GPU node through
-``scripts/della/verify_deepseek_serving.sh``. It is not part of any campaign
-job, writes no marker or lock files, and nothing in the launchers depends on
-its result. It exercises an ordinary completion, a native tool call followed by
+Run this diagnostic on a GPU node through
+``scripts/della/verify_deepseek_serving.sh`` or the Qwen qualification pilot.
+The diagnostic writes no marker or lock files; the Qwen pilot records successful
+verification for its exact runtime. It exercises an ordinary completion, a native tool call followed by
 its tool-result continuation, and one real ReAct V2 proposal per broad edit tool
 (DELETE_TEXT, INSERT_TEXT, MOVE_TEXT, REPLACE_TEXT), then prints a PASS/FAIL
 report and exits non-zero when any check failed.
@@ -36,7 +36,7 @@ from examples.hotpotqa.utils import resolve_hotpotqa_lm_kwargs
 from gepa.lm import LM
 from gepa.strategies.edit_tools import EDIT_TOOL_SETS
 
-DEFAULT_TIMEOUT_SECONDS = 600
+DEFAULT_TIMEOUT_SECONDS = 3600
 
 
 def run_serving_verification(
@@ -75,7 +75,7 @@ def run_serving_verification(
             f"At least {len(tools)} edit attempts are needed to exercise every broad edit tool once; "
             f"received {attempts}."
         )
-    lm_kwargs: dict[str, Any] = dict(resolve_hotpotqa_lm_kwargs(model, api_base))
+    lm_kwargs: dict[str, Any] = dict(resolve_hotpotqa_lm_kwargs(model, api_base, role="optimizer"))
     lm_kwargs.update(provider_retry_kwargs(attempt_log, "serving_verification"))
     lm_kwargs["timeout"] = timeout
     lm = LM(model, **lm_kwargs)

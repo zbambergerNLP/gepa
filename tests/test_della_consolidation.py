@@ -138,7 +138,7 @@ def test_existing_shared_model_is_verified_without_preparing_it(tmp_path, verifi
 
 
 @pytest.mark.parametrize("profile,workers", [("qwen3.8-27b", 12), ("deepseek-v4.1-flash", 4)])
-@pytest.mark.parametrize("kind", ["experiment", "pilot"])
+@pytest.mark.parametrize("kind", ["experiment", "pilot", "prepare"])
 @pytest.mark.parametrize("invalid_setting", [None, "DELLA_GPUS", "DELLA_CPUS_PER_TASK", "VLLM_TENSOR_PARALLEL_SIZE"])
 def test_submit_expands_the_remote_script_without_running_jobs(tmp_path, profile, workers, kind, invalid_setting):
     """Catch laptop-side heredoc expansion errors before any real submission."""
@@ -162,7 +162,8 @@ def test_submit_expands_the_remote_script_without_running_jobs(tmp_path, profile
         **os.environ,
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "MODEL_PROFILE": profile,
-        "HOTPOTQA_JOB_KIND": kind,
+        "HOTPOTQA_JOB_KIND": "pilot" if kind == "prepare" else kind,
+        "HOTPOTQA_PREPARE_ONLY": str(int(kind == "prepare")),
         "CAPTURE_REMOTE_SCRIPT": str(capture),
         "HOTPOTQA_CAMPAIGN_ID": "integration-test",
         "HOTPOTQA_TEXT_LIMITS_JSON": '{"component_chars":12345}',
@@ -199,7 +200,7 @@ def test_submit_expands_the_remote_script_without_running_jobs(tmp_path, profile
         assert resource in remote
     for setting in (f"VLLM_TENSOR_PARALLEL_SIZE={tp}", "VLLM_DATA_PARALLEL_SIZE=1", "VLLM_API_SERVER_COUNT=1"):
         assert f'"{setting}"' in remote
-    assert f'"HOTPOTQA_PILOT_ONLY={int(kind == "pilot")}"' in remote
+    assert f'"HOTPOTQA_PILOT_ONLY={int(kind != "experiment")}"' in remote
     assert "examples.common.slurm_continuation add" in remote
     assert "examples.common.slurm_continuation start" in remote
     assert '"HOTPOTQA_TEXT_LIMITS_JSON=${HOTPOTQA_TEXT_LIMITS_JSON}"' in remote
@@ -208,6 +209,62 @@ def test_submit_expands_the_remote_script_without_running_jobs(tmp_path, profile
     assert "POSIT" not in remote
     assert "logs/hotpotqa/integration-test/" in remote
     subprocess.run(["bash", "-n", str(capture)], check=True, capture_output=True)
+    if kind == "prepare":
+        block = remote[remote.index("write_sbatch_export_file()") : remote.index('for _ in "${SUBMIT_CONDITIONS[@]}"')]
+        prepared = subprocess.run(
+            ["bash", "-c", "set -euo pipefail\n" + block],
+            env={
+                **env,
+                **dict.fromkeys(re.findall(r"\$\{([A-Z][A-Z_0-9]*)", block), "fixture"),
+                "CONTINUATION_DIR": str(tmp_path),
+                "HOME": os.environ["HOME"],
+                "PATH": os.environ["PATH"],
+            },
+            capture_output=True,
+            text=True,
+        )
+        assert prepared.returncode == 0, prepared.stderr
+        export_path = Path(prepared.stdout.strip().removeprefix("INTERACTIVE_EXPORT_FILE="))
+        entries = export_path.read_bytes().split(b"\0")
+        assert b"HOTPOTQA_PILOT_ONLY=1" in entries
+        assert f"VLLM_TENSOR_PARALLEL_SIZE={tp}".encode() in entries
+        assert not (tmp_path / "plan.json").exists()
+
+
+@pytest.mark.parametrize("probe_status", [0, 1])
+def test_qwen_tool_verification_gates_pilot_and_resumes(tmp_path, probe_status):
+    """Start a pilot only after all tool probes pass, reusing only its exact attestation."""
+    source = (ROOT / "examples/hotpotqa/run_hotpotqa.sbatch").read_text()
+    start = source.index('if [[ "${HOTPOTQA_PILOT_ONLY}" == "1" ]]; then\n')
+    block = source[start : source.index("CAMPAIGN_LOCK_DIR=", start)]
+    calls = tmp_path / "calls"
+    python = tmp_path / "python"
+    executable(
+        python,
+        f'printf "%s\\n" "$*" >> "${{CALLS}}"\nif [[ "$*" == *verify_serving* ]]; then exit {probe_status}; fi\n',
+    )
+    env = {
+        **os.environ,
+        **dict.fromkeys(re.findall(r"\$\{([A-Z][A-Z_0-9]*)", block), "fixture"),
+        "PY": str(python),
+        "CALLS": str(calls),
+        "SCRATCH_BASE": str(tmp_path),
+        "LOG_DIR": str(tmp_path),
+        "MODEL_PROFILE": "qwen3.8-27b",
+        "HOTPOTQA_PILOT_ONLY": "1",
+    }
+    command = [
+        "bash",
+        "-c",
+        "set -euo pipefail\nGEN_PID=$$\ngenerator_reports_expected_model() { return 0; }\n" + block,
+    ]
+    first = subprocess.run(command, env=env, capture_output=True, text=True)
+    assert first.returncode == probe_status, first.stderr
+    assert ("examples.hotpotqa.pilot" in calls.read_text()) is (probe_status == 0)
+    if probe_status == 0:
+        subprocess.run(command, env=env, check=True, capture_output=True)
+        assert calls.read_text().count("examples.hotpotqa.verify_serving") == 1
+        assert calls.read_text().count("examples.hotpotqa.pilot") == 2
 
 
 @pytest.mark.parametrize(

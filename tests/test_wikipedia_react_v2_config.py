@@ -315,7 +315,7 @@ def test_hotpot_provider_sampling_reaches_every_model_role(model: str, budget: i
     args = _hotpot_args(solver_model=model, reflection_model=model, max_metric_calls=budget)
     general = experiment_decoding(model, agentic=False)
     agentic = experiment_decoding(model, agentic=True)
-    reflection_kwargs = resolve_hotpotqa_lm_kwargs(model, None)
+    reflection_kwargs = resolve_hotpotqa_lm_kwargs(model, None, role="optimizer")
     request_overrides = experiment_request_overrides(model, explicit_reasoning=True)
     config, selector = build_hotpotqa_config(condition, args, reflection_kwargs)
     contract = build_hotpotqa_run_contract(condition, args)
@@ -345,22 +345,31 @@ def test_hotpot_provider_sampling_reaches_every_model_role(model: str, budget: i
         "max_candidate_chars": None,
         "selector_target_chars": None,
     }
+    optimizer_general = {**general, "max_tokens": reflection_kwargs["max_tokens"]}
+    optimizer_agentic = {**agentic, "max_tokens": reflection_kwargs["max_tokens"]}
     expected = general["temperature"]
 
     assert expected == 1.0
     assert contract["models"]["solver_decoding"]["temperature"] == expected
     assert config.reflection.reflection_lm_kwargs["temperature"] == expected
+    expected_output_cap = 131_072 if model == DEEPSEEK_V4_1_FLASH_MODEL else 16_384
+    assert contract["models"]["solver_decoding"]["max_tokens"] == 16_384
+    assert contract["models"]["reflection_decoding"]["max_tokens"] == expected_output_cap
+    assert config.reflection.reflection_lm_kwargs["max_tokens"] == expected_output_cap
     assert contract["models"]["solver_decoding"]["top_p"] == general["top_p"]
     assert config.reflection.reflection_lm_kwargs["top_p"] == general["top_p"]
     assert config.reflection.reflection_lm_kwargs["extra_body"] == request_overrides["extra_body"]
     assert contract["models"]["solver_request_overrides"] == request_overrides
     assert contract["models"]["reflection_request_overrides"] == request_overrides
     if selector is not None:
+        assert selector.lm.completion_kwargs["max_tokens"] == expected_output_cap
         assert selector.lm.completion_kwargs["temperature"] == expected
         assert selector.lm.completion_kwargs["top_p"] == general["top_p"]
         assert selector.lm.completion_kwargs["extra_body"] == request_overrides["extra_body"]
     strategy = config.reflection.reflection_strategy
     if strategy is not None:
+        assert strategy.base_lm.completion_kwargs["max_tokens"] == expected_output_cap
+        assert strategy.manifestor_lm.completion_kwargs["max_tokens"] == expected_output_cap
         assert strategy.base_lm.completion_kwargs["temperature"] == expected
         assert strategy.manifestor_lm.completion_kwargs["temperature"] == expected
         assert strategy.base_lm.completion_kwargs["top_p"] == agentic["top_p"]
@@ -368,12 +377,13 @@ def test_hotpot_provider_sampling_reaches_every_model_role(model: str, budget: i
         assert strategy.base_lm.completion_kwargs["extra_body"] == request_overrides["extra_body"]
         assert strategy.manifestor_lm.completion_kwargs["extra_body"] == request_overrides["extra_body"]
         roles = contract["models"]["reflection_role_decoding"]
-        assert roles["manifestor"]["requested"] == {**general, "seed": 0}
-        assert roles["react_v2_proposer"]["requested"] == {**agentic, "seed": 0}
+        assert roles["manifestor"]["requested"] == {**optimizer_general, "seed": 0}
+        assert roles["react_v2_proposer"]["requested"] == {**optimizer_agentic, "seed": 0}
         if condition == "react_v2":
+            assert strategy.controller_lm.completion_kwargs["max_tokens"] == expected_output_cap
             assert strategy.controller_lm.completion_kwargs["top_p"] == general["top_p"]
             assert strategy.controller_lm.completion_kwargs["extra_body"] == request_overrides["extra_body"]
-            assert roles["controller"]["requested"] == {**general, "seed": 0}
+            assert roles["controller"]["requested"] == {**optimizer_general, "seed": 0}
         else:
             assert roles["controller"] is None
 
@@ -941,6 +951,45 @@ def test_hotpot_scientific_contract_rejects_qwen_runtime_drift(
 
 
 @pytest.mark.parametrize(
+    "model,runtime",
+    [(QWEN3_8_27B_MODEL, QWEN_SCIENTIFIC_RUNTIME), (DEEPSEEK_V4_1_FLASH_MODEL, DEEPSEEK_SCIENTIFIC_RUNTIME)],
+)
+@pytest.mark.parametrize("sequences", [1, 2, 4, 3])
+def test_batching_profile_is_validated_and_frozen(monkeypatch, tmp_path, model, runtime, sequences):
+    """Allow the measured batch sizes and reject resume into a different profile."""
+    for name, value in runtime.items():
+        monkeypatch.setenv(name, value)
+    args = _hotpot_args(
+        solver_model=model,
+        reflection_model=model,
+        enforce_scientific_contract=True,
+        max_metric_calls=6871,
+        train_limit=None,
+        val_limit=None,
+        test_limit=None,
+        data_identity=_scientific_data_identity(),
+    )
+    initial = build_hotpotqa_run_contract("react_v2", args)
+    ensure_wikipedia_run_contract(tmp_path, initial)
+    single = "true" if sequences == 1 else "false"
+    serve = runtime["HOTPOTQA_SERVE_ARGUMENTS"].replace("max_num_seqs=1", f"max_num_seqs={sequences}")
+    serve = serve.replace("single_sequence_replicas=true", f"single_sequence_replicas={single}")
+    monkeypatch.setenv("HOTPOTQA_SERVE_ARGUMENTS", serve)
+    monkeypatch.setenv("HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS", single)
+    if sequences == 3:
+        with pytest.raises(ValueError, match="max_num_seqs"):
+            build_hotpotqa_run_contract("react_v2", args)
+        return
+    contract = build_hotpotqa_run_contract("react_v2", args)
+    assert f"max_num_seqs={sequences}" in contract["execution_runtime"]["serve_arguments"]
+    if sequences == 1:
+        ensure_wikipedia_run_contract(tmp_path, contract)
+    else:
+        with pytest.raises(ValueError, match="different Wikipedia benchmark configuration"):
+            ensure_wikipedia_run_contract(tmp_path, contract)
+
+
+@pytest.mark.parametrize(
     ("changed_field", "message"),
     [
         ("revision", "revision"),
@@ -1218,7 +1267,7 @@ def test_hotpot_and_hover_contracts_record_exact_model_pair() -> None:
     assert hover["models"]["solver_decoding"] == experiment_decoding(QWEN3_8_27B_MODEL)
     assert hover["models"]["reflection_decoding"] == experiment_decoding(QWEN3_8_27B_MODEL)
 
-    assert hotpot["schema_version"] == 26
+    assert hotpot["schema_version"] == 27
     assert hotpot["baseline_protocol"]["test_repetitions"] == 1
     assert hotpot["optimizer"]["react_execution"]["completion"] == "explicit_finish"
     assert hotpot["optimizer"]["react_execution"]["max_iterations"] is None
@@ -1341,18 +1390,18 @@ def test_deepseek_contract_uses_the_deepseek_pair_and_local_request_settings() -
         "reflection": DEEPSEEK_V4_1_FLASH_MODEL,
         "reflection_version": DEEPSEEK_V4_1_FLASH_REVISION,
         "reflection_api_base": LOCAL_API_BASE,
-        "reflection_decoding": deepseek_decoding,
+        "reflection_decoding": {**deepseek_decoding, "max_tokens": 131_072},
         "reflection_role_decoding": {
             "controller": {
-                "requested": deepseek_decoding,
+                "requested": {**deepseek_decoding, "max_tokens": 131_072},
                 "provider_ignored_fields": [],
             },
             "manifestor": {
-                "requested": deepseek_decoding,
+                "requested": {**deepseek_decoding, "max_tokens": 131_072},
                 "provider_ignored_fields": [],
             },
             "react_v2_proposer": {
-                "requested": {**experiment_decoding(DEEPSEEK_V4_1_FLASH_MODEL, agentic=True), "seed": 0},
+                "requested": {**deepseek_decoding, "max_tokens": 131_072},
                 "provider_ignored_fields": [],
             },
         },
@@ -1657,7 +1706,7 @@ def test_stateless_action_menu_contract_matches_between_wikipedia_benchmarks() -
     expected = build_hotpotqa_run_contract("random", args)["optimizer"]["stateless_action_menu"]
 
     for build_contract, schema_version in (
-        (build_hotpotqa_run_contract, 26),
+        (build_hotpotqa_run_contract, 27),
         (build_hover_run_contract, 4),
     ):
         contract = build_contract("random", args)

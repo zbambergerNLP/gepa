@@ -1016,18 +1016,29 @@ def test_move_cannot_use_an_anchor_from_an_unselected_section() -> None:
     assert "anchor not found" in result.steps[0].observation
 
 
-def test_finish_before_a_changing_tool_call_is_rejected() -> None:
-    """Prevent an unchanged atomic-basis proposal from being marked complete."""
-    lm = ScriptedLM(
-        [
-            "<finish>Nothing to do.</finish>",
-            tool_call(EditTool.DELETE_TEXT, target="be nice"),
-            "<finish>Done.</finish>",
-        ]
-    )
+def test_finish_without_a_change_drops_the_proposal() -> None:
+    """End an inapplicable action without accepting an unchanged candidate."""
+    lm = ScriptedLM(["<finish>Nothing to do.</finish>"])
     result = run(lm, allowed_tools=EDIT_TOOL_SETS["minimal"])
-    assert [step.action for step in result.steps] == ["INVALID", "DELETE_TEXT", "FINISH"]
-    assert "Cannot finish" in result.steps[0].observation
+    assert [step.action for step in result.steps] == ["FINISH"]
+    assert not result.changed and result.new_text == RULES_TEXT
+    assert result.tool_calls == 0 and "Nothing to do" in result.dropped_reason
+
+
+def test_empty_section_error_restates_only_the_editable_body() -> None:
+    """Recover when an empty-section MOVE mistakenly targets feedback text."""
+    lm = NativeScriptedLM([
+        ToolCompletion(content="", tool_calls=[NativeToolCall(
+            id="move", name="MOVE_TEXT", arguments={"target": "feedback text", "anchor": "trace text", "where": "after"}
+        )]),
+        ToolCompletion(content="<finish>The selected body is empty, so nothing can move.</finish>", tool_calls=[]),
+    ])
+    result = run(lm, component_text=TEMPLATE.render({"Rules": ""}), preferred_tool=EditTool.MOVE_TEXT)
+    assert not result.changed and result.new_text == ""
+    assert [step.action for step in result.steps] == ["INVALID", "FINISH"]
+    assert '0 characters; JSON string)\n""' in lm.calls[0][-1]["content"]
+    assert '0 characters; JSON string):\n""' in result.steps[0].observation
+    assert "not feedback or traces" in result.steps[0].observation
 
 
 def test_manifestor_steering_is_delivered_in_the_current_user_message() -> None:

@@ -163,16 +163,23 @@ def test_repeated_empty_manifestation_raises_explicit_error() -> None:
 
 
 def test_controller_action_is_authoritative_for_manifestor() -> None:
-    """Realize the sampled action without a second applicability decision."""
+    """Keep the sampled action while requiring literal region grounding."""
     lm = RecordingLM("Add grounded background that addresses the observed failure.")
     choice = ControllerChoice(EditTarget("sys", "Rules"), SPEC)
     result = Manifestor(lm).manifest(choice, "region", "feedback", "traces")
     assert result == "Add grounded background that addresses the observed failure."
     assert len(lm.calls) == 1
     prompt = lm.calls[0]
-    assert "do not reassess its preconditions" in prompt
-    assert "not a Manifestor decision" in prompt
+    assert "do not substitute another action" in prompt
+    assert "If its required text is absent, say so" in prompt
     assert "<not_applicable>" not in prompt
+
+
+def test_empty_region_is_explicitly_separated_from_feedback() -> None:
+    """Prevent feedback from appearing to be the body of an empty section."""
+    lm = RecordingLM()
+    Manifestor(lm).manifest(ControllerChoice(EditTarget("sys", "Tone"), SPEC), "", "feedback", "traces")
+    assert '\'Tone\' (0 characters; JSON string)\n""\n\n## Failure feedback' in lm.calls[0]
 
 
 def test_blank_fixed_manifestation_is_rejected() -> None:

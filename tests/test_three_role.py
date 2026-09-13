@@ -428,8 +428,10 @@ def test_three_role_run_contract_blocks_catalog_or_policy_drift(tmp_path: Path) 
     assert contract["react_max_iterations"] is None
     assert contract["react_max_tool_calls"] is None
     assert contract["react_execution"] == {
-        "version": 1,
+        "version": 2,
         "completion": "explicit_finish",
+        "unchanged_finish": "discard_proposal",
+        "region_encoding": "json_string_with_character_count",
         "scope": "selected_section",
         "semantic_action": "fixed_for_proposal",
         "max_iterations": None,

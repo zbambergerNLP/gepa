@@ -44,7 +44,7 @@ def test_both_scopes_exercise_every_method_without_heldout_tasks(tmp_path, monke
         assert kwargs["acceptance_criterion"] == "strict_improvement"
         callback = next(cb for cb in kwargs["callbacks"] if isinstance(cb, CycleEvidence))
         stored = json.loads((callback.directory / benchmark.RUN_CONTRACT_FILENAME).read_text())
-        assert stored["optimization_budget"]["max_iterations"] == 1
+        assert stored["optimization_budget"]["max_iterations"] is None
         observed.append((stored["optimization_scope"], stored["condition"]))
         callback.events = {
             "reflection": {"feedback": "zero reward"},

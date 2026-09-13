@@ -502,7 +502,7 @@ def main(argv: list[str] | None = None) -> None:
         if args.optimizer_pilot:
             contract["optimizer_pilot"] = OPTIMIZER_PILOT_PROTOCOL
             contract["pilot_evaluation_split"] = "train"
-            contract["optimization_budget"].update(training_epochs=1, max_iterations=1, sampled_training_tasks=3)
+            contract["optimization_budget"].update(training_epochs=None, max_iterations=None, sampled_training_tasks=3)
             calibration = load_completed_pilot(args.optimizer_pilot_calibration, manifest, "full")
             validate_runtime(calibration["config"], run_runtime(contract))
             contract["optimizer_pilot_calibration"] = calibration
@@ -607,7 +607,11 @@ def main(argv: list[str] | None = None) -> None:
         reflection_lm_kwargs=reflection_lm_kwargs,
         reflection_strategy=reflection_strategy,
         max_metric_calls=args.max_metric_calls,
-        stop_callbacks=MaxCandidateProposalsStopper(contract["optimization_budget"]["max_iterations"]),
+        stop_callbacks=(
+            cycle.completed_cycle
+            if cycle is not None
+            else MaxCandidateProposalsStopper(contract["optimization_budget"]["max_iterations"])
+        ),
         callbacks=[RecoveryCallback(args.run_dir), *([cycle] if cycle else [])],
         batch_sampler=IndependentEpochShuffledBatchSampler(args.reflection_minibatch_size, args.seed),
         reflection_minibatch_size=None,

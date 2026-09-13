@@ -45,6 +45,7 @@ from gepa.core.state import (
     initialize_gepa_state,
     new_iteration_id,
 )
+from gepa.evaluation_journal import EvaluationJournal
 from gepa.gepa_utils import json_default, try_json_serialize
 from gepa.logging.experiment_tracker import ExperimentTracker
 from gepa.logging.logger import LoggerProtocol
@@ -230,6 +231,8 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
         self.experiment_tracker = experiment_tracker
 
         self.reflective_proposer = reflective_proposer
+        if run_dir is not None:
+            self.reflective_proposer.evaluation_journal = EvaluationJournal(run_dir, use_cloudpickle=use_cloudpickle)
         self.merge_proposer = merge_proposer
         self.frontier_type: FrontierType = frontier_type
 

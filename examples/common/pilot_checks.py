@@ -13,10 +13,11 @@ from examples.common.recovery import seal_progress
 
 METHODS = ("vanilla", "react_v2", "react_v2_random", "action")
 OPTIMIZER_PILOT_PROTOCOL = {
-    "version": 1,
+    "version": 2,
     "split": "train",
     "minibatch_size": 3,
     "cycles": 1,
+    "stop_after": "completed_candidate_reevaluation_and_decision",
     "metric_improvement_required": False,
     "budget_reuse": ["standard", "double"],
 }
@@ -67,6 +68,8 @@ class CycleEvidence:
 
     def on_iteration_start(self, event: dict) -> None:
         """Discard an interrupted iteration's observations before replay."""
+        if self.events and self.events.get("iteration") != event["iteration"]:
+            atomic_json(self.directory / "incomplete-iterations" / f"{self.events['iteration']}.json", self.events)
         self.events = {"iteration": event["iteration"]}
         self._save()
 
@@ -114,6 +117,15 @@ class CycleEvidence:
     def set_state(self, state: dict) -> None:
         """Restore observations when the completed checkpoint is resumed."""
         self.events = state
+
+    def completed_cycle(self, state: Any) -> bool:
+        """Stop only after a changed proposal receives a full reevaluation and decision."""
+        return (
+            "reflection" in self.events
+            and bool(self.events.get("proposal", {}).get("new_instructions"))
+            and len(self.events.get("reevaluation", {}).get("scores", [])) == 3
+            and "decision" in self.events
+        )
 
     def verify(self) -> dict:
         """Require every stage, accepting a tied or worse evaluated candidate."""

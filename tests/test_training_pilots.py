@@ -12,7 +12,6 @@ from examples.hotpotqa.pilot import run_calibration, strict_evaluator, validate_
 from examples.hotpotqa.pilot_report import overlap_seconds, report, request_intervals
 from gepa import optimize
 from gepa.core.adapter import EvaluationBatch
-from gepa.utils.stop_condition import MaxCandidateProposalsStopper
 
 
 def test_calibration_accepts_wrong_answers_and_resumes_completed_work(tmp_path):
@@ -79,13 +78,16 @@ def test_partial_calibration_resumes_only_unfinished_questions(tmp_path):
 
 
 @pytest.mark.parametrize("new_score,accepted", [(0.0, False), (0.5, False), (1.0, True)])
-def test_real_engine_cycle_accepts_any_metric_direction(tmp_path, new_score, accepted, monkeypatch):
+@pytest.mark.parametrize("drop_first", [False, True])
+def test_real_engine_cycle_accepts_any_metric_direction(tmp_path, new_score, accepted, drop_first, monkeypatch):
     """Run the actual mutation, evaluation, and strict acceptance path."""
     registry = tmp_path / "registry.json"
     monkeypatch.setenv("GEPA_RECOVERY_REGISTRY", str(registry))
     monkeypatch.setenv("HOTPOTQA_SOURCE_COMMIT", "a" * 40)
 
     class Adapter:
+        proposals = 0
+
         def evaluate(self, batch, candidate, capture_traces=False):
             score = new_score if candidate["prompt"] == "revised" else 0.5
             return EvaluationBatch(
@@ -98,6 +100,9 @@ def test_real_engine_cycle_accepts_any_metric_direction(tmp_path, new_score, acc
             return {"prompt": eval_batch.trajectories}
 
         def propose_new_texts(self, candidate, reflective_dataset, components_to_update):
+            self.proposals += 1
+            if drop_first and self.proposals == 1:
+                return {}
             return {"prompt": "revised"}
 
     cycle = CycleEvidence(tmp_path)
@@ -109,7 +114,7 @@ def test_real_engine_cycle_accepts_any_metric_direction(tmp_path, new_score, acc
         reflection_lm=lambda _: "unused",
         reflection_minibatch_size=3,
         run_dir=str(tmp_path),
-        stop_callbacks=MaxCandidateProposalsStopper(1),
+        stop_callbacks=cycle.completed_cycle,
         callbacks=[RecoveryCallback(tmp_path), cycle],
         acceptance_criterion="strict_improvement",
         cache_evaluation=False,
@@ -120,6 +125,7 @@ def test_real_engine_cycle_accepts_any_metric_direction(tmp_path, new_score, acc
     assert summary["decision"]["accepted"] is accepted
     assert len(json.loads((tmp_path / "optimizer-cycle.json").read_text())["reevaluation"]["scores"]) == 3
     assert next(iter(snapshot(registry, "a" * 40).values())) > 0
+    assert (tmp_path / "incomplete-iterations" / "1.json").exists() is drop_first
 
 
 def test_skipped_cycle_is_not_misrepresented_as_covered(tmp_path):
@@ -232,7 +238,8 @@ def test_hotpotqa_pilot_checks_optimizers_before_throughput_and_full_calibration
     def optimize(method, candidate, train, val, config, evaluator, callbacks):
         assert len(executed) == 3
         assert train == val == training[:3]
-        assert config.engine.max_candidate_proposals == 1 and config.engine.max_metric_calls is None
+        assert config.engine.max_candidate_proposals is None and config.engine.max_metric_calls is None
+        assert config.stop_callbacks == callbacks[-1].completed_cycle
         assert config.reflection.reflection_lm_kwargs["_gepa_provider_retry"]["token_limits"] == pilot.LIMITS
         assert config.reflection.reflection_strategy is not None if method.startswith("react_v2") else True
         methods.append(method)

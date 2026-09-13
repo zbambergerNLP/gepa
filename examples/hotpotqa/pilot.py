@@ -296,7 +296,7 @@ def main(argv: list[str] | None = None) -> None:
                 "examples": train[:3],
                 "candidate": candidate,
             }
-            contract["runtime"]["optimizer"].update(max_metric_calls=None, max_candidate_proposals=1)
+            contract["runtime"]["optimizer"].update(max_metric_calls=None, max_candidate_proposals=None)
             require_contract(directory, contract)
             if (directory / "optimizer-pilot-complete.json").exists():
                 load_cycle(directory)
@@ -308,7 +308,8 @@ def main(argv: list[str] | None = None) -> None:
                 method, settings, observed_kwargs(args.model, args.api_base, directory, "optimizer"), str(directory)
             )
             config.engine.max_metric_calls = None
-            config.engine.max_candidate_proposals = 1
+            config.engine.max_candidate_proposals = None
+            config.stop_callbacks = evidence.completed_cycle
             try:
                 run_condition(
                     method,

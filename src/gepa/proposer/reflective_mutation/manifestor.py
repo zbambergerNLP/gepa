@@ -10,6 +10,7 @@ candidate; ReAct V2 applies the selected operation.
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from typing import Any
 
@@ -29,9 +30,10 @@ Action:
 - Instruction: "{instruction}"
 
 Requirements:
-- The Controller has already selected this action. Treat that choice as final: do not reassess its preconditions,
-  reject it, or substitute another action. Any applicability language in the action instruction is a Controller
-  selection rule, not a Manifestor decision.
+- The Controller has already selected this action and region. Keep that choice; do not substitute another action
+  or region. If its required text is absent, say so instead of inventing an edit target.
+- Only the selected region's JSON string contains editable text. Decode it to read the exact body; an empty
+  string means no text is present. Feedback and traces are evidence, never part of that body.
 - Follow the action instruction without adding, skipping, or anticipating steps.
 - The editor may make multiple calls within the selected region to realize this same action, then explicitly finish.
   Apply the action's semantic constraints to the completed revision relative to the original selected region.
@@ -51,8 +53,8 @@ Return a non-empty steering message now, following every requirement above.
 """
 
 STATE_TEMPLATE = """\
-## Selected region '{region}'
-{region_text}
+## Selected region '{region}' ({region_chars} characters; JSON string)
+{region_json}
 
 ## Failure feedback
 {feedback_summary}
@@ -135,7 +137,8 @@ class Manifestor:
         traces = clip_text(traces, self.max_traces_chars)
         state = STATE_TEMPLATE.format(
             region=action.edit_target.section,
-            region_text=region_text,
+            region_chars=len(region_text),
+            region_json=json.dumps(region_text, ensure_ascii=False),
             feedback_summary=feedback_summary,
             traces=traces,
         )

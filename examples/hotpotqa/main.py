@@ -583,7 +583,7 @@ def build_run_contract(condition: str, args) -> dict:
         else:
             semantic_controller_policy = deepcopy(CONTROLLER_POLICY_CONTRACT)
     return {
-        "schema_version": 27,
+        "schema_version": 28,
         "baseline_protocol": dict(BASELINE_PROTOCOL),
         "provider_retry_policy": deepcopy(PROVIDER_RETRY_POLICY),
         "benchmark": "hotpotqa-fullwiki-wiki17",
@@ -660,6 +660,11 @@ def build_run_contract(condition: str, args) -> dict:
                 "scope_policy": RESPONSE_JOURNAL_SCOPE_POLICY,
                 "addressing": "lm-namespace-call-ordinal",
                 "request_storage": "sha256-only",
+            },
+            "evaluation_recovery": {
+                "scope": "optimizer-iteration-and-parent-or-child-batch",
+                "stores": ["outputs", "scores", "trajectories", "adapter_state"],
+                "reuse_across_iterations": False,
             },
             "branch_history": (
                 {

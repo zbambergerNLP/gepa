@@ -144,3 +144,18 @@ Still to decide or verify:
 4. Complete the remaining Qwen optimizer ablations and larger calibration, review the failed short tool probes, and prepare the actual Terminal-Bench container runtime.
 
 Qwen's smoke test and one complete FOREST cycle are verified. DeepSeek inference and standalone tool compatibility are verified. The full 150-question/model pilot matrix, production campaigns, and live Terminal-Bench execution remain unqualified.
+
+
+## Follow-up qualification and recovery fixes
+
+Source `a07ea72e8b476a0d71e53d7805a8f90892cbd40c` was exercised on Qwen in interactive jobs 13834255 and 13836224. All four native edit probes passed (11 requests, 1,554 output tokens); the three-question smoke passed in 241.13 seconds with 14,361 output tokens and no errors or cutoffs. Vanilla GEPA and FOREST each completed reflection, proposal, three-question reevaluation, and ordinary tied-candidate rejection. Their request totals were 37 / 51,548 output tokens and 40 / 68,874 output tokens, respectively. These remain historical results for that exact source.
+
+The random Controller selected MOVE_TEXT on an empty Tone section. The Manifestor confused feedback with the editable body, and the editor could not finish without a mutation. Fourteen invalid editor responses were saved before the first allocation's planned 53-minute timeout. The next allocation replayed those responses and the Manifestor response, but rebuilt the parent feedback through 12 repeated solver calls. The rebuilt feedback happened to match exactly; repeated inference is unnecessary and could invalidate reflection replay if its output differs.
+
+The follow-up code makes the selected body explicit as a JSON string with its character count, repeats the actual current body in edit-error observations, and separates feedback from editable text. An editor may explicitly finish an inapplicable action; the unchanged proposal is discarded. Fixed action menus, multiple edits, and unlimited production turns/tool calls remain in force. Optimizer pilots now continue after dropped attempts until they record a proposal, reevaluation, and decision; they do not require metric improvement.
+
+Completed parent and child evaluation batches are journaled by optimizer iteration and phase, including original outputs, scores, trajectories, and adapter state. Restart replays only that interrupted logical occurrence; a later iteration evaluates again even with identical inputs. Checksums and exact input identity reject corrupt or mismatched records. A partially completed batch still needs to restart; only completed batches are durable at this boundary.
+
+A focused Qwen GPU diagnostic with the corrected context ended the empty-section action in one turn without editing feedback. A separate unbounded MOVE formatting diagnostic was interrupted after repeated attempts and is not a completed-cycle qualification. Full optimizer pilots, selected-concurrency calibration, and live interruption/replay must be verified on the new committed source before campaigns are qualified. Current caps are 131,072 tokens for DeepSeek optimizer roles, 16,384 for both solvers and all Qwen roles. DeepSeek's next qualification allocation uses 640G host memory for headroom above the previous 512G peak.
+
+Evidence: `outputs/hotpotqa-qualification-20260913/` and its `live-state.json`, including the original pilot and server artifacts, 44 completed-file checksums before resume, and isolated empty-section diagnostics. No held-out data was used for these changes.

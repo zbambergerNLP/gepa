@@ -171,6 +171,10 @@ revision is complete</finish>. Never emit both. Tool arguments are literal: copy
 anchors exactly from the latest region in the most recent observation.
 The harness applies a call and returns an observation; use that observation before acting again.
 Invalid calls do not change the document and return an error you must correct.
+Feedback, traces, steering, and branch history are context, never editable text. The selected
+body is shown as a JSON string; decode it before copying literal tool arguments. An empty
+string means the section has no text. If the selected action cannot apply to that body,
+emit <finish> with the reason. An unchanged result is discarded, never accepted as an edit.
 
 The harness owns the surrounding document and its headers. You receive only one section body. Never write
 a `## <Section>` header; every target and anchor must come from the selected body.
@@ -186,8 +190,8 @@ REACT_V2_TASK_PROMPT = """\
 Component: {component}
 Region: {region}
 
-## Current selected section body
-{region_text}
+## Current selected section body ({region_chars} characters; JSON string)
+{region_json}
 
 ## Failure feedback
 {feedback}
@@ -460,8 +464,10 @@ def _validated_branch_history(
 
 
 REACT_V2_EXECUTION_CONTRACT = {
-    "version": 1,
+    "version": 2,
     "completion": "explicit_finish",
+    "unchanged_finish": "discard_proposal",
+    "region_encoding": "json_string_with_character_count",
     "scope": "selected_section",
     "semantic_action": "fixed_for_proposal",
     "max_iterations": None,
@@ -600,7 +606,8 @@ class ReActV2Proposer:
         task = REACT_V2_TASK_PROMPT.format(
             component=edit_target.component_name,
             region=edit_target.section,
-            region_text=region_text,
+            region_chars=len(region_text),
+            region_json=json.dumps(region_text, ensure_ascii=False),
             feedback=feedback_summary,
             traces=traces_text,
         )
@@ -874,21 +881,7 @@ class ReActV2Proposer:
                     )
                     self._append_observation(messages, observation, None)
                     continue
-                if valid_calls == 0 or current == region_text:
-                    error = "Cannot finish before at least one valid tool call changes the selected region."
-                    observation = f"ERROR: {error}"
-                    steps.append(
-                        ReActV2Step(
-                            turn,
-                            assistant_history_content,
-                            "INVALID",
-                            observation,
-                            error,
-                            region_text=current,
-                        )
-                    )
-                    self._append_observation(messages, observation, None)
-                    continue
+                changed = valid_calls > 0 and current != region_text
                 steps.append(
                     ReActV2Step(
                         turn,
@@ -901,11 +894,12 @@ class ReActV2Proposer:
                 )
                 return ReActV2Result(
                     new_text=current,
-                    changed=True,
+                    changed=changed,
                     executed_edit=executed_all,
                     iterations=turn,
                     tool_calls=valid_calls,
                     final_output=raw,
+                    dropped_reason=None if changed else f"Editor finished without a text change: {finish.strip()}",
                     steps=steps,
                 )
 
@@ -974,7 +968,11 @@ class ReActV2Proposer:
             except (ReActV2ProtocolError, EditApplicationError, MalformedDocumentError) as exc:
                 error = str(exc)
                 observation = (
-                    f"ERROR: {error}\nThe selected section is unchanged. Correct the call using its latest text."
+                    f"ERROR: {error}\nThe selected section is unchanged. "
+                    "Use only its exact text below, not feedback or traces. "
+                    "Correct the call, or emit <finish> explaining why the selected action cannot apply.\n"
+                    f"Latest selected section body ({len(current)} characters; JSON string):\n"
+                    f"{json.dumps(current, ensure_ascii=False)}"
                 )
                 steps.append(
                     ReActV2Step(
@@ -999,7 +997,11 @@ class ReActV2Proposer:
             current = new_region
             valid_calls += 1
             executed_all.extend(executed)
-            observation = f"OK: {tool.value} applied.\nLatest selected region:\n{new_region}"
+            observation = (
+                f"OK: {tool.value} applied.\n"
+                f"Latest selected region ({len(new_region)} characters; JSON string):\n"
+                f"{json.dumps(new_region, ensure_ascii=False)}"
+            )
             steps.append(
                 ReActV2Step(
                     turn=turn,

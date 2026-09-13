@@ -31,6 +31,7 @@ from gepa.core.callbacks import (
 )
 from gepa.core.data_loader import DataId, DataLoader, ensure_loader
 from gepa.core.state import TRAINSET_CACHE_SPLIT, GEPAState, _candidate_hash
+from gepa.evaluation_journal import EvaluationJournal
 from gepa.lm import LMProviderError, ProviderIdentityMismatchError
 from gepa.proposer.base import CandidateProposal, SubsampleEvaluation
 from gepa.proposer.reflective_mutation.base import (
@@ -117,6 +118,7 @@ class ReflectiveMutationProposer:
                 proposal generation.
         """
         self.logger = logger
+        self.evaluation_journal: EvaluationJournal | None = None
         self.trainset = ensure_loader(trainset)
         self.adapter = adapter
         self.candidate_selector = candidate_selector
@@ -428,6 +430,14 @@ class ReflectiveMutationProposer:
         """Evaluate (candidate, batch) pairs via the adapter's batch_evaluate or fallback."""
         return invoke_batch_evaluate(self.adapter, items, capture_traces=True)
 
+    def _evaluate_iteration_batch(self, state: GEPAState, phase: str, items: list) -> list[EvaluationBatch]:
+        """Keep completed feedback stable when replaying this interrupted iteration."""
+        if self.evaluation_journal is None:
+            return self._batch_evaluate(items)
+        return self.evaluation_journal.evaluate(
+            state.i, phase, items, self.adapter, lambda: self._batch_evaluate(items)
+        )
+
     # ------------------------------------------------------------------
     # Main proposal method
     # ------------------------------------------------------------------
@@ -509,7 +519,7 @@ class ReflectiveMutationProposer:
                 ),
             )
 
-        parent_evals = self._batch_evaluate(items)
+        parent_evals = self._evaluate_iteration_batch(state, "parents", items)
         key_to_eval: dict[tuple[str, tuple], EvaluationBatch] = dict(zip(key_list, parent_evals, strict=True))
 
         # Fire evaluation end callbacks for each task
@@ -816,7 +826,7 @@ class ReflectiveMutationProposer:
                 ),
             )
 
-        child_evals = self._batch_evaluate(child_items)
+        child_evals = self._evaluate_iteration_batch(state, "children", child_items)
 
         # Fire evaluation end callbacks for each child candidate
         for (_, (task, _new_candidate, _eval_curr, _meta)), child_eval in zip(valid_children, child_evals, strict=True):

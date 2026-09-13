@@ -315,11 +315,12 @@ if ! module load "${HOTPOTQA_CUDA_MODULE}" || ! module is-loaded "${HOTPOTQA_CUD
 fi
 # The module's /usr/local/cuda-* tree is a per-node local install, and at least one
 # ailab node lacks the cuBLAS headers that FlashInfer's first-load JIT builds include.
-# Put the locked CUDA wheels' headers and libraries first so those builds depend only
-# on the hash-locked serving environment, not on what the node happens to have.
+# Use system include fallbacks: CPATH precedes nvcc's explicit -isystem headers
+# and can mix the wheel's compiler ABI with the cluster's CUDA compiler.
 SERVING_CUDA_ROOT="$("${VLLM_PY}" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')/nvidia/cu13"
 if [[ -d "${SERVING_CUDA_ROOT}/include" ]]; then
-    export CPATH="${SERVING_CUDA_ROOT}/include${CPATH:+:${CPATH}}"
+    export C_INCLUDE_PATH="${SERVING_CUDA_ROOT}/include${C_INCLUDE_PATH:+:${C_INCLUDE_PATH}}"
+    export CPLUS_INCLUDE_PATH="${SERVING_CUDA_ROOT}/include${CPLUS_INCLUDE_PATH:+:${CPLUS_INCLUDE_PATH}}"
     export LIBRARY_PATH="${SERVING_CUDA_ROOT}/lib${LIBRARY_PATH:+:${LIBRARY_PATH}}"
 fi
 if [[ ! -f "${SERVING_LOCK}" ]]; then

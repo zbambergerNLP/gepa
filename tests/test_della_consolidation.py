@@ -20,6 +20,42 @@ def executable(path: Path, body: str) -> None:
     path.chmod(0o700)
 
 
+@pytest.mark.parametrize(
+    "script", ["examples/hotpotqa/run_hotpotqa.sbatch", "scripts/della/verify_deepseek_serving.sh"]
+)
+@pytest.mark.parametrize("language", ["c", "c++"])
+def test_cuda_headers_match_nvcc_with_wheel_fallback(tmp_path, script, language):
+    """Resolve compiler runtime headers before wheels while retaining missing cuBLAS headers."""
+    compiler = shutil.which("cc")
+    if compiler is None:
+        pytest.skip("A C preprocessor is required")
+    cuda = tmp_path / "cuda"
+    wheel = tmp_path / "site" / "nvidia" / "cu13"
+    for root in (cuda, wheel):
+        (root / "include").mkdir(parents=True)
+    (cuda / "include" / "cuda_runtime.h").write_text("compiler_runtime\n")
+    (wheel / "include" / "cuda_runtime.h").write_text("incompatible_wheel_runtime\n")
+    (wheel / "include" / "cublas.h").write_text("wheel_cublas\n")
+    python = tmp_path / "python"
+    executable(python, f"printf '%s\\n' {shlex.quote(str(tmp_path / 'site'))}\n")
+    source = (ROOT / script).read_text()
+    start = source.index("SERVING_CUDA_ROOT=")
+    block = source[start : source.index("\nfi\n", start) + 4]
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            block + f"\n{shlex.quote(compiler)} -isystem {shlex.quote(str(cuda / 'include'))} -E -P -x {language} -",
+        ],
+        input="#include <cuda_runtime.h>\n#include <cublas.h>\n",
+        env={**os.environ, "VLLM_PY": str(python)},
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == ["compiler_runtime", "wheel_cublas"]
+
+
 @pytest.mark.parametrize("case", ["current", "stale_commit", "other_branch", "dirty"])
 def test_preflight_uses_clean_consolidated_head_before_any_ssh(tmp_path, case):
     """Default to HEAD and reject source drift before contacting either host."""

@@ -129,7 +129,8 @@ fi
 # builds must find cuBLAS headers even on nodes whose local CUDA install lacks them.
 SERVING_CUDA_ROOT="$("${VLLM_PY}" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')/nvidia/cu13"
 if [[ -d "${SERVING_CUDA_ROOT}/include" ]]; then
-    export CPATH="${SERVING_CUDA_ROOT}/include${CPATH:+:${CPATH}}"
+    export C_INCLUDE_PATH="${SERVING_CUDA_ROOT}/include${C_INCLUDE_PATH:+:${C_INCLUDE_PATH}}"
+    export CPLUS_INCLUDE_PATH="${SERVING_CUDA_ROOT}/include${CPLUS_INCLUDE_PATH:+:${CPLUS_INCLUDE_PATH}}"
     export LIBRARY_PATH="${SERVING_CUDA_ROOT}/lib${LIBRARY_PATH:+:${LIBRARY_PATH}}"
 fi
 echo "==> vLLM ${HOTPOTQA_VLLM_VERSION} from ${SERVING_VENV_DIR} (CUDA ${HOTPOTQA_CUDA_VERSION}); results in ${RUN_DIR}"

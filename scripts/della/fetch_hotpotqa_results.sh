@@ -28,6 +28,11 @@ if [[ ! "${ENV_MODE}" =~ ^[0-7]{3,4}$ ]] || (( (8#${ENV_MODE} & 8#077) != 0 )); 
 fi
 
 source "${ENV_FILE}"
+HOTPOTQA_JOB_KIND="${HOTPOTQA_JOB_KIND:-experiment}"
+if [[ "${HOTPOTQA_JOB_KIND}" != "experiment" && "${HOTPOTQA_JOB_KIND}" != "pilot" ]]; then
+    echo "ERROR: HOTPOTQA_JOB_KIND must be experiment or pilot" >&2
+    exit 1
+fi
 
 HOTPOTQA_SOURCE_COMMIT="${HOTPOTQA_SOURCE_COMMIT:-$(git -C "${REPO_ROOT}" rev-parse HEAD)}"
 HOTPOTQA_CAMPAIGN_ID="${HOTPOTQA_CAMPAIGN_ID:-hotpotqa-final-v1}"
@@ -63,6 +68,9 @@ REMOTE_SOURCE_DIR="${REMOTE_DIR%/}/sources/${HOTPOTQA_SOURCE_COMMIT}"
 REMOTE_LOG_DIR="${SCRATCH_BASE%/}/logs/hotpotqa/${HOTPOTQA_CAMPAIGN_ID}/${HOTPOTQA_SOURCE_COMMIT}"
 REMOTE_LOCK_DIR="${SCRATCH_BASE%/}/.cache/gepa/hotpotqa-campaign/${HOTPOTQA_CAMPAIGN_ID}"
 LOCAL_PARENT="${REPO_ROOT}/outputs/hotpotqa-campaigns/${HOTPOTQA_CAMPAIGN_ID}"
+if [[ "${HOTPOTQA_JOB_KIND}" == "pilot" ]]; then
+    LOCAL_PARENT="${REPO_ROOT}/outputs/hotpotqa-pilot-fetches/${HOTPOTQA_CAMPAIGN_ID}"
+fi
 LOCAL_ROOT="${LOCAL_PARENT}/${HOTPOTQA_SOURCE_COMMIT}"
 SSH_TARGET="${REMOTE_USER}@${REMOTE_HOST}"
 SSH_OPTIONS="ssh -o BatchMode=yes -o StrictHostKeyChecking=yes"
@@ -103,21 +111,29 @@ rsync -avz --partial \
     "${SSH_TARGET}:${REMOTE_LOG_DIR}/" \
     "${FETCH_ROOT}/logs/"
 
-echo "==> fetching campaign identity locks"
-rsync -avz --partial \
-    -e "${SSH_OPTIONS}" \
-    "${SSH_TARGET}:${REMOTE_LOCK_DIR}/" \
-    "${FETCH_ROOT}/campaign-locks/"
+if [[ "${HOTPOTQA_JOB_KIND}" == "experiment" ]]; then
+    echo "==> fetching campaign identity locks"
+    rsync -avz --partial \
+        -e "${SSH_OPTIONS}" \
+        "${SSH_TARGET}:${REMOTE_LOCK_DIR}/" \
+        "${FETCH_ROOT}/campaign-locks/"
+fi
 
-echo "==> analyzing completed runs"
+echo "==> analyzing fetched evidence"
 (
     cd "${REPO_ROOT}"
-    uv run python -m examples.hotpotqa.analyze_results \
-        "${FETCH_ROOT}/runs" \
-        --output "${FETCH_ROOT}/hotpotqa_analysis.json" \
-        --campaign-id "${HOTPOTQA_CAMPAIGN_ID}" \
-        --source-commit "${HOTPOTQA_SOURCE_COMMIT}" \
-        --analysis-source-commit "${ANALYSIS_SOURCE_COMMIT}"
+    if [[ "${HOTPOTQA_JOB_KIND}" == "pilot" ]]; then
+        uv run --no-sync python -m examples.hotpotqa.pilot_report \
+            "${FETCH_ROOT}/runs/hotpotqa-pilots/${HOTPOTQA_CAMPAIGN_ID}" \
+            --output "${FETCH_ROOT}/pilot-report.json"
+    else
+        uv run python -m examples.hotpotqa.analyze_results \
+            "${FETCH_ROOT}/runs" \
+            --output "${FETCH_ROOT}/hotpotqa_analysis.json" \
+            --campaign-id "${HOTPOTQA_CAMPAIGN_ID}" \
+            --source-commit "${HOTPOTQA_SOURCE_COMMIT}" \
+            --analysis-source-commit "${ANALYSIS_SOURCE_COMMIT}"
+    fi
 )
 
 if [[ -e "${LOCAL_ROOT}" ]]; then

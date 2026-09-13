@@ -104,6 +104,7 @@ def _record(
     row = {
         "schema_version": 1,
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "allocation_job_id": os.environ.get("SLURM_JOB_ID"),
         "request_id": request_id,
         "attempt": attempt,
         "role": settings["role"],

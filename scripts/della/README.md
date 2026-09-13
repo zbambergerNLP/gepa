@@ -59,7 +59,8 @@ completion qualifies even with unchanged/worse scores or a rejected candidate.
 Use one completed proposal-and-reevaluation cycle on a three-example training
 minibatch per combination: eight HotPotQA checks and 16 Terminal-Bench checks.
 Standard and doubled budgets share these checks.
-Implementation and live execution of this additional check remain pending; see
+Both check runners are implemented, with offline tests of stage coverage and
+acceptance of worse or tied scores. Live qualification remains pending; see
 the benchmark runbooks for coverage and acceptance criteria.
 
 Both benchmarks also have an approved automatic allocation-continuation policy:
@@ -67,8 +68,9 @@ resume after scheduler-confirmed allocation time expiry when a verified
 checkpoint contains new saved work, preserving run identity and the remaining
 budget. Metric improvement is not required. Unresolved errors, cancellation,
 missing/incompatible checkpoints, or no saved progress stop continuation.
-Scheduler wiring and live verification remain pending; see the benchmark
-runbooks. Terminal-Bench's Della backend remains paused.
+The shared Slurm controller and checkpoint hooks are implemented. HotPotQA
+submission is wired to the controller; live allocation recovery remains
+unverified. Terminal-Bench's Della backend remains paused.
 
 DeepSeek is pinned to revision `dba1be0a40aa45a94ad051997016db3960a90277`.
 The V4.1 arm uses the exact vLLM commit wheel `e77daef89` (version
@@ -105,7 +107,12 @@ complete the pilots, and apply their reviewed schedule when submitting:
 
 ```bash
 scripts/della/build_env.sh
+export HOTPOTQA_CAMPAIGN_ID=<fresh-pilot-id>
+scripts/della/submit_hotpotqa_pilots.sh --dry-run
+scripts/della/submit_hotpotqa_pilots.sh
+HOTPOTQA_JOB_KIND=pilot scripts/della/fetch_hotpotqa_results.sh
 # After completing the pilots and reviewing their scheduling evidence:
+export HOTPOTQA_CAMPAIGN_ID=<fresh-experiment-id>
 MODEL_PROFILE=qwen3.8-27b scripts/della/submit_hotpotqa.sh
 # For sequential scheduling, wait for Qwen's chain to finish first.
 MODEL_PROFILE=deepseek-v4.1-flash scripts/della/submit_hotpotqa.sh
@@ -115,6 +122,13 @@ Each HotPotQA arm contains the existing six optimization cells. DeepSeek first
 runs the multi-tool canary; a failed canary prevents its campaign from starting.
 Use a fresh campaign ID after changing models or serving environments. Previous
 GLM results and checkpoints cannot be resumed as DeepSeek runs.
+
+Pilot fetches write `pilot-report.json` with stage and optimizer completion,
+usage, allocation IDs, and measured full-stage request overlap. The report
+preserves partial evidence and leaves the scheduling decision for review.
+Pilot results and candidates never seed production runs. A persisted
+continuation plan rejects duplicate submissions; inspect its status and queued
+jobs before attempting manual recovery.
 
 HotPotQA reflection uses the configured model context window without an
 additional 8,000-character Manifestor trace cap. All supplied passages,

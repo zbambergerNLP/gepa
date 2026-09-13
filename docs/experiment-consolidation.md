@@ -77,9 +77,10 @@ approved smaller output caps. See the provider review for sources.
   finish successfully. Stop for unresolved execution errors, user cancellation,
   missing or incompatible checkpoints, or no saved progress. Provider retries
   and official Terminal-Bench task-timeout scoring retain their own policies;
-  they do not trigger allocation continuation. This policy is approved;
-  automatic submission wiring and live verification remain pending for both
-  benchmarks. Terminal-Bench's Della backend work remains paused.
+  they do not trigger allocation continuation. Shared checkpoint sealing and
+  the Slurm continuation controller are implemented for both benchmark entry
+  points. The HotPotQA launcher uses the controller; live allocation recovery
+  remains unverified. Terminal-Bench's Della backend work remains paused.
 - Training batches use their own seeded random stream, independent of method
   decisions; larger budgets continue the same batch sequence.
 - Add a small training-only optimizer-flow check for each model and distinct
@@ -96,8 +97,10 @@ approved smaller output caps. See the provider review for sources.
   Keep these diagnostics separate from initial-prompt throughput calibration
   and production budgets; preserve their artifacts, but start every production
   cell from the approved initial prompts. Validation and test data remain
-  excluded. This additional check is approved; implementation and live
-  execution remain pending.
+  excluded. These checks are implemented in `examples.hotpotqa.pilot` and
+  `examples.terminalbench.optimizer_pilot`; live execution remains pending.
+  Saved evidence verifies each stage and records rejected candidates as valid
+  process outcomes. A perfect-batch skip remains uncovered and requires review.
 - Size each optimizer-flow check at one completed proposal-and-reevaluation
   cycle on the normal three-example training minibatch. Cover four methods
   and two models for HotPotQA (eight checks), and both text scopes as well for
@@ -182,6 +185,16 @@ Canonical detailed protocol and commands:
 [`terminal_bench_adapter/README.md`](../src/gepa/adapters/terminal_bench_adapter/README.md).
 
 ## Local verification
+
+The pilot/recovery implementation passes **529 focused offline tests**,
+Ruff on changed Python files, targeted Pyright on the new runner/recovery
+modules, and shell syntax checks. Coverage includes real engine cycles with
+lower/tied scores, all four HotPotQA methods and both Terminal-Bench scopes,
+training-only execution, evidence integrity, allocation timeout recovery,
+unchanged budgets, failed/duplicate submission handling, and read-only reuse
+of shared model checkpoints. Live serving and recovery remain unqualified.
+Server commands require explicit user approval, including read-only preflight.
+No builds, downloads, or benchmark jobs were launched during implementation.
 
 The context-preservation update passes **546 focused offline tests**, with one
 optional test skipped, plus **28** tests in the pinned Harbor environment. Ruff

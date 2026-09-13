@@ -46,7 +46,7 @@ from examples.common.experiment_models import (
     validate_experiment_model_pair,
     validate_experiment_vllm_version,
 )
-from examples.common.provider_retries import PROVIDER_RETRY_POLICY, provider_retry_kwargs
+from examples.common.provider_retries import PROVIDER_RETRY_KEY, PROVIDER_RETRY_POLICY, provider_retry_kwargs
 from examples.common.react_v2 import (
     benchmark_data_identity,
     build_react_v2_strategy,
@@ -56,6 +56,7 @@ from examples.common.react_v2 import (
     resolve_template_family,
     structured_prompt,
 )
+from examples.common.recovery import RecoveryCallback, run_guarded, seal_progress
 from examples.common.wiki17_bm25 import DEFAULT_WIKI17_ROOT, GEPA_ARTIFACT_COMMIT, Wiki17BM25Retriever
 from examples.common.wikipedia import WikipediaRetriever
 from examples.hotpotqa.baseline import (
@@ -160,6 +161,7 @@ _SCIENTIFIC_UV_VERSION = "0.9.13"
 _SCIENTIFIC_SPLIT_COUNTS = {"train": 150, "val": 300, "test": 300}
 _REACT_V2_CONDITIONS = {"react_v2", "react_v2_random"}
 _SEMANTIC_CONDITIONS = {"react_v2", "react_v2_random", "random", "action"}
+_HELDOUT_RECOVERY_LOCK = threading.Lock()
 
 
 def _validate_hotpotqa_model_pair(student_model: str, proposer_model: str) -> None:
@@ -1029,6 +1031,9 @@ def evaluate_on_set(
             temporary_path = record_path.with_suffix(f".{os.getpid()}.{threading.get_ident()}.part")
             temporary_path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             temporary_path.replace(record_path)
+            with _HELDOUT_RECOVERY_LOCK:
+                records = sorted(checkpoint_root.glob("[0-9]*.json"))
+                seal_progress(checkpoint_root, len(records), records)
         return exact_match, f1
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -1242,10 +1247,14 @@ def build_config(condition: str, args, reflection_lm_kwargs: dict, run_dir: str 
     _validate_scientific_contract(args)
     text_limits = resolve_text_limits(getattr(args, "text_limits", None))
     resolved_run_dir = run_dir or condition_run_dir(condition, args.program, args.tag, _run_key(condition, args))
+    observed_retry_settings = (reflection_lm_kwargs or {}).get(PROVIDER_RETRY_KEY, {})
     reflection_lm_kwargs = {
         **(reflection_lm_kwargs or {}),
         **provider_retry_kwargs(Path(resolved_run_dir) / "provider-attempts.jsonl", "optimizer"),
     }
+    for field in ("token_usage_log", "token_limits"):
+        if field in observed_retry_settings:
+            reflection_lm_kwargs[PROVIDER_RETRY_KEY][field] = observed_retry_settings[field]
     response_journal_path = os.path.join(resolved_run_dir, ".lm-response-journal", "responses.sqlite3")
     reflection_proposer_kwargs = deepcopy(reflection_lm_kwargs or {})
     reflection_proposer_kwargs["response_journal_path"] = response_journal_path
@@ -1403,8 +1412,8 @@ def _verify_scientific_retriever_integrity(retriever: Wiki17BM25Retriever) -> No
         raise ValueError("The production Wiki-2017 integrity attestation does not match the locked manifest.")
 
 
-def main():
-    """Parse CLI arguments and run the requested HotPotQA conditions.
+def build_parser() -> argparse.ArgumentParser:
+    """Build the common experiment settings parser.
 
     Production runs preserve the locked benchmark, retrieval, model, and
     optimization configuration. Explicit JSONL data remains available for
@@ -1514,6 +1523,12 @@ def main():
         default=None,
         help="JSON object of optional character limits; omitted or null fields are unlimited",
     )
+    return parser
+
+
+def main():
+    """Parse CLI arguments and run the requested HotPotQA conditions."""
+    parser = build_parser()
     args = parser.parse_args()
     try:
         _validate_hotpotqa_model_pair(args.solver_model, args.reflection_model)
@@ -1625,7 +1640,7 @@ def main():
         )
         config, selector = build_config(condition, args, reflection_lm_kwargs, run_dir=run_dir)
         trackers[condition] = ActionDiversityCallback(selector=selector)
-        callbacks = [trackers[condition]]
+        callbacks = [trackers[condition], RecoveryCallback(Path(run_dir))]
         seed = seed_candidate(args.program, args.seed_style, resolved_family)
         condition_label = _CONDITION_LABELS[condition]
         if args.merge:
@@ -1760,4 +1775,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    run_guarded(main)

@@ -57,11 +57,23 @@ trap cleanup_local_files EXIT
 
 # Tunable knobs (env overrides).
 MODEL_PROFILE="${MODEL_PROFILE:-qwen3.8-27b}"
+HOTPOTQA_JOB_KIND="${HOTPOTQA_JOB_KIND:-experiment}"
+HOTPOTQA_PILOT_ONLY=0
+if [[ "${HOTPOTQA_JOB_KIND}" != "experiment" && "${HOTPOTQA_JOB_KIND}" != "pilot" ]]; then
+    echo "ERROR: HOTPOTQA_JOB_KIND must be experiment or pilot" >&2
+    exit 1
+fi
+if [[ "${HOTPOTQA_JOB_KIND}" == "pilot" ]]; then
+    BUDGET_PROFILE=standard
+    CONDITION=vanilla
+    HOTPOTQA_PILOT_ONLY=1
+fi
 BUDGET_PROFILE="${BUDGET_PROFILE:-campaign}"
 CONDITION="${CONDITION:-all}"
 HOTPOTQA_TEXT_LIMITS_B64="$(printf '%s' "${HOTPOTQA_TEXT_LIMITS_JSON:-null}" | base64 | tr -d '\n')"
 HOTPOTQA_CAMPAIGN_ID="${HOTPOTQA_CAMPAIGN_ID:-hotpotqa-final-v1}"
 HOTPOTQA_LOG_DIR="${SCRATCH_BASE}/logs/hotpotqa/${HOTPOTQA_CAMPAIGN_ID}/${HOTPOTQA_SOURCE_COMMIT}"
+HOTPOTQA_PILOT_ROOT="${REMOTE_SOURCE_DIR}/outputs/hotpotqa-pilots/${HOTPOTQA_CAMPAIGN_ID}/${MODEL_PROFILE}"
 MAX_WORKERS="${MAX_WORKERS:-}"
 WIKI17_DIR="${WIKI17_DIR:-${SCRATCH_BASE}/.cache/gepa/wiki17}"
 GEN_GMU=0.92
@@ -458,6 +470,13 @@ fi
 HOTPOTQA_LOG_DIR="${SCRATCH_BASE}/logs/hotpotqa/${HOTPOTQA_CAMPAIGN_ID}/${HOTPOTQA_SOURCE_COMMIT}"
 mkdir -p "${HOTPOTQA_LOG_DIR}"
 umask 077
+CONTINUATION_DIR="${HOTPOTQA_LOG_DIR}/continuation-${MODEL_PROFILE}-${HOTPOTQA_JOB_KIND}-${BUDGET_PROFILE}-${CONDITION}"
+mkdir -p "\${CONTINUATION_DIR}"
+PLAN_PATH="\${CONTINUATION_DIR}/plan.json"
+if [[ -e "\${PLAN_PATH}" ]]; then
+    echo "ERROR: a continuation plan already exists; inspect it before resubmission" >&2
+    exit 1
+fi
 SBATCH_EXPORT_FILE=""
 cleanup_export_file() {
     if [[ -n "\${SBATCH_EXPORT_FILE}" ]]; then
@@ -476,7 +495,7 @@ write_sbatch_export_file() {
     local run_condition="\$3"
     local canary_only="\$4"
 
-    SBATCH_EXPORT_FILE="\$(mktemp)"
+    SBATCH_EXPORT_FILE="\${CONTINUATION_DIR}/\${CELL_NAME}.env"
     printf '%s\0' \
         "MODEL_PROFILE=${MODEL_PROFILE}" \
         "BUDGET_PROFILE=\${run_budget_profile}" \
@@ -484,6 +503,10 @@ write_sbatch_export_file() {
         "CONDITION=\${run_condition}" \
         "HOTPOTQA_TEXT_LIMITS_JSON=\${HOTPOTQA_TEXT_LIMITS_JSON}" \
         "HOTPOTQA_CANARY_ONLY=\${canary_only}" \
+        "HOTPOTQA_PILOT_ONLY=${HOTPOTQA_PILOT_ONLY}" \
+        "HOTPOTQA_PILOT_ROOT=${HOTPOTQA_PILOT_ROOT}" \
+        "GEPA_RECOVERY_REGISTRY=\${RECOVERY_REGISTRY}" \
+        "GEPA_RECOVERY_ERROR_FILE=\${RECOVERY_ERROR_FILE}" \
         "HOTPOTQA_CAMPAIGN_ID=${HOTPOTQA_CAMPAIGN_ID}" \
         "MAX_WORKERS=${MAX_WORKERS}" \
         "WIKI17_DIR=${WIKI17_DIR}" \
@@ -517,84 +540,42 @@ write_sbatch_export_file() {
         > "\${SBATCH_EXPORT_FILE}"
 }
 
-PREVIOUS_JOB_ID=""
+CANARY_FLAGS=()
+for _ in "\${SUBMIT_CONDITIONS[@]}"; do CANARY_FLAGS+=(0); done
 if [[ "${MODEL_PROFILE}" == "deepseek-v4.1-flash" ]]; then
-    write_sbatch_export_file standard 6871 react_v2 1
-    SBATCH_OUTPUT="\$(
-        env -i \
-            HOME="\${HOME}" \
-            USER="${REMOTE_USER}" \
-            PATH="\${PATH}" \
-            LANG=C.UTF-8 \
-            LC_ALL=C.UTF-8 \
-            "\${SBATCH_BIN}"${SBATCH_RESOURCE_COMMAND} \
-            --parsable \
-            --job-name="gepa-hp-deepseek-canary" \
-            --output="${HOTPOTQA_LOG_DIR}/hotpotqa-%x-%j.log" \
-            --time="04:00:00" \
-            --export=ALL \
-            --export-file="\${SBATCH_EXPORT_FILE}" \
-            examples/hotpotqa/run_hotpotqa.sbatch
-    )"
-    PREVIOUS_JOB_ID="\${SBATCH_OUTPUT%%;*}"
-    if [[ ! "\${PREVIOUS_JOB_ID}" =~ ^[0-9]+$ ]]; then
-        echo "ERROR: sbatch returned an invalid DeepSeek canary job id: \${SBATCH_OUTPUT}" >&2
-        exit 1
-    fi
-    rm -f -- "\${SBATCH_EXPORT_FILE}"
-    SBATCH_EXPORT_FILE=""
-    echo "==> submitted pinned DeepSeek four-tool canary: job \${PREVIOUS_JOB_ID}"
+    SUBMIT_BUDGET_PROFILES=(standard "\${SUBMIT_BUDGET_PROFILES[@]}")
+    SUBMIT_CONDITIONS=(react_v2 "\${SUBMIT_CONDITIONS[@]}")
+    CANARY_FLAGS=(1 "\${CANARY_FLAGS[@]}")
 fi
-
 for CELL_INDEX in "\${!SUBMIT_CONDITIONS[@]}"; do
     RUN_BUDGET_PROFILE="\${SUBMIT_BUDGET_PROFILES[\${CELL_INDEX}]}"
     RUN_CONDITION="\${SUBMIT_CONDITIONS[\${CELL_INDEX}]}"
-    case "\${RUN_BUDGET_PROFILE}" in
-        standard)
-            RUN_MAX_METRIC_CALLS=6871
-            RUN_TIME="${STANDARD_TIME}"
-            ;;
-        expanded)
-            RUN_MAX_METRIC_CALLS=13742
-            RUN_TIME="${EXPANDED_TIME}"
-            ;;
-        *)
-            echo "ERROR: generated an unsupported HotPotQA budget profile: \${RUN_BUDGET_PROFILE}" >&2
-            exit 1
-            ;;
-    esac
-    write_sbatch_export_file "\${RUN_BUDGET_PROFILE}" "\${RUN_MAX_METRIC_CALLS}" "\${RUN_CONDITION}" 0
-
-    DEPENDENCY_ARGS=()
-    if [[ -n "\${PREVIOUS_JOB_ID}" ]]; then
-        DEPENDENCY_ARGS+=("--dependency=afterok:\${PREVIOUS_JOB_ID}")
+    CANARY_ONLY="\${CANARY_FLAGS[\${CELL_INDEX}]}"
+    if [[ "\${RUN_BUDGET_PROFILE}" == "expanded" ]]; then
+        RUN_MAX_METRIC_CALLS=13742
+        RUN_TIME="${EXPANDED_TIME}"
+    else
+        RUN_MAX_METRIC_CALLS=6871
+        RUN_TIME="${STANDARD_TIME}"
     fi
-    SBATCH_OUTPUT="\$(
-        env -i \
-            HOME="\${HOME}" \
-            USER="${REMOTE_USER}" \
-            PATH="\${PATH}" \
-            LANG=C.UTF-8 \
-            LC_ALL=C.UTF-8 \
-            "\${SBATCH_BIN}"${SBATCH_RESOURCE_COMMAND} \
-            --parsable \
-            --job-name="gepa-hp-${MODEL_PROFILE}-\${RUN_BUDGET_PROFILE}-\${RUN_CONDITION}" \
-            --output="${HOTPOTQA_LOG_DIR}/hotpotqa-%x-%j.log" \
-            --time="\${RUN_TIME}" \
-            --export=ALL \
-            --export-file="\${SBATCH_EXPORT_FILE}" \
-            "\${DEPENDENCY_ARGS[@]}" \
-            examples/hotpotqa/run_hotpotqa.sbatch
-    )"
-    PREVIOUS_JOB_ID="\${SBATCH_OUTPUT%%;*}"
-    if [[ ! "\${PREVIOUS_JOB_ID}" =~ ^[0-9]+$ ]]; then
-        echo "ERROR: sbatch returned an invalid job id: \${SBATCH_OUTPUT}" >&2
-        exit 1
+    CELL_NAME="\${RUN_BUDGET_PROFILE}-\${RUN_CONDITION}"
+    if [[ "\${CANARY_ONLY}" == "1" ]]; then
+        CELL_NAME=canary
+        RUN_TIME=04:00:00
     fi
-    rm -f -- "\${SBATCH_EXPORT_FILE}"
+    RECOVERY_REGISTRY="\${CONTINUATION_DIR}/\${CELL_NAME}-registry.json"
+    RECOVERY_ERROR_FILE="\${CONTINUATION_DIR}/\${CELL_NAME}-error.json"
+    write_sbatch_export_file "\${RUN_BUDGET_PROFILE}" "\${RUN_MAX_METRIC_CALLS}" "\${RUN_CONDITION}" "\${CANARY_ONLY}"
+    "${GEPA_VENV_DIR}/bin/python" -m examples.common.slurm_continuation add \
+        --plan "\${PLAN_PATH}" --source-commit "${HOTPOTQA_SOURCE_COMMIT}" \
+        --name "\${CELL_NAME}" --export-file "\${SBATCH_EXPORT_FILE}" \
+        --registry "\${RECOVERY_REGISTRY}" --error-file "\${RECOVERY_ERROR_FILE}" -- \
+        "\${SBATCH_BIN}"${SBATCH_RESOURCE_COMMAND} --parsable \
+        --job-name="gepa-hp-${MODEL_PROFILE}-${HOTPOTQA_JOB_KIND}-\${CELL_NAME}" \
+        --output="${HOTPOTQA_LOG_DIR}/hotpotqa-%x-%j.log" --time="\${RUN_TIME}" \
+        --export=ALL --export-file="\${SBATCH_EXPORT_FILE}" examples/hotpotqa/run_hotpotqa.sbatch
     SBATCH_EXPORT_FILE=""
-    echo "==> submitted \${RUN_BUDGET_PROFILE}/\${RUN_CONDITION}: job \${PREVIOUS_JOB_ID}"
 done
-
-echo "==> approved HotPotQA campaign chain submitted. Check status with: squeue -u ${REMOTE_USER}"
+"${GEPA_VENV_DIR}/bin/python" -m examples.common.slurm_continuation start --plan "\${PLAN_PATH}"
+echo "==> continuation plan: \${PLAN_PATH}"
 REMOTE_SCRIPT

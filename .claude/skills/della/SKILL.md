@@ -17,6 +17,9 @@ old `169ddda` commit or switch to a separate tooling branch.
 
 - Start with HotPotQA. Terminal-Bench's Apptainer integration is paused.
 - Code consolidation or review does not submit a campaign.
+- Obtain the user's explicit approval before every server step, including
+  read-only checks, sync, builds, downloads, and job submissions. Present the
+  exact commands first; local implementation work does not authorize them.
 - Use the repository scripts for connections, setup, sync, submission, and
   fetching. Do not invent alternate submission paths.
 - Launch from the reviewed clean source. Preflight requires explicit
@@ -60,9 +63,12 @@ https://researchcomputing.princeton.edu/support/knowledge-base/data-storage.
 - `remote/download_model.sh qwen3.8-27b|deepseek-v4.1-flash`: pinned model bytes.
 - `submit_deepseek_smoke.sh submit|fetch <id>`: independent transcript and
   four-tool diagnostic; no campaign qualification marker.
-- `submit_hotpotqa.sh`: exact-source production submission and `afterok` chain.
+- `submit_hotpotqa.sh`: exact-source submission with verified allocation continuation.
+- `submit_hotpotqa_pilots.sh [--dry-run]`: independent model pilots, three then
+  150 training questions followed by four real optimizer checks per model.
 - `fetch_hotpotqa_results.sh`: validated local results under
-  `outputs/hotpotqa-campaigns/<campaign>/<commit>/`.
+  `outputs/hotpotqa-campaigns/<campaign>/<commit>/`. Set `HOTPOTQA_JOB_KIND=pilot`
+  for `outputs/hotpotqa-pilot-fetches/<campaign>/<commit>/pilot-report.json`.
 - `sync_to_della.sh`: preserves environments, tools, caches, snapshots, outputs.
 
 Run remote setup stages from the synced checkout with `SCRATCH_BASE`,
@@ -100,9 +106,19 @@ six optimization cells. A failed canary or native-tool preflight cannot freeze
 campaign identity. The independent smoke does not replace that gate.
 
 Per model: standard `vanilla`, `react_v2`, `react_v2_random`, `action` at 6,871
-metric calls, then independent expanded `vanilla`, `react_v2` at 13,742. Inspect
-failed parents and orphaned `afterok` dependencies before resubmitting. Exclude
-failed or unverified runs.
+metric calls, then independent expanded `vanilla`, `react_v2` at 13,742. Workers
+are held until their short `afterany` controller is saved. Only allocation
+`TIMEOUT` with newly saved, verified work permits automatic continuation, with
+the same source/runtime and remaining budget. Success advances to the next
+ablation after testing. Inspect stopped plans and held/queued jobs before
+manual recovery; do not duplicate active plans. Exclude failed or unverified
+runs. These paths have offline coverage; live Slurm qualification is required.
+
+Pilot completion does not require improved metrics or accepted candidates.
+Require actual reflection, proposal, reevaluation, and decision evidence;
+perfect-batch skips remain uncovered. Pilot evidence stays outside production
+campaign locks and starting baselines. Review request overlap, throughput,
+usage, cutoffs, and errors before choosing the model-arm schedule.
 
 Jobs request one node, eight H200s, 64 CPUs, 768G on `ailab`; caps are 72 hours
 for Qwen standard and 144 hours for expanded/DeepSeek. They are not estimates.

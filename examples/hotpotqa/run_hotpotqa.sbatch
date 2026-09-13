@@ -37,6 +37,11 @@ MODEL_PROFILE="${MODEL_PROFILE:-qwen3.8-27b}"
 BUDGET_PROFILE="${BUDGET_PROFILE:-standard}"
 CONDITION="${CONDITION:-}"
 HOTPOTQA_CANARY_ONLY="${HOTPOTQA_CANARY_ONLY:-0}"
+HOTPOTQA_PILOT_ONLY="${HOTPOTQA_PILOT_ONLY:-0}"
+if [[ "${HOTPOTQA_PILOT_ONLY}" != "0" && "${HOTPOTQA_PILOT_ONLY}" != "1" ]]; then
+    echo "ERROR: HOTPOTQA_PILOT_ONLY must be 0 or 1" >&2
+    exit 1
+fi
 HOTPOTQA_CAMPAIGN_ID="${HOTPOTQA_CAMPAIGN_ID:-}"
 if [[ ! "${HOTPOTQA_CAMPAIGN_ID}" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$ ]]; then
     echo "ERROR: production launcher did not provide a valid HotPotQA campaign ID" >&2
@@ -234,7 +239,7 @@ mkdir -p "${XDG_CACHE_HOME}" "${HF_HOME}" "${VLLM_CACHE_ROOT}" \
 
 RUN_LOCK_DIR="${SCRATCH_BASE}/.cache/gepa/hotpotqa-runs/${HOTPOTQA_CAMPAIGN_ID}"
 mkdir -p "${RUN_LOCK_DIR}"
-RUN_LOCK_PATH="${RUN_LOCK_DIR}/${MODEL_PROFILE}-${BUDGET_PROFILE}-${CONDITION}.lock"
+RUN_LOCK_PATH="${RUN_LOCK_DIR}/${MODEL_PROFILE}-${BUDGET_PROFILE}-${CONDITION}-pilot${HOTPOTQA_PILOT_ONLY}.lock"
 exec {RUN_LOCK_FD}>"${RUN_LOCK_PATH}"
 if ! flock -n "${RUN_LOCK_FD}"; then
     echo "ERROR: another HotPotQA job is already writing ${MODEL_PROFILE}/${BUDGET_PROFILE}/${CONDITION}" >&2
@@ -660,6 +665,15 @@ if arguments.get("value") != "ready":
     raise SystemExit(f"Native tool-call preflight returned unexpected arguments: {arguments!r}")
 print("Native tool-call preflight passed.")
 PY
+
+if [[ "${HOTPOTQA_PILOT_ONLY}" == "1" ]]; then
+    "${PY}" -m examples.hotpotqa.pilot \
+        --model "${SOLVER_MODEL}" --api-base "${SOLVER_API_BASE}" \
+        --wiki17-dir "${WIKI17_DIR}" --workers "${MAX_WORKERS}" \
+        --output-dir "${HOTPOTQA_PILOT_ROOT:?pilot output root required}" \
+        --text-limits "${HOTPOTQA_TEXT_LIMITS_JSON:-null}" --stage all
+    exit 0
+fi
 
 CAMPAIGN_LOCK_DIR="${SCRATCH_BASE}/.cache/gepa/hotpotqa-campaign/${HOTPOTQA_CAMPAIGN_ID}"
 CAMPAIGN_LOCK_PATH="${CAMPAIGN_LOCK_DIR}/${MODEL_PROFILE}.sha256"

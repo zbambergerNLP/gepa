@@ -329,9 +329,13 @@ optimization and test to finish successfully.
 Unresolved execution errors, cancellation, missing/incompatible checkpoints,
 or no saved progress stop continuation. Official task timeouts and provider or
 Harbor process failures keep the policies above; they are not cluster allocation
-expiry. Automatic allocation continuation is approved, but scheduler wiring and
-live verification remain pending. This decision does not resume the paused
-Terminal-Bench Della backend work.
+expiry. The optimization and final-evaluation entry points now seal recoverable
+work for `examples.common.slurm_continuation`, the shared Slurm controller also
+used by HotPotQA. Register a worker through its `add` command with the exact
+source, immutable export file, checkpoint registry, and error marker, then
+`start` the plan. It advances on success and retries only verified allocation
+`TIMEOUT` with new saved work. Live Terminal-Bench Slurm/backend qualification
+remains pending; the Della Apptainer backend work stays paused.
 
 #### Reference protocol and pending confirmation
 
@@ -923,9 +927,29 @@ preserve the existing task-failure and verified-timeout policies. Save these
 diagnostics separately from throughput calibration and production budgets, and
 start every production cell from the approved initial harness.
 
-This additional optimizer-flow check is approved; implementation and live
-execution remain pending. The current `canary` command and `--reviewed-pilot`
-validation cover the two initial-harness stages, not this additional check.
+The check runner is implemented. After both initial-harness stages complete,
+run all eight method/scope checks for each model:
+
+```bash
+uv run --no-sync python -m examples.terminalbench.optimizer_pilot \
+  --student-model hosted_vllm/Qwen/Qwen3.8-27B \
+  --proposer-model hosted_vllm/Qwen/Qwen3.8-27B \
+  --student-api-base http://localhost:8000/v1 \
+  --proposer-api-base http://localhost:8000/v1 \
+  --runtime-record runs/servers/qwen.json \
+  --optimizer-pilot-calibration runs/canaries/tb2.1/qwen/full \
+  --n-concurrent 1 --output-dir runs/optimizer-pilots/tb2.1/qwen
+```
+
+Repeat with the DeepSeek model, server record, and separate output/calibration
+directories. The runner validates the full calibration runtime and uses the
+production adapter and method builders, with three training tasks as discovery
+and diagnostic evaluation data. It returns before held-out evaluation and
+writes `optimizer-cycle.json` plus `optimizer-pilot-complete.json` per check.
+Missing stages, including perfect-batch skips, cannot qualify. Live execution
+remains pending. Review these artifacts alongside the initial-harness stages
+before passing `--reviewed-pilot` for the campaign; that flag still records the
+human review of the initial-harness calibration evidence.
 
 Optimization writes `token-usage.jsonl` beside the run contract. Every Harbor
 trial writes another in its agent log directory, including main-agent and

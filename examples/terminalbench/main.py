@@ -31,14 +31,23 @@ from examples.common.experiment_models import (
     experiment_request_overrides,
     validate_experiment_model_pair,
 )
+from examples.common.pilot_checks import OPTIMIZER_PILOT_PROTOCOL, CycleEvidence
 from examples.common.provider_retries import PROVIDER_RETRY_POLICY, provider_retry_kwargs
 from examples.common.react_v2 import build_react_v2_strategy, resolve_template_family
+from examples.common.recovery import RecoveryCallback, run_guarded
 from examples.terminalbench.model_settings import (
     terminalbench_decoding,
     terminalbench_limits,
     terminalbench_model_info,
 )
-from examples.terminalbench.pilot import PILOT_PROTOCOL, review_pilot, validate_review
+from examples.terminalbench.pilot import (
+    PILOT_PROTOCOL,
+    load_completed_pilot,
+    review_pilot,
+    run_runtime,
+    validate_review,
+    validate_runtime,
+)
 from examples.terminalbench.reflection import ComponentActionReflectionLM
 from examples.terminalbench.runtime import load_role_runtimes
 from examples.terminalbench.token_usage import TOKEN_USAGE_POLICY, observe_optimizer
@@ -169,6 +178,12 @@ def build_parser() -> argparse.ArgumentParser:
         Configured argument parser.
     """
     parser = argparse.ArgumentParser(description="GEPA on pinned Terminal-Bench 2.1 through Harbor")
+    parser.add_argument(
+        "--optimizer-pilot", action="store_true", help="One real optimizer cycle using three training tasks only"
+    )
+    parser.add_argument(
+        "--optimizer-pilot-calibration", type=Path, help="Completed full training pilot required before optimizer checks"
+    )
     parser.add_argument(
         "--text-limits",
         type=parse_text_limits,
@@ -443,14 +458,14 @@ def build_run_contract(
     }
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     """Validate the pinned harness and start the requested GEPA condition.
 
     Raises:
         ValueError: Training or validation selection is empty.
     """
     parser = build_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     try:
         validate_experiment_model_pair(args.student_model, args.proposer_model)
     except ValueError as exc:
@@ -459,8 +474,20 @@ def main() -> None:
     manifest = load_terminalbench_manifest(manifest_path)
     if manifest.experiment != args.experiment:
         parser.error("--manifest must match the selected --experiment")
-    trainset = manifest.tasks("train", args.train_limit)
-    valset = manifest.tasks("val", args.val_limit)
+    if args.optimizer_pilot:
+        if args.optimizer_pilot_calibration is None:
+            parser.error("Optimizer checks require --optimizer-pilot-calibration with the completed full training pilot")
+        if args.budget != "standard" or args.reflection_minibatch_size != 3 or args.max_metric_calls is not None:
+            parser.error("Optimizer pilots use one cycle on three training tasks and no separate metric cap")
+        if args.train_limit is not None or args.val_limit is not None or args.reviewed_pilot is not None:
+            parser.error("Optimizer pilots use their fixed training-only selection without validation or review overrides")
+        trainset = manifest.tasks("train", 3)
+        valset = trainset
+    else:
+        if args.optimizer_pilot_calibration is not None:
+            parser.error("--optimizer-pilot-calibration is only for --optimizer-pilot checks")
+        trainset = manifest.tasks("train", args.train_limit)
+        valset = manifest.tasks("val", args.val_limit)
     if not trainset or not valset:
         raise ValueError("train and validation selections must both be non-empty")
 
@@ -472,6 +499,13 @@ def main() -> None:
     try:
         args.execution_runtime = load_role_runtimes(args)
         contract = build_run_contract(args, manifest, trainset, valset, condition, resolved_family)
+        if args.optimizer_pilot:
+            contract["optimizer_pilot"] = OPTIMIZER_PILOT_PROTOCOL
+            contract["pilot_evaluation_split"] = "train"
+            contract["optimization_budget"].update(training_epochs=1, max_iterations=1, sampled_training_tasks=3)
+            calibration = load_completed_pilot(args.optimizer_pilot_calibration, manifest, "full")
+            validate_runtime(calibration["config"], run_runtime(contract))
+            contract["optimizer_pilot_calibration"] = calibration
     except (ValueError, OSError) as exc:
         parser.error(str(exc))
     try:
@@ -563,6 +597,7 @@ def main() -> None:
             rng=random.Random(args.seed),
             text_limits=text_limits,
         )
+    cycle = CycleEvidence(args.run_dir) if args.optimizer_pilot else None
     optimize(
         seed_candidate=candidate,
         trainset=trainset,
@@ -573,6 +608,7 @@ def main() -> None:
         reflection_strategy=reflection_strategy,
         max_metric_calls=args.max_metric_calls,
         stop_callbacks=MaxCandidateProposalsStopper(contract["optimization_budget"]["max_iterations"]),
+        callbacks=[RecoveryCallback(args.run_dir), *([cycle] if cycle else [])],
         batch_sampler=IndependentEpochShuffledBatchSampler(args.reflection_minibatch_size, args.seed),
         reflection_minibatch_size=None,
         sampling_strategy=SingleMutationSampling(),
@@ -596,6 +632,10 @@ def main() -> None:
         text_limits=text_limits,
     )
 
+    if cycle is not None:
+        cycle.verify()
+        print(f"Training-only optimizer pilot completed: {args.run_dir}")
+        return
     if trainset != manifest.tasks("train") or valset != manifest.tasks("val"):
         print("Partial-split diagnostic finished; held-out testing requires the complete campaign splits.")
         return
@@ -620,4 +660,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_guarded(main)

@@ -17,8 +17,33 @@ def executable(path: Path, body: str) -> None:
     path.chmod(0o700)
 
 
+@pytest.mark.parametrize("verification_status", [0, 1])
+def test_existing_shared_model_is_verified_without_preparing_it(tmp_path, verification_status):
+    """Reuse Zach's pinned bytes read-only and never repair a failed shared checkpoint silently."""
+    model = tmp_path / "models" / "Qwen3.8-27B"
+    model.mkdir(parents=True)
+    (model / ".gepa-model-integrity.json").write_text("{}")
+    python = tmp_path / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    calls = tmp_path / "calls"
+    executable(python, f'printf "%s\\n" "$*" >> "${{CALLS}}"\nexit {verification_status}\n')
+    source = (ROOT / "scripts/della/remote/download_model.sh").read_text()
+    # Linux-only flock setup is unchanged; exercise the new read-only branch on macOS too.
+    block = source[source.index('echo "==> ${MODEL} into') :]
+    result = subprocess.run(
+        ["bash", "-c", "set -eu\n" + block],
+        cwd=tmp_path,
+        env={**os.environ, "CALLS": str(calls), "MODEL": "qwen3.8-27b", "MODEL_DIR": str(model)},
+        capture_output=True, text=True,
+    )
+    assert result.returncode == verification_status
+    assert len(calls.read_text().splitlines()) == 1
+    assert "model_snapshot verify" in calls.read_text() and "prepare" not in calls.read_text()
+
+
 @pytest.mark.parametrize("profile,workers", [("qwen3.8-27b", 12), ("deepseek-v4.1-flash", 4)])
-def test_submit_expands_the_remote_script_without_running_jobs(tmp_path, profile, workers):
+@pytest.mark.parametrize("kind", ["experiment", "pilot"])
+def test_submit_expands_the_remote_script_without_running_jobs(tmp_path, profile, workers, kind):
     """Catch laptop-side heredoc expansion errors before any real submission."""
     script_dir = tmp_path / "scripts" / "della"
     script_dir.mkdir(parents=True)
@@ -40,6 +65,7 @@ def test_submit_expands_the_remote_script_without_running_jobs(tmp_path, profile
         **os.environ,
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "MODEL_PROFILE": profile,
+        "HOTPOTQA_JOB_KIND": kind,
         "CAPTURE_REMOTE_SCRIPT": str(capture),
         "HOTPOTQA_CAMPAIGN_ID": "integration-test",
         "HOTPOTQA_TEXT_LIMITS_JSON": '{"component_chars":12345}',
@@ -52,6 +78,9 @@ def test_submit_expands_the_remote_script_without_running_jobs(tmp_path, profile
     assert 'local run_condition="$3"' in remote
     assert 'local canary_only="$4"' in remote
     assert f'"MAX_WORKERS={workers}"' in remote
+    assert f'"HOTPOTQA_PILOT_ONLY={int(kind == "pilot")}"' in remote
+    assert "examples.common.slurm_continuation add" in remote
+    assert "examples.common.slurm_continuation start" in remote
     assert '"HOTPOTQA_TEXT_LIMITS_JSON=${HOTPOTQA_TEXT_LIMITS_JSON}"' in remote
     suffix = "-deepseek-v4.1-flash" if profile == "deepseek-v4.1-flash" else ""
     assert f'"SERVING_VENV_DIR=/scratch/test/gepa/.serving-venv{suffix}"' in remote

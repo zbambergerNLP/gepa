@@ -142,7 +142,8 @@ It uses the approved V4.1 serving flags and shared edit probes, including explic
 `<finish>`. It does not write a campaign qualification marker.
 
 The production DeepSeek chain retains its mandatory 20-attempt canary on the
-exact campaign runtime before six optimization jobs, with `afterok` dependencies.
+exact campaign runtime before six optimization jobs. A short Slurm controller
+advances the chain only after each allocation completes successfully.
 Its marker is written only on success. A failed canary or native-tool preflight
 cannot freeze campaign locks. Every optimization job verifies source, model
 bytes, environment, H200 hardware, and native tool calls before training.
@@ -157,8 +158,11 @@ Use the pinned training split, Wiki-2017 BM25 k=7, and approved model settings.
 Start with 12 Qwen workers / 4 DeepSeek workers. Keep validation and test
 examples outside calibration, and review the evidence before freezing the
 runtime settings across the six experiment cells per model. These stages
-evaluate the initial prompts without optimizing them. Pilot execution remains
-pending; the production optimization launcher is not a training-only pilot.
+evaluate the initial prompts without optimizing them. The dedicated
+`submit_hotpotqa_pilots.sh` launcher runs them before four optimizer checks on
+each model. It uses the production serving gates and writes isolated outputs
+under `outputs/hotpotqa-pilots/<pilot-id>/<model>/`. It does not freeze production
+campaign locks. Live pilot execution remains pending.
 
 The approved pilot acceptance criteria are:
 
@@ -192,8 +196,12 @@ when normal feedback allows completion. Investigate unresolved execution errors
 and missing stage evidence; do not retry for an improved metric or change the
 optimizer's acceptance rule. Keep validation/test examples out, and start every
 production cell from the approved initial prompts, not a pilot revision.
-This additional check is approved; its implementation and live execution remain
-pending. The serving canary alone does not exercise this complete flow.
+The checks use the production optimizer builders, with only the three training
+examples as both discovery and diagnostic evaluation data and a one-proposal
+stop condition. `optimizer-cycle.json` retains callback evidence;
+`optimizer-pilot-complete.json` verifies all required stages. A perfect-batch
+skip does not count as an exercised cycle. The serving canary alone does not
+exercise this complete flow. Live qualification remains pending.
 
 Keep 12 Qwen / 4 DeepSeek workers if the pilot passes; the approved plan does
 not include a search for higher parallelism. If queueing causes timeouts,
@@ -217,6 +225,26 @@ trial or overlapping execution fails the checks, use sequential scheduling and
 complete the required full training pilots in that mode. Serial execution must
 still pass the same checks. Review and record the final schedule from the pilot
 evidence before production; the schedule remains undecided until then.
+
+After artifact preparation, commit the exact source and use a fresh pilot ID:
+
+```bash
+export HOTPOTQA_CAMPAIGN_ID=<new-pilot-id>
+scripts/della/submit_hotpotqa_pilots.sh --dry-run
+scripts/della/submit_hotpotqa_pilots.sh
+HOTPOTQA_JOB_KIND=pilot scripts/della/fetch_hotpotqa_results.sh
+```
+
+The dry run prints the two submissions without contacting Della. The actual
+launcher submits independent model arms; resource availability and canary
+timing determine overlap. The fetch writes `pilot-report.json` under
+`outputs/hotpotqa-pilot-fetches/<pilot-id>/<source-commit>/`. It validates
+calibration records and optimizer stage evidence, retains incomplete results,
+and measures overlap from physical request intervals, including queue time.
+Idle gaps and merely queued jobs do not count as concurrent requests. Review
+the report and the preserved Slurm/model-server logs before freezing settings.
+Original provider records retain job IDs, failed attempts, and unknown usage;
+completed question records are reused only when resuming the same pilot.
 
 ## Campaign and results
 
@@ -252,12 +280,19 @@ data, model, runtime settings, saved state, and remaining original budget.
 Keep downstream ablations waiting for this cell's optimization and test to
 finish successfully. Stop for unresolved execution errors, cancellation,
 missing/incompatible checkpoints, or no saved progress; retain recovery usage.
-Automatic continuation is approved but not yet wired into the launcher or
-verified on Della. The existing launcher still requires explicit resubmission.
+The launcher implements this through `examples.common.slurm_continuation`.
+Each worker is submitted held until its `afterany` controller is recorded,
+then released. The controller reads the allocation's final `sacct` state. Only
+`TIMEOUT` plus new hash-verified work permits another allocation with the same
+command and environment. Successful completion advances to the next cell;
+errors, corruption, ambiguous submission replies, and duplicate starts stop
+without blind resubmission. Plans and allocation history live in the campaign
+log directory, with separate provider usage identified by allocation job ID.
+These failure paths are tested locally; live Slurm recovery remains unverified.
 
-For the current manual path, resume only with the same source/campaign/model/settings, using
-`BUDGET_PROFILE=standard|expanded CONDITION=<cell>`. Inspect orphaned dependency
-chains before resubmission. Fetch and validate completed evidence with
+For a stopped plan, inspect its state and queued/held jobs before any manual
+resubmission; never start a second plan over an active logical run. Fetch and
+validate completed experiment evidence with
 `scripts/della/fetch_hotpotqa_results.sh` under the same campaign ID. Its output
 is `outputs/hotpotqa-campaigns/<campaign>/<commit>/`.
 

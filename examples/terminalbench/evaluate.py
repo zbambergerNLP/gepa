@@ -10,6 +10,7 @@ import statistics
 from pathlib import Path
 from typing import Any
 
+from examples.common.recovery import run_guarded, seal_progress
 from examples.terminalbench.main import (
     EVALUATION_PROTOCOL,
     EXPERIMENT_MANIFESTS,
@@ -298,6 +299,8 @@ def evaluate_comparison(
             raise ValueError("Each test repetition must use a distinct Harbor evaluation")
         seen_evaluations.add(record["evaluation_id"])
         _write_json(output_dir / f"{label}-repetition-{repetition}.json", record)
+        repetitions = sorted(output_dir.glob("*-repetition-*.json"))
+        seal_progress(output_dir, len(repetitions), repetitions)
         records[label, repetition] = record
 
     summary: dict[str, Any] = {
@@ -394,4 +397,4 @@ def main(argv: list[str] | None = None) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_guarded(main)

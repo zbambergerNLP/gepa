@@ -20,7 +20,9 @@ def test_chat_request_matches_the_body_the_campaign_client_sends() -> None:
     assert body["messages"] == smoke_serving.SMOKE_MESSAGES
     assert body["chat_template_kwargs"] == {"thinking": True, "reasoning_effort": 100}
     assert body["seed"] == 0
-    for field, value in experiment_decoding(DEEPSEEK_V4_1_FLASH_MODEL, agentic=False).items():
+    expected = experiment_decoding(DEEPSEEK_V4_1_FLASH_MODEL, agentic=False)
+    expected["max_tokens"] = 32_768
+    for field, value in expected.items():
         assert body[field] == value
     for client_only in ("api_base", "num_retries", "max_retries", "model_info", "timeout", "extra_body"):
         assert client_only not in body

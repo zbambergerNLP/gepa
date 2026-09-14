@@ -89,7 +89,9 @@ def test_cli_gives_both_methods_the_same_documents_and_runtime(
         experiment: Each independently selectable benchmark and optimization target.
     """
     optimize = Mock()
+    evaluate = Mock()
     monkeypatch.setattr(cli, "optimize", optimize)
+    monkeypatch.setattr("examples.terminalbench.evaluate.main", evaluate)
     monkeypatch.setattr(cli.HarborCLI, "check_requirements", Mock())
     for condition in ("vanilla", "react_v2"):
         monkeypatch.setattr(
@@ -118,6 +120,9 @@ def test_cli_gives_both_methods_the_same_documents_and_runtime(
         monkeypatch.setattr(sys, "argv", [*sys.argv, "--reviewed-pilot", str(pilot_dir)])
         cli.main()
     vanilla, forest = [call.kwargs for call in optimize.call_args_list]
+    assert evaluate.call_count == 2
+    for condition, call in zip(("vanilla", "react_v2"), evaluate.call_args_list, strict=True):
+        assert call.args[0][:2] == ["--run-dir", f"system_prompt__{condition}={tmp_path / condition}"]
     for key in (
         "seed_candidate",
         "component_kinds",

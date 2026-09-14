@@ -55,6 +55,7 @@ def create_fitness_fn_with_best_evals_tracking(call_log: list):
     return fitness_fn
 
 
+@pytest.mark.usefixtures("openrouter_credentials")
 class TestExampleBestEvals:
     """Tests for OptimizationState / best_example_evals feature."""
 

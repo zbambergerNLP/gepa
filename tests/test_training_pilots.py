@@ -248,8 +248,8 @@ def test_completed_cycle_cannot_be_reused_after_contract_change(tmp_path):
         load_cycle(tmp_path)
 
 
-@pytest.mark.parametrize("stage", ["all", "preliminary"])
-def test_hotpotqa_pilot_checks_optimizers_before_throughput_and_full_calibration(tmp_path, monkeypatch, stage):
+@pytest.mark.parametrize("stage", ["all", "preliminary", "throughput"])
+def test_hotpotqa_pilot_stage_order_and_calibration_recovery(tmp_path, monkeypatch, stage):
     """Use real config builders and isolate only dataset, model transport, and GPU validation."""
     training = [{"id": f"train-{i}", "question": f"question-{i}", "answer": "gold"} for i in range(150)]
     heldout = [{"id": "never-execute", "question": "heldout", "answer": "gold"}]
@@ -297,23 +297,23 @@ def test_hotpotqa_pilot_checks_optimizers_before_throughput_and_full_calibration
         callbacks[-1]._save()
 
     monkeypatch.setattr(pilot, "run_condition", optimize)
-    pilot.main(
-        [
-            "--model",
-            "hosted_vllm/Qwen/Qwen3.8-27B",
-            "--api-base",
-            "http://127.0.0.1:8000/v1",
-            "--wiki17-dir",
-            str(tmp_path / "wiki"),
-            "--workers",
-            "12",
-            "--output-dir",
-            str(tmp_path / "pilot"),
-            "--stage",
-            stage,
-        ]
-    )
-    assert methods == list(METHODS)
+    args = [
+        "--model",
+        "hosted_vllm/Qwen/Qwen3.8-27B",
+        "--api-base",
+        "http://127.0.0.1:8000/v1",
+        "--wiki17-dir",
+        str(tmp_path / "wiki"),
+        "--workers",
+        "12",
+        "--output-dir",
+        str(tmp_path / "pilot"),
+        "--stage",
+        stage,
+    ]
+    pilot.main(args)
+    assert methods == ([] if stage == "throughput" else list(METHODS))
+    assert validate_calibration(tmp_path / "pilot" / "smoke", 3)["qualified"]
     assert validate_calibration(tmp_path / "pilot" / "throughput", 12)["qualified"]
     if stage == "all":
         assert len(executed) == 165
@@ -321,3 +321,9 @@ def test_hotpotqa_pilot_checks_optimizers_before_throughput_and_full_calibration
     else:
         assert len(executed) == 15
         assert not (tmp_path / "pilot" / "full").exists()
+    if stage == "throughput":
+        assert not (tmp_path / "pilot" / "optimizer").exists()
+        saved = {path: path.read_bytes() for path in (tmp_path / "pilot").rglob("*.json")}
+        pilot.main(args)
+        assert len(executed) == 15
+        assert all(path.read_bytes() == contents for path, contents in saved.items())

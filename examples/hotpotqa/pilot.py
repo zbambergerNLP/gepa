@@ -286,7 +286,7 @@ def main(argv: list[str] | None = None) -> None:
             workers=args.workers,
         )
 
-    if args.stage in ("all", "preliminary", "smoke"):
+    if args.stage in ("all", "preliminary", "smoke", "throughput"):
         calibrate("smoke", 3)
     if args.stage in ("all", "preliminary", "optimizer"):
         validate_calibration(args.output_dir / "smoke", 3)

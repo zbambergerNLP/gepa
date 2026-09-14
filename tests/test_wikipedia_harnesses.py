@@ -1856,6 +1856,9 @@ def test_deepseek_serving_verification_is_manual_and_mirrors_the_sbatch() -> Non
     assert ".ok" not in verify
     assert "examples.hotpotqa.verify_serving" in verify
     assert "examples.hotpotqa.smoke_serving" in verify
+    # Diagnostics must never abort the run: a broken one cost a whole queue slot once.
+    assert '> "${RUN_DIR}/serving-packages.txt" || true' in verify
+    assert 'nvidia-smi > "${RUN_DIR}/gpus.txt" || true' in verify
     assert 'SERVING_VENV_DIR="${SERVING_VENV_DIR:-${REPO_ROOT}/.serving-venv-deepseek-v4.1-flash}"' in verify
     smoke = (REPO_ROOT / "scripts" / "della" / "smoke_deepseek_serving.sbatch").read_text()
     assert "#SBATCH --partition=ailab" in smoke

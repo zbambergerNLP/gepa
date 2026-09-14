@@ -353,7 +353,7 @@ def test_hotpot_provider_sampling_reaches_every_model_role(model: str, budget: i
     assert contract["models"]["solver_decoding"]["temperature"] == expected
     assert config.reflection.reflection_lm_kwargs["temperature"] == expected
     expected_output_cap = 131_072 if model == DEEPSEEK_V4_1_FLASH_MODEL else 32_768
-    expected_solver_cap = 32_768 if model == DEEPSEEK_V4_1_FLASH_MODEL else 16_384
+    expected_solver_cap = 32_768
     assert contract["models"]["solver_decoding"]["max_tokens"] == expected_solver_cap
     assert contract["models"]["reflection_decoding"]["max_tokens"] == expected_output_cap
     assert config.reflection.reflection_lm_kwargs["max_tokens"] == expected_output_cap
@@ -1262,7 +1262,7 @@ def test_hotpot_and_hover_contracts_record_exact_model_pair() -> None:
         assert contract["optimizer"]["semantic_action_space"] == SEMANTIC_ACTION_CATALOGS["prompt"]
         assert contract["optimizer"]["semantic_controller_policy"] == CONTROLLER_POLICY_CONTRACT
 
-    expected_hotpot_decoding = {**experiment_decoding(QWEN3_8_27B_MODEL), "seed": 0}
+    expected_hotpot_decoding = {**experiment_decoding(QWEN3_8_27B_MODEL), "max_tokens": 32_768, "seed": 0}
     assert hotpot["models"]["solver_decoding"] == expected_hotpot_decoding
     assert hotpot["models"]["reflection_decoding"] == {**expected_hotpot_decoding, "max_tokens": 32_768}
     assert hover["models"]["solver_decoding"] == experiment_decoding(QWEN3_8_27B_MODEL)

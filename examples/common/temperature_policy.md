@@ -58,7 +58,7 @@ advertised maximum or a claim to reproduce their largest-context evaluations.
 DeepSeek's card recommends 1M context and at least 256K output; our approved
 output budgets are deliberately smaller:
 
-- HotPotQA Qwen: **16,384 output tokens per solver call**, **32,768 per optimizer call**.
+- HotPotQA Qwen: **32,768 output tokens per solver call**, **32,768 per optimizer call**.
 - HotPotQA DeepSeek: **32,768 output tokens per solver call**, **131,072 per optimizer call**.
 - TB2.1: **32,768 output tokens per call**, every role, including reasoning.
 

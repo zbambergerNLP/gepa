@@ -104,7 +104,7 @@ def test_hotpot_lm_uses_local_campaign_decoding(monkeypatch, model: str) -> None
         "num_retries": EXPERIMENT_NUM_RETRIES,
         **experiment_decoding(model, agentic=False),
         **experiment_request_overrides(model, explicit_reasoning=True),
-        "max_tokens": 32_768 if model == DEEPSEEK_V4_1_FLASH_MODEL else 16_384,
+        "max_tokens": 32_768,
     }
     expected_request["seed"] = hotpot_utils.HOTPOTQA_SCIENTIFIC_REQUEST_SEED
     assert 3599 < calls[0]["timeout"] <= 3600
@@ -470,7 +470,7 @@ def test_real_dspy_provider_requests_use_three_attempts(tmp_path, monkeypatch, m
     assert result.choices[0].message.content == "done"
     assert provider.call_count == 3
     assert all(call.kwargs["num_retries"] == call.kwargs["max_retries"] == 0 for call in provider.call_args_list)
-    expected_cap = 32_768 if model == DEEPSEEK_V4_1_FLASH_MODEL else 16_384
+    expected_cap = 32_768
     assert all(call.kwargs["max_tokens"] == expected_cap for call in provider.call_args_list)
     assert len(path.read_text().splitlines()) == 3
 
@@ -1313,7 +1313,7 @@ def test_hotpotqa_della_submit_scales_resources_by_model_profile() -> None:
     assert 'DELLA_CPUS_PER_TASK="${DELLA_CPUS_PER_TASK:-8}"' in submit
     assert 'DELLA_CPUS_PER_TASK="${DELLA_CPUS_PER_TASK:-32}"' in submit
     assert 'DELLA_MEMORY="${DELLA_MEMORY:-128G}"' in submit
-    assert 'DELLA_MEMORY="${DELLA_MEMORY:-512G}"' in submit
+    assert 'DELLA_MEMORY="${DELLA_MEMORY:-768G}"' in submit
     assert 'JOB_PARTITION="${GPU_PARTITION}"' in submit
     assert 'MAX_WORKERS="${MAX_WORKERS:-12}"' in submit
     assert 'VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-${DELLA_GPUS}}"' in submit

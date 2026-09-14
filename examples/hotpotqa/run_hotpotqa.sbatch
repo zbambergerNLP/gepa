@@ -729,6 +729,12 @@ if [[ "${HOTPOTQA_PILOT_ONLY}" == "1" ]]; then
             mv "${QWEN_VERIFY_TEMP}" "${QWEN_VERIFY_MARKER}"
         fi
     fi
+    if [[ "${HOTPOTQA_PILOT_STAGE:-all}" == "all" ]]; then
+        "${PY}" -m examples.hotpotqa.error_recovery_probe \
+            --model "${SOLVER_MODEL}" --api-base "${SOLVER_API_BASE}" \
+            --attempt-log "${LOG_DIR}/error-recovery-provider-${MODEL_PROFILE}-${SLURM_JOB_ID:-local}.jsonl" \
+            --output "${LOG_DIR}/error-recovery-${MODEL_PROFILE}-${SLURM_JOB_ID:-local}.json"
+    fi
     "${PY}" -m examples.hotpotqa.pilot \
         --model "${SOLVER_MODEL}" --api-base "${SOLVER_API_BASE}" \
         --wiki17-dir "${WIKI17_DIR}" --workers "${MAX_WORKERS}" \

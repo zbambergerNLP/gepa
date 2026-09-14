@@ -195,7 +195,7 @@ def test_submit_expands_the_remote_script_without_running_jobs(tmp_path, profile
     assert 'local run_condition="$3"' in remote
     assert 'local canary_only="$4"' in remote
     assert f'"MAX_WORKERS={workers}"' in remote
-    gpus, cpus, memory, tp = (1, 8, "128G", 1) if profile == "qwen3.8-27b" else (4, 32, "512G", 4)
+    gpus, cpus, memory, tp = (1, 8, "128G", 1) if profile == "qwen3.8-27b" else (4, 32, "768G", 4)
     for resource in (f"--gres=gpu:{gpus}", f"--cpus-per-task={cpus}", f"--mem={memory}"):
         assert resource in remote
     for setting in (f"VLLM_TENSOR_PARALLEL_SIZE={tp}", "VLLM_DATA_PARALLEL_SIZE=1", "VLLM_API_SERVER_COUNT=1"):

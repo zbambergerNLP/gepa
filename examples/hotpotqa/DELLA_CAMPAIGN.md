@@ -92,11 +92,11 @@ FlashInfer builds use the serving environment's CUDA headers first.
 | Model, all roles | Qwen3.8-27B | DeepSeek-V4.1-Flash |
 | Revision | `1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0` | `dba1be0a40aa45a94ad051997016db3960a90277` |
 | Serving | TP1 / DP1 / one API server | TP4 / EP4 / DP1 / one API server |
-| Della allocation | 1 H200, 8 CPUs, 128G | 4 H200s on one node, 32 CPUs, 512G |
+| Della allocation | 1 H200, 8 CPUs, 128G | 4 H200s on one node, 32 CPUs, 768G |
 | Weights / KV cache | BF16 / BF16 (`auto`) | Native FP4 experts + FP8 / FP8 |
 | Engram tables | Not applicable | Explicit CPU offload |
 | Active sequences | Calibrate 1, 2, 4 | Calibrate 1, 2, 4 |
-| Context / output caps | 262,144 / 16,384 solver; 32,768 optimizer | 262,144 / 32,768 solver; 131,072 optimizer |
+| Context / output caps | 262,144 / 32,768 solver; 32,768 optimizer | 262,144 / 32,768 solver; 131,072 optimizer |
 | Thinking effort | `xhigh` | `100` |
 | Approved initial pilot workers | 12 | 4 |
 
@@ -271,7 +271,9 @@ model's chain to finish before submitting the other for sequential scheduling.
 Each model's six ablations and their test evaluations remain sequential.
 
 Qwen requests one H200, 8 CPUs, and 128G; DeepSeek requests four H200s, 32 CPUs,
-and 512G on one `ailab` node, with Engram tables explicitly offloaded to CPU.
+and 768G on one `ailab` node, with Engram tables explicitly offloaded to CPU.
+The host-memory request includes headroom after the 640G pilot encountered
+memory reclaim pressure without OOM.
 Qwen standard
 caps are 72 hours; expanded and DeepSeek caps are 144 hours. These are limits,
 not estimates. Logs live at `$SCRATCH_BASE/logs/hotpotqa/<campaign>/<commit>/`.
@@ -313,8 +315,8 @@ Check the actual connection and runtime before using this consolidated source.
 
 DeepSeek optimizer roles now use a 131,072-token ceiling, uniformly across
 vanilla, FOREST, random Controller, and action-only. Following observed training-pilot
-cutoffs and user approval, DeepSeek solver calls use 32,768; Qwen uses 16,384 for
-solver calls and 32,768 for optimizer roles. These revised caps require fresh
+cutoffs and user approval, DeepSeek solver calls use 32,768; Qwen uses 32,768 for
+solver calls and optimizer roles. These revised caps require fresh
 qualification. The 262,144 context and provider sampling
 settings are unchanged. Run contracts use schema 27; pilot protocol uses version 2.
 
@@ -326,13 +328,15 @@ submitting jobs. Inside an approved allocation, run the staged
 `srun`. Stages `smoke`, `optimizer`, `throughput`, and `full` are individually
 resumable. Use `preliminary` to run smoke, all optimizer checks, and throughput
 with one server startup, stopping before the full calibration. This supports
-batching selection before the 150-question run. Request one allocation at a time
-with `salloc`, for 55 minutes, using
-the model's resource profile. The DeepSeek interactive pilot runs its required
+batching selection before the 150-question run. The complete qualification plan
+uses one 12-hour `salloc` with four H200s, 32 CPUs and 768G host memory, releasing
+it early when finished. Run DeepSeek and then Qwen sequentially; Qwen uses an
+exact one-H200/eight-CPU/128G step within that allocation. This replaces the
+earlier 55-minute partial-pilot reservations. The DeepSeek interactive pilot runs its required
 20-attempt runtime canary before inference when its exact-runtime marker is absent.
 
-Store each batching profile under its own pilot ID. Run the small optimizer
-checks first, compare the three server settings on training only, then finish
+Store each batching profile under its own pilot ID. Compare the three server
+settings on training only, then finish
 the complete optimizer and 150-question checks at the selected setting.
 `--stage optimizer --method <name>` can resume a single method through the
 Python CLI against an already running endpoint. Completed checks are hash-verified
@@ -343,6 +347,13 @@ The bounded one-edit native diagnostic now requests `tool_choice=none` and an
 explicit finish after spending its configured edit allowance. Its strict two-turn
 check still requires a valid edit and finish. Production's unlimited tool/turn
 policy is unchanged. Keep failed historical probes as evidence.
+
+The `all` pilot stage also checks native error recovery before optimization.
+It replaces the first returned replacement target with a deliberately missing
+target, then requires the model to receive the actual editor error, correct its
+edit, and explicitly finish. Evidence identifies this as a controlled injected
+fault, not a spontaneous model error. The isolated probe allows four turns and
+three tool calls; production editor limits remain unchanged.
 
 Qualify interruption and resume with saved records, optimizer checkpoints, and
 response journals before long runs. Check that original metric budgets remain

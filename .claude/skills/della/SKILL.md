@@ -93,7 +93,7 @@ HotPotQA does not depend on POSIT.
   automatic block size (64 on SM90), original weight formats, explicit Engram
   CPU offload (`--engram-config '{"cpu_offload":true}'`), no speculation.
   `FLASHINFER_NO_DOWNLOAD=1`; keep compiler CUDA headers first; use wheel headers through C_INCLUDE_PATH/CPLUS_INCLUDE_PATH as fallbacks.
-- Temperature 1.0 / top-p 0.95 for every role. HotPotQA output caps: Qwen solver 16,384 and optimizer roles 32,768;
+- Temperature 1.0 / top-p 0.95 for every role. HotPotQA output caps: Qwen solver 32,768 and optimizer roles 32,768;
   DeepSeek solver 32,768 and optimizer roles 131,072. Terminal-Bench uses 32,768. Server context is the Della setting, not the provider's
   maximum. See `examples/common/temperature_policy.md`.
 - Initial workers: 12 Qwen / 4 DeepSeek. Calibrate on training and freeze across
@@ -124,7 +124,8 @@ campaign locks and starting baselines. Review request overlap, throughput,
 usage, cutoffs, and errors before choosing the model-arm schedule.
 
 Qwen requests one H200, 8 CPUs, 128G; DeepSeek requests four H200s, 32 CPUs,
-512G on one `ailab` node. These calculator-supported starting allocations await
+768G on one `ailab` node. DeepSeek's memory request includes headroom after
+the earlier 640G pilot reached its host-memory limit without OOM. These allocations await
 empirical pilot qualification. Allocated-GPU inventory and five-second VRAM
 samples are stored with the job logs; vLLM INFO logs retain startup memory
 allocations and throughput. Caps are 72 hours

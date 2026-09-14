@@ -255,7 +255,6 @@ class Wiki17BM25Retriever:
                     f"Expected {expected_document_count} {self.preparation_label} documents, "
                     f"found {len(corpus)} in {self.corpus_path}."
                 )
-            self._retriever = retriever
             self._corpus = corpus
             if self.preparation_label == "Wiki-2017":
                 if not self.integrity_path.is_file():
@@ -263,6 +262,8 @@ class Wiki17BM25Retriever:
                 integrity_digest = self._file_sha256(self.integrity_path)
                 self.cache_path = self.root / (f"retriever_cache_{WIKI17_CORPUS_SHA256}_{integrity_digest}")
             self._cache = Cache(str(self.cache_path))
+            # Other threads use this field as the initialization-complete marker.
+            self._retriever = retriever
 
     def _require_dependencies(self) -> None:
         """Validate the benchmark-only retrieval dependency set.

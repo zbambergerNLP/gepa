@@ -104,6 +104,7 @@ def test_hotpot_lm_uses_local_campaign_decoding(monkeypatch, model: str) -> None
         "num_retries": EXPERIMENT_NUM_RETRIES,
         **experiment_decoding(model, agentic=False),
         **experiment_request_overrides(model, explicit_reasoning=True),
+        "max_tokens": 32_768 if model == DEEPSEEK_V4_1_FLASH_MODEL else 16_384,
     }
     expected_request["seed"] = hotpot_utils.HOTPOTQA_SCIENTIFIC_REQUEST_SEED
     assert 3599 < calls[0]["timeout"] <= 3600
@@ -469,6 +470,8 @@ def test_real_dspy_provider_requests_use_three_attempts(tmp_path, monkeypatch, m
     assert result.choices[0].message.content == "done"
     assert provider.call_count == 3
     assert all(call.kwargs["num_retries"] == call.kwargs["max_retries"] == 0 for call in provider.call_args_list)
+    expected_cap = 32_768 if model == DEEPSEEK_V4_1_FLASH_MODEL else 16_384
+    assert all(call.kwargs["max_tokens"] == expected_cap for call in provider.call_args_list)
     assert len(path.read_text().splitlines()) == 3
 
 
@@ -1331,7 +1334,7 @@ def test_hotpotqa_della_submit_scales_resources_by_model_profile() -> None:
 
 
 def test_hotpotqa_sbatch_configures_within_run_vllm_throughput() -> None:
-    """Queue independent examples against the single-sequence Qwen server."""
+    """Queue independent examples against the configured Qwen sequence limit."""
     script = (REPO_ROOT / "examples" / "hotpotqa" / "run_hotpotqa.sbatch").read_text()
 
     assert "#SBATCH --cpus-per-task=8" in script
@@ -1344,7 +1347,7 @@ def test_hotpotqa_sbatch_configures_within_run_vllm_throughput() -> None:
     assert "--tensor-parallel-size 1" in script
     assert "--data-parallel-size 1" in script
     assert "--api-server-count 1" in script
-    assert "--max-num-seqs 1" in script
+    assert '--max-num-seqs "${VLLM_MAX_NUM_SEQS}"' in script
     assert '--max-num-batched-tokens "${VLLM_MAX_NUM_BATCHED_TOKENS}"' in script
     assert "--no-enable-prefix-caching" in script
     assert "--language-model-only" in script
@@ -1649,12 +1652,12 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert "export HOTPOTQA_VLLM_BATCH_INVARIANT" in sbatch
     assert "export HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS" in sbatch
     assert "batch_invariant=false" in sbatch
-    assert "single_sequence_replicas=true" in sbatch
+    assert "single_sequence_replicas=${HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS}" in sbatch
     assert "gpu_memory_utilization=${GEN_GMU}" in sbatch
     assert "max_model_len=${GEN_MAX_LEN}" in sbatch
     assert "rope_scaling=none" in sbatch
     assert "--rope-scaling" not in sbatch
-    assert "max_num_seqs=1" in sbatch
+    assert "max_num_seqs=${VLLM_MAX_NUM_SEQS}" in sbatch
     assert "serving_env=${HOTPOTQA_SERVING_ENV_SHA256}" in sbatch
     assert "gpu=${HOTPOTQA_GPU_RUNTIME}" in sbatch
     assert 'examples.common.python_environment verify --path "${SERVING_ENV_MANIFEST}"' in sbatch

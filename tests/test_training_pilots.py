@@ -286,7 +286,10 @@ def test_hotpotqa_pilot_checks_optimizers_before_throughput_and_full_calibration
         assert train == val == training[:3]
         assert config.engine.max_candidate_proposals is None and config.engine.max_metric_calls is None
         assert config.stop_callbacks == callbacks[-1].completed_cycle
-        assert config.reflection.reflection_lm_kwargs["_gepa_provider_retry"]["token_limits"] == pilot.LIMITS
+        assert config.reflection.reflection_lm_kwargs["_gepa_provider_retry"]["token_limits"] == {
+            **pilot.LIMITS,
+            "max_output_tokens": 32_768,
+        }
         assert config.reflection.reflection_strategy is not None if method.startswith("react_v2") else True
         methods.append(method)
         callbacks[-1].events = completed_cycle()

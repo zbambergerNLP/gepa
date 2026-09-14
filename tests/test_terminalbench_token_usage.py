@@ -31,7 +31,7 @@ from gepa.response_journal import response_journal_scope
 
 @pytest.mark.parametrize("model", EXPERIMENT_MODELS)
 def test_output_budget_does_not_expand_context_or_change_qa(model: str) -> None:
-    """Keep QA at 16K and context unchanged while TB roles receive a 32K ceiling."""
+    """Keep shared defaults and context unchanged while TB roles receive a 32K ceiling."""
     original_info = experiment_model_info(model)
     for agentic in (False, True):
         qa = experiment_decoding(model, agentic=agentic)

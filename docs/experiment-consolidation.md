@@ -51,7 +51,8 @@ approved smaller output caps. See the provider review for sources.
 - The model executing the benchmark is also the optimizer model within each arm.
 - Provider guidance determines role-specific sampling and reasoning: temperature
   1.0 and top-p 0.95 for both models; Qwen xhigh and DeepSeek V4.1 numeric effort 100.
-- Output limits are 16,384 for HotPotQA and 32,768 for Terminal-Bench per call.
+- HotPotQA output limits are 16,384 solver / 32,768 optimizer for Qwen and
+  32,768 solver / 131,072 optimizer for DeepSeek. Terminal-Bench uses 32,768 per call.
   Context limits remain 262,144 Qwen and 262,144 DeepSeek.
 - Model context/output limits still apply when character limits are unlimited.
   All relevant character limits remain independently configurable.
@@ -254,8 +255,10 @@ No messages to collaborators or Della jobs are sent by this consolidation.
 The source integration does not establish GPU runtime compatibility or successful
 benchmark execution; those require actual subsequent runtime evidence.
 
-September 13 follow-up: DeepSeek HotPotQA optimizer calls use 131,072 output
-tokens; solver calls and all Qwen roles retain 16,384. The approved qualification
+September 13–14 follow-up: DeepSeek HotPotQA optimizer calls use 131,072 output
+tokens. After training-pilot cutoffs, the user approved 32,768 for DeepSeek solver
+calls and Qwen optimizer calls; Qwen solver calls retain 16,384. Both revised
+profiles require fresh qualification. The approved qualification
 compares server active-request limits 1/2/4 on the same twelve training examples,
 with client workers fixed. Four small optimizer checks precede full calibration.
 Source/runtime changes require new run identities; see the current Della runbook.

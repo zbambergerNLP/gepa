@@ -251,3 +251,19 @@ def test_full_manifestor_prompt_limit_prevents_a_model_call() -> None:
     with pytest.raises(TextLimitError, match="max_prompt_chars=100"):
         Manifestor(lm, text_limits=TextLimits(max_prompt_chars=100)).manifest(choice, "region", "feedback", "traces")
     assert not lm.calls
+
+
+@pytest.mark.parametrize("tool", [EditTool.DELETE_TEXT, EditTool.REPLACE_TEXT, EditTool.MOVE_TEXT])
+def test_empty_target_action_manifestation_requires_finish(tool: EditTool) -> None:
+    """Prevent insertion guidance from contradicting an inapplicable selected action."""
+    lm = RecordingLM("Tell the editor to finish without a change.")
+    spec = SemanticActionSpec(
+        name="targeted", description="Edit existing text.", edit_tool=tool, instruction="Apply it."
+    )
+    result = Manifestor(lm).manifest(ControllerChoice(EditTarget("sys", "Rules"), spec), "", "feedback", "traces")
+    assert result == lm.reply and len(lm.calls) == 1
+    prompt = lm.calls[0]
+    assert f"{tool.value} requires a non-empty target" in prompt
+    assert "selected region is empty" in prompt
+    assert "finish without editing" in prompt
+    assert "INSERT_TEXT accepts" not in prompt

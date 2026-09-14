@@ -561,7 +561,18 @@ class ReActV2Proposer:
         """
         direct_tool = preferred_tool if preferred_tool is not None and preferred_tool in self.allowed_tools else None
         lowered_tool = _lowered_semantic_tool(preferred_tool, self.allowed_tools)
-        if direct_tool is not None:
+        if (
+            region_text == ""
+            and preferred_tool is not None
+            and preferred_tool in (EditTool.DELETE_TEXT, EditTool.REPLACE_TEXT, EditTool.MOVE_TEXT)
+        ):
+            completion_rule = (
+                f"The selected section is empty. {preferred_tool.value} requires a non-empty target, so this "
+                "action cannot apply, including through atomic insert/delete calls. "
+                "Emit only <finish> with this reason, without a tool call. Do not insert text to create a target "
+                "or substitute another tool, even if the steering suggests doing so."
+            )
+        elif direct_tool is not None:
             completion_rule = (
                 f"This semantic action is coupled to {direct_tool.value}. Make as many {direct_tool.value} "
                 "calls as needed within the selected section, all serving the same semantic action and steering. "
@@ -793,6 +804,11 @@ class ReActV2Proposer:
             native_tools=use_native_tools,
         )
         current = region_text
+        missing_target = region_text == "" and preferred_tool in (
+            EditTool.DELETE_TEXT,
+            EditTool.REPLACE_TEXT,
+            EditTool.MOVE_TEXT,
+        )
         if max_chars is None:
             max_chars = self.text_limits.max_component_chars
         executed_all: list[str] = []
@@ -812,7 +828,7 @@ class ReActV2Proposer:
             if use_native_tools:
                 tool_budget_spent = self.max_tool_calls is not None and valid_calls >= self.max_tool_calls
                 completion = cast(Any, native_complete)(
-                    messages, provider_tools, tool_choice="none" if tool_budget_spent else "auto"
+                    messages, provider_tools, tool_choice="none" if tool_budget_spent or missing_target else "auto"
                 )
                 if not isinstance(completion, ToolCompletion):
                     raise TypeError("complete_with_tools must return gepa.lm.ToolCompletion.")

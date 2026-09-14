@@ -1210,3 +1210,37 @@ def test_max_chars_violation_is_returned_as_an_error_observation() -> None:
     assert result.changed is False
     assert result.new_text == RULES_TEXT
     assert "exceeding max_chars" in result.steps[0].observation
+
+
+@pytest.mark.parametrize("tool", [EditTool.DELETE_TEXT, EditTool.REPLACE_TEXT, EditTool.MOVE_TEXT])
+@pytest.mark.parametrize("basis", ["broad", "minimal"])
+def test_empty_target_action_requests_explicit_finish_without_native_tools(tool: EditTool, basis: str) -> None:
+    """Keep the selected action but finish when its required target cannot exist."""
+    lm = NativeScriptedLM([ToolCompletion("<finish>No text exists to edit.</finish>", ())])
+    result = run(
+        lm,
+        allowed_tools=EDIT_TOOL_SETS[basis],
+        preferred_tool=tool,
+        component_text=TEMPLATE.render({"Rules": ""}),
+        steering_message="Append supporting context using INSERT_TEXT.",
+    )
+    assert lm.tool_choices == ["none"]
+    assert len(lm.calls) == 1
+    assert "requires a non-empty target" in lm.calls[0][0]["content"]
+    assert "Emit only <finish>" in lm.calls[0][0]["content"]
+    assert [step.action for step in result.steps] == ["FINISH"]
+    assert not result.changed and result.tool_calls == 0
+
+
+def test_whitespace_target_remains_editable_with_native_replacement() -> None:
+    """Preserve literal whitespace as a valid target instead of treating it as empty."""
+    lm = NativeScriptedLM(
+        [
+            ToolCompletion("", (NativeToolCall("replace", "REPLACE_TEXT", json.dumps({"target": " ", "text": "x"})),)),
+            ToolCompletion("<finish>Done.</finish>", ()),
+        ]
+    )
+    proposer = ReActV2Proposer(lm, TEMPLATE, EDIT_TOOL_SETS["broad"])
+    result = proposer.propose(" ", RULES, EditTool.REPLACE_TEXT, "Replace the space.", "", "", [], None)
+    assert lm.tool_choices == ["auto", "auto"]
+    assert result.changed and result.new_text == "x"

@@ -189,6 +189,52 @@ def completed_cycle():
     }
 
 
+@pytest.mark.parametrize(
+    "signal", [{"length_finish": True}, {"output_cap_reached": True}, {"finish_reasons": ["length"]}]
+)
+def test_optimizer_cutoff_cannot_be_sealed_or_reused(tmp_path, signal):
+    """An evaluated candidate can still contain a truncated proposer response."""
+    require_contract(tmp_path, {"method": "vanilla"})
+    cycle = CycleEvidence(tmp_path)
+    cycle.events = completed_cycle()
+    cycle._save()
+    attempts = tmp_path / "provider-attempts.jsonl"
+    attempts.write_text(json.dumps({"role": "optimizer", "outcome": "success", **signal}) + "\n")
+    with pytest.raises(ValueError, match="truncated"):
+        cycle.verify()
+    assert not (tmp_path / "optimizer-pilot-complete.json").exists()
+
+    attempts.write_text(json.dumps({"role": "optimizer", "outcome": "success", "finish_reasons": ["stop"]}) + "\n")
+    cycle.verify()
+    marker = tmp_path / "optimizer-pilot-complete.json"
+    legacy = json.loads(marker.read_text())
+    del legacy["provider_attempts_sha256"]
+    atomic_json(marker, legacy)
+    attempts.write_text(json.dumps({"role": "optimizer", "outcome": "success", **signal}) + "\n")
+    with pytest.raises(ValueError, match="truncated"):
+        load_cycle(tmp_path)
+
+
+@pytest.mark.parametrize("remove", [False, True])
+def test_completed_optimizer_binds_provider_evidence(tmp_path, remove):
+    """Removing or changing request evidence invalidates a completed pilot."""
+    require_contract(tmp_path, {"method": "vanilla"})
+    cycle = CycleEvidence(tmp_path)
+    cycle.events = completed_cycle()
+    cycle._save()
+    attempts = tmp_path / "provider-attempts.jsonl"
+    row = {"role": "optimizer", "outcome": "success", "finish_reasons": ["stop"], "completion_tokens": 10}
+    attempts.write_text(json.dumps(row) + "\n")
+    cycle.verify()
+    assert load_cycle(tmp_path)["completed_cycles"] == 1
+    if remove:
+        attempts.unlink()
+    else:
+        attempts.write_text(json.dumps({**row, "completion_tokens": 11}) + "\n")
+    with pytest.raises(ValueError, match="changed"):
+        load_cycle(tmp_path)
+
+
 def test_completed_cycle_cannot_be_reused_after_contract_change(tmp_path):
     """Bind coverage evidence to the actual data and optimizer configuration."""
     require_contract(tmp_path, {"method": "vanilla"})

@@ -54,6 +54,20 @@ def require_contract(directory: Path, contract: dict) -> Path:
     return path
 
 
+def _provider_attempts_digest(directory: Path) -> str | None:
+    """Reject truncated model output and bind coverage to its physical request history."""
+    path = directory / "provider-attempts.jsonl"
+    if not path.exists():
+        return None
+    attempts = [json.loads(line) for line in path.read_text().splitlines()]
+    if any(
+        row.get("length_finish") or row.get("output_cap_reached") or "length" in (row.get("finish_reasons") or [])
+        for row in attempts
+    ):
+        raise ValueError("Optimizer pilot recorded truncated model output; review token limits before qualification")
+    return digest(attempts)
+
+
 class CycleEvidence:
     """Observe production callbacks without changing selection or acceptance."""
 
@@ -144,6 +158,7 @@ class CycleEvidence:
             "completed_cycles": 1,
             "decision": self.events["decision"],
             "evidence_sha256": digest(self.events),
+            "provider_attempts_sha256": _provider_attempts_digest(self.directory),
         }
         for name in ("pilot-contract.json", "terminalbench-run-contract.json"):
             if (self.directory / name).exists():
@@ -157,6 +172,7 @@ def load_cycle(directory: Path) -> dict:
     """Verify completed optimizer evidence without rerunning any model calls."""
     summary = json.loads((directory / "optimizer-pilot-complete.json").read_text())
     evidence = json.loads((directory / "optimizer-cycle.json").read_text())
+    provider_attempts_sha256 = _provider_attempts_digest(directory)
     if (
         summary.get("protocol") != OPTIMIZER_PILOT_PROTOCOL
         or summary.get("completed_cycles") != 1
@@ -167,6 +183,7 @@ def load_cycle(directory: Path) -> dict:
         or "accepted" not in evidence.get("decision", {})
         or summary.get("decision") != evidence.get("decision")
         or summary.get("evidence_sha256") != digest(evidence)
+        or summary.get("provider_attempts_sha256") != provider_attempts_sha256
         or summary.get("contract_file") not in ("pilot-contract.json", "terminalbench-run-contract.json")
         or summary.get("contract_sha256") != digest(json.loads((directory / summary["contract_file"]).read_text()))
     ):

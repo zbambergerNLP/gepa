@@ -1,6 +1,8 @@
 import random
 from types import SimpleNamespace
 
+import pytest
+
 from gepa.proposer.merge import (
     MergeProposer,
     does_triplet_have_desirable_predictors,
@@ -8,6 +10,7 @@ from gepa.proposer.merge import (
     find_common_ancestor_pair,
     sample_and_attempt_merge_programs_by_common_predictors,
 )
+from gepa.strategies.text_limits import TextLimits
 
 
 def test_does_triplet_have_desirable_predictors_true_when_descendants_diverge():
@@ -267,6 +270,29 @@ def _make_state(prog_val_scores, evaluator=None):
 
     state.cached_evaluate_full = cached_evaluate_full
     return state
+
+
+@pytest.mark.parametrize("limits", [TextLimits(max_component_chars=5), TextLimits(max_candidate_chars=5)])
+def test_merge_cannot_bypass_configured_document_limits(monkeypatch, limits):
+    """Reject an oversized merge before spending any evaluation calls."""
+    evaluations = []
+    proposer = MergeProposer(
+        logger=_StubLogger(), valset=_StubValset(),
+        evaluator=lambda batch, prog: evaluations.append(prog),
+        use_merge=True, max_merge_invocations=5, val_overlap_floor=1,
+        text_limits=limits,
+    )
+    proposer.last_iter_found_new_program = True
+    proposer.merges_due = 1
+    state = _make_state([{0: 0.1}, {0: 0.4}, {0: 0.5}])
+    monkeypatch.setattr("gepa.proposer.merge.find_dominator_programs", lambda *_args, **_kwargs: [1, 2])
+    monkeypatch.setattr(
+        "gepa.proposer.merge.sample_and_attempt_merge_programs_by_common_predictors",
+        lambda **_kwargs: ({"pred": "oversized merged text"}, 1, 2, 0),
+    )
+    assert proposer.propose(state) is None
+    assert not evaluations
+    assert state.total_num_evals == 0
 
 
 def test_merge_proposer_skips_pairs_below_overlap_floor(monkeypatch):

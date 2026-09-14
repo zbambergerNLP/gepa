@@ -1,483 +1,353 @@
-<!-- Source: Gilad Morad, https://gist.github.com/gilad12-coder/b0142ad28de98c47487ea9847686206a (fetched 2026-09-02).
-     Adapted in this checkout: the second arm is DeepSeek-V4.1-Flash (GLM-5.3-Flash is dropped); neither arm
-     depends on an external POSIT checkout or any container; this repo builds one hash-locked vLLM serving venv per
-     arm (section 4); and there is no canary job, only a one-time serving smoke test (section 5). Everything else
-     follows the gist. -->
+# HotPotQA on Della
 
-# Running the HotPotQA campaign on Della
+Use `codex/consolidated-della-experiments`, which combines the reviewed HotPotQA
+and Terminal-Bench work with [Zach's PR #62](https://github.com/zbambergerNLP/gepa/pull/62).
+The [integration record](../../docs/experiment-consolidation.md) identifies the
+input commits, conflict resolutions, and deferred decisions. The old `169ddda`
+runbook commit predates these decisions and is not a launch target.
 
-Zach,
+These are instructions for future operations. Consolidation does not submit
+jobs. Start with HotPotQA; Terminal-Bench's Apptainer integration is paused.
 
-The code is in [PR #59](https://github.com/zbambergerNLP/gepa/pull/59), and [Graphite](https://app.graphite.dev/github/pr/zbambergerNLP/gepa/59) has the review view. Use this commit for the first campaign:
+## Source and connection
 
-```text
-169ddda125b1abe305c7714bbb5b3fc38b21b587
-```
-
-We are running six configurations with Qwen3.8-27B and six with DeepSeek-V4.1-Flash (`deepseek-ai/DeepSeek-V4.1-Flash`, released 2026-09-10). Each run uses one model for the student, proposer, and Controller.
-
-## 1. Run the launcher locally
-
-Run the launcher from your laptop or another machine that can SSH non-interactively to both Della hosts. Do not invoke `examples/hotpotqa/run_hotpotqa.sbatch` directly.
-
-The launcher uses each machine as follows:
-
-- Your local machine freezes and syncs the source commit, submits jobs, and fetches results.
-- `della-vis1` downloads and verifies the internet-dependent artifacts.
-- The Della login node calls `sbatch`.
-- The allocated eight-H200 Slurm nodes serve the local models and run GEPA.
-
-Model inference and GEPA both run on Della. The local script handles submission and file transfer.
-
-Local prerequisites:
+Run the laptop launchers from the reviewed, clean consolidated checkout. They
+stage `git archive HEAD` under `$REMOTE_DIR/sources/<commit>` and verify its
+manifest. No branch switching is needed between experiment and Della tooling.
 
 ```bash
-command -v git
-command -v ssh
-command -v rsync
-command -v sha256sum
-command -v uv
+cd /path/to/gepa-consolidated
+git status --short --branch
 ```
 
-Your SSH agent or `~/.ssh/config` must already provide access. Visit both hosts once so their verified host keys are present in `~/.ssh/known_hosts`:
+Preflight and submission automatically record the latest committed `HEAD`;
+no manual source hash is required. Preflight requires the consolidated branch
+and rejects uncommitted changes. An optional `HOTPOTQA_SOURCE_COMMIT` asserts
+a particular expected revision. Keep the recorded SHA fixed during a campaign.
+Source, checkpoint, runtime, or experiment
+changes require a fresh campaign. HotPotQA's consolidated run contract is schema 27.
+
+Reuse the working Della connection configuration. If this checkout's ignored
+`scripts/della/.env` is absent, create it from `.env.example`, fill in the real
+user, hosts, allocation, scratch path, and model path, and set mode 600. Do not
+overwrite an existing configured file. Credentials are never committed.
+Needed local commands: `git`, `ssh`, `rsync`, `sha256sum`, and `uv`.
+
+The SSH connection must work with `BatchMode=yes` and verified host keys. If the
+account requires interactive authentication, use the ControlMaster helper:
 
 ```bash
-ssh YOUR_NETID@della.princeton.edu exit
-ssh YOUR_NETID@della-vis1.princeton.edu exit
-```
-
-The scripts use `BatchMode=yes` and `StrictHostKeyChecking=yes`. A launch will fail if either host needs a password prompt or has an unknown host key.
-
-## 2. Check out the experiment source
-
-For a fresh checkout:
-
-```bash
-git clone https://github.com/zbambergerNLP/gepa.git gepa-hotpotqa
-cd gepa-hotpotqa
-
-git fetch origin codex/review-current-07-hotpotqa-slurm
-git switch --detach 169ddda125b1abe305c7714bbb5b3fc38b21b587
-```
-
-For an existing checkout, check for local work before switching commits:
-
-```bash
-cd /path/to/gepa
-git status --short
-git fetch origin codex/review-current-07-hotpotqa-slurm
-git switch --detach 169ddda125b1abe305c7714bbb5b3fc38b21b587
-```
-
-Check the commit and worktree:
-
-```bash
-test "$(git rev-parse HEAD)" = "169ddda125b1abe305c7714bbb5b3fc38b21b587"
-test -z "$(git status --porcelain --untracked-files=normal)"
-echo "Source is exact and clean."
-```
-
-The launcher rejects a dirty checkout.
-
-## 3. Configure the Della paths
-
-Create the ignored local configuration file:
-
-```bash
-cp scripts/della/.env.example scripts/della/.env
-chmod 600 scripts/della/.env
-```
-
-Edit `scripts/della/.env` and replace every placeholder:
-
-```bash
-REMOTE_USER="YOUR_NETID"
-REMOTE_HOST="della.princeton.edu"
-REMOTE_VIS_HOST="della-vis1.princeton.edu"
-REMOTE_DIR="/scratch/gpfs/YOUR_ALLOCATION/YOUR_NETID/gepa"
-SCRATCH_BASE="/scratch/gpfs/YOUR_ALLOCATION/YOUR_NETID/gepa"
-MODEL_STORAGE="/projects/YOUR_ALLOCATION/model_storage"
-GPU_PARTITION="ailab"
-```
-
-For the existing BSTEWART shared model location, use:
-
-```bash
-MODEL_STORAGE="/projects/BSTEWART/model_storage"
-```
-
-`MODEL_STORAGE` must be writable while the artifacts are first prepared and readable from the visualization, login, and compute nodes.
-
-Recheck the file mode:
-
-```bash
-test "$(stat -f '%Lp' scripts/della/.env 2>/dev/null || stat -c '%a' scripts/della/.env)" = "600"
-```
-
-## 4. Check the serving prerequisites
-
-Each arm is served by its own vLLM environment that this repository builds itself, as a
-plain uv venv with every package hash-locked (no container, no other project's checkout):
-
-| Arm | Requirements | Lock | Venv |
-|---|---|---|---|
-| Qwen3.8-27B | `serving/requirements.in` | `serving/requirements-x86_64-linux-py312.txt` | `$REMOTE_DIR/.serving-venv` |
-| DeepSeek-V4.1-Flash | `serving/requirements-deepseek-v4.1-flash.in` | `serving/requirements-deepseek-v4.1-flash-x86_64-linux-py312.txt` | `$REMOTE_DIR/.serving-venv-deepseek-v4.1-flash` |
-
-(paths under `examples/hotpotqa/`). Regenerate a lock with
-`MODEL_PROFILE=<arm> scripts/della/lock_serving_env.sh` after changing its `.in` file, and
-commit the lock.
-
-Qwen keeps the proven vLLM 0.25.1 / torch 2.11 stack. DeepSeek-V4.1-Flash
-(`DeepseekV41ForCausalLM`) is newer than every vLLM release, so its environment pins the
-wheel vLLM publishes for main commit `e77daef89` (the commit that added the model, its
-`deepseek_v41` tokenizer mode, and its reasoning and tool-call parsers), with torch 2.13
-(CUDA 13.0) and flashinfer 0.6.18.post1. Della's GPU nodes are offline, and from vLLM 0.26
-flashinfer downloads missing GPU kernels at runtime, so the lock also installs flashinfer's
-prebuilt `flashinfer-cubin` and `flashinfer-jit-cache` wheels from flashinfer.ai and the job
-sets `FLASHINFER_NO_DOWNLOAD=1`. Every job still fails closed at the architecture check in
-`run_hotpotqa.sbatch` if the frozen vLLM does not register the checkpoint's architecture.
-
-The DeepSeek arm serves one TP8/EP8 replica per node with the same single-sequence
-determinism contract as Qwen (`--max-num-seqs 1`, `--seed 0`, no prefix caching, no
-batch-invariant mode, one API server, no speculative decoding: neither the MTP layers nor
-the DSpark draft module is loaded). Prompts use the checkpoint's native encoding
-(`--tokenizer-mode deepseek_v41`; the repository ships no Jinja template), with thinking on
-and reasoning effort 100, the maximum. The KV cache is FP8 (`fp8_ds_mla`, the layout its
-sparse-MLA path uses) and the KV block size is left to vLLM (its SM90 sparse-MLA kernel
-needs 64-token blocks). The checkpoint ships FP8 dense weights, FP4 experts, and FP8 Engram
-tables; on the H200 (SM90) the FP4 experts run on vLLM's Marlin MoE backend.
-
-Concurrency: every replica decodes one sequence at a time, so each concurrent example
-beyond the replica count only queues. The launcher runs 12 concurrent examples on Qwen's
-eight replicas and 4 on DeepSeek's single replica, and each request has a 3,600-second
-timeout with two retries of the identical seeded request.
-
-Run the read-only preflight from your laptop; it covers steps 1-4:
-
-```bash
+scripts/della/della_session.sh status
+# Authenticate interactively only when a new master is needed:
+scripts/della/della_session.sh open
 scripts/della/preflight_hotpotqa.sh
 ```
 
-It checks the local tools, the exact commit and clean tree, `scripts/della/.env`,
-non-interactive SSH to both hosts, and on `della-vis1`: the `cudatoolkit/13.0` module, a
-writable `MODEL_STORAGE`, the home quota, and (once built) that the serving venv matches
-the committed lock, for each arm's serving venv.
+The helper uses the existing SSH configuration: `ControlMaster auto`,
+`ControlPath ~/.ssh/cm/%r@%h:%p`, and `ControlPersist yes` for both configured
+hosts. Preflight is read-only and uses the current consolidated branch tip.
+It checks source, permissions, SSH, CUDA, storage, and serving locks.
 
-Della requires an SSH key **and** a password step; the launcher scripts use `BatchMode=yes`,
-so open the persistent master connections once per laptop session:
+## Prepare the exact artifacts
 
-```bash
-scripts/della/della_session.sh open
-```
+Login nodes handle brief operations and submissions. `della-vis1` handles
+builds and downloads. Allocated H200 GPUs run inference and optimization
+with Hugging Face offline mode. Keep environments, caches, and outputs on
+`SCRATCH_BASE`; checkpoints use the configured shared `MODEL_STORAGE`.
 
-## 5. Build the shared artifacts
-
-Run this once from the repository on your laptop:
-
-```bash
-scripts/della/build_env.sh
-```
-
-`build_env.sh` syncs the checkout and runs three steps on `della-vis1`, each a script under
-`scripts/della/remote/` that also runs on its own from the synced checkout:
-
-- `setup_env.sh` builds the frozen Python 3.11.13 / uv 0.9.13 GEPA environment and each
-  model's hash-locked vLLM serving venv (table above), and freezes their manifests;
-- `download_dataset.sh` builds and verifies the frozen Wiki-2017 BM25 index and caches the
-  exact HotPotQA 150/300/300 split; and
-- `download_model.sh <model>` downloads and byte-verifies one pinned checkpoint. It runs
-  detached for both models (`build_env.sh [model ...]` to choose), so a dropped laptop
-  connection cannot stop the 510 GB DeepSeek download; the script prints the log path,
-  which ends with `MODELS_DONE`.
-
-Disk prerequisite: the DeepSeek-V4.1-Flash checkpoint is 48 safetensors shards
-totalling 510.3 GB (475.3 GiB) at the pinned revision, on top of Qwen3.8-27B. Check
-that `MODEL_STORAGE` has roughly 600 GB free before the first build (`checkquota` or
-`df -h "$MODEL_STORAGE"` on `della-vis1`); the download also stages transfer metadata
-under `.cache` inside the checkpoint directory.
-
-The shared files will be at:
-
-```text
-$MODEL_STORAGE/Qwen3.8-27B
-$MODEL_STORAGE/DeepSeek-V4.1-Flash
-```
-
-Model revisions:
-
-```text
-Qwen/Qwen3.8-27B
-revision 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
-
-deepseek-ai/DeepSeek-V4.1-Flash
-revision dba1be0a40aa45a94ad051997016db3960a90277
-```
-
-Use `build_env.sh` rather than `huggingface-cli download`. The launcher requires the `.gepa-model-integrity.json` manifests generated during this build. Existing valid files are reused and verified.
-
-After the build succeeds, check that both manifests are present:
+Each model has its own hash-locked vLLM environment. Qwen uses `.serving-venv`
+(vLLM 0.25.1 / Torch 2.11). DeepSeek V4.1 uses `.serving-venv-deepseek-v4.1-flash`
+from `serving/requirements-deepseek-v4.1-flash-x86_64-linux-py312.txt`, including
+vLLM commit `e77daef89e18e08321ae7b8b24827eedd5fe8673` (package version
+`0.1.1.dev5+ge77daef89`), Torch 2.13, and prebuilt FlashInfer kernels for offline
+GPU nodes. Both serving environments use Python 3.12.7 / Transformers 5.13.
+GEPA uses Python 3.11.13 / uv 0.9.13 with pinned DSPy. HotPotQA does not need
+a POSIT checkout. HoVer's shared model references are updated, but its separate
+POSIT-based deployment is outside this HotPotQA campaign.
 
 ```bash
-source scripts/della/.env
-
-ssh "${REMOTE_USER}@${REMOTE_VIS_HOST}" \
-  "test -s '${MODEL_STORAGE}/Qwen3.8-27B/.gepa-model-integrity.json' &&
-   test -s '${MODEL_STORAGE}/DeepSeek-V4.1-Flash/.gepa-model-integrity.json' &&
-   echo 'All pinned model artifacts are present.'"
+scripts/della/build_env.sh qwen3.8-27b deepseek-v4.1-flash
 ```
 
-The byte-level verification runs inside `download_model.sh`.
+This syncs code, builds environments and datasets, and starts detached model
+downloads on the visualization node. A successful launcher exit means downloads
+started, not finished. The printed log must end with `MODELS_DONE`; each model
+directory must contain its byte-verified `.gepa-model-integrity.json`.
 
-### Smoke-test the DeepSeek serving stack once
+The remote stages are `scripts/della/remote/setup_env.sh`,
+`download_dataset.sh`, and `download_model.sh <profile>`. Run them from the
+synced checkout with `SCRATCH_BASE`, `MODEL_STORAGE`, and any custom
+`WIKI17_DIR` exported. Artifact locks prevent rebuilding in-use environments
+and indexes; model-directory locks protect served checkpoints.
 
-Before submitting the DeepSeek chain the first time, run the serving smoke test. It is not
-part of any campaign job, is not a dependency of one, and writes no marker or lock files.
-It serves the checkpoint with exactly the `vllm serve` invocation the sbatch uses, waits
-for health, then sends one simple prompt with the campaign's request settings and records
-the request, the prompt text the server rendered from it (via vLLM's `/tokenize` and
-`/detokenize`), and the full response including the reasoning tokens. It then exercises an
-ordinary completion, a native tool call plus its tool-result continuation, and one ReAct V2
-proposal per edit tool (DELETE_TEXT, INSERT_TEXT, MOVE_TEXT, REPLACE_TEXT). From your laptop:
+Installation and ordered CUTLASS reinstalls use committed requirements hashes.
+The launcher/job check both the lock and realized package manifest. Code sync
+preserves `.venv`, `.serving-venv*`, `.tools`, caches, snapshots, and outputs.
+FlashInfer builds use the serving environment's CUDA headers first.
+
+## Frozen experiment choices
+
+| Setting | Qwen | DeepSeek |
+| --- | --- | --- |
+| Model, all roles | Qwen3.8-27B | DeepSeek-V4.1-Flash |
+| Revision | `1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0` | `dba1be0a40aa45a94ad051997016db3960a90277` |
+| Serving | TP1 / DP1 / one API server | TP4 / EP4 / DP1 / one API server |
+| Della allocation | 1 H200, 8 CPUs, 128G | 4 H200s on one node, 32 CPUs, 512G |
+| Weights / KV cache | BF16 / BF16 (`auto`) | Native FP4 experts + FP8 / FP8 |
+| Engram tables | Not applicable | Explicit CPU offload |
+| Active sequences | Calibrate 1, 2, 4 | Calibrate 1, 2, 4 |
+| Context / output caps | 262,144 / 16,384 solver; 32,768 optimizer | 262,144 / 32,768 solver; 131,072 optimizer |
+| Thinking effort | `xhigh` | `100` |
+| Approved initial pilot workers | 12 | 4 |
+
+The initial client-worker values incorporate Zach's observed queue timeout.
+The smaller GPU allocations follow the checkpoint-byte sizing review and await
+empirical qualification. Client workers may queue behind one active sequence. Check
+throughput and timeouts on training examples, then freeze the chosen concurrency
+across all six cells per model. This calibration remains pending. The
+September 13 qualification now compares 1, 2, and 4 active requests on the same 12 training questions. This revises the earlier single-sequence profile.
+
+Temperature is 1.0 and top-p is 0.95 for both models and all roles. DeepSeek uses
+numeric effort 100, matching its published instruct/agentic evaluations.
+Requests have a 3,600-second deadline shared by at most three transient-error
+attempts, with 1/2-second backoff and attempt logs; SDK retries stay disabled.
+The 262,144-token server context is Zach's Della configuration, below the model
+card's 1M capability. Output caps remain our approved practical budgets.
+See the [provider review](../common/temperature_policy.md).
+
+HotPotQA retains 150/300/300 examples, seed 0, the pinned DSPy two-stage program,
+Wiki-2017 BM25 k=7, and minibatches of three. Evaluation and response caches stay
+off. Text feedback remains enabled; repeated context is preserved without
+deduplication, as recorded by reflection-context policy version 2. Character limits
+default to unlimited and can be set with `HOTPOTQA_TEXT_LIMITS_JSON`; model token
+limits remain. See [shared decisions](../../scripts/della/README.md).
+
+Final testing includes one shared starting-prompt baseline per model. Alongside
+the first completed cell's held-out evaluation, run the original prompts once
+over the same 300 test questions using that model's frozen task runtime. All six
+cells reference those same baseline scores and report EM/F1 gains. This adds 300
+question executions per model, accounted separately from optimization. Training
+pilot scores continue to serve calibration only.
+
+Baseline artifacts live under `outputs/hotpotqa-baselines/<identity-sha256>/`
+and are fetched with the other run outputs. The identity includes the campaign,
+source/runtime, starting prompts, model settings, retriever, and exact data.
+Completed per-question records are reused on resume; changed identities require
+separate evidence. The result analyzer verifies each cell's baseline and gains,
+then checks that all of a model's cells share the same reference evaluation.
+
+## Verify before optimization
+
+Zach's independent diagnostic records the request, rendered prompt, reasoning,
+output, usage, and four edit-tool probes:
 
 ```bash
-scripts/della/submit_deepseek_smoke.sh submit          # prints the job id
-scripts/della/submit_deepseek_smoke.sh fetch <job-id>  # after it finishes
+scripts/della/submit_deepseek_smoke.sh submit
+scripts/della/submit_deepseek_smoke.sh fetch <job-id>
 ```
 
-The fetch copies `outputs/deepseek-smoke/<job-id>/`: `transcript.md` (human-readable),
-`transcript.json`, `verify_report.txt`, `serving-packages.txt`, `gpus.txt`, `vllm.log`, and
-the Slurm log. The same check runs interactively on an allocated node with
-`scripts/della/verify_deepseek_serving.sh`. `VERIFY_ATTEMPTS` (default 4, one per tool)
-raises the number of edit attempts for a longer soak. Do not submit the DeepSeek chain
-until it prints `PASS`.
+It uses the approved V4.1 serving flags and shared edit probes, including explicit
+`<finish>`. It does not write a campaign qualification marker.
 
-## 6. Experiment matrix
+The production DeepSeek chain retains its mandatory 20-attempt canary on the
+exact campaign runtime before six optimization jobs. A short Slurm controller
+advances the chain only after each allocation completes successfully.
+Its marker is written only on success. A failed canary or native-tool preflight
+cannot freeze campaign locks. Every optimization job verifies source, model
+bytes, environment, H200 hardware, and native tool calls before training.
 
-The launcher enforces this order separately for Qwen and DeepSeek:
+The approved HotPotQA calibration pilot then evaluates, for each model:
 
-| Order | Tree | Code condition | Metric-call budget |
-|---:|---|---|---:|
-| 1 | Standard | `vanilla` | 6,871 |
-| 2 | Standard | `react_v2` | 6,871 |
-| 3 | Standard | `react_v2_random` | 6,871 |
-| 4 | Standard | `action` | 6,871 |
-| 5 | Expanded | `vanilla` | 13,742 |
-| 6 | Expanded | `react_v2` | 13,742 |
+1. Three training questions to check the complete two-stage task pipeline.
+2. One real cycle for each of the four optimizer methods.
+3. Twelve fixed training questions to compare active-request limits 1, 2, and 4.
+4. All 150 training questions at the selected profile to measure throughput,
+   timeouts, token usage, and output cutoffs with the initial prompts.
 
-Each job uses `afterok` on the previous job. Within a model arm, the four standard-tree runs finish before either expanded-tree run starts. The Qwen and DeepSeek arms are independent and can occupy two nodes at once.
+Use the pinned training split, Wiki-2017 BM25 k=7, and approved model settings.
+Start with 12 Qwen workers / 4 DeepSeek workers. Keep validation and test
+examples outside calibration, and review the evidence before freezing the
+runtime settings across the six experiment cells per model. These stages
+evaluate the initial prompts without optimizing them. The dedicated
+`submit_hotpotqa_pilots.sh` launcher runs smoke and the four optimizer checks before throughput and full calibration on
+each model. It uses the production serving gates and writes isolated outputs
+under `outputs/hotpotqa-pilots/<pilot-id>/<model>/`. It does not freeze production
+campaign locks. Qwen first verifies all four native edit tools; DeepSeek runs
+its 20-attempt canary. Successful checks are recorded for the exact runtime.
+Live pilot execution remains pending.
 
-Every job, Qwen or DeepSeek, verifies the frozen serving environment, checks that the pinned vLLM registers the checkpoint's architecture, and runs a native tool-call check before optimization. There is no separate canary job; the one-time manual serving check is described in section 5.
+The approved pilot acceptance criteria are:
 
-## 7. Submit the jobs
+- Every question completes the pipeline and returns a usable prediction.
+- Unresolved provider or parsing errors, and output cutoffs, require
+  investigation before proceeding to the full campaign.
+- Record EM/F1 as baseline measurements with no minimum accuracy threshold.
 
-Launch the Qwen chain:
+Check execution evidence separately from scores: the normal evaluator assigns
+zero to malformed task output, which is a pilot reliability issue. An ordinary
+wrong answer remains a valid baseline result.
+
+Also include a small training-only optimizer-flow check per model for `vanilla`,
+`react_v2`, `react_v2_random`, and `action`. Exercise real task feedback through
+reflection/proposal and candidate reevaluation, including each method's actual
+Manifestor, Controller, and Editor stages where applicable. Save the stage
+evidence and the resulting normal acceptance or rejection decision separately
+from the initial-prompt calibration measurements and production runs.
+
+Run one completed proposal-and-reevaluation cycle on the normal three-example
+training minibatch per method/model combination: four methods times two models
+gives eight checks. Standard and doubled budgets share this process coverage;
+their execution paths are the same. Stop after the completed cycle regardless
+of metric direction or candidate acceptance. The three-question and full
+150-question initial-prompt calibration stages remain separate.
+
+The check passes when that process completes correctly. Tied or lower EM/F1,
+wrong answers, and rejected candidates are valid outcomes, with no minimum
+score or improvement requirement. Recovered editor tool errors are acceptable
+when normal feedback allows completion. Investigate unresolved execution errors
+and missing stage evidence; do not retry for an improved metric or change the
+optimizer's acceptance rule. Keep validation/test examples out, and start every
+production cell from the approved initial prompts, not a pilot revision.
+The checks use the production optimizer builders, with only the three training
+examples as both discovery and diagnostic evaluation data and a one-proposal
+stop condition. `optimizer-cycle.json` retains callback evidence;
+`optimizer-pilot-complete.json` verifies all required stages. A perfect-batch
+skip does not count as an exercised cycle. The serving canary alone does not
+exercise this complete flow. Live qualification remains pending.
+
+Keep client workers fixed at 12 Qwen / 4 DeepSeek while comparing server
+active-request limits 1, 2, and 4. Rank completed questions per hour using
+`examples.hotpotqa.batching_report`; inspect memory, queueing, preemptions, and
+request errors before selecting a profile. A timing winner alone is not production qualification. If queueing causes timeouts,
+reduce concurrency and repeat the affected model's 150-question training
+pilot. Investigate parsing failures and output cutoffs separately. Freeze the
+successful setting across that model's six experiment cells.
+
+Use one interactive allocation at a time, following the user's updated resource
+instructions. Qwen and DeepSeek qualification runs are sequential; concurrency
+calibration compares active requests within each model server. Record each job
+ID, inference start/end times, throughput, errors, output cutoffs, and resource
+peaks. Cross-model overlap has not been qualified.
+
+After artifact preparation, commit the exact source and use a fresh pilot ID:
 
 ```bash
-MODEL_PROFILE=qwen3.8-27b \
-BUDGET_PROFILE=campaign \
-CONDITION=all \
-HOTPOTQA_CAMPAIGN_ID=hotpotqa-final-v1 \
-scripts/della/submit_hotpotqa.sh
+export HOTPOTQA_CAMPAIGN_ID=<new-pilot-id>
+scripts/della/submit_hotpotqa_pilots.sh --dry-run
+scripts/della/submit_hotpotqa_pilots.sh
+HOTPOTQA_JOB_KIND=pilot scripts/della/fetch_hotpotqa_results.sh
 ```
 
-Launch the DeepSeek chain (after the one-time manual serving check in section 5 has passed):
+The dry run prints the two submissions without contacting Della. The actual
+launcher submits independent model arms; resource availability and canary
+timing determine overlap. The fetch writes `pilot-report.json` under
+`outputs/hotpotqa-pilot-fetches/<pilot-id>/<source-commit>/`. It validates
+calibration records and optimizer stage evidence, retains incomplete results,
+and measures overlap from physical request intervals, including queue time.
+Idle gaps and merely queued jobs do not count as concurrent requests. Review
+the report and the preserved Slurm/model-server logs before freezing settings.
+Original provider records retain job IDs, failed attempts, and unknown usage;
+completed question records are reused only when resuming the same pilot.
+
+## Campaign and results
+
+Per model: standard `vanilla`, `react_v2`, `react_v2_random`, and `action` at
+6,871 metric calls; then independent expanded `vanilla` and `react_v2` at
+13,742 calls. There are 12 optimization cells across both models. Expanded runs
+start from the initial prompt.
+
+After source, training calibration, and runtime checks are reviewed, choose a
+new campaign ID and use the production launcher:
 
 ```bash
-MODEL_PROFILE=deepseek-v4.1-flash \
-BUDGET_PROFILE=campaign \
-CONDITION=all \
-HOTPOTQA_CAMPAIGN_ID=hotpotqa-final-v1 \
-scripts/della/submit_hotpotqa.sh
+export HOTPOTQA_CAMPAIGN_ID=<new-campaign-id>
+MODEL_PROFILE=qwen3.8-27b scripts/della/submit_hotpotqa.sh
+MODEL_PROFILE=deepseek-v4.1-flash scripts/della/submit_hotpotqa.sh
 ```
 
-Each command submits six jobs. The campaign produces 12 result cells.
+These commands submit independent model chains. Apply the schedule selected
+from the pilots: submit both chains for concurrent scheduling, or wait for one
+model's chain to finish before submitting the other for sequential scheduling.
+Each model's six ablations and their test evaluations remain sequential.
 
-The launcher stages the source at:
+Qwen requests one H200, 8 CPUs, and 128G; DeepSeek requests four H200s, 32 CPUs,
+and 512G on one `ailab` node, with Engram tables explicitly offloaded to CPU.
+Qwen standard
+caps are 72 hours; expanded and DeepSeek caps are 144 hours. These are limits,
+not estimates. Logs live at `$SCRATCH_BASE/logs/hotpotqa/<campaign>/<commit>/`.
+Each allocation records its CUDA-visible GPU inventory and VRAM/utilization every
+five seconds in `gpu-inventory-<job>.json` and `gpu-memory-<job>.csv`. Physical
+UUIDs stay outside the resumable experiment identity. vLLM INFO logs retain
+weight, KV-cache, and startup allocation details; reserved VRAM alone is not the
+working memory needed by a request.
 
-```text
-$REMOTE_DIR/sources/169ddda125b1abe305c7714bbb5b3fc38b21b587
-```
+The approved allocation-recovery policy is to request a continuation
+automatically after scheduler-confirmed allocation time expiry, using a
+verified checkpoint with newly persisted work from that allocation. Completed
+evaluations or iterations count as progress even when scores do not improve
+or candidates are rejected. Preserve the same logical run, source/campaign,
+data, model, runtime settings, saved state, and remaining original budget.
+Keep downstream ablations waiting for this cell's optimization and test to
+finish successfully. Stop for unresolved execution errors, cancellation,
+missing/incompatible checkpoints, or no saved progress; retain recovery usage.
+The launcher implements this through `examples.common.slurm_continuation`.
+Each worker is submitted held until its `afterany` controller is recorded,
+then released. The controller reads the allocation's final `sacct` state. Only
+`TIMEOUT` plus new hash-verified work permits another allocation with the same
+command and environment. Successful completion advances to the next cell;
+errors, corruption, ambiguous submission replies, and duplicate starts stop
+without blind resubmission. Plans and allocation history live in the campaign
+log directory, with separate provider usage identified by allocation job ID.
+These failure paths are tested locally; live Slurm recovery remains unverified.
 
-The jobs load the checkpoints from Della storage and set Hugging Face and Transformers to offline mode. They do not use OpenRouter or another hosted model API.
+For a stopped plan, inspect its state and queued/held jobs before any manual
+resubmission; never start a second plan over an active logical run. Fetch and
+validate completed experiment evidence with
+`scripts/della/fetch_hotpotqa_results.sh` under the same campaign ID. Its output
+is `outputs/hotpotqa-campaigns/<campaign>/<commit>/`.
 
-The Slurm time limits are safety caps, not runtime estimates: Qwen standard jobs receive 72 hours, Qwen expanded jobs 144 hours, and DeepSeek campaign jobs 144 hours.
+PR #62's previous job numbers and artifact-readiness claims are historical.
+Check the actual connection and runtime before using this consolidated source.
 
-## 8. Monitor the jobs
+## Interactive qualification after the September 13 measurements
 
-From a Della shell:
+DeepSeek optimizer roles now use a 131,072-token ceiling, uniformly across
+vanilla, FOREST, random Controller, and action-only. Following observed training-pilot
+cutoffs and user approval, DeepSeek solver calls use 32,768; Qwen uses 16,384 for
+solver calls and 32,768 for optimizer roles. These revised caps require fresh
+qualification. The 262,144 context and provider sampling
+settings are unchanged. Run contracts use schema 27; pilot protocol uses version 2.
 
-```bash
-squeue -u "$USER" -o "%.18i %.60j %.2t %.12M %.30R"
-```
+Set `HOTPOTQA_JOB_KIND=pilot HOTPOTQA_PREPARE_ONLY=1` with a fresh campaign ID
+and `MODEL_PROFILE`, then run `scripts/della/submit_hotpotqa.sh`. This verifies
+and stages the clean current source and prints `INTERACTIVE_EXPORT_FILE` without
+submitting jobs. Inside an approved allocation, run the staged
+`scripts/della/remote/run_hotpotqa_interactive.sh <export-file> all` through
+`srun`. Stages `smoke`, `optimizer`, `throughput`, and `full` are individually
+resumable. Use `preliminary` to run smoke, all optimizer checks, and throughput
+with one server startup, stopping before the full calibration. This supports
+batching selection before the 150-question run. Request one allocation at a time
+with `salloc`, for 55 minutes, using
+the model's resource profile. The DeepSeek interactive pilot runs its required
+20-attempt runtime canary before inference when its exact-runtime marker is absent.
 
-Qwen job order:
+Store each batching profile under its own pilot ID. Run the small optimizer
+checks first, compare the three server settings on training only, then finish
+the complete optimizer and 150-question checks at the selected setting.
+`--stage optimizer --method <name>` can resume a single method through the
+Python CLI against an already running endpoint. Completed checks are hash-verified
+and reused only for the same run identity. Standard and doubled budgets share
+method coverage; production candidates always start from the original prompts.
 
-```text
-gepa-hp-qwen3.8-27b-standard-vanilla
-gepa-hp-qwen3.8-27b-standard-react_v2
-gepa-hp-qwen3.8-27b-standard-react_v2_random
-gepa-hp-qwen3.8-27b-standard-action
-gepa-hp-qwen3.8-27b-expanded-vanilla
-gepa-hp-qwen3.8-27b-expanded-react_v2
-```
+The bounded one-edit native diagnostic now requests `tool_choice=none` and an
+explicit finish after spending its configured edit allowance. Its strict two-turn
+check still requires a valid edit and finish. Production's unlimited tool/turn
+policy is unchanged. Keep failed historical probes as evidence.
 
-The six DeepSeek jobs use the same standard-first order with the `deepseek-v4.1-flash` profile.
-
-Inspect the dependency and state of one job:
-
-```bash
-scontrol show job JOB_ID | tr ' ' '\n' | grep -E '^(JobName|JobState|Reason|Dependency)='
-```
-
-After jobs leave the queue, inspect accounting records. Replace the date with the actual submission date:
-
-```bash
-sacct -u "$USER" --starttime YYYY-MM-DD \
-  --format=JobIDRaw,JobName%64,State,ExitCode,Elapsed,Timelimit
-```
-
-Logs are written under:
-
-```text
-$SCRATCH_BASE/logs/hotpotqa/hotpotqa-final-v1/169ddda125b1abe305c7714bbb5b3fc38b21b587/
-```
-
-List them:
-
-```bash
-source scripts/della/.env
-
-find "${SCRATCH_BASE}/logs/hotpotqa/hotpotqa-final-v1/169ddda125b1abe305c7714bbb5b3fc38b21b587" \
-  -maxdepth 1 -type f -print | sort
-```
-
-Each Slurm job has a `hotpotqa-<job-name>-<job-id>.log`; the corresponding local model server has `gen-<job-id>.log`.
-
-## 9. Resume a failed or preempted run
-
-Keep the existing output. Resubmit the same source commit, campaign ID, model, budget profile, and condition. GEPA will reuse its saved state, response journal, evaluation cache, and held-out checkpoints.
-
-Example: resume Qwen standard ReAct V2:
-
-```bash
-MODEL_PROFILE=qwen3.8-27b \
-BUDGET_PROFILE=standard \
-CONDITION=react_v2 \
-HOTPOTQA_CAMPAIGN_ID=hotpotqa-final-v1 \
-scripts/della/submit_hotpotqa.sh
-```
-
-Example: resume DeepSeek expanded ReAct V2:
-
-```bash
-MODEL_PROFILE=deepseek-v4.1-flash \
-BUDGET_PROFILE=expanded \
-CONDITION=react_v2 \
-HOTPOTQA_CAMPAIGN_ID=hotpotqa-final-v1 \
-scripts/della/submit_hotpotqa.sh
-```
-
-When an `afterok` parent fails, its old dependent jobs cannot run. Cancel those job IDs and submit the missing runs explicitly. Do not submit the `.sbatch` file directly.
-
-## 10. Fetch the results
-
-Once all result cells have completed, run this from the same local checkout:
-
-```bash
-HOTPOTQA_SOURCE_COMMIT=169ddda125b1abe305c7714bbb5b3fc38b21b587 \
-HOTPOTQA_CAMPAIGN_ID=hotpotqa-final-v1 \
-scripts/della/fetch_hotpotqa_results.sh
-```
-
-The local result directory is:
-
-```text
-outputs/hotpotqa-campaigns/hotpotqa-final-v1/169ddda125b1abe305c7714bbb5b3fc38b21b587/
-```
-
-It contains:
-
-```text
-runs/
-logs/
-campaign-locks/
-hotpotqa_analysis.json
-```
-
-The command prints validation EM, test EM, test F1, call and candidate counts, candidate and proposal Jaccard diversity, action usage and acceptance, action entropy, Controller entropy, fallback rate, and tail-sampling rate.
-
-The analyzer accepts a completed subset. Check that all campaign cells are present before comparing results:
-
-```bash
-python3 - <<'PY'
-import json
-from pathlib import Path
-
-commit = "169ddda125b1abe305c7714bbb5b3fc38b21b587"
-analysis = (
-    Path("outputs/hotpotqa-campaigns/hotpotqa-final-v1")
-    / commit
-    / "hotpotqa_analysis.json"
-)
-runs = json.loads(analysis.read_text())["runs"]
-
-models = {
-    "hosted_vllm/Qwen/Qwen3.8-27B",
-    "hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash",
-}
-cells = {
-    (6871, "vanilla"),
-    (6871, "react_v2"),
-    (6871, "react_v2_random"),
-    (6871, "action"),
-    (13742, "vanilla"),
-    (13742, "react_v2"),
-}
-expected = {
-    (model, budget, condition)
-    for model in models
-    for budget, condition in cells
-}
-actual = {
-    (run["model"], run["max_metric_calls"], run["condition"])
-    for run in runs
-}
-
-missing = sorted(expected - actual)
-extra = sorted(actual - expected)
-if missing or extra:
-    raise SystemExit(
-        f"Campaign is incomplete. Missing={missing}; extra={extra}"
-    )
-print("All 12 HotPotQA campaign cells completed.")
-PY
-```
-
-Print a compact table:
-
-```bash
-jq -r '
-  .runs[]
-  | [.model_label, .budget_profile, .condition,
-     .best_validation_exact_match, .test_exact_match, .test_f1]
-  | @tsv
-' \
-outputs/hotpotqa-campaigns/hotpotqa-final-v1/169ddda125b1abe305c7714bbb5b3fc38b21b587/hotpotqa_analysis.json
-```
-
-Paired confidence intervals are not implemented. Ignore the absolute `path` fields in the JSON because they point to temporary fetch directories. Use the result directory shown above. The reported scores and mechanism statistics are valid.
-
-## 11. Final check
-
-Confirm these items before using the results:
-
-- The source commit is exactly `169ddda125b1abe305c7714bbb5b3fc38b21b587`.
-- `build_env.sh` completed without an integrity error.
-- The Qwen chain produced six successful Slurm jobs.
-- The DeepSeek chain produced six successful Slurm jobs.
-- No relevant job ended in `FAILED`, `TIMEOUT`, `OUT_OF_MEMORY`, or `CANCELLED`.
-- The completeness script prints `All 12 HotPotQA campaign cells completed.`
-- `hotpotqa_analysis.json`, run artifacts, campaign locks, and logs were fetched locally.
-
-If a preflight or integrity check fails, keep the error and logs and stop. The failed run should not be included in the comparison.
+Qualify interruption and resume with saved records, optimizer checkpoints, and
+response journals before long runs. Check that original metric budgets remain
+unchanged and completed work is not rerun. Compiler caches remain on scratch;
+model-response and evaluation caches remain disabled. See
+`DELLA_QUALIFICATION_2026-09-13.md` for the original measurements; the new batching
+comparison, larger-token DeepSeek cycle, full calibration, and live recovery
+are not established by that earlier report.

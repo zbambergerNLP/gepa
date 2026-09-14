@@ -19,11 +19,11 @@ from typing import Any
 
 from gepa.strategies.action_space import (
     FULL_SUPPORT_EXPLORATION_EPSILON,
-    SOFT_PROMPT_CHAR_BUDGET,
     VerbalizedActionSelector,
 )
 from gepa.strategies.document_template import DocumentTemplate, EditTarget
 from gepa.strategies.edit_tools import EditTool
+from gepa.strategies.text_limits import clip_text, validate_char_limit
 
 logger = logging.getLogger(__name__)
 
@@ -102,9 +102,9 @@ class ControllerChoice:
         object.__setattr__(self, "menu_description", menu_description)
 
 
-SEMANTIC_ACTION_CATALOG_VERSION = 2
+SEMANTIC_ACTION_CATALOG_VERSION = 3
 CONTROLLER_POLICY_VERSION = 4
-STATELESS_ACTION_MENU_VERSION = 1
+STATELESS_ACTION_MENU_VERSION = 3
 
 CONTROLLER_POLICY_CONTRACT: dict[str, Any] = {
     "version": CONTROLLER_POLICY_VERSION,
@@ -187,8 +187,9 @@ SEMANTIC_ACTIONS: tuple[SemanticActionSpec, ...] = (
         "Add supporting context while preserving the complete operative meaning of the current text.",
         EditTool.INSERT_TEXT,
         instruction=(
-            "Insert supporting background, explanation, rationale, or illustration at an exact anchor inside the "
-            "current text. Every current supporting proposition must remain, and at least one genuinely new supporting "
+            "Insert supporting background, explanation, rationale, or illustration at exact anchors inside the "
+            "current text, or use an empty anchor to append, including when the selected section is empty. "
+            "Every current supporting proposition must remain, and at least one genuinely new supporting "
             "proposition must be added, so the resulting context is a proper superset. Preserve every operative "
             "requirement, permission, prohibition, condition, exception, scope boundary, normative force, and "
             "admissible behavior, and preserve the existing text verbatim. Do not add an operative commitment. Use "
@@ -201,7 +202,7 @@ SEMANTIC_ACTIONS: tuple[SemanticActionSpec, ...] = (
         "Remove supporting context while preserving the complete operative meaning of the current text.",
         EditTool.DELETE_TEXT,
         instruction=(
-            "Delete one exact target substring containing only background, explanation, rationale, illustration, or "
+            "Delete one or more exact target substrings containing only background, explanation, rationale, illustration, or "
             "other supporting context. At least one supporting proposition must be removed and none introduced, so the "
             "resulting context is a proper subset. Preserve every operative requirement, permission, prohibition, "
             "condition, exception, scope boundary, normative force, and admissible behavior, and preserve all remaining "
@@ -217,7 +218,7 @@ SEMANTIC_ACTIONS: tuple[SemanticActionSpec, ...] = (
         ),
         EditTool.REPLACE_TEXT,
         instruction=(
-            "Replace one exact target substring containing supporting context. At least one supporting proposition "
+            "Replace one or more exact target substrings containing supporting context. At least one supporting proposition "
             "must remain applicable to both the current and resulting text, at least one must occur only in the current "
             "text, and at least one must occur only in the result, so the two context sets overlap without containment. "
             "Preserve all operative meaning and discourse order. "
@@ -230,10 +231,10 @@ SEMANTIC_ACTIONS: tuple[SemanticActionSpec, ...] = (
         "Replace all supporting context with non-overlapping context while preserving the complete operative meaning.",
         EditTool.REPLACE_TEXT,
         instruction=(
-            "Replace one exact target substring containing the complete supporting context. The result must retain no "
-            "supporting proposition from that target and must supply new supporting context, while preserving every "
+            "Replace exact target substrings covering the complete supporting context. The result must retain no "
+            "supporting proposition from the original section and must supply new supporting context, while preserving every "
             "operative commitment and the discourse order. Use revise_context whenever any supporting proposition "
-            "from the target survives."
+            "from the original section survives."
         ),
     ),
     SemanticActionSpec(
@@ -241,7 +242,7 @@ SEMANTIC_ACTIONS: tuple[SemanticActionSpec, ...] = (
         "Change only the order of existing content while preserving operative meaning, context, and wording.",
         EditTool.MOVE_TEXT,
         instruction=(
-            "Move one exact target substring to a distinct exact anchor inside the current text. Preserve the moved "
+            "Move one or more exact target substrings to distinct exact anchors inside the current text. Preserve each moved "
             "substring verbatim and retain exactly the same operative commitments and supporting context; only order, "
             "grouping, dependency presentation, precedence presentation, or salience may change. Both target and "
             "anchor must occur inside the current section. If the move changes admissible interpretations or behaviors, "
@@ -253,7 +254,7 @@ SEMANTIC_ACTIONS: tuple[SemanticActionSpec, ...] = (
         "Change only wording while preserving operative meaning, supporting context, and ordering.",
         EditTool.REPLACE_TEXT,
         instruction=(
-            "Replace one exact target substring inside the current text. Preserve every operative commitment, every "
+            "Replace one or more exact target substrings inside the current text. Preserve every operative commitment, every "
             "supporting proposition, every ordering relationship, scope boundary, normative force, and necessary "
             "detail. Change only wording, syntax, or another lossless surface realization. Do not add, remove, or move "
             "content. If admissible interpretations or behaviors change, use restrict_meaning, relax_meaning, "
@@ -268,7 +269,7 @@ SEMANTIC_ACTIONS: tuple[SemanticActionSpec, ...] = (
         ),
         EditTool.REPLACE_TEXT,
         instruction=(
-            "Replace one exact target substring inside the current text. Every interpretation or behavior admitted by "
+            "Replace one or more exact target substrings inside the current text. Every interpretation or behavior admitted by "
             "the result must have been admitted by the current text, and at least one formerly admitted interpretation "
             "or behavior must be excluded. Preserve supporting context and discourse ordering exactly. Use "
             "relax_meaning when the result is a proper superset, revise_meaning when the meanings overlap without "
@@ -283,7 +284,7 @@ SEMANTIC_ACTIONS: tuple[SemanticActionSpec, ...] = (
         ),
         EditTool.REPLACE_TEXT,
         instruction=(
-            "Replace one exact target substring inside the current text. Every interpretation or behavior admitted by "
+            "Replace one or more exact target substrings inside the current text. Every interpretation or behavior admitted by "
             "the current text must remain admitted by the result, and the result must admit at least one additional "
             "interpretation or behavior. Preserve supporting context and discourse ordering exactly. Use "
             "restrict_meaning when the result is a proper subset, revise_meaning when the meanings overlap without "
@@ -297,7 +298,7 @@ SEMANTIC_ACTIONS: tuple[SemanticActionSpec, ...] = (
         ),
         EditTool.REPLACE_TEXT,
         instruction=(
-            "Replace one exact target substring inside the current text. The current and resulting text must admit at "
+            "Replace one or more exact target substrings inside the current text. The current and resulting text must admit at "
             "least one common interpretation or behavior, at least one admitted only by the current text, and at least "
             "one admitted only by the result. Preserve supporting context and discourse ordering exactly. Use "
             "restrict_meaning or relax_meaning when one meaning contains the other, and supplant_meaning when no "
@@ -309,7 +310,7 @@ SEMANTIC_ACTIONS: tuple[SemanticActionSpec, ...] = (
         "Replace the complete operative meaning with a disjoint meaning while preserving supporting context.",
         EditTool.REPLACE_TEXT,
         instruction=(
-            "Replace one exact target substring containing the complete operative rule or task commitment. The current "
+            "Replace exact target substrings covering the complete operative rule or task commitment. The current "
             "and resulting operative meanings must be disjoint: no relevant interpretation or behavior may satisfy "
             "both. Preserve supporting context and discourse ordering exactly, and keep the replacement coherent with "
             "that preserved context. Use revise_meaning whenever any compatible interpretation or behavior survives."
@@ -379,15 +380,22 @@ class StatelessActionConstraint:
         object.__setattr__(self, "menu_description", menu_description)
 
 
-def format_stateless_action_constraint(action: StatelessActionConstraint) -> str:
+def format_stateless_action_constraint(action: StatelessActionConstraint, target_chars: int | None = None) -> str:
     """Render one canonical action/region choice as a reflection constraint.
 
     Args:
         action: Semantic action bound to its selected target region.
+        target_chars: Optional soft section-size target; unlimited by default.
 
     Returns:
         Constraint suffix suitable for a stateless selected-section proposer.
     """
+    validate_char_limit("target_chars", target_chars)
+    length_guidance = (
+        f"Aim for a section body of about {target_chars} characters; preserve useful detail without repetition.\n\n"
+        if target_chars is not None
+        else ""
+    )
     section_scope = (
         f"The instruction document above is only the body of the selected '{action.target_section}' section. "
         "Return the complete revised body for that section without a '## <Section>' header. "
@@ -402,8 +410,7 @@ def format_stateless_action_constraint(action: StatelessActionConstraint) -> str
         f"Coupled text operator: {action.edit_tool.value}\n"
         f"{section_scope}\n"
         f"Guidance: {manifestation}\n\n"
-        f"Length budget: the revised section body must stay under {SOFT_PROMPT_CHAR_BUDGET} characters. "
-        "If this edit would exceed the budget, replace or remove existing content instead of adding.\n\n"
+        f"{length_guidance}"
         "Make no other changes."
     )
 
@@ -492,17 +499,17 @@ class Controller(VerbalizedActionSelector[ControllerChoice]):
             exploration among positive-probability choices.
     """
 
-def summarize_feedback(reflective_entries: Any, max_chars: int = SOFT_PROMPT_CHAR_BUDGET) -> str:
-    """Join feedback and truncate its raw prefix before adding an ellipsis.
+def summarize_feedback(reflective_entries: Any, max_chars: int | None = None) -> str:
+    """Join all feedback, optionally retaining a marked prefix.
 
     Args:
         reflective_entries: Rows carrying ``Feedback`` or ``execution_feedback``.
-        max_chars: Characters retained from non-empty joined feedback before
-            an optional ``...`` suffix. The no-feedback marker is returned
+        max_chars: Source characters retained before an omission marker, or
+            ``None`` for unlimited. The no-feedback marker is returned
             verbatim regardless of this limit.
 
     Returns:
-        Joined feedback, a truncated prefix plus an ellipsis, or the
+        Joined feedback, a marked prefix, or the
         no-feedback marker.
     """
     parts: list[str] = []
@@ -511,6 +518,5 @@ def summarize_feedback(reflective_entries: Any, max_chars: int = SOFT_PROMPT_CHA
         if feedback:
             parts.append(str(feedback))
     summary = "\n".join(parts)
-    if len(summary) > max_chars:
-        summary = summary[:max_chars] + "..."
+    summary = clip_text(summary, max_chars)
     return summary or "(no feedback available)"

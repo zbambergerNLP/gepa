@@ -1,0 +1,275 @@
+"""Bound and record provider attempts for the reviewed benchmark campaigns."""
+
+from __future__ import annotations
+
+import asyncio
+import functools
+import json
+import logging
+import os
+import threading
+import time
+import uuid
+from collections.abc import Mapping
+from copy import deepcopy
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, cast
+
+import httpx
+import litellm
+from litellm.exceptions import APIConnectionError, AuthenticationError, BadRequestError, ContextWindowExceededError
+
+PROVIDER_RETRY_KEY = "_gepa_provider_retry"
+PROVIDER_RETRY_POLICY = {
+    "version": 1,
+    "max_attempts": 3,
+    "backoff_seconds": [1.0, 2.0],
+    "retryable_http_statuses": [408, 429, 500, 502, 503, 504],
+    "retryable_errors": "connection_or_transport_timeout",
+    "sdk_retries": 0,
+    "timeout_scope": "all_attempts_share_explicit_request_timeout",
+    "attempt_log": "provider-attempts.jsonl",
+    "missing_usage": None,
+}
+_WRITE_LOCK = threading.Lock()
+
+
+class ProviderRequestError(RuntimeError):
+    """Stop higher-level retries after a provider request fails its policy."""
+
+
+def _field(value: Any, name: str, default: Any = None) -> Any:
+    """Read a response attribute from either a mapping or a provider object."""
+    return value.get(name, default) if isinstance(value, Mapping) else getattr(value, name, default)
+
+
+def is_provider_request_error(error: BaseException) -> bool:
+    """Recognize exhausted requests through Harbor's exception translation."""
+    seen: set[int] = set()
+    while id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, ProviderRequestError):
+            return True
+        cause = error.__cause__
+        if cause is None:
+            return False
+        error = cause
+    return False
+
+
+def _retryable(error: BaseException) -> bool:
+    """Accept only temporary HTTP failures and connection/transport timeouts."""
+    if isinstance(error, AuthenticationError | BadRequestError):
+        return False
+    status = _field(error, "status_code")
+    if status is None:
+        status = _field(_field(error, "response"), "status_code")
+    if status is not None:
+        return status in PROVIDER_RETRY_POLICY["retryable_http_statuses"]
+    return isinstance(
+        error,
+        ConnectionError
+        | TimeoutError
+        | httpx.NetworkError
+        | httpx.TimeoutException
+        | httpx.RemoteProtocolError
+        | APIConnectionError,
+    )
+
+
+def _record(
+    settings: dict[str, Any],
+    request: dict[str, Any],
+    request_id: str,
+    attempt: int,
+    started: float,
+    response: Any,
+    error: BaseException | None,
+    will_retry: bool,
+) -> None:
+    """Append one secret-free physical-attempt record, retaining unknown usage."""
+    if response is None and error is not None:
+        response = _field(error, "response")
+    usage = _field(response, "usage")
+    if usage is None and isinstance(response, httpx.Response):
+        try:
+            usage = _field(response.json(), "usage")
+        except (ValueError, httpx.ResponseNotRead):
+            pass
+    limits = settings.get("token_limits")
+    prompt_tokens = _field(usage, "prompt_tokens")
+    completion_tokens = _field(usage, "completion_tokens")
+    reasons = [_field(choice, "finish_reason") for choice in _field(response, "choices", [])]
+    row = {
+        "schema_version": 1,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "allocation_job_id": os.environ.get("SLURM_JOB_ID"),
+        "request_id": request_id,
+        "attempt": attempt,
+        "role": settings["role"],
+        "model": request.get("model"),
+        "requested_model": request.get("model"),
+        "response_model": _field(response, "model"),
+        "response_id": _field(response, "id"),
+        "elapsed_seconds": time.monotonic() - started,
+        "outcome": "success" if error is None else "error" if isinstance(error, Exception) else "cancelled",
+        "error_type": type(error).__name__ if error is not None else None,
+        "status_code": _field(error, "status_code", _field(response, "status_code")),
+        "will_retry": will_retry,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "reasoning_tokens": _field(_field(usage, "completion_tokens_details"), "reasoning_tokens"),
+        "cost_usd": _field(_field(response, "_hidden_params"), "response_cost"),
+        "finish_reasons": reasons,
+        "length_finish": "length" in reasons if any(reason is not None for reason in reasons) else None,
+        "output_cap_reached": (
+            completion_tokens >= limits["max_output_tokens"]
+            if limits is not None and completion_tokens is not None
+            else None
+        ),
+        "context_cap_reached": (
+            prompt_tokens + completion_tokens >= limits["context_tokens"]
+            if limits is not None and prompt_tokens is not None and completion_tokens is not None
+            else None
+        ),
+        "limits": limits,
+    }
+    line = json.dumps(row, sort_keys=True, allow_nan=False)
+    path = settings.get("log_path")
+    if path is None:
+        logging.getLogger(__name__).warning("Provider attempt: %s", line)
+        return
+    destinations = {Path(path)}
+    if settings.get("token_usage_log") is not None:
+        destinations.add(Path(settings["token_usage_log"]))
+    for destination in destinations:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with _WRITE_LOCK, destination.open("a", encoding="utf-8") as stream:
+            stream.write(line + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+
+
+def _request(request: dict[str, Any], deadline: float | None) -> dict[str, Any]:
+    """Disable nested SDK retries and carry the remaining explicit timeout."""
+    result = {**request, "num_retries": 0, "max_retries": 0}
+    for field in ("messages", "tools", "extra_body"):
+        if field in result:
+            result[field] = deepcopy(result[field])
+    if deadline is not None:
+        remaining = max(deadline - time.monotonic(), 0.001)
+        for field in ("timeout", "request_timeout"):
+            if field in result:
+                result[field] = remaining
+    return result
+
+
+def _deadline(request: dict[str, Any]) -> float | None:
+    """Share an explicit numeric timeout across attempts and backoff."""
+    values = [request.get(field) for field in ("timeout", "request_timeout")]
+    seconds = [float(value) for value in values if isinstance(value, float | int) and not isinstance(value, bool)]
+    return time.monotonic() + min(seconds) if seconds else None
+
+
+def _delay(error: BaseException, attempt: int, deadline: float | None) -> float | None:
+    """Choose a permitted backoff only while another attempt fits the deadline."""
+    if attempt >= 3 or not _retryable(error):
+        return None
+    delay = float(PROVIDER_RETRY_POLICY["backoff_seconds"][attempt - 1])
+    if deadline is not None and time.monotonic() + delay >= deadline:
+        return None
+    return delay
+
+
+def install_provider_retries() -> None:
+    """Install opt-in transport wrappers without changing unmarked requests.
+
+    The marker is consumed before LiteLLM or provider code sees the request.
+    Batch workers and DSPy's pinned client also dispatch through these public
+    completion functions. Installation is idempotent; importing this module
+    alone does not modify LiteLLM.
+    """
+    if getattr(litellm.completion, "_gepa_retry_wrapper", False) is not True:
+        original = litellm.completion
+
+        @functools.wraps(original)
+        def completion(*args: Any, **kwargs: Any) -> Any:
+            """Retry one marked synchronous request without reissuing a batch."""
+            settings = kwargs.pop(PROVIDER_RETRY_KEY, None)
+            if settings is None:
+                return original(*args, **kwargs)
+            request_id, deadline = str(uuid.uuid4()), _deadline(kwargs)
+            last_error: Exception | None = None
+            for attempt in range(1, 4):
+                if attempt > 1 and deadline is not None and time.monotonic() >= deadline:
+                    raise ProviderRequestError("Provider request timeout exhausted during backoff.") from last_error
+                started = time.monotonic()
+                try:
+                    response = original(*args, **_request(kwargs, deadline))
+                except BaseException as error:
+                    delay = _delay(error, attempt, deadline) if isinstance(error, Exception) else None
+                    _record(settings, kwargs, request_id, attempt, started, None, error, delay is not None)
+                    if not isinstance(error, Exception):
+                        raise
+                    last_error = error
+                    if delay is None:
+                        if isinstance(error, ContextWindowExceededError):
+                            raise
+                        raise ProviderRequestError(
+                            "Provider request failed; inspect provider-attempts.jsonl."
+                        ) from error
+                    time.sleep(delay)
+                else:
+                    _record(settings, kwargs, request_id, attempt, started, response, None, False)
+                    return response
+
+        cast(Any, completion)._gepa_retry_wrapper = True
+        litellm.completion = completion
+
+    if getattr(litellm.acompletion, "_gepa_retry_wrapper", False) is not True:
+        original_async = litellm.acompletion
+
+        @functools.wraps(original_async)
+        async def acompletion(*args: Any, **kwargs: Any) -> Any:
+            """Retry one marked asynchronous request while preserving cancellation."""
+            settings = kwargs.pop(PROVIDER_RETRY_KEY, None)
+            if settings is None:
+                return await original_async(*args, **kwargs)
+            request_id, deadline = str(uuid.uuid4()), _deadline(kwargs)
+            last_error: Exception | None = None
+            for attempt in range(1, 4):
+                if attempt > 1 and deadline is not None and time.monotonic() >= deadline:
+                    raise ProviderRequestError("Provider request timeout exhausted during backoff.") from last_error
+                started = time.monotonic()
+                try:
+                    response = await original_async(*args, **_request(kwargs, deadline))
+                except BaseException as error:
+                    delay = _delay(error, attempt, deadline) if isinstance(error, Exception) else None
+                    _record(settings, kwargs, request_id, attempt, started, None, error, delay is not None)
+                    if not isinstance(error, Exception):
+                        raise
+                    last_error = error
+                    if delay is None:
+                        if isinstance(error, ContextWindowExceededError):
+                            raise
+                        raise ProviderRequestError(
+                            "Provider request failed; inspect provider-attempts.jsonl."
+                        ) from error
+                    await asyncio.sleep(delay)
+                else:
+                    _record(settings, kwargs, request_id, attempt, started, response, None, False)
+                    return response
+
+        cast(Any, acompletion)._gepa_retry_wrapper = True
+        litellm.acompletion = acompletion
+
+
+def provider_retry_kwargs(log_path: Path | None = None, role: str = "model") -> dict[str, Any]:
+    """Enable the fixed policy and return serializable, local-only request metadata."""
+    install_provider_retries()
+    return {
+        "num_retries": 0,
+        "max_retries": 0,
+        PROVIDER_RETRY_KEY: {"log_path": str(log_path) if log_path is not None else None, "role": role},
+    }

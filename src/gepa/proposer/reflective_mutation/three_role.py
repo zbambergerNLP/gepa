@@ -18,22 +18,22 @@ import os
 import random
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
+from dataclasses import replace
 from typing import Any
 
 from gepa.proposer.reflective_mutation.base import LanguageModel
 from gepa.proposer.reflective_mutation.manifestor import (
-    MAX_TRACES_CHARS,
     ManifestationError,
     Manifestor,
 )
-from gepa.proposer.reflective_mutation.react_v2_proposer import ReActV2Proposer
+from gepa.proposer.reflective_mutation.react_v2_proposer import REACT_V2_EXECUTION_CONTRACT, ReActV2Proposer
 from gepa.proposer.reflective_mutation.reflection_lm import (
     ReflectionJob,
     ReflectionProposal,
     StatelessReflectionLM,
 )
 from gepa.response_journal import stable_api_base_identity
-from gepa.strategies.action_space import MAX_PROPOSAL_CHARS, IncompleteActionDistributionError
+from gepa.strategies.action_space import IncompleteActionDistributionError
 from gepa.strategies.document_template import TEMPLATE_FAMILIES, DocumentTemplate, MalformedDocumentError
 from gepa.strategies.edit_tools import EDIT_TOOL_SETS
 from gepa.strategies.intervention import (
@@ -45,8 +45,9 @@ from gepa.strategies.intervention import (
     build_controller_menu,
     summarize_feedback,
 )
+from gepa.strategies.reflection_context import REFLECTION_CONTEXT_CONTRACT
+from gepa.strategies.text_limits import TextLimitError, TextLimits, clip_text, resolve_text_limits
 
-MAX_HISTORY_TEXT_CHARS = 2000
 MAX_HISTORY_STEPS = 16
 MAX_HISTORY_EDIT_ENTRIES = 32
 REFLECTION_RUN_CONTRACT_FILENAME = "reflection-run-contract.json"
@@ -186,21 +187,19 @@ def ensure_reflection_run_contract(run_dir: str, contract: Mapping[str, Any]) ->
     return path
 
 
-def _bounded_history_text(value: Any) -> str | None:
+def _bounded_history_text(value: Any, max_chars: int | None = None) -> str | None:
     """Render one optional history field within its persistent text bound.
 
     Args:
         value: Field value to stringify, or ``None`` when absent.
+        max_chars: Optional source-character limit for this stored field.
 
     Returns:
         Original string representation, a length-marked prefix, or ``None``.
     """
     if value is None:
         return None
-    text = str(value)
-    if len(text) <= MAX_HISTORY_TEXT_CHARS:
-        return text
-    return text[:MAX_HISTORY_TEXT_CHARS] + f"...(+{len(text) - MAX_HISTORY_TEXT_CHARS} chars)"
+    return clip_text(str(value), max_chars)
 
 
 def _react_chat_messages(steps: Sequence[Any]) -> list[dict[str, str]]:
@@ -393,7 +392,7 @@ class ThreeRoleReflectionLM:
     """Controller/Manifestor reflection with a ReAct V2 proposer.
 
     Args:
-        base_lm: Reflection model used by ReAct V2 and by verbalized Controller
+        base_lm: Reflection model used by ReAct V2 and, by default, Controller
             selection.
         level: ``0`` vanilla GEPA, ``1`` region plus edit basis, or ``2`` region
             plus semantic action and Manifestor steering.
@@ -416,18 +415,21 @@ class ThreeRoleReflectionLM:
         reflection_prompt_template: Vanilla level-0 prompt template.
         max_menu: Optional level-1 region bound. Level 2 requires it to retain
             every cataloged region/action pair; semantic choices are never subsampled.
-        max_chars: Maximum completed component size.
-        manifestor_lm: Deterministic LM used to manifest level-2 actions.
+        max_chars: Optional maximum completed component size; no limit by default.
+        controller_lm: Optional separate LM for verbalized Controller selection.
+        manifestor_lm: LM used to manifest level-2 actions.
         base_lm_run_identity: Optional stable, non-secret configuration identity
-            for a custom Controller/ReAct callable.
+            for a custom ReAct callable.
+        controller_lm_run_identity: Optional stable, non-secret configuration
+            identity for a custom Controller callable.
         manifestor_lm_run_identity: Optional stable, non-secret configuration
             identity for a custom Manifestor callable.
         manifestor_traces_chars: Trace budget for the Manifestor.
         proposer_model: Provider/model identifier recorded in the run contract.
             When omitted, ``base_lm.model`` is inspected. Manifestor steering is
             delivered as a user message for every ReAct provider.
-        react_max_iterations: Maximum ReAct assistant turns per component.
-        react_max_tool_calls: Maximum valid calls in an atomic-basis proposal.
+        react_max_iterations: Optional ReAct assistant-turn limit per component.
+        react_max_tool_calls: Optional valid tool-call limit per proposal.
 
     Raises:
         ValueError: Configuration names or reflection level are invalid.
@@ -449,19 +451,26 @@ class ThreeRoleReflectionLM:
         logger: Any | None = None,
         reflection_prompt_template: str | dict[str, str] | None = None,
         max_menu: int | None = None,
-        max_chars: int = MAX_PROPOSAL_CHARS,
+        max_chars: int | None = None,
+        controller_lm: LanguageModel | None = None,
         manifestor_lm: LanguageModel | None = None,
         base_lm_run_identity: Mapping[str, Any] | None = None,
+        controller_lm_run_identity: Mapping[str, Any] | None = None,
         manifestor_lm_run_identity: Mapping[str, Any] | None = None,
-        manifestor_traces_chars: int | None = MAX_TRACES_CHARS,
+        manifestor_traces_chars: int | None = None,
         proposer_model: str | None = None,
-        react_max_iterations: int = 8,
-        react_max_tool_calls: int = 4,
+        react_max_iterations: int | None = None,
+        react_max_tool_calls: int | None = None,
+        text_limits: TextLimits | None = None,
     ):
         """Validate and store the complete three-role strategy configuration.
 
+        ``text_limits`` configures optional character budgets for all roles.
+        Explicit legacy ``max_chars`` and ``manifestor_traces_chars`` values
+        override their corresponding entries.
+
         Args:
-            base_lm: ReAct V2 model, also used for verbalized Controller selection.
+            base_lm: ReAct V2 model, also the default Controller model.
             level: Reflection level: vanilla, region-only, or region/action.
             edit_tool_set: Named atomic or broad execution basis.
             component_kinds: Optional component-to-template-kind overrides.
@@ -477,17 +486,21 @@ class ThreeRoleReflectionLM:
             logger: Optional run logger shared by all roles.
             reflection_prompt_template: Vanilla level-0 reflection template.
             max_menu: Optional level-1 region-menu bound.
-            max_chars: Maximum reconstructed component length.
+            max_chars: Maximum reconstructed component length, or ``None`` for no limit.
+            controller_lm: Separate Controller model, or ``None`` to share the
+                base model.
             manifestor_lm: Separate Manifestor model, or ``None`` to share the
                 base model.
             base_lm_run_identity: Stable public identity for a custom base model.
+            controller_lm_run_identity: Stable public identity for a custom
+                Controller model.
             manifestor_lm_run_identity: Stable public identity for a custom
                 Manifestor model.
             manifestor_traces_chars: Maximum trace characters shown to the
                 Manifestor.
             proposer_model: Model identifier persisted in the run contract.
-            react_max_iterations: Maximum ReAct assistant turns per proposal.
-            react_max_tool_calls: Maximum valid calls in an atomic ReAct path.
+            react_max_iterations: Maximum ReAct turns, or ``None`` for no limit.
+            react_max_tool_calls: Maximum valid calls, or ``None`` for no limit.
 
         Raises:
             ValueError: A level, tool set, Controller selection, template
@@ -524,15 +537,27 @@ class ThreeRoleReflectionLM:
         self.logger = logger
         self.reflection_prompt_template = reflection_prompt_template
         self.max_menu = max_menu
-        self.max_chars = max_chars
+        limits = resolve_text_limits(text_limits)
+        if max_chars is not None:
+            limits = replace(limits, max_component_chars=max_chars)
+        if manifestor_traces_chars is not None:
+            limits = replace(limits, manifestor_trace_chars=manifestor_traces_chars)
+        self.text_limits = limits
+        self.max_chars = limits.max_component_chars
+        self.controller_lm = controller_lm if controller_lm is not None else base_lm
         self.manifestor_lm = manifestor_lm if manifestor_lm is not None else base_lm
         self.base_lm_run_identity = base_lm_run_identity
+        self.controller_lm_run_identity = (
+            base_lm_run_identity
+            if controller_lm is None and controller_lm_run_identity is None
+            else controller_lm_run_identity
+        )
         self.manifestor_lm_run_identity = (
             base_lm_run_identity
             if manifestor_lm is None and manifestor_lm_run_identity is None
             else manifestor_lm_run_identity
         )
-        self.manifestor_traces_chars = manifestor_traces_chars
+        self.manifestor_traces_chars = limits.manifestor_trace_chars
         inferred_model = proposer_model
         if inferred_model is None:
             model_attribute = getattr(base_lm, "model", None)
@@ -541,7 +566,9 @@ class ThreeRoleReflectionLM:
         self.react_max_iterations = react_max_iterations
         self.react_max_tool_calls = react_max_tool_calls
         self._stateless: StatelessReflectionLM | None = (
-            StatelessReflectionLM(base_lm, reflection_prompt_template, logger, rng=self.rng) if level == 0 else None
+            StatelessReflectionLM(base_lm, reflection_prompt_template, logger, rng=self.rng, text_limits=limits)
+            if level == 0
+            else None
         )
 
     def _component_kind(self, name: str) -> str:
@@ -614,7 +641,12 @@ class ThreeRoleReflectionLM:
                 "tau": self.tau,
                 "max_menu": self.max_menu,
             }
-        controller_lm_identity = _language_model_run_identity(self.base_lm, self.base_lm_run_identity)
+        proposer_lm_identity = _language_model_run_identity(self.base_lm, self.base_lm_run_identity)
+        controller_lm_identity = (
+            _language_model_run_identity(self.controller_lm, self.controller_lm_run_identity)
+            if self.level >= 1 and self.controller_selection == "verbalized"
+            else None
+        )
         manifestor_lm_identity = (
             _language_model_run_identity(self.manifestor_lm, self.manifestor_lm_run_identity)
             if self.level >= 2
@@ -623,7 +655,8 @@ class ThreeRoleReflectionLM:
         unstable_roles = [
             role
             for role, identity in (
-                ("Controller/Proposer", controller_lm_identity),
+                ("Proposer", proposer_lm_identity),
+                ("Controller", controller_lm_identity),
                 ("Manifestor", manifestor_lm_identity),
             )
             if identity is not None and identity["configuration_source"] in {"opaque", "partial"}
@@ -631,11 +664,12 @@ class ThreeRoleReflectionLM:
         if unstable_roles:
             roles = " and ".join(unstable_roles)
             raise ValueError(
-                f"A stable run identity is required for the {roles} LM. Pass base_lm_run_identity and/or "
-                "manifestor_lm_run_identity when constructing ThreeRoleReflectionLM with custom callables."
+                f"A stable run identity is required for the {roles} LM. Pass the corresponding "
+                "base_lm_run_identity, controller_lm_run_identity, or manifestor_lm_run_identity "
+                "when constructing ThreeRoleReflectionLM with custom callables."
             )
         return {
-            "schema_version": 4,
+            "schema_version": 9,
             "strategy": "three_role_reflection",
             "reflection_level": self.level,
             "edit_tool_set": self.edit_tool_set,
@@ -646,15 +680,15 @@ class ThreeRoleReflectionLM:
             "reflection_prompt_template": self.reflection_prompt_template,
             "controller": controller,
             "semantic_action_spaces": (
-                {
-                    kind: deepcopy(SEMANTIC_ACTION_CATALOGS[self.templates[kind].kind])
-                    for kind in active_kinds
-                }
+                {kind: deepcopy(SEMANTIC_ACTION_CATALOGS[self.templates[kind].kind]) for kind in active_kinds}
                 if self.level >= 2
                 else None
             ),
             "max_chars": self.max_chars,
+            "document_length": self.text_limits.document_contract(),
+            "text_limits": self.text_limits.to_dict(),
             "manifestor_traces_chars": self.manifestor_traces_chars,
+            "reflection_context": deepcopy(REFLECTION_CONTEXT_CONTRACT),
             "manifestor_delivery": "user_message",
             "branch_history": {
                 "storage": "target_scoped_user_assistant_messages",
@@ -663,11 +697,17 @@ class ThreeRoleReflectionLM:
             },
             "proposer_model": self.proposer_model,
             "proposer_backend": "react_v2",
-            "controller_react_lm": controller_lm_identity,
+            "proposer_lm": proposer_lm_identity,
+            "controller_lm": controller_lm_identity,
             "manifestor_lm": manifestor_lm_identity,
             "max_proposer_model_calls": self.react_max_iterations,
             "react_max_iterations": self.react_max_iterations,
             "react_max_tool_calls": self.react_max_tool_calls,
+            "react_execution": {
+                **REACT_V2_EXECUTION_CONTRACT,
+                "max_iterations": self.react_max_iterations,
+                "max_tool_calls": self.react_max_tool_calls,
+            },
         }
 
     def validate_candidate(self, candidate: dict[str, str]) -> None:
@@ -728,8 +768,8 @@ class ThreeRoleReflectionLM:
         """Snapshot role-local state before a batched reflection attempt.
 
         Returns:
-            Controller RNG state and response-journal cursors for the shared
-            Controller/ReAct model and the Manifestor model.
+            Controller RNG state and response-journal cursors for each
+            distinct role model.
         """
         if self._stateless is not None:
             return self._stateless.get_batch_retry_state()
@@ -737,7 +777,11 @@ class ThreeRoleReflectionLM:
         base_cursor = getattr(self.base_lm, "response_journal_cursor_state", None)
         if callable(base_cursor):
             state["base_lm_cursor"] = base_cursor()
-        if self.manifestor_lm is not self.base_lm:
+        if self.controller_lm is not self.base_lm:
+            controller_cursor = getattr(self.controller_lm, "response_journal_cursor_state", None)
+            if callable(controller_cursor):
+                state["controller_lm_cursor"] = controller_cursor()
+        if self.manifestor_lm is not self.base_lm and self.manifestor_lm is not self.controller_lm:
             manifestor_cursor = getattr(self.manifestor_lm, "response_journal_cursor_state", None)
             if callable(manifestor_cursor):
                 state["manifestor_lm_cursor"] = manifestor_cursor()
@@ -764,8 +808,14 @@ class ThreeRoleReflectionLM:
         if base_cursor is not None:
             restore = getattr(self.base_lm, "restore_response_journal_cursor_state", None)
             if not callable(restore):
-                raise TypeError("Controller/ReAct LM cannot restore its response-journal cursor.")
+                raise TypeError("ReAct LM cannot restore its response-journal cursor.")
             restore(base_cursor)
+        controller_cursor = state.get("controller_lm_cursor")
+        if controller_cursor is not None:
+            restore = getattr(self.controller_lm, "restore_response_journal_cursor_state", None)
+            if not callable(restore):
+                raise TypeError("Controller LM cannot restore its response-journal cursor.")
+            restore(controller_cursor)
         manifestor_cursor = state.get("manifestor_lm_cursor")
         if manifestor_cursor is not None:
             restore = getattr(self.manifestor_lm, "restore_response_journal_cursor_state", None)
@@ -819,13 +869,15 @@ class ThreeRoleReflectionLM:
 
     @property
     def total_cost(self) -> float:
-        """Return provider spend without double-counting a shared Manifestor LM.
+        """Return provider spend without double-counting shared role models.
 
         Returns:
             Combined tracked cost.
         """
         cost = float(getattr(self.base_lm, "total_cost", 0.0))
-        if self.manifestor_lm is not self.base_lm:
+        if self.controller_lm is not self.base_lm:
+            cost += float(getattr(self.controller_lm, "total_cost", 0.0))
+        if self.manifestor_lm is not self.base_lm and self.manifestor_lm is not self.controller_lm:
             cost += float(getattr(self.manifestor_lm, "total_cost", 0.0))
         return cost
 
@@ -921,7 +973,7 @@ class ThreeRoleReflectionLM:
 
             template = self.templates[self._component_kind(name)]
             text = candidate[name]
-            feedback = summarize_feedback(entries)
+            feedback = summarize_feedback(entries, self.text_limits.controller_feedback_chars)
             traces = _summarize_traces(entries)
             section_bodies = template.parse(text)
             # Sparse rendering keeps empty sections out of task-model messages.
@@ -949,11 +1001,12 @@ class ThreeRoleReflectionLM:
             else:
                 controller = Controller(
                     menu,
-                    self.base_lm,
+                    self.controller_lm,
                     k=len(menu) if self.level >= 2 else self.k,
                     tau=self.tau,
                     rng=self.rng,
                     require_full_support=self.level >= 2,
+                    text_limits=self.text_limits,
                 )
                 try:
                     action = controller.select(
@@ -963,7 +1016,7 @@ class ThreeRoleReflectionLM:
                         feedback_summary=feedback,
                     )[0]
                 except IncompleteActionDistributionError as exc:
-                    error = _bounded_history_text(exc) or "Controller action distribution failed."
+                    error = _bounded_history_text(exc, self.text_limits.history_text_chars) or "Controller action distribution failed."
                     controller_failures.append({"component": name, "error": error})
                     dropped.append(name)
                     if self.logger is not None:
@@ -985,11 +1038,17 @@ class ThreeRoleReflectionLM:
                     self.manifestor_lm,
                     self.logger,
                     self.manifestor_traces_chars,
+                    text_limits=self.text_limits,
                 )
                 try:
-                    steering_message = manifestor.manifest(action, region_text, feedback, traces)
+                    steering_message = manifestor.manifest(
+                        action,
+                        region_text,
+                        feedback,
+                        traces,
+                    )
                 except ManifestationError as exc:
-                    error = _bounded_history_text(exc)
+                    error = _bounded_history_text(exc, self.text_limits.history_text_chars)
                     failed_proposer_record = {
                         "react_iterations": 0,
                         "react_tool_calls": 0,
@@ -1008,7 +1067,7 @@ class ThreeRoleReflectionLM:
                             "semantic_action": semantic_action,
                             "steering_message": "",
                             "manifestor_delivery": "user_message",
-                            "feedback": _bounded_history_text(feedback),
+                            "feedback": _bounded_history_text(feedback, self.text_limits.history_text_chars),
                             "controller_sampling": controller_sampling,
                             "manifestor_error": error,
                             "executed_edit": [],
@@ -1037,6 +1096,7 @@ class ThreeRoleReflectionLM:
                 max_iterations=self.react_max_iterations,
                 max_tool_calls=self.react_max_tool_calls,
                 logger=self.logger,
+                text_limits=self.text_limits,
             )
             result = react.propose(
                 region_text,
@@ -1054,12 +1114,12 @@ class ThreeRoleReflectionLM:
                 "react_steps": [
                     {
                         "turn": step.turn,
-                        "assistant": _bounded_history_text(step.assistant),
+                        "assistant": _bounded_history_text(step.assistant, self.text_limits.history_text_chars),
                         "action": step.action,
-                        "observation": _bounded_history_text(step.observation),
-                        "error": _bounded_history_text(step.error),
+                        "observation": _bounded_history_text(step.observation, self.text_limits.history_text_chars),
+                        "error": _bounded_history_text(step.error, self.text_limits.history_text_chars),
                         "executed_edit": [
-                            _bounded_history_text(value) or ""
+                            _bounded_history_text(value, self.text_limits.history_text_chars) or ""
                             for value in list(step.executed_edit)[:MAX_HISTORY_EDIT_ENTRIES]
                         ],
                     }
@@ -1078,6 +1138,13 @@ class ThreeRoleReflectionLM:
                         f"Edited component is {len(new_component)} characters, exceeding max_chars={self.max_chars}."
                     )
                     new_component = None
+                elif self.text_limits.max_candidate_chars is not None:
+                    try:
+                        self.text_limits.check_candidate({**candidate, **proposal.new_texts, name: new_component})
+                    except TextLimitError as exc:
+                        result.changed = False
+                        result.dropped_reason = str(exc)
+                        new_component = None
 
             record = {
                 "backend": "react_v2",
@@ -1088,16 +1155,16 @@ class ThreeRoleReflectionLM:
                 "action_target_section": section,
                 "preferred_edit_tool": preferred_edit_tool,
                 "semantic_action": semantic_action,
-                "steering_message": _bounded_history_text(steering_message) if steering_message is not None else "",
+                "steering_message": _bounded_history_text(steering_message, self.text_limits.history_text_chars) if steering_message is not None else "",
                 "manifestor_delivery": "user_message",
-                "feedback": _bounded_history_text(feedback),
+                "feedback": _bounded_history_text(feedback, self.text_limits.history_text_chars),
                 "controller_sampling": controller_sampling,
                 "manifestor_error": None,
                 "executed_edit": [
-                    _bounded_history_text(value) or ""
+                    _bounded_history_text(value, self.text_limits.history_text_chars) or ""
                     for value in list(result.executed_edit)[:MAX_HISTORY_EDIT_ENTRIES]
                 ],
-                "dropped_reason": _bounded_history_text(result.dropped_reason),
+                "dropped_reason": _bounded_history_text(result.dropped_reason, self.text_limits.history_text_chars),
                 "attempt_status": "completed" if result.changed else "dropped",
                 "tracking_id": _tracking_id(action),
                 "branch_history_length": len(history),

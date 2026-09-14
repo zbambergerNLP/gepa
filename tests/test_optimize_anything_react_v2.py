@@ -10,6 +10,7 @@ import pytest
 import gepa.gepa_launcher as launcher
 from gepa.gepa_launcher import EngineConfig, GEPAConfig, ReflectionConfig, optimize_anything
 from gepa.strategies.document_template import TEMPLATE_FAMILIES, MalformedDocumentError
+from gepa.strategies.text_limits import TextLimits
 
 
 class _StrategyCapturedError(Exception):
@@ -54,11 +55,13 @@ def test_reflection_config_builds_react_v2_like_optimize(monkeypatch: pytest.Mon
                     component_kinds={"system_prompt": "system_prompt"},
                     template_family="auto",
                     template_model="openai/gpt-5",
+                    text_limits=TextLimits(manifestor_steering_chars=900, selector_target_chars=6000),
                 ),
             ),
         )
 
     assert captured["level"] == 2
+    assert captured["text_limits"] == TextLimits(manifestor_steering_chars=900, selector_target_chars=6000)
     assert captured["edit_tool_set"] == "minimal"
     assert captured["component_kinds"] == {"system_prompt": "system_prompt"}
     assert captured["template_family"] == "openai"

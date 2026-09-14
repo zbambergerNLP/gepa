@@ -163,6 +163,7 @@ from gepa.strategies.eval_policy import EvaluationPolicy, FullEvaluationPolicy
 from gepa.strategies.intervention import StatelessActionConstraint
 from gepa.strategies.proposal_sampling import SamplingStrategy
 from gepa.strategies.proposal_selection import SelectionStrategy
+from gepa.strategies.text_limits import TextLimits
 from gepa.utils import FileStopper, StopperProtocol
 from gepa.utils.stdio_capture import ThreadLocalStreamCapture, stream_manager
 
@@ -797,6 +798,9 @@ class ReflectionConfig:
     component_kinds: dict[str, str] | None = None
     template_family: Literal["auto", "generic", "openai", "anthropic", "google", "alibaba"] = "auto"
     template_model: str | None = None
+    text_limits: TextLimits | None = None
+    """Optional character limits for built-in optimizer roles and documents;
+    ``None`` leaves every surface unlimited."""
 
 
 @dataclass
@@ -853,6 +857,8 @@ class RefinerConfig:
 
     # Maximum refinement iterations per evaluation
     max_refinements: int = 1
+    text_limits: TextLimits | None = None
+    """Optional prompt, document, and saved-output character limits."""
 
 
 # --- Component 3: Experiment Tracking Configuration ---
@@ -1740,6 +1746,7 @@ def optimize_anything(
             reflection_prompt_template=config.reflection.reflection_prompt_template,
             manifestor_lm=manifestor_lm,
             proposer_model=reflection_lm_model,
+            text_limits=config.reflection.text_limits,
         )
         try:
             config.reflection.reflection_strategy.validate_candidate(seed_candidate)
@@ -1793,6 +1800,7 @@ def optimize_anything(
         sampling_strategy=config.engine.sampling_strategy,
         reflection_strategy=config.reflection.reflection_strategy,
         action_selector=config.reflection.action_selector,
+        text_limits=config.reflection.text_limits,
     )
     # Seed the default reflection LM (and thus action selection) from the run
     # RNG; injected strategies were already bound above.
@@ -1816,6 +1824,7 @@ def optimize_anything(
             max_merge_invocations=config.merge.max_merge_invocations,
             rng=rng,
             val_overlap_floor=config.merge.merge_val_overlap_floor,
+            text_limits=reflective_proposer.text_limits,
             callbacks=config.callbacks,
         )
 

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Batch wrapper for scripts/della/verify_deepseek_serving.sh: serve DeepSeek-V4.1-Flash
-# with the campaign's exact vLLM invocation on one eight-H200 node, record one full
+# with the campaign's exact vLLM invocation on one four-H200 allocation on one node, record one full
 # exchange (request, server-rendered prompt, reasoning, content), and run the ReAct V2
 # tool probes. Not part of any campaign chain.
 #
@@ -11,9 +11,9 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --partition=ailab
-#SBATCH --gres=gpu:8
-#SBATCH --cpus-per-task=64
-#SBATCH --mem=768G
+#SBATCH --gres=gpu:4
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=512G
 #SBATCH --time=03:00:00
 
 set -euo pipefail

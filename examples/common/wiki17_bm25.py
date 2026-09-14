@@ -255,18 +255,15 @@ class Wiki17BM25Retriever:
                     f"Expected {expected_document_count} {self.preparation_label} documents, "
                     f"found {len(corpus)} in {self.corpus_path}."
                 )
-            self._retriever = retriever
             self._corpus = corpus
             if self.preparation_label == "Wiki-2017":
                 if not self.integrity_path.is_file():
-                    raise Wiki17PreparationError(
-                        f"Wiki-2017 integrity manifest is missing under {self.root}."
-                    )
+                    raise Wiki17PreparationError(f"Wiki-2017 integrity manifest is missing under {self.root}.")
                 integrity_digest = self._file_sha256(self.integrity_path)
-                self.cache_path = self.root / (
-                    f"retriever_cache_{WIKI17_CORPUS_SHA256}_{integrity_digest}"
-                )
+                self.cache_path = self.root / (f"retriever_cache_{WIKI17_CORPUS_SHA256}_{integrity_digest}")
             self._cache = Cache(str(self.cache_path))
+            # Other threads use this field as the initialization-complete marker.
+            self._retriever = retriever
 
     def _require_dependencies(self) -> None:
         """Validate the benchmark-only retrieval dependency set.
@@ -380,9 +377,7 @@ class Wiki17BM25Retriever:
         """
         corpus_digest = self._file_sha256(self.corpus_path)
         if corpus_digest != WIKI17_CORPUS_SHA256:
-            raise Wiki17PreparationError(
-                f"Wiki-2017 corpus failed integrity validation: sha256={corpus_digest}."
-            )
+            raise Wiki17PreparationError(f"Wiki-2017 corpus failed integrity validation: sha256={corpus_digest}.")
         index_files = []
         for path in sorted(candidate for candidate in self.index_path.rglob("*") if candidate.is_file()):
             index_files.append(

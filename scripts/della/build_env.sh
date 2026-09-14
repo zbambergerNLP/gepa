@@ -21,9 +21,16 @@ ENV_MODE="$(stat -f '%Lp' "${ENV_FILE}" 2>/dev/null || stat -c '%a' "${ENV_FILE}
 (( (8#${ENV_MODE} & 8#077) == 0 )) || { echo "ERROR: run chmod 600 ${ENV_FILE}" >&2; exit 1; }
 source "${ENV_FILE}"
 MODEL_STORAGE="${MODEL_STORAGE:-/projects/BSTEWART/model_storage}"
+WIKI17_DIR="${WIKI17_DIR:-${SCRATCH_BASE}/.cache/gepa/wiki17}"
 (( $# )) || set -- qwen3.8-27b deepseek-v4.1-flash
+for model in "$@"; do
+    case "${model}" in
+        qwen3.8-27b|deepseek-v4.1-flash) ;;
+        *) echo "ERROR: unsupported model profile: ${model}" >&2; exit 1 ;;
+    esac
+done
 VIS=(ssh -o BatchMode=yes -o StrictHostKeyChecking=yes "${REMOTE_USER}@${REMOTE_VIS_HOST}")
-IN_CHECKOUT="cd '${REMOTE_DIR}' && export SCRATCH_BASE='${SCRATCH_BASE}' MODEL_STORAGE='${MODEL_STORAGE}'"
+IN_CHECKOUT="cd '${REMOTE_DIR}' && export SCRATCH_BASE='${SCRATCH_BASE}' MODEL_STORAGE='${MODEL_STORAGE}' WIKI17_DIR='${WIKI17_DIR}'"
 LOG="${SCRATCH_BASE}/logs/build/download-models-$(date +%Y%m%dT%H%M%S).log"
 
 "${SCRIPT_DIR}/sync_to_della.sh"

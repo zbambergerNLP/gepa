@@ -3,6 +3,7 @@
 # index and the pinned HotpotQA fullwiki split (150/300/300). Run from the synced
 # checkout with SCRATCH_BASE set, after scripts/della/remote/setup_env.sh.
 set -euo pipefail
+export PYTHONPATH="${PWD}/src:${PWD}"
 
 : "${SCRATCH_BASE:?}"
 WIKI17_DIR="${WIKI17_DIR:-${SCRATCH_BASE}/.cache/gepa/wiki17}"

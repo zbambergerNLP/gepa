@@ -6,6 +6,30 @@ import pytest
 
 from gepa import optimize
 from gepa.strategies.document_template import MalformedDocumentError
+from gepa.strategies.text_limits import TextLimitError, TextLimits
+
+
+@pytest.mark.parametrize("limit_kind", ["component", "prompt"])
+def test_public_api_enforces_text_limits(limit_kind: str) -> None:
+    """Forward limits into the default stateless proposer during a real offline run."""
+    reflection_lm = Mock(return_value="```\nA much longer proposed instruction\n```")
+    kwargs = {
+        "seed_candidate": {"instructions": "short"},
+        "trainset": [{"input": "question", "answer": "expected", "additional_context": {}}],
+        "task_lm": Mock(return_value="incorrect"),
+        "reflection_lm": reflection_lm,
+        "reflection_minibatch_size": 1,
+        "max_metric_calls": 4,
+        "skip_perfect_score": False,
+    }
+    if limit_kind == "prompt":
+        with pytest.raises(TextLimitError, match="max_prompt_chars=10"):
+            optimize(**kwargs, text_limits=TextLimits(max_prompt_chars=10))
+        reflection_lm.assert_not_called()
+    else:
+        result = optimize(**kwargs, text_limits=TextLimits(max_component_chars=5))
+        assert result.candidates == [{"instructions": "short"}]
+        assert reflection_lm.call_count > 0
 
 
 def test_reflection_prompt_template():

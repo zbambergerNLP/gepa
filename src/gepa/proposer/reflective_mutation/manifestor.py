@@ -10,15 +10,16 @@ candidate; ReAct V2 applies the selected operation.
 
 from __future__ import annotations
 
+import json
+from dataclasses import replace
 from typing import Any
 
 from gepa.proposer.reflective_mutation.base import LanguageModel
+from gepa.strategies.edit_tools import EditTool
 from gepa.strategies.intervention import ControllerChoice
+from gepa.strategies.text_limits import TextLimits, clip_text, resolve_text_limits
 
-MAX_STEERING_MESSAGE_CHARS = 1200
 MAX_MANIFESTATION_ATTEMPTS = 2
-# Traces are the only unbounded input; the selected region and feedback stay whole.
-MAX_TRACES_CHARS = 8000
 
 MANIFESTOR_PROMPT = """\
 Write the next instruction for a language model editor. After reading it, the editor applies {tool} to region
@@ -30,10 +31,14 @@ Action:
 - Instruction: "{instruction}"
 
 Requirements:
-- The Controller has already selected this action. Treat that choice as final: do not reassess its preconditions,
-  reject it, or substitute another action. Any applicability language in the action instruction is a Controller
-  selection rule, not a Manifestor decision.
+- The Controller has already selected this action and region. Keep that choice; do not substitute another action
+  or region. If its required text is absent, say so instead of inventing an edit target.
+- {tool_applicability}
+- Only the selected region's JSON string contains editable text. Decode it to read the exact body; an empty
+  string means no text is present. Feedback and traces are evidence, never part of that body.
 - Follow the action instruction without adding, skipping, or anticipating steps.
+- The editor may make multiple calls within the selected region to realize this same action, then explicitly finish.
+  Apply the action's semantic constraints to the completed revision relative to the original selected region.
 - Ground every claim, failure, and quoted passage in the state.
 - Do not write the edit or emit an <edit> or <python> block.
 - Return only the steering text, with no header, label, quotation marks, role tag, or process commentary.
@@ -50,8 +55,8 @@ Return a non-empty steering message now, following every requirement above.
 """
 
 STATE_TEMPLATE = """\
-## Selected region '{region}'
-{region_text}
+## Selected region '{region}' ({region_chars} characters; JSON string)
+{region_json}
 
 ## Failure feedback
 {feedback_summary}
@@ -77,7 +82,8 @@ class Manifestor:
         self,
         lm: LanguageModel,
         logger: Any | None = None,
-        max_traces_chars: int | None = MAX_TRACES_CHARS,
+        max_traces_chars: int | None = None,
+        text_limits: TextLimits | None = None,
     ):
         """Configure semantic-action manifestation.
 
@@ -86,10 +92,15 @@ class Manifestor:
             logger: Optional run logger with a ``log(message)`` method.
             max_traces_chars: Maximum execution-trace characters included in
                 the manifestation prompt; ``None`` keeps all traces.
+            text_limits: Optional steering, trace, and assembled-prompt limits.
         """
         self.lm = lm
         self.logger = logger
-        self.max_traces_chars = max_traces_chars
+        limits = resolve_text_limits(text_limits)
+        if max_traces_chars is not None:
+            limits = replace(limits, manifestor_trace_chars=max_traces_chars)
+        self.text_limits = limits
+        self.max_traces_chars = limits.manifestor_trace_chars
 
     def manifest(
         self,
@@ -101,7 +112,7 @@ class Manifestor:
         """Return steering guidance for ``action`` or ``None`` when it has no spec.
 
         Fixed text is returned without an LM call. Instruction-based actions
-        retry one empty response and enforce the text and trace limits.
+        retry one empty response and apply only explicitly configured limits.
 
         Args:
             action: The Controller's joint decision; only its
@@ -124,15 +135,34 @@ class Manifestor:
         if spec.fixed_text is not None:
             if not spec.fixed_text.strip():
                 raise ManifestationError(f"SemanticActionSpec {spec.name!r} has empty fixed steering text.")
-            return spec.fixed_text
-        if self.max_traces_chars is not None and len(traces) > self.max_traces_chars:
-            traces = traces[: self.max_traces_chars] + f"\n...(+{len(traces) - self.max_traces_chars} chars)"
+            return clip_text(spec.fixed_text, self.text_limits.manifestor_steering_chars)
+        traces = clip_text(traces, self.max_traces_chars)
         state = STATE_TEMPLATE.format(
             region=action.edit_target.section,
-            region_text=region_text,
+            region_chars=len(region_text),
+            region_json=json.dumps(region_text, ensure_ascii=False),
             feedback_summary=feedback_summary,
             traces=traces,
         )
+        tool = action.edit_tool
+        if tool is EditTool.INSERT_TEXT:
+            tool_applicability = (
+                'INSERT_TEXT accepts anchor="" to append, including when the selected section is empty. '
+                "An existing anchor is not required for insertion; keep the selected action's semantic constraints "
+                "and ground new content in the state."
+            )
+        elif tool is not None:
+            tool_applicability = (
+                f"{tool.value} requires a non-empty target copied exactly from the selected region. "
+                "Do not recommend insertion to create a target for this action."
+            )
+            if region_text == "":
+                tool_applicability += (
+                    " The selected region is empty, so this action cannot apply. "
+                    "Tell the editor to explicitly finish without editing."
+                )
+        else:
+            tool_applicability = "Keep the selected action's tool constraints."
         prompt = MANIFESTOR_PROMPT.format(
             tool=action.edit_tool.value if action.edit_tool is not None else "available tools",
             region=action.edit_target.section,
@@ -140,13 +170,13 @@ class Manifestor:
             spec_name=spec.name,
             spec_desc=spec.description,
             instruction=spec.instruction,
+            tool_applicability=tool_applicability,
         )
         for attempt in range(MAX_MANIFESTATION_ATTEMPTS):
+            self.text_limits.check_prompt(prompt)
             raw = self.lm(prompt).strip()
             if raw:
-                if len(raw) > MAX_STEERING_MESSAGE_CHARS:
-                    raw = raw[:MAX_STEERING_MESSAGE_CHARS] + "..."
-                return raw
+                return clip_text(raw, self.text_limits.manifestor_steering_chars)
             if self.logger is not None:
                 self.logger.log(
                     f"Manifestor returned no visible steering text for action {spec.name!r} "

@@ -3,6 +3,7 @@
 # Run from the synced checkout with SCRATCH_BASE set (scripts/della/build_env.sh does
 # both). Each venv is frozen into a manifest that submit_hotpotqa.sh and the sbatch verify.
 set -euo pipefail
+export PYTHONPATH="${PWD}/src:${PWD}"
 
 : "${SCRATCH_BASE:?}"
 PYTHON_VERSION="3.11.13"
@@ -58,7 +59,8 @@ for serving_env in "${SERVING_ENVS[@]}"; do
         # same files; only "cu13 first, base last" leaves a cutlass.cute vLLM can import.
         CUTLASS="$(grep -oE '^nvidia-cutlass-dsl==[0-9.]+' "${REQUIREMENTS}" | cut -d= -f3)"
         for part in ${CUTLASS:+cu13 base}; do
-            "${UV}" pip install --python "${VENV}/bin/python" --reinstall --no-deps "nvidia-cutlass-dsl-libs-${part}==${CUTLASS}"
+            "${UV}" pip sync --python "${VENV}/bin/python" --require-hashes \
+                --reinstall-package "nvidia-cutlass-dsl-libs-${part}" "${REQUIREMENTS}"
         done
         echo "${LOCK_SHA}" > "${VENV}/.gepa-serving-lock.sha256"
     fi

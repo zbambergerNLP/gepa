@@ -341,6 +341,35 @@ def test_prepared_state_requires_exact_manifest_index_and_corpus_size(monkeypatc
     assert retriever._prepared_manifest() is None
 
 
+def test_failed_cache_initialization_does_not_publish_a_ready_retriever(monkeypatch, tmp_path) -> None:
+    """Retry initialization when the index loads but its cache is not ready.
+
+    Args:
+        monkeypatch: Pytest fixture used to replace optional dependencies.
+        tmp_path: Pytest directory containing the prepared retrieval fixture.
+    """
+    dependencies = install_fake_dependencies(monkeypatch)
+    retriever = wiki17_bm25.Wiki17BM25Retriever(tmp_path)
+    retriever.integrity_path.write_text('{"identity":"initialization"}\n', encoding="utf-8")
+    monkeypatch.setattr(retriever, "_prepared_manifest", lambda: {"prepared": True})
+    monkeypatch.setattr(retriever, "_load_corpus", lambda: ["Alpha | first abstract"])
+    monkeypatch.setattr(wiki17_bm25, "WIKI17_DOCUMENT_COUNT", 1)
+    index = Mock()
+    index.retrieve.return_value = ([[0]], [[1.0]])
+    dependencies.bm25_factory.load.return_value = index
+    cache = Mock()
+    cache.get.return_value = None
+    dependencies.cache_factory.side_effect = [OSError("cache unavailable"), cache]
+
+    with pytest.raises(OSError, match="cache unavailable"):
+        retriever.search("question", 1)
+    result = retriever.search("question", 1)
+
+    assert [(passage.title, passage.text) for passage in result] == [("Alpha", "first abstract")]
+    assert dependencies.cache_factory.call_count == 2
+    index.retrieve.assert_called_once()
+
+
 def test_provenance_locks_artifact_source_versions_and_retrieval_parameters() -> None:
     """Keep every material frozen-retrieval choice in run identity."""
     provenance = wiki17_bm25.Wiki17BM25Retriever("wiki17").provenance()

@@ -1,5 +1,6 @@
 """Tests for the Wikipedia-backed HotPotQA and HOVER runners."""
 
+import asyncio
 import fcntl
 import json
 import random
@@ -7,17 +8,18 @@ import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, call
+from unittest.mock import AsyncMock, Mock, call
 
 import datasets
+import litellm
 import pytest
 from litellm.utils import get_optional_params
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
+from examples.common import provider_retries
 from examples.common.experiment_models import (
     DEEPSEEK_V4_1_FLASH_MODEL,
-    DEEPSEEK_V4_FLASH_MODEL,
     EXPERIMENT_NUM_RETRIES,
     QWEN3_8_27B_MODEL,
     experiment_decoding,
@@ -95,21 +97,28 @@ def test_hotpot_lm_uses_local_campaign_decoding(monkeypatch, model: str) -> None
     monkeypatch.setattr(hotpot_utils.litellm, "completion", completion)
 
     assert hotpot_utils._call_lm("", "question", model, None) == "answer"
+    assert hotpot_utils._call_lm("", "question", model, None) == "answer"
+    assert len(calls) == 2
     assert calls[0]["messages"] == [{"role": "user", "content": "question"}]
     expected_request = {
-        "num_retries": hotpot_utils.HOTPOTQA_NUM_RETRIES,
-        "timeout": hotpot_utils.HOTPOTQA_REQUEST_TIMEOUT_SECONDS,
-        **experiment_decoding(model),
-        **experiment_request_overrides(model),
+        "num_retries": EXPERIMENT_NUM_RETRIES,
+        **experiment_decoding(model, agentic=False),
+        **experiment_request_overrides(model, explicit_reasoning=True),
+        "max_tokens": 32_768 if model == DEEPSEEK_V4_1_FLASH_MODEL else 16_384,
     }
     expected_request["seed"] = hotpot_utils.HOTPOTQA_SCIENTIFIC_REQUEST_SEED
-    assert {key: value for key, value in calls[0].items() if key not in {"model", "messages"}} == expected_request
-    assert calls[0].get("extra_body") == experiment_request_overrides(model).get("extra_body")
+    assert 3599 < calls[0]["timeout"] <= 3600
+    assert {key: value for key, value in calls[0].items() if key not in {"model", "messages", "timeout"}} == {
+        **expected_request,
+        "max_retries": 0,
+        "cache": {"no-cache": True, "no-store": True},
+    }
+    assert calls[0].get("extra_body") == experiment_request_overrides(model, explicit_reasoning=True).get("extra_body")
 
 
-@pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_FLASH_MODEL])
-def test_hover_lm_keeps_its_existing_decoding(monkeypatch, model: str) -> None:
-    """Leave the lower-stack HoVer request contract unchanged.
+@pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL])
+def test_hover_lm_uses_local_decoding_and_thinking(monkeypatch, model: str) -> None:
+    """Send the selected model decoding and thinking controls for HoVer.
 
     Args:
         monkeypatch: Pytest fixture used to replace LiteLLM completion.
@@ -133,30 +142,31 @@ def test_hover_lm_keeps_its_existing_decoding(monkeypatch, model: str) -> None:
 
     assert hover_utils._call_lm("", "question", model, None) == "answer"
     assert calls[0]["messages"] == [{"role": "user", "content": "question"}]
-    assert {key: value for key, value in calls[0].items() if key not in {"model", "messages"}} == {
+    assert {key: value for key, value in calls[0].items() if key not in {"model", "messages", "timeout"}} == {
         "num_retries": EXPERIMENT_NUM_RETRIES,
         **experiment_decoding(model),
+        **experiment_request_overrides(model),
     }
     assert "seed" not in calls[0]
-    assert "extra_body" not in calls[0]
+    assert calls[0].get("extra_body") == experiment_request_overrides(model).get("extra_body")
 
 
-def test_litellm_preserves_local_deepseek_chat_template_settings() -> None:
-    """Keep DeepSeek thinking mode and maximum reasoning effort intact through LiteLLM."""
-    request_overrides = experiment_request_overrides(DEEPSEEK_V4_1_FLASH_MODEL)
+@pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL])
+def test_litellm_preserves_local_thinking_and_effort_settings(model: str) -> None:
+    """Keep both providers' explicit thinking controls in the outgoing vLLM request."""
+    request_overrides = experiment_request_overrides(model, explicit_reasoning=True)
 
     transformed = get_optional_params(
-        model="deepseek-ai/DeepSeek-V4.1-Flash",
+        model=model.removeprefix("hosted_vllm/"),
         custom_llm_provider="hosted_vllm",
         drop_params=True,
-        **experiment_decoding(DEEPSEEK_V4_1_FLASH_MODEL),
+        **experiment_decoding(model),
         **request_overrides,
     )
 
-    assert transformed["extra_body"]["chat_template_kwargs"] == {
-        "thinking": True,
-        "reasoning_effort": 100,
-    }
+    assert transformed["extra_body"]["chat_template_kwargs"] == request_overrides["extra_body"]["chat_template_kwargs"]
+    if model == QWEN3_8_27B_MODEL:
+        assert transformed["extra_body"]["top_k"] == 20
     assert transformed["temperature"] == 1.0
     assert transformed["top_p"] == 0.95
 
@@ -438,6 +448,67 @@ def test_hotpot_heldout_evaluation_scores_only_task_parse_errors_as_zero(monkeyp
 
 
 @pytest.mark.skipif(hotpot_utils.dspy is None, reason="HotPotQA's locked DSPy group is not installed")
+@pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL])
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_real_dspy_provider_requests_use_three_attempts(tmp_path, monkeypatch, model, asynchronous):
+    """Exercise the pinned DSPy transport with the same bounded retry policy."""
+    raw = litellm.ModelResponse(
+        model=model,
+        choices=[{"message": {"role": "assistant", "content": "done"}, "finish_reason": "stop"}],
+        usage={"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+    )
+    outcomes = [ConnectionError("temporary"), ConnectionError("temporary"), raw]
+    provider = AsyncMock(side_effect=outcomes) if asynchronous else Mock(side_effect=outcomes)
+    monkeypatch.setattr(litellm, "acompletion" if asynchronous else "completion", provider)
+    monkeypatch.setattr(provider_retries.time, "sleep", Mock())
+    monkeypatch.setattr(provider_retries.asyncio, "sleep", AsyncMock())
+    path = tmp_path / "provider-attempts.jsonl"
+    settings = hotpot_utils.resolve_hotpotqa_lm_kwargs(model, "http://localhost:8000/v1")
+    settings.update(provider_retries.provider_retry_kwargs(path, "solver"))
+    lm = hotpot_utils.build_hotpotqa_task_lm(model, None, settings)
+    result = asyncio.run(lm.aforward(prompt="test")) if asynchronous else lm.forward(prompt="test")
+    assert result.choices[0].message.content == "done"
+    assert provider.call_count == 3
+    assert all(call.kwargs["num_retries"] == call.kwargs["max_retries"] == 0 for call in provider.call_args_list)
+    expected_cap = 32_768 if model == DEEPSEEK_V4_1_FLASH_MODEL else 16_384
+    assert all(call.kwargs["max_tokens"] == expected_cap for call in provider.call_args_list)
+    assert len(path.read_text().splitlines()) == 3
+
+
+@pytest.mark.skipif(hotpot_utils.dspy is None, reason="HotPotQA's locked DSPy group is not installed")
+@pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL])
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_repeated_hotpot_dspy_requests_are_fresh(tmp_path, monkeypatch, model, asynchronous):
+    """Bypass both DSPy caches and call the provider for identical new requests."""
+    responses = [
+        litellm.ModelResponse(
+            model=model,
+            choices=[{"message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
+            usage={"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+        )
+        for text in ("first result", "second result")
+    ]
+    provider = AsyncMock(side_effect=responses) if asynchronous else Mock(side_effect=responses)
+    monkeypatch.setattr(litellm, "acompletion" if asynchronous else "completion", provider)
+    monkeypatch.setattr(hotpot_utils.dspy.cache, "get", Mock(side_effect=AssertionError("cache read")))
+    monkeypatch.setattr(hotpot_utils.dspy.cache, "put", Mock(side_effect=AssertionError("cache write")))
+    path = tmp_path / "provider-attempts.jsonl"
+    settings = hotpot_utils.resolve_hotpotqa_lm_kwargs(model, "http://localhost:8000/v1")
+    settings.update(provider_retries.provider_retry_kwargs(path, "solver"))
+    settings.update(cache=True, cache_in_memory=True)
+    lm = hotpot_utils.build_hotpotqa_task_lm(model, None, settings)
+    assert lm.cache is False and lm.cache_in_memory is False
+    outputs = []
+    for _ in range(2):
+        response = asyncio.run(lm.aforward(prompt="same input")) if asynchronous else lm.forward(prompt="same input")
+        outputs.append(response.choices[0].message.content)
+    assert outputs == ["first result", "second result"]
+    assert provider.call_count == 2
+    assert all(call.kwargs["cache"] == {"no-cache": True, "no-store": True} for call in provider.call_args_list)
+    assert len(path.read_text().splitlines()) == 2
+
+
+@pytest.mark.skipif(hotpot_utils.dspy is None, reason="HotPotQA's locked DSPy group is not installed")
 def test_hotpot_chain_of_thought_uses_the_real_dspy_protocol() -> None:
     """Execute the artifact signature through DSPy's real ChatAdapter.
 
@@ -587,6 +658,7 @@ def test_hotpot_dspy_lm_uses_the_selected_experiment_profile(monkeypatch, model:
     settings.configure.assert_called_once_with(disable_history=True)
     expected_kwargs = {
         "model": model,
+        "cache": False,
         "cache_in_memory": False,
         **hotpot_utils.resolve_hotpotqa_lm_kwargs(model, "http://solver.example/v1"),
     }
@@ -1214,12 +1286,7 @@ def test_wikipedia_sbatch_exposes_both_homogeneous_model_profiles(benchmark: str
 
     assert 'MODEL_PROFILE="${MODEL_PROFILE:-qwen3.8-27b}"' in script
     assert 'SOLVER_MODEL="hosted_vllm/Qwen/Qwen3.8-27B"' in script
-    secondary_model = (
-        'SOLVER_MODEL="hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash"'
-        if benchmark == "hotpotqa"
-        else 'SOLVER_MODEL="deepseek/deepseek-v4-flash"'
-    )
-    assert secondary_model in script
+    assert 'SOLVER_MODEL="hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash"' in script
     assert 'REFLECTION_MODEL="${SOLVER_MODEL}"' in script
     if benchmark == "hover":
         assert 'if [[ "${LOCAL_SOLVER}" == "1" ]]' in script
@@ -1228,11 +1295,10 @@ def test_wikipedia_sbatch_exposes_both_homogeneous_model_profiles(benchmark: str
     if benchmark == "hotpotqa":
         assert 'export OPENAI_API_KEY="EMPTY"' in script
         assert "DEEPSEEK_API_KEY" not in script
-        assert script.count('SERVING_ENGINE="vllm"') == 2
-        assert "sglang" not in script.lower()
+        assert 'SERVING_ENGINE="vllm"' in script
     else:
         assert 'export OPENAI_API_KEY="${OPENAI_API_KEY:-EMPTY}"' in script
-        assert 'export DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-}"' in script
+        assert "DEEPSEEK_API_KEY" not in script
 
 
 def test_hotpotqa_della_submit_scales_resources_by_model_profile() -> None:
@@ -1242,16 +1308,19 @@ def test_hotpotqa_della_submit_scales_resources_by_model_profile() -> None:
     assert 'DELLA_GPUS="${DELLA_GPUS:-}"' in submit
     assert 'DELLA_CPUS_PER_TASK="${DELLA_CPUS_PER_TASK:-}"' in submit
     assert 'DELLA_MEMORY="${DELLA_MEMORY:-}"' in submit
-    assert 'DELLA_GPUS="${DELLA_GPUS:-8}"' in submit
-    assert 'DELLA_CPUS_PER_TASK="${DELLA_CPUS_PER_TASK:-64}"' in submit
-    assert 'DELLA_MEMORY="${DELLA_MEMORY:-768G}"' in submit
+    assert 'DELLA_GPUS="${DELLA_GPUS:-1}"' in submit
+    assert 'DELLA_GPUS="${DELLA_GPUS:-4}"' in submit
+    assert 'DELLA_CPUS_PER_TASK="${DELLA_CPUS_PER_TASK:-8}"' in submit
+    assert 'DELLA_CPUS_PER_TASK="${DELLA_CPUS_PER_TASK:-32}"' in submit
+    assert 'DELLA_MEMORY="${DELLA_MEMORY:-128G}"' in submit
+    assert 'DELLA_MEMORY="${DELLA_MEMORY:-512G}"' in submit
     assert 'JOB_PARTITION="${GPU_PARTITION}"' in submit
     assert 'MAX_WORKERS="${MAX_WORKERS:-12}"' in submit
     assert 'VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-${DELLA_GPUS}}"' in submit
     assert 'VLLM_API_SERVER_COUNT="${VLLM_API_SERVER_COUNT:-${VLLM_DATA_PARALLEL_SIZE}}"' in submit
     assert "DELLA_GPUS=0" not in submit
     assert "deepseek-v4.1-flash)" in submit
-    assert 'VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-8}"' in submit
+    assert 'VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-4}"' in submit
     assert 'VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-1}"' in submit
     assert 'VLLM_API_SERVER_COUNT="${VLLM_API_SERVER_COUNT:-1}"' in submit
     assert 'MAX_WORKERS="${MAX_WORKERS:-4}"' in submit
@@ -1265,23 +1334,20 @@ def test_hotpotqa_della_submit_scales_resources_by_model_profile() -> None:
 
 
 def test_hotpotqa_sbatch_configures_within_run_vllm_throughput() -> None:
-    """Batch independent examples across data-parallel Qwen replicas."""
+    """Queue independent examples against the configured Qwen sequence limit."""
     script = (REPO_ROOT / "examples" / "hotpotqa" / "run_hotpotqa.sbatch").read_text()
 
     assert "#SBATCH --cpus-per-task=8" in script
     assert "#SBATCH --mem=128G" in script
     assert "#SBATCH --gres" not in script
     assert 'VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-1}"' in script
-    assert (
-        'VLLM_API_SERVER_COUNT="${VLLM_API_SERVER_COUNT:-${VLLM_DATA_PARALLEL_SIZE}}"'
-        in script
-    )
+    assert 'VLLM_API_SERVER_COUNT="${VLLM_API_SERVER_COUNT:-${VLLM_DATA_PARALLEL_SIZE}}"' in script
     assert 'VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-1}"' in script
     assert 'VLLM_MAX_NUM_BATCHED_TOKENS="${VLLM_MAX_NUM_BATCHED_TOKENS:-16384}"' in script
     assert "--tensor-parallel-size 1" in script
-    assert "--data-parallel-size 8" in script
-    assert "--api-server-count 8" in script
-    assert "--max-num-seqs 1" in script
+    assert "--data-parallel-size 1" in script
+    assert "--api-server-count 1" in script
+    assert '--max-num-seqs "${VLLM_MAX_NUM_SEQS}"' in script
     assert '--max-num-batched-tokens "${VLLM_MAX_NUM_BATCHED_TOKENS}"' in script
     assert "--no-enable-prefix-caching" in script
     assert "--language-model-only" in script
@@ -1313,14 +1379,6 @@ def test_hotpotqa_sbatch_limits_nested_cpu_threads_after_vllm_starts() -> None:
         "scripts/della/submit_hotpotqa.sh",
         "scripts/della/fetch_hotpotqa_results.sh",
         "scripts/della/submit_hover.sh",
-        "scripts/della/build_env.sh",
-        "scripts/della/remote/setup_env.sh",
-        "scripts/della/remote/download_dataset.sh",
-        "scripts/della/remote/download_model.sh",
-        "scripts/della/submit_deepseek_smoke.sh",
-        "scripts/della/smoke_deepseek_serving.sbatch",
-        "scripts/della/preflight_hotpotqa.sh",
-        "scripts/della/verify_deepseek_serving.sh",
         "examples/hotpotqa/run_hotpotqa.sbatch",
         "examples/hover/run_hover.sbatch",
     ],
@@ -1343,15 +1401,7 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     """Pin methodology while retaining only quality-neutral throughput knobs."""
     submit = (REPO_ROOT / "scripts" / "della" / "submit_hotpotqa.sh").read_text()
     sbatch = (REPO_ROOT / "examples" / "hotpotqa" / "run_hotpotqa.sbatch").read_text()
-    build = "\n".join(
-        (REPO_ROOT / "scripts" / "della" / path).read_text()
-        for path in (
-            "build_env.sh",
-            "remote/setup_env.sh",
-            "remote/download_dataset.sh",
-            "remote/download_model.sh",
-        )
-    )
+    build = (REPO_ROOT / "scripts" / "della" / "build_env.sh").read_text()
     sync = (REPO_ROOT / "scripts" / "della" / "sync_to_della.sh").read_text()
     fetch = (REPO_ROOT / "scripts" / "della" / "fetch_hotpotqa_results.sh").read_text()
 
@@ -1374,7 +1424,7 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert 'MODEL="Qwen3.8-27B"' in submit
     assert 'if [[ "${GPU_PARTITION}" != "ailab" ]]' in submit
     assert "Qwen3.8-27B production runs require GPU_PARTITION=ailab" in submit
-    assert "scientific Qwen runs require 8 H200 data-parallel replicas and 8 API servers" in submit
+    assert "scientific Qwen runs require one H200, TP1/DP1, and one API server" in submit
     assert 'SOLVER_MODEL_PATH="${MODEL_STORAGE}/${MODEL}"' in submit
     assert 'MODEL_SNAPSHOT_PROFILE="qwen3.8-27b"' in submit
     assert 'MODEL_SNAPSHOT_PROFILE="deepseek-v4.1-flash"' in submit
@@ -1384,17 +1434,8 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert "found staged local ${MODEL_SNAPSHOT_PROFILE} checkpoint" in submit
     assert 'SOLVER_MODEL="hosted_vllm/Qwen/Qwen3.8-27B"' in submit
     assert 'SOLVER_MODEL="hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash"' in submit
-    assert "GLM" not in submit
-    assert "zai-org" not in submit
     assert 'REFLECTION_MODEL="${SOLVER_MODEL}"' in submit
     assert "DEEPSEEK_API_KEY" not in submit
-    assert "sglang" not in submit.lower()
-    assert "apptainer" not in submit.lower()
-    assert "HOTPOTQA_CANARY_ONLY" not in submit
-    assert "canary" not in submit.lower()
-    assert 'VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-8}"' not in submit
-    assert "scientific DeepSeek runs require VLLM_MAX_NUM_SEQS=1" in submit
-    assert "scientific DeepSeek runs require one TP8/EP8 replica on one eight-H200 node" in submit
     assert r'"BUDGET_PROFILE=\${run_budget_profile}"' in submit
     assert "HOTPOTQA_CAMPAIGN_ID=${HOTPOTQA_CAMPAIGN_ID}" in submit
     assert 'SBATCH_BIN="\\$(command -v sbatch)"' in submit
@@ -1429,13 +1470,11 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
         'HOTPOTQA_LOG_DIR="${SCRATCH_BASE}/logs/hotpotqa/${HOTPOTQA_CAMPAIGN_ID}/${HOTPOTQA_SOURCE_COMMIT}"' in submit
     )
     assert 'LOG_DIR="${SCRATCH_BASE}/logs/hotpotqa/${HOTPOTQA_CAMPAIGN_ID}/${HOTPOTQA_SOURCE_COMMIT}"' in sbatch
-    assert 'SBATCH_EXPORT_FILE="\\$(mktemp)"' in submit
+    assert r'SBATCH_EXPORT_FILE="\${CONTINUATION_DIR}/\${CELL_NAME}.env"' in submit
     assert "cleanup_export_file()" in submit
     assert 'rm -f -- "\\${SBATCH_EXPORT_FILE}"' in submit
     assert "printf '%s\\0'" in submit
-    assert "env -i" in submit
-    assert 'HOME="\\${HOME}"' in submit
-    assert 'PATH="\\${PATH}"' in submit
+    assert "trap cleanup_export_file EXIT" in submit
     assert "LANG=C.UTF-8" in submit
     assert "LC_ALL=C.UTF-8" in submit
     assert '"HOME=\\${HOME}"' in submit
@@ -1446,7 +1485,8 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert 'HOTPOTQA_SOURCE_COMMIT="$(git -C "${REPO_ROOT}" rev-parse HEAD)"' in submit
     assert 'REMOTE_SOURCE_DIR="${REMOTE_DIR%/}/sources/${HOTPOTQA_SOURCE_COMMIT}"' in submit
     assert 'GEPA_VENV_DIR="${REMOTE_DIR%/}/.venv"' in submit
-    assert submit.count('"${GEPA_VENV_DIR}/bin/python"') == 5
+    assert '"${GEPA_VENV_DIR}/bin/python" -m examples.common.slurm_continuation add' in submit
+    assert '"${GEPA_VENV_DIR}/bin/python" -m examples.common.slurm_continuation start' in submit
     assert 'SYNC_SOURCE_COMMIT="${HOTPOTQA_SOURCE_COMMIT}"' in submit
     assert 'SYNC_REMOTE_DIR="${REMOTE_SOURCE_DIR}"' in submit
     assert 'SYNC_MANIFEST_OUTPUT="${SOURCE_MANIFEST_OUTPUT}"' in submit
@@ -1478,16 +1518,17 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert "RUN_MAX_METRIC_CALLS=13742" in submit
     assert 'RUN_TIME="${STANDARD_TIME}"' in submit
     assert 'RUN_TIME="${EXPANDED_TIME}"' in submit
-    assert 'DEPENDENCY_ARGS+=("--dependency=afterok:\\${PREVIOUS_JOB_ID}")' in submit
+    assert r'--plan "\${PLAN_PATH}" --source-commit "${HOTPOTQA_SOURCE_COMMIT}"' in submit
     assert "afterany:" not in submit
     assert r'"CONDITION=\${run_condition}"' in submit
-    assert r'--job-name="gepa-hp-${MODEL_PROFILE}-\${RUN_BUDGET_PROFILE}-\${RUN_CONDITION}"' in submit
+    assert r'--job-name="gepa-hp-${MODEL_PROFILE}-${HOTPOTQA_JOB_KIND}-\${CELL_NAME}"' in submit
     assert r'--time="\${RUN_TIME}"' in submit
     assert 'sha256sum "\\${SERVING_ENV_MANIFEST}"' in submit
     assert 'pip check --python "\\${VLLM_PY}"' in submit
     assert ".gepa-source-commit" in submit
     assert ".gepa-source-manifest.sha256sums" in submit
     assert "HOTPOTQA_SOURCE_MANIFEST_SHA256=${HOTPOTQA_SOURCE_MANIFEST_SHA256}" in submit
+    assert 'if [[ "${MODEL_PROFILE}" == "deepseek-v4.1-flash" ]]' in submit
     assert "commit the complete experiment source" in submit
     assert '"${SCRIPT_DIR}/sync_to_della.sh"' in submit
     assert "NO_SYNC" not in submit
@@ -1519,12 +1560,7 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert 'SOLVER_MODEL_PATH="${MODEL_STORAGE}/${MODEL}"' in sbatch
     assert 'QWEN_REVISION="1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"' in sbatch
     assert 'DEEPSEEK_REVISION="dba1be0a40aa45a94ad051997016db3960a90277"' in sbatch
-    assert 'MODEL="DeepSeek-V4.1-Flash"' in sbatch
-    assert 'SOLVER_SERVED_NAME="deepseek-ai/DeepSeek-V4.1-Flash"' in sbatch
-    assert 'MODEL_SNAPSHOT_PROFILE="deepseek-v4.1-flash"' in sbatch
-    assert "GLM" not in sbatch
-    assert "zai-org" not in sbatch
-    assert "MODEL_PROFILE must be qwen3.8-27b or deepseek-v4.1-flash" in sbatch
+    assert "sglang" not in sbatch
     assert 'HOTPOTQA_MODEL_REVISION="${QWEN_REVISION}"' in sbatch
     assert 'HOTPOTQA_MODEL_REVISION="${DEEPSEEK_REVISION}"' in sbatch
     assert 'SOLVER_API_BASE="http://127.0.0.1:${GEN_PORT}/v1"' in sbatch
@@ -1547,7 +1583,10 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
         "expanded:react_v2_random",
     ):
         assert rejected_cell not in sbatch
-    assert 'RUN_LOCK_PATH="${RUN_LOCK_DIR}/${MODEL_PROFILE}-${BUDGET_PROFILE}-${CONDITION}.lock"' in sbatch
+    assert (
+        'RUN_LOCK_PATH="${RUN_LOCK_DIR}/${MODEL_PROFILE}-${BUDGET_PROFILE}-${CONDITION}-pilot${HOTPOTQA_PILOT_ONLY}.lock"'
+        in sbatch
+    )
     assert 'if ! flock -n "${RUN_LOCK_FD}"' in sbatch
     assert "another HotPotQA job is already writing" in sbatch
     assert "proxy/default" not in sbatch
@@ -1566,16 +1605,11 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert 'SOLVER_API_BASE="http://127.0.0.1:${GEN_PORT}/v1"' in sbatch
     assert "generator_reports_expected_model()" in sbatch
     assert "ids == [sys.argv[1]]" in sbatch
-    assert sbatch.index('if ! kill -0 "${GEN_PID}"') < sbatch.index(
-        "if generator_reports_expected_model"
-    )
+    assert sbatch.index('if ! kill -0 "${GEN_PID}"') < sbatch.index("if generator_reports_expected_model")
     assert "--reasoning-parser qwen3" in sbatch
     assert "--enable-auto-tool-choice" in sbatch
     assert "--tool-call-parser qwen3_coder" in sbatch
-    assert 'Version("0.17.0")' not in sbatch
-    assert "from vllm import ModelRegistry" in sbatch
-    assert 'SERVING_LOCK="examples/hotpotqa/serving/requirements-x86_64-linux-py312.txt"' in sbatch
-    assert 'SERVING_LOCK="examples/hotpotqa/serving/requirements-deepseek-v4.1-flash-x86_64-linux-py312.txt"' in sbatch
+    assert "validate_experiment_vllm_version(sys.argv[1], sys.argv[2])" in sbatch
     assert '"${VLLM_BIN}" serve --help=all' in sbatch
     assert '"${VLLM_BIN}" serve --help 2>&1' not in sbatch
     assert 'echo "==> checking native tool-call compatibility"' in sbatch
@@ -1618,56 +1652,22 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert "export HOTPOTQA_VLLM_BATCH_INVARIANT" in sbatch
     assert "export HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS" in sbatch
     assert "batch_invariant=false" in sbatch
-    assert "single_sequence_replicas=true" in sbatch
+    assert "single_sequence_replicas=${HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS}" in sbatch
     assert "gpu_memory_utilization=${GEN_GMU}" in sbatch
     assert "max_model_len=${GEN_MAX_LEN}" in sbatch
     assert "rope_scaling=none" in sbatch
     assert "--rope-scaling" not in sbatch
-    assert "max_num_seqs=1" in sbatch
+    assert "max_num_seqs=${VLLM_MAX_NUM_SEQS}" in sbatch
     assert "serving_env=${HOTPOTQA_SERVING_ENV_SHA256}" in sbatch
     assert "gpu=${HOTPOTQA_GPU_RUNTIME}" in sbatch
     assert 'examples.common.python_environment verify --path "${SERVING_ENV_MANIFEST}"' in sbatch
     assert 'pip check --python "${VLLM_PY}"' in sbatch
     assert '"H200" not in name.upper() or capability != "9.0"' in sbatch
-    assert '"nvidia-smi", "--query-gpu=driver_version"' in sbatch
+    assert '"nvidia-smi", "--id", gpu_ids, "--query-gpu=driver_version"' in sbatch
     assert 'exec {MODEL_LOCK_FD}<"${SOLVER_MODEL_PATH}"' in sbatch
     assert 'if ! flock -s -n "${MODEL_LOCK_FD}"' in sbatch
     assert 'HOTPOTQA_VLLM_VERSION=""' in sbatch
-    assert "HOTPOTQA_SGLANG_VERSION" not in sbatch
-    assert "HOTPOTQA_SERVING_IMAGE_URI" not in sbatch
-    assert "HOTPOTQA_SERVING_IMAGE_SHA256" not in sbatch
-    assert "HOTPOTQA_CANARY_ONLY" not in sbatch
-    assert "runtime_canary" not in sbatch
-    assert "sglang" not in sbatch.lower()
-    assert "apptainer" not in sbatch.lower()
     assert 'HOTPOTQA_CUDA_MODULE=""' in sbatch
-    # Both profiles serve through the one frozen vLLM environment; DeepSeek is one TP8/EP8
-    # replica with the same single-sequence determinism contract as Qwen, the FP8 KV cache
-    # and 256-token blocks its sparse-MLA path requires, and no MTP/DSpark speculation.
-    assert "--enable-expert-parallel" in sbatch
-    assert "--tensor-parallel-size 8" in sbatch
-    assert "--tokenizer-mode deepseek_v41" in sbatch
-    assert "--reasoning-parser deepseek_v41" in sbatch
-    assert "--tool-call-parser deepseek_v41" in sbatch
-    assert "--kv-cache-dtype fp8" in sbatch
-    assert "--block-size" not in sbatch
-    assert "export FLASHINFER_NO_DOWNLOAD=1" in sbatch
-    assert "--speculative-config" not in sbatch
-    assert "--trust-remote-code" not in sbatch
-    assert "--moe-backend" not in sbatch
-    assert 'export HOTPOTQA_WEIGHT_DTYPE="fp8"' in sbatch
-    assert 'export HOTPOTQA_KV_CACHE_DTYPE="fp8"' in sbatch
-    assert "tp=8;ep=8;dp=1;api_servers=1;dp_attention=false;speculative_decoding=false;" in sbatch
-    assert "weight_quant=fp8;expert_dtype=fp4;kv_cache_dtype=fp8;block_size=auto;" in sbatch
-    assert sbatch.count("max_num_seqs=1;") == 2
-    assert sbatch.count("batch_invariant=false;single_sequence_replicas=true") == 2
-    assert sbatch.count('"${VLLM_BIN}" serve "${SOLVER_MODEL_PATH}"') == 1
-    assert '"${VLLM_PROFILE_ARGS[@]}"' in sbatch
-    assert "scientific runs require one sequence per replica (VLLM_MAX_NUM_SEQS=1)" in sbatch
-    assert "DeepSeek requires one TP8/EP8 replica with one API server on the eight-H200 node" in sbatch
-    assert "from vllm import ModelRegistry" in sbatch
-    assert "ModelRegistry.get_supported_archs()" in sbatch
-    assert "serving environment was built from a different lockfile; run scripts/della/build_env.sh" in sbatch
     assert 'WIKI17_INTEGRITY_SHA256="$(sha256sum "${WIKI17_DIR}/integrity.json"' in sbatch
     assert 'HOTPOTQA_CUDA_MODULE="cudatoolkit/${HOTPOTQA_CUDA_VERSION}"' in sbatch
     assert 'module load "${HOTPOTQA_CUDA_MODULE}"' in sbatch
@@ -1684,10 +1684,6 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert "uv_sha=${HOTPOTQA_UV_SHA256}" in sbatch
     assert "api_base=${SOLVER_API_BASE}" in sbatch
     assert "engine=${HOTPOTQA_SERVING_ENGINE}" in sbatch
-    assert "sglang=" not in sbatch
-    assert "image_uri=" not in sbatch
-    assert "image_sha=" not in sbatch
-    assert "HOTPOTQA_DEEPSEEK" not in sbatch
     assert "env_spec=${HOTPOTQA_ENV_SPEC_SHA256}" in sbatch
     assert "gepa_env=${HOTPOTQA_GEPA_ENV_SHA256}" in sbatch
     assert "budget_profile=${BUDGET_PROFILE}" in sbatch
@@ -1724,47 +1720,40 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert "sshpass" not in sync
     assert "REMOTE_PASSWORD" not in sync
     assert sync.count("-o BatchMode=yes -o StrictHostKeyChecking=yes") == 2
-    assert 'PYTHON_VERSION="3.11.13"' in build
-    assert 'UV_VERSION="0.9.13"' in build
-    assert "UV_UNMANAGED_INSTALL" in build
-    assert "--frozen --no-install-project" in build
-    assert '"${UV}" sync "${SYNC_ARGS[@]}" --check' in build
-    assert build.count('flock -n "${ARTIFACT_LOCK_FD}"') == 2
-    assert "validate_hotpotqa_dspy_runtime" in build
-    assert 'prepare \\\n        --path "${MANIFESTS}/serving-environments/${LOCK_SHA}.json"' in build
-    assert 'prepare \\\n    --path "${MANIFESTS}/python-environments/gepa-${ENV_SPEC}.json"' in build
-    assert '"${UV}" pip check --python "${VENV}/bin/python"' in build
-    assert '"${UV}" pip sync --python "${VENV}/bin/python" --require-hashes "${REQUIREMENTS}"' in build
-    assert "sglang" not in build.lower()
-    assert "apptainer" not in build.lower()
-    # Must hash the same bytes submit_hotpotqa.sh and the sbatch hash for the env spec.
-    assert "sha256sum pyproject.toml uv.lock; printf 'python=%s\\nuv=%s\\n'" in build
-    assert ".venv/.gepa-env-spec.sha256" in build
-    assert ".venv/.gepa-python-version" in build
-    assert ".venv/.gepa-uv-version" in build
-    assert ".venv/.gepa-uv-sha256" in build
-    assert "examples.common.model_snapshot prepare" in build
-    assert "examples.common.model_snapshot verify" in build
-    assert 'qwen3.8-27b) MODEL_DIR="${MODEL_STORAGE}/Qwen3.8-27B"' in build
-    assert 'deepseek-v4.1-flash) MODEL_DIR="${MODEL_STORAGE}/DeepSeek-V4.1-Flash"' in build
-    assert '--model-profile "${MODEL}" --root "${MODEL_DIR}"' in build
-    assert "GLM" not in build
-    assert "zai-org" not in build
-    assert "canary" not in build.lower()
-    assert 'exec {MODEL_LOCK_FD}<"${MODEL_DIR}"' in build
-    assert 'flock -n "${MODEL_LOCK_FD}"' in build
-    assert 'examples.common.wiki17_bm25 verify --deep --root "${WIKI17_DIR}"' in build
-    assert "load_hotpotqa_dataset as load" in build
-    assert "load(seed=0)" in build
-    # Hours-long checkpoint downloads must not depend on the laptop's ssh session.
-    assert "nohup setsid bash -c" in build
-    assert "scripts/della/remote/download_model.sh" in build
-    assert "set -- qwen3.8-27b deepseek-v4.1-flash" in build
+    remote = REPO_ROOT / "scripts" / "della" / "remote"
+    setup = (remote / "setup_env.sh").read_text()
+    dataset = (remote / "download_dataset.sh").read_text()
+    model = (remote / "download_model.sh").read_text()
+    assert 'PYTHON_VERSION="3.11.13"' in setup
+    assert 'UV_VERSION="0.9.13"' in setup
+    assert "UV_UNMANAGED_INSTALL" in setup
+    assert "--frozen --no-install-project" in setup
+    assert "--check" in setup
+    assert 'flock -n "${ARTIFACT_LOCK_FD}"' in setup
+    assert 'flock -n "${ARTIFACT_LOCK_FD}"' in dataset
+    assert "validate_hotpotqa_dspy_runtime" in setup
+    assert "examples.common.python_environment prepare" in setup
+    assert "python-environments/gepa-${ENV_SPEC}.json" in setup
+    assert "serving-environments/${LOCK_SHA}.json" in setup
+    assert "pip check" in setup
+    assert "--require-hashes" in setup
+    for marker in (".gepa-env-spec.sha256", ".gepa-python-version", ".gepa-uv-version", ".gepa-uv-sha256"):
+        assert marker in setup
+    assert "examples.common.model_snapshot prepare" in model
+    assert "examples.common.model_snapshot verify" in model
+    assert 'qwen3.8-27b) MODEL_DIR="${MODEL_STORAGE}/Qwen3.8-27B"' in model
+    assert 'deepseek-v4.1-flash) MODEL_DIR="${MODEL_STORAGE}/DeepSeek-V4.1-Flash"' in model
+    assert 'exec {MODEL_LOCK_FD}<"${MODEL_DIR}"' in model
+    assert 'flock -n "${MODEL_LOCK_FD}"' in model
+    assert 'examples.common.wiki17_bm25 verify --deep --root "${WIKI17_DIR}"' in dataset
+    assert "load(seed=0)" in dataset
+    assert "nohup setsid" in build
+    for name in ("setup_env.sh", "download_dataset.sh", "download_model.sh"):
+        assert f"scripts/della/remote/{name}" in build
+    for pattern in (".serving-venv/", ".serving-venv-*/", ".tools/"):
+        assert f"--exclude '{pattern}'" in sync
     assert "load_hover_dataset" not in build
     assert "--exclude '.cache/'" in sync
-    assert "--exclude '.serving-venv/'" in sync
-    assert "--exclude '.serving-venv-*/'" in sync
-    assert "--exclude '.tools/'" in sync
     assert "--exclude 'logs/'" in sync
     assert "--exclude 'sources/'" in sync
     assert 'git -C "${REPO_ROOT}" archive "${SYNC_SOURCE_COMMIT}"' in sync
@@ -1817,9 +1806,9 @@ def test_hover_della_submit_preserves_artifact_methodology() -> None:
     assert 'FINAL_RETRIEVAL_K="${FINAL_RETRIEVAL_K:-10}"' in submit
     assert 'MODEL="${MODEL:-Qwen3.8-27B}"' in submit
     assert 'SOLVER_MODEL="hosted_vllm/Qwen/Qwen3.8-27B"' in submit
-    assert 'SOLVER_MODEL="deepseek/deepseek-v4-flash"' in submit
+    assert 'SOLVER_MODEL="hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash"' in submit
     assert 'REFLECTION_MODEL="${SOLVER_MODEL}"' in submit
-    assert "DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}" in submit
+    assert "DEEPSEEK_API_KEY" not in submit
     assert "examples.common.wiki17_bm25 verify" in submit
     assert "load_hover_dataset(seed=0" in submit
     assert "WIKI17_DIR=${WIKI17_DIR}" in submit
@@ -1838,67 +1827,3 @@ def test_hover_della_submit_preserves_artifact_methodology() -> None:
         "POSIT_DIR",
     ):
         assert f"{variable}=${{{variable}}}" in submit
-
-
-def test_deepseek_serving_verification_is_manual_and_mirrors_the_sbatch() -> None:
-    """Keep the DeepSeek serving check a standalone manual tool with the campaign's exact vLLM flags."""
-    verify = (REPO_ROOT / "scripts" / "della" / "verify_deepseek_serving.sh").read_text()
-    submit = (REPO_ROOT / "scripts" / "della" / "submit_hotpotqa.sh").read_text()
-    sbatch = (REPO_ROOT / "examples" / "hotpotqa" / "run_hotpotqa.sbatch").read_text()
-
-    assert "verify_deepseek_serving" not in submit
-    assert "verify_serving" not in submit
-    assert "verify_serving" not in sbatch
-    command_lines = [line for line in verify.splitlines() if not line.lstrip().startswith("#")]
-    assert not any("sbatch" in line for line in command_lines)
-    assert "flock" not in verify
-    assert "canary" not in verify.lower()
-    assert ".ok" not in verify
-    assert "examples.hotpotqa.verify_serving" in verify
-    assert "examples.hotpotqa.smoke_serving" in verify
-    assert 'SERVING_VENV_DIR="${SERVING_VENV_DIR:-${REPO_ROOT}/.serving-venv-deepseek-v4.1-flash}"' in verify
-    smoke = (REPO_ROOT / "scripts" / "della" / "smoke_deepseek_serving.sbatch").read_text()
-    assert "#SBATCH --partition=ailab" in smoke
-    assert "#SBATCH --gres=gpu:8" in smoke
-    assert "exec scripts/della/verify_deepseek_serving.sh" in smoke
-    assert "smoke_deepseek_serving" not in submit
-    assert 'SOLVER_MODEL="hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash"' in verify
-    assert 'SOLVER_SERVED_NAME="deepseek-ai/DeepSeek-V4.1-Flash"' in verify
-    assert "from vllm import ModelRegistry" in verify
-    assert "HF_HUB_OFFLINE=1" in verify
-    for shared_flag in (
-        '"${VLLM_BIN}" serve "${SOLVER_MODEL_PATH}"',
-        '--served-model-name "${SOLVER_SERVED_NAME}"',
-        "--enable-auto-tool-choice",
-        '--gpu-memory-utilization "${GEN_GMU}"',
-        '--max-model-len "${GEN_MAX_LEN}"',
-        "--max-num-seqs 1",
-        '--max-num-batched-tokens "${VLLM_MAX_NUM_BATCHED_TOKENS}"',
-        "--dtype bfloat16",
-        "--seed 0",
-        "--no-enable-prefix-caching",
-        "--language-model-only",
-        "--tokenizer-mode deepseek_v41",
-        "--reasoning-parser deepseek_v41",
-        "--tool-call-parser deepseek_v41",
-        "--tensor-parallel-size 8",
-        "--enable-expert-parallel",
-        "--data-parallel-size 1",
-        "--api-server-count 1",
-        "--kv-cache-dtype fp8",
-        "FLASHINFER_NO_DOWNLOAD=1",
-        "VLLM_ENGINE_READY_TIMEOUT_S=3600",
-        "GEN_GMU=0.92",
-        "GEN_MAX_LEN=262144",
-    ):
-        assert shared_flag in verify, shared_flag
-        assert shared_flag in sbatch, shared_flag
-    for forbidden_flag in (
-        "--speculative-config",
-        "--trust-remote-code",
-        "--moe-backend",
-        "--enable-prefix-caching ",
-        "--block-size",
-    ):
-        assert forbidden_flag not in verify
-        assert forbidden_flag not in sbatch

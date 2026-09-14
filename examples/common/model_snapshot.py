@@ -287,9 +287,7 @@ def verify_model_snapshot(root: str | Path, model_profile: str) -> dict[str, obj
         if source_oid_kind == "lfs_sha256":
             authoritative_match = len(source_oid) == 64 and digest == source_oid
         else:
-            authoritative_match = (
-                len(source_oid) == 40 and _git_blob_sha1(path, int(record["size"])) == source_oid
-            )
+            authoritative_match = len(source_oid) == 40 and _git_blob_sha1(path, int(record["size"])) == source_oid
         if not authoritative_match:
             raise ModelSnapshotError(f"Pinned model file differs from authoritative repository bytes: {path}")
         if digest != record.get("sha256"):

@@ -10,6 +10,10 @@ from unittest.mock import Mock
 
 import pytest
 
+from gepa.core.data_loader import ListDataLoader
+from gepa.strategies.batch_sampler import IndependentEpochShuffledBatchSampler
+from gepa.strategies.text_limits import TextLimits
+
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
 from examples.common.experiment_models import (
@@ -49,14 +53,12 @@ from examples.hotpotqa.main import (
     dump_candidates as dump_hotpotqa_candidates,
 )
 from examples.hotpotqa.main import (
+    run_condition as run_hotpotqa_condition,
+)
+from examples.hotpotqa.main import (
     seed_candidate as hotpotqa_seed_candidate,
 )
-from examples.hotpotqa.utils import (
-    HOTPOTQA_HF_REVISION,
-    HOTPOTQA_NUM_RETRIES,
-    HOTPOTQA_REQUEST_TIMEOUT_SECONDS,
-    HOTPOTQA_SCIENTIFIC_SPLIT_SHA256,
-)
+from examples.hotpotqa.utils import HOTPOTQA_HF_REVISION, HOTPOTQA_SCIENTIFIC_SPLIT_SHA256, resolve_hotpotqa_lm_kwargs
 from examples.hover.main import _run_key as hover_run_key
 from examples.hover.main import build_config as build_hover_config
 from examples.hover.main import build_run_contract as build_hover_run_contract
@@ -79,16 +81,22 @@ from gepa.strategies.proposal_sampling import SingleMutationSampling
 from gepa.strategies.proposal_selection import AllImprovements
 
 LOCAL_API_BASE = "http://127.0.0.1:8000/v1"
-H200_GPU_RUNTIME = json.dumps(
-    {
-        "compute_capabilities": ["9.0"] * 8,
-        "count": 8,
-        "driver_version": "580.82",
-        "names": ["NVIDIA H200"] * 8,
-    },
-    sort_keys=True,
-    separators=(",", ":"),
-)
+
+
+def h200_gpu_runtime(count: int) -> str:
+    """Build the canonical hardware record for a model's allocated GPU count."""
+    return json.dumps(
+        {
+            "compute_capabilities": ["9.0"] * count,
+            "count": count,
+            "driver_version": "580.82",
+            "names": ["NVIDIA H200"] * count,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 QWEN_SERVE_ARGUMENTS = (
     "tp=1;gpu_memory_utilization=0.92;max_model_len=262144;rope_scaling=none;max_num_seqs=1;"
     "dtype=bfloat16;kv_cache_dtype=auto;prefix_caching=false;reasoning_parser=qwen3;"
@@ -96,17 +104,14 @@ QWEN_SERVE_ARGUMENTS = (
     "single_sequence_replicas=true"
 )
 DEEPSEEK_SERVE_ARGUMENTS = (
-    "tp=8;ep=8;dp=1;api_servers=1;dp_attention=false;speculative_decoding=false;"
-    "gpu_memory_utilization=0.92;max_model_len=262144;rope_scaling=none;max_num_seqs=1;"
-    "max_num_batched_tokens=16384;dtype=bfloat16;weight_quant=fp8;expert_dtype=fp4;kv_cache_dtype=fp8;"
-    "block_size=auto;prefix_caching=false;language_model_only=true;tokenizer_mode=deepseek_v41;"
-    "reasoning_parser=deepseek_v41;auto_tool_choice=true;tool_parser=deepseek_v41;seed=0;batch_invariant=false;"
-    "single_sequence_replicas=true"
+    "tp=4;ep=4;dp=1;api_servers=1;gpu_memory_utilization=0.92;max_model_len=262144;max_num_seqs=1;"
+    "dtype=bfloat16;weight_dtype=fp8;expert_dtype=fp4;engram_cpu_offload=true;kv_cache_dtype=fp8;block_size=auto;prefix_caching=false;"
+    "tokenizer_mode=deepseek_v41;reasoning_parser=deepseek_v41;auto_tool_choice=true;tool_parser=deepseek_v41;"
+    "speculative_decoding=false;seed=0;batch_invariant=false;single_sequence_replicas=true"
 )
 COMMON_SCIENTIFIC_RUNTIME = {
     "HOTPOTQA_MODEL_INTEGRITY_SHA256": "c" * 64,
     "HOTPOTQA_TRANSFORMERS_VERSION": "5.8.0",
-    "HOTPOTQA_GPU_RUNTIME": H200_GPU_RUNTIME,
     "HOTPOTQA_SOURCE_COMMIT": "a" * 40,
     "HOTPOTQA_SOURCE_MANIFEST_SHA256": "e" * 64,
     "HOTPOTQA_PYTHON_VERSION": "3.11.13",
@@ -119,6 +124,7 @@ COMMON_SCIENTIFIC_RUNTIME = {
 }
 QWEN_SCIENTIFIC_RUNTIME = {
     **COMMON_SCIENTIFIC_RUNTIME,
+    "HOTPOTQA_GPU_RUNTIME": h200_gpu_runtime(1),
     "HOTPOTQA_MODEL_REVISION": QWEN3_8_27B_REVISION,
     "HOTPOTQA_WEIGHT_DTYPE": "bfloat16",
     "HOTPOTQA_KV_CACHE_DTYPE": "auto",
@@ -132,15 +138,16 @@ QWEN_SCIENTIFIC_RUNTIME = {
 }
 DEEPSEEK_SCIENTIFIC_RUNTIME = {
     **COMMON_SCIENTIFIC_RUNTIME,
+    "HOTPOTQA_GPU_RUNTIME": h200_gpu_runtime(4),
     "HOTPOTQA_MODEL_REVISION": DEEPSEEK_V4_1_FLASH_REVISION,
     "HOTPOTQA_WEIGHT_DTYPE": "fp8",
     "HOTPOTQA_KV_CACHE_DTYPE": "fp8",
     "HOTPOTQA_SERVING_ENGINE": "vllm",
+    "HOTPOTQA_VLLM_VERSION": "0.1.1.dev5+ge77daef89",
+    "HOTPOTQA_SERVING_LOCK_SHA256": "b" * 64,
+    "HOTPOTQA_SERVING_ENV_SHA256": "1" * 64,
     "HOTPOTQA_VLLM_BATCH_INVARIANT": "false",
     "HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS": "true",
-    "HOTPOTQA_VLLM_VERSION": "0.25.1",
-    "HOTPOTQA_SERVING_LOCK_SHA256": "b" * 64,
-    "HOTPOTQA_SERVING_ENV_SHA256": "3" * 64,
     "HOTPOTQA_SERVE_ARGUMENTS": DEEPSEEK_SERVE_ARGUMENTS,
 }
 
@@ -252,12 +259,285 @@ def test_experiment_model_pairs_build_without_running_an_experiment(model: str, 
     assert strategy.proposer_model == model
     assert strategy.component_kinds == {"summarize1": "system_prompt"}
     assert strategy.rng is strategy_rng
+    assert strategy.max_chars is None
     assert {tool.value for tool in strategy.edit_tools} == {
         "INSERT_TEXT",
         "DELETE_TEXT",
         "REPLACE_TEXT",
         "MOVE_TEXT",
     }
+
+
+@pytest.mark.parametrize("condition", ["vanilla", "react_v2", "react_v2_random", "action"])
+@pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL])
+def test_hotpotqa_text_limits_reach_roles_and_contracts(condition: str, model: str, tmp_path: Path) -> None:
+    """Keep optional limits identical in actual role wiring and saved run identity."""
+    limits = TextLimits(
+        max_component_chars=25000,
+        max_candidate_chars=100000,
+        selector_target_chars=20000,
+        max_prompt_chars=200000,
+        controller_feedback_chars=17000,
+        stateless_feedback_chars=15000,
+        manifestor_trace_chars=80000,
+        manifestor_steering_chars=3000,
+        history_text_chars=7000,
+    )
+    args = _hotpot_args(solver_model=model, reflection_model=model, text_limits=limits.to_dict())
+    config, selector = build_hotpotqa_config(condition, args, resolve_hotpotqa_lm_kwargs(model, None))
+    contract = build_hotpotqa_run_contract(condition, args)
+    assert config.reflection.text_limits == limits
+    assert contract["optimizer"]["text_limits"] == limits.to_dict()
+    assert contract["optimizer"]["document_length"] == limits.document_contract()
+    assert contract["optimizer"]["manifestor_traces_chars"] == 80000
+    if condition in ("react_v2", "react_v2_random"):
+        assert config.reflection.reflection_strategy.text_limits == limits
+        assert config.reflection.reflection_strategy.max_chars == 25000
+    if condition == "action":
+        assert selector.text_limits == limits
+    ensure_wikipedia_run_contract(tmp_path, contract)
+    args.text_limits["manifestor_steering_chars"] = 3001
+    with pytest.raises(ValueError, match="different Wikipedia benchmark configuration"):
+        ensure_wikipedia_run_contract(tmp_path, build_hotpotqa_run_contract(condition, args))
+
+
+@pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL])
+@pytest.mark.parametrize(
+    ("budget", "condition"),
+    [
+        (budget, condition)
+        for budget, conditions in _SCIENTIFIC_CONDITIONS_BY_BUDGET.items()
+        for condition in conditions
+    ],
+)
+def test_hotpot_provider_sampling_reaches_every_model_role(model: str, budget: int, condition: str) -> None:
+    """Apply role-specific provider sampling through all six cells and persist actual values."""
+    args = _hotpot_args(solver_model=model, reflection_model=model, max_metric_calls=budget)
+    general = experiment_decoding(model, agentic=False)
+    agentic = experiment_decoding(model, agentic=True)
+    reflection_kwargs = resolve_hotpotqa_lm_kwargs(model, None, role="optimizer")
+    request_overrides = experiment_request_overrides(model, explicit_reasoning=True)
+    config, selector = build_hotpotqa_config(condition, args, reflection_kwargs)
+    contract = build_hotpotqa_run_contract(condition, args)
+    assert config.engine.cache_evaluation is False
+    sampler = config.reflection.batch_sampler
+    assert isinstance(sampler, IndependentEpochShuffledBatchSampler)
+    assert contract["optimizer"]["training_batch_order"] == sampler.contract()
+    assert sampler.seed == args.seed
+    assert sampler.minibatch_size == config.reflection.reflection_minibatch_size == 3
+    expected_rng = random.Random(args.seed)
+    loader = ListDataLoader(list(range(150)))
+    for epoch in range(2):
+        expected_ids = list(range(150))
+        expected_rng.shuffle(expected_ids)
+        actual_ids = [
+            index
+            for iteration in range(epoch * 50, (epoch + 1) * 50)
+            for index in sampler.next_minibatch_ids(loader, SimpleNamespace(i=iteration))
+        ]
+        assert actual_ids == expected_ids
+    assert contract["program"]["cache_evaluation"] is False
+    assert contract["program"]["dspy_disk_cache"] is False
+    assert contract["program"]["dspy_memory_cache"] is False
+    assert contract["optimizer"]["document_length"] == {
+        "version": 2,
+        "max_component_chars": None,
+        "max_candidate_chars": None,
+        "selector_target_chars": None,
+    }
+    optimizer_general = {**general, "max_tokens": reflection_kwargs["max_tokens"]}
+    optimizer_agentic = {**agentic, "max_tokens": reflection_kwargs["max_tokens"]}
+    expected = general["temperature"]
+
+    assert expected == 1.0
+    assert contract["models"]["solver_decoding"]["temperature"] == expected
+    assert config.reflection.reflection_lm_kwargs["temperature"] == expected
+    expected_output_cap = 131_072 if model == DEEPSEEK_V4_1_FLASH_MODEL else 32_768
+    expected_solver_cap = 32_768 if model == DEEPSEEK_V4_1_FLASH_MODEL else 16_384
+    assert contract["models"]["solver_decoding"]["max_tokens"] == expected_solver_cap
+    assert contract["models"]["reflection_decoding"]["max_tokens"] == expected_output_cap
+    assert config.reflection.reflection_lm_kwargs["max_tokens"] == expected_output_cap
+    assert contract["models"]["solver_decoding"]["top_p"] == general["top_p"]
+    assert config.reflection.reflection_lm_kwargs["top_p"] == general["top_p"]
+    assert config.reflection.reflection_lm_kwargs["extra_body"] == request_overrides["extra_body"]
+    assert contract["models"]["solver_request_overrides"] == request_overrides
+    assert contract["models"]["reflection_request_overrides"] == request_overrides
+    if selector is not None:
+        assert selector.lm.completion_kwargs["max_tokens"] == expected_output_cap
+        assert selector.lm.completion_kwargs["temperature"] == expected
+        assert selector.lm.completion_kwargs["top_p"] == general["top_p"]
+        assert selector.lm.completion_kwargs["extra_body"] == request_overrides["extra_body"]
+    strategy = config.reflection.reflection_strategy
+    if strategy is not None:
+        assert strategy.base_lm.completion_kwargs["max_tokens"] == expected_output_cap
+        assert strategy.manifestor_lm.completion_kwargs["max_tokens"] == expected_output_cap
+        assert strategy.base_lm.completion_kwargs["temperature"] == expected
+        assert strategy.manifestor_lm.completion_kwargs["temperature"] == expected
+        assert strategy.base_lm.completion_kwargs["top_p"] == agentic["top_p"]
+        assert strategy.manifestor_lm.completion_kwargs["top_p"] == general["top_p"]
+        assert strategy.base_lm.completion_kwargs["extra_body"] == request_overrides["extra_body"]
+        assert strategy.manifestor_lm.completion_kwargs["extra_body"] == request_overrides["extra_body"]
+        roles = contract["models"]["reflection_role_decoding"]
+        assert roles["manifestor"]["requested"] == {**optimizer_general, "seed": 0}
+        assert roles["react_v2_proposer"]["requested"] == {**optimizer_agentic, "seed": 0}
+        if condition == "react_v2":
+            assert strategy.controller_lm.completion_kwargs["max_tokens"] == expected_output_cap
+            assert strategy.controller_lm.completion_kwargs["top_p"] == general["top_p"]
+            assert strategy.controller_lm.completion_kwargs["extra_body"] == request_overrides["extra_body"]
+            assert roles["controller"]["requested"] == {**optimizer_general, "seed": 0}
+        else:
+            assert roles["controller"] is None
+
+
+@pytest.mark.parametrize("role", ["solver", "reflection"])
+def test_hotpot_rejects_resume_with_changed_request_timeout(tmp_path: Path, role: str) -> None:
+    """Keep a request-deadline change from silently altering a resumed run."""
+    contract = build_hotpotqa_run_contract("react_v2", _hotpot_args())
+    assert contract["models"][f"{role}_request_timeout_seconds"] == 3600
+    old = deepcopy(contract)
+    old["models"][f"{role}_request_timeout_seconds"] = 600
+    ensure_wikipedia_run_contract(tmp_path, old)
+    with pytest.raises(ValueError, match="different Wikipedia benchmark configuration"):
+        ensure_wikipedia_run_contract(tmp_path, contract)
+
+
+@pytest.mark.parametrize("damage", ["missing", "shared", "seed"])
+def test_hotpot_rejects_changed_training_batch_order(tmp_path: Path, damage: str) -> None:
+    """Require a fresh run after changing the training shuffle policy."""
+    contract = build_hotpotqa_run_contract("react_v2", _hotpot_args())
+    old = deepcopy(contract)
+    if damage == "missing":
+        del old["optimizer"]["training_batch_order"]
+    elif damage == "shared":
+        old["optimizer"]["training_batch_order"]["rng_stream"] = "shared"
+    else:
+        old["optimizer"]["training_batch_order"]["seed"] += 1
+    ensure_wikipedia_run_contract(tmp_path, old)
+    with pytest.raises(ValueError, match="different Wikipedia benchmark configuration"):
+        ensure_wikipedia_run_contract(tmp_path, contract)
+
+
+def test_hotpot_training_order_survives_real_engine_resume(tmp_path: Path) -> None:
+    """Exercise HotPotQA's launcher and checkpoints without making model requests."""
+    args = _hotpot_args(seed=19, max_metric_calls=1000)
+    run_dir = tmp_path / "run"
+    stop_file = run_dir / "gepa.stop"
+    batches = []
+
+    class Recorder:
+        """Capture training batches and request one durable pause."""
+
+        def on_minibatch_sampled(self, event):
+            """Stop after the fifth minibatch has finished its work."""
+            batches.append(event["minibatch_ids"])
+            if len(batches) == 5:
+                stop_file.touch()
+
+    def evaluate(candidate, example):
+        """Skip reflection so the test never contacts a model provider."""
+        return 1.0, {"feedback": "Perfect; no reflection needed"}
+
+    def run():
+        """Rebuild the entry-point configuration for each process restart."""
+        config, _ = build_hotpotqa_config("vanilla", args, {}, run_dir=str(run_dir))
+        config.engine.max_candidate_proposals = 110
+        config.engine.parallel = False
+        run_hotpotqa_condition(
+            "offline sampling",
+            {"system_prompt": "Answer the question"},
+            [{"id": index} for index in range(150)],
+            [{"id": "validation"}],
+            config,
+            evaluate,
+            callbacks=[Recorder()],
+        )
+
+    run()
+    assert len(batches) == 5
+    stop_file.unlink()
+    run()
+    assert len(batches) == 110
+    run()
+    assert len(batches) == 110
+    rng = random.Random(args.seed)
+    expected = []
+    for _ in range(3):
+        ids = list(range(150))
+        rng.shuffle(ids)
+        expected.extend(ids[start : start + 3] for start in range(0, 150, 3))
+    assert batches == expected[:110]
+
+
+def test_hotpot_rejects_resume_with_the_previous_manifestor_temperature(tmp_path: Path) -> None:
+    """Prevent continuing a Manifestor-0.0 checkpoint under provider-temperature sampling."""
+    contract = build_hotpotqa_run_contract("react_v2", _hotpot_args())
+    old = deepcopy(contract)
+    old["models"]["reflection_role_decoding"]["manifestor"]["requested"]["temperature"] = 0.0
+    ensure_wikipedia_run_contract(tmp_path, old)
+
+    with pytest.raises(ValueError, match="different Wikipedia benchmark configuration"):
+        ensure_wikipedia_run_contract(tmp_path, contract)
+
+
+@pytest.mark.parametrize("role", ["controller", "manifestor", "react_v2_proposer"])
+def test_hotpot_rejects_resume_with_changed_role_top_p(tmp_path: Path, role: str) -> None:
+    """Reject sampling drift in any FOREST role before continuing optimization."""
+    args = _hotpot_args(solver_model=DEEPSEEK_V4_1_FLASH_MODEL, reflection_model=DEEPSEEK_V4_1_FLASH_MODEL)
+    contract = build_hotpotqa_run_contract("react_v2", args)
+    old = deepcopy(contract)
+    old["models"]["reflection_role_decoding"][role]["requested"]["top_p"] = 0.5
+    ensure_wikipedia_run_contract(tmp_path, old)
+    with pytest.raises(ValueError, match="different Wikipedia benchmark configuration"):
+        ensure_wikipedia_run_contract(tmp_path, contract)
+
+
+@pytest.mark.parametrize("role", ["solver", "reflection"])
+@pytest.mark.parametrize("damage", ["implicit", "lower_effort", "thinking_disabled"])
+def test_hotpot_rejects_missing_or_changed_reasoning_settings(tmp_path: Path, role: str, damage: str) -> None:
+    """Reject earlier implicit Qwen settings and changed reasoning behavior on resume."""
+    contract = build_hotpotqa_run_contract("react_v2", _hotpot_args())
+    old = deepcopy(contract)
+    if damage == "implicit":
+        old["models"][f"{role}_request_overrides"] = {}
+    else:
+        template_kwargs = old["models"][f"{role}_request_overrides"]["extra_body"]["chat_template_kwargs"]
+        if damage == "lower_effort":
+            template_kwargs["reasoning_effort"] = "low"
+        else:
+            template_kwargs["enable_thinking"] = False
+    ensure_wikipedia_run_contract(tmp_path, old)
+    with pytest.raises(ValueError, match="different Wikipedia benchmark configuration"):
+        ensure_wikipedia_run_contract(tmp_path, contract)
+
+
+@pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL])
+def test_role_specific_sampling_keeps_distinct_journal_namespaces(tmp_path: Path, model: str) -> None:
+    """Share identical Controller/editor clients and isolate different sampling profiles."""
+    strategy, family = build_react_v2_strategy(
+        reflection_model=model,
+        task_model=model,
+        lm_kwargs={
+            **experiment_decoding(model, agentic=False),
+            "response_journal_path": str(tmp_path / "responses.sqlite3"),
+        },
+        level=2,
+        edit_tool_set="broad",
+        template_family="auto",
+        react_top_p=float(experiment_decoding(model, agentic=True)["top_p"]),
+        manifestor_temperature=1.0,
+    )
+    assert strategy.controller_lm is strategy.base_lm
+    expected_namespaces = ("controller-proposer", "controller-proposer", "manifestor")
+    assert (
+        tuple(
+            client._response_journal.namespace
+            for client in (strategy.base_lm, strategy.controller_lm, strategy.manifestor_lm)
+        )
+        == expected_namespaces
+    )
+    contract = strategy.run_contract({"sys": structured_prompt("Answer accurately.", family, "system_prompt")})
+    assert contract["controller_lm"]["completion_kwargs"]["top_p"] == experiment_decoding(model, agentic=False)["top_p"]
+    assert contract["proposer_lm"]["completion_kwargs"]["top_p"] == 0.95
 
 
 def _hotpot_args(**overrides):
@@ -413,7 +693,7 @@ def test_hotpot_scientific_campaign_contains_only_the_six_approved_cells() -> No
 
 
 def test_hotpot_scientific_contract_accepts_the_pinned_deepseek_runtime(monkeypatch) -> None:
-    """Accept DeepSeek only under the exact local vLLM TP8/EP8 serving contract.
+    """Accept DeepSeek only under the exact local vLLM serving contract.
 
     Args:
         monkeypatch: Pytest fixture used to install recorded runtime metadata.
@@ -439,6 +719,33 @@ def test_hotpot_scientific_contract_accepts_the_pinned_deepseek_runtime(monkeypa
 
 
 @pytest.mark.parametrize(
+    "model,runtime,expected_count",
+    [(QWEN3_8_27B_MODEL, QWEN_SCIENTIFIC_RUNTIME, 1), (DEEPSEEK_V4_1_FLASH_MODEL, DEEPSEEK_SCIENTIFIC_RUNTIME, 4)],
+)
+@pytest.mark.parametrize("gpu_count", [1, 4, 8])
+def test_hotpot_scientific_contract_enforces_model_gpu_count(monkeypatch, model, runtime, expected_count, gpu_count):
+    """Reject the former eight-GPU default and allocations meant for the other model."""
+    for name, value in {**runtime, "HOTPOTQA_GPU_RUNTIME": h200_gpu_runtime(gpu_count)}.items():
+        monkeypatch.setenv(name, value)
+    args = _hotpot_args(
+        enforce_scientific_contract=True,
+        max_metric_calls=6_871,
+        solver_model=model,
+        reflection_model=model,
+        solver_api_base=LOCAL_API_BASE,
+        reflection_api_base=LOCAL_API_BASE,
+        train_limit=None,
+        val_limit=None,
+        test_limit=None,
+    )
+    if gpu_count == expected_count:
+        _validate_scientific_contract(args)
+    else:
+        with pytest.raises(ValueError, match=f"exactly {expected_count} H200"):
+            _validate_scientific_contract(args)
+
+
+@pytest.mark.parametrize(
     ("environment", "message"),
     [
         ({"HOTPOTQA_MODEL_REVISION": "moving-main"}, "HOTPOTQA_MODEL_REVISION"),
@@ -446,24 +753,19 @@ def test_hotpot_scientific_contract_accepts_the_pinned_deepseek_runtime(monkeypa
         ({"HOTPOTQA_WEIGHT_DTYPE": "bfloat16"}, "HOTPOTQA_WEIGHT_DTYPE"),
         ({"HOTPOTQA_KV_CACHE_DTYPE": "bfloat16"}, "HOTPOTQA_KV_CACHE_DTYPE"),
         ({"HOTPOTQA_SERVING_ENGINE": "sglang"}, "HOTPOTQA_SERVING_ENGINE"),
-        ({"HOTPOTQA_VLLM_BATCH_INVARIANT": "true"}, "HOTPOTQA_VLLM_BATCH_INVARIANT"),
-        (
-            {"HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS": "false"},
-            "HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS",
-        ),
-        ({"HOTPOTQA_VLLM_VERSION": ""}, "HOTPOTQA_VLLM_VERSION"),
+        ({"HOTPOTQA_VLLM_VERSION": "0.24.0"}, "HOTPOTQA_VLLM_VERSION"),
         ({"HOTPOTQA_SERVING_LOCK_SHA256": "moving-main"}, "HOTPOTQA_SERVING_LOCK_SHA256"),
-        ({"HOTPOTQA_SERVING_ENV_SHA256": "moving-environment"}, "HOTPOTQA_SERVING_ENV_SHA256"),
+        ({"HOTPOTQA_SERVING_ENV_SHA256": "moving-env"}, "HOTPOTQA_SERVING_ENV_SHA256"),
         ({"HOTPOTQA_TRANSFORMERS_VERSION": ""}, "HOTPOTQA_TRANSFORMERS_VERSION"),
         ({"HOTPOTQA_GPU_RUNTIME": "{}"}, "HOTPOTQA_GPU_RUNTIME"),
         ({"HOTPOTQA_SERVE_ARGUMENTS": "tp=8"}, "HOTPOTQA_SERVE_ARGUMENTS"),
         (
-            {"HOTPOTQA_SERVE_ARGUMENTS": DEEPSEEK_SERVE_ARGUMENTS.replace("max_num_seqs=1", "max_num_seqs=8")},
-            "max_num_seqs=1",
-        ),
-        (
-            {"HOTPOTQA_SERVE_ARGUMENTS": DEEPSEEK_SERVE_ARGUMENTS.replace("ep=8;", "")},
-            "ep=8",
+            {
+                "HOTPOTQA_SERVE_ARGUMENTS": DEEPSEEK_SERVE_ARGUMENTS.replace(
+                    "engram_cpu_offload=true", "engram_cpu_offload=false"
+                )
+            },
+            "engram_cpu_offload=true",
         ),
     ],
 )
@@ -650,11 +952,54 @@ def test_hotpot_scientific_contract_rejects_qwen_runtime_drift(
 
 
 @pytest.mark.parametrize(
+    "model,runtime",
+    [(QWEN3_8_27B_MODEL, QWEN_SCIENTIFIC_RUNTIME), (DEEPSEEK_V4_1_FLASH_MODEL, DEEPSEEK_SCIENTIFIC_RUNTIME)],
+)
+@pytest.mark.parametrize("sequences", [1, 2, 4, 3])
+def test_batching_profile_is_validated_and_frozen(monkeypatch, tmp_path, model, runtime, sequences):
+    """Allow the measured batch sizes and reject resume into a different profile."""
+    for name, value in runtime.items():
+        monkeypatch.setenv(name, value)
+    args = _hotpot_args(
+        solver_model=model,
+        reflection_model=model,
+        enforce_scientific_contract=True,
+        max_metric_calls=6871,
+        train_limit=None,
+        val_limit=None,
+        test_limit=None,
+        data_identity=_scientific_data_identity(),
+    )
+    initial = build_hotpotqa_run_contract("react_v2", args)
+    ensure_wikipedia_run_contract(tmp_path, initial)
+    single = "true" if sequences == 1 else "false"
+    serve = runtime["HOTPOTQA_SERVE_ARGUMENTS"].replace("max_num_seqs=1", f"max_num_seqs={sequences}")
+    serve = serve.replace("single_sequence_replicas=true", f"single_sequence_replicas={single}")
+    monkeypatch.setenv("HOTPOTQA_SERVE_ARGUMENTS", serve)
+    monkeypatch.setenv("HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS", single)
+    if sequences == 3:
+        with pytest.raises(ValueError, match="max_num_seqs"):
+            build_hotpotqa_run_contract("react_v2", args)
+        return
+    contract = build_hotpotqa_run_contract("react_v2", args)
+    assert f"max_num_seqs={sequences}" in contract["execution_runtime"]["serve_arguments"]
+    if sequences == 1:
+        ensure_wikipedia_run_contract(tmp_path, contract)
+    else:
+        with pytest.raises(ValueError, match="different Wikipedia benchmark configuration"):
+            ensure_wikipedia_run_contract(tmp_path, contract)
+
+
+@pytest.mark.parametrize(
     ("changed_field", "message"),
     [
         ("revision", "revision"),
         ("train_count", "train split"),
+        ("train_digest", "train split"),
+        ("val_count", "val split"),
         ("val_digest", "val split"),
+        ("test_count", "test split"),
+        ("test_digest", "test split"),
     ],
 )
 def test_hotpot_scientific_data_identity_rejects_split_drift(changed_field: str, message: str) -> None:
@@ -667,10 +1012,12 @@ def test_hotpot_scientific_data_identity_rejects_split_drift(changed_field: str,
     identity = _scientific_data_identity()
     if changed_field == "revision":
         identity["source"]["revision"] = "moving-main"
-    elif changed_field == "train_count":
-        identity["splits"]["train"]["count"] = 149
     else:
-        identity["splits"]["val"]["sha256"] = "corrupt"
+        split, field = changed_field.split("_")
+        if field == "count":
+            identity["splits"][split]["count"] -= 1
+        else:
+            identity["splits"][split]["sha256"] = "corrupt"
     args = _hotpot_args(enforce_scientific_contract=True, data_identity=identity)
 
     with pytest.raises(ValueError, match=message):
@@ -907,24 +1254,28 @@ def test_hotpot_and_hover_contracts_record_exact_model_pair() -> None:
         assert contract["models"]["solver_api_base"] == "http://localhost:8000/v1"
         assert contract["models"]["reflection"] == QWEN3_8_27B_MODEL
         assert contract["models"]["reflection_api_base"] == "http://localhost:8000/v1"
-        expected_retries = HOTPOTQA_NUM_RETRIES if contract is hotpot else EXPERIMENT_NUM_RETRIES
-        assert contract["models"]["solver_num_retries"] == expected_retries
-        assert contract["models"]["reflection_num_retries"] == expected_retries
+        assert contract["models"]["solver_num_retries"] == EXPERIMENT_NUM_RETRIES
+        assert contract["models"]["reflection_num_retries"] == EXPERIMENT_NUM_RETRIES
         assert contract["optimizer"]["max_metric_calls"] == 100
         assert contract["optimizer"]["seed_style"] == "structured"
         assert set(contract["optimizer"]["component_kinds"].values()) == {"system_prompt"}
         assert contract["optimizer"]["semantic_action_space"] == SEMANTIC_ACTION_CATALOGS["prompt"]
         assert contract["optimizer"]["semantic_controller_policy"] == CONTROLLER_POLICY_CONTRACT
-    assert hotpot["models"]["solver_request_timeout_seconds"] == HOTPOTQA_REQUEST_TIMEOUT_SECONDS
-    assert hotpot["models"]["reflection_request_timeout_seconds"] == HOTPOTQA_REQUEST_TIMEOUT_SECONDS
 
     expected_hotpot_decoding = {**experiment_decoding(QWEN3_8_27B_MODEL), "seed": 0}
     assert hotpot["models"]["solver_decoding"] == expected_hotpot_decoding
-    assert hotpot["models"]["reflection_decoding"] == expected_hotpot_decoding
+    assert hotpot["models"]["reflection_decoding"] == {**expected_hotpot_decoding, "max_tokens": 32_768}
     assert hover["models"]["solver_decoding"] == experiment_decoding(QWEN3_8_27B_MODEL)
     assert hover["models"]["reflection_decoding"] == experiment_decoding(QWEN3_8_27B_MODEL)
 
-    assert hotpot["schema_version"] == 15
+    assert hotpot["schema_version"] == 28
+    assert hotpot["baseline_protocol"]["test_repetitions"] == 1
+    assert hotpot["optimizer"]["react_execution"]["completion"] == "explicit_finish"
+    assert hotpot["optimizer"]["react_execution"]["max_iterations"] is None
+    assert hotpot["optimizer"]["react_execution"]["max_tool_calls"] is None
+    assert hotpot["optimizer"]["manifestor_traces_chars"] is None
+    assert hotpot["optimizer"]["reflection_context"]["version"] == 2
+    assert hotpot["optimizer"]["reflection_context"]["duplicates"] == "preserved"
     assert hotpot["scientific_contract_enforced"] is False
     assert hotpot["models"]["solver_version"] == QWEN3_8_27B_REVISION
     assert hotpot["models"]["reflection_version"] == QWEN3_8_27B_REVISION
@@ -950,7 +1301,8 @@ def test_hotpot_and_hover_contracts_record_exact_model_pair() -> None:
     assert hotpot["program"]["predictor_adapter"] == "dspy_chat_adapter"
     assert hotpot["program"]["dspy_runtime_version"] == "2.6.23"
     assert hotpot["program"]["dspy_runtime_commit"] == "62dc3b634d7dc0c4889abcf905cb4c391ea6b396"
-    assert hotpot["program"]["dspy_disk_cache"] is True
+    assert hotpot["program"]["cache_evaluation"] is False
+    assert hotpot["program"]["dspy_disk_cache"] is False
     assert hotpot["program"]["dspy_memory_cache"] is False
     assert hotpot["program"]["dspy_history"] is False
     assert hotpot["execution_runtime"] == {
@@ -1025,7 +1377,11 @@ def test_deepseek_contract_uses_the_deepseek_pair_and_local_request_settings() -
     )
 
     contract = build_hotpotqa_run_contract("react_v2", args)
-    deepseek_decoding = {**experiment_decoding(DEEPSEEK_V4_1_FLASH_MODEL), "seed": 0}
+    deepseek_decoding = {
+        **experiment_decoding(DEEPSEEK_V4_1_FLASH_MODEL, agentic=False),
+        "max_tokens": 32_768,
+        "seed": 0,
+    }
     deepseek_request_overrides = experiment_request_overrides(DEEPSEEK_V4_1_FLASH_MODEL)
 
     assert contract["models"] == {
@@ -1034,37 +1390,37 @@ def test_deepseek_contract_uses_the_deepseek_pair_and_local_request_settings() -
         "solver_api_base": LOCAL_API_BASE,
         "solver_decoding": deepseek_decoding,
         "solver_request_overrides": deepseek_request_overrides,
-        "solver_num_retries": HOTPOTQA_NUM_RETRIES,
-        "solver_request_timeout_seconds": HOTPOTQA_REQUEST_TIMEOUT_SECONDS,
+        "solver_num_retries": 0,
+        "solver_request_timeout_seconds": 3600,
         "reflection": DEEPSEEK_V4_1_FLASH_MODEL,
         "reflection_version": DEEPSEEK_V4_1_FLASH_REVISION,
         "reflection_api_base": LOCAL_API_BASE,
-        "reflection_decoding": deepseek_decoding,
+        "reflection_decoding": {**deepseek_decoding, "max_tokens": 131_072},
         "reflection_role_decoding": {
             "controller": {
-                "requested": deepseek_decoding,
+                "requested": {**deepseek_decoding, "max_tokens": 131_072},
                 "provider_ignored_fields": [],
             },
             "manifestor": {
-                "requested": {**deepseek_decoding, "temperature": 0},
+                "requested": {**deepseek_decoding, "max_tokens": 131_072},
                 "provider_ignored_fields": [],
             },
             "react_v2_proposer": {
-                "requested": deepseek_decoding,
+                "requested": {**deepseek_decoding, "max_tokens": 131_072},
                 "provider_ignored_fields": [],
             },
         },
         "reflection_request_overrides": deepseek_request_overrides,
-        "reflection_num_retries": HOTPOTQA_NUM_RETRIES,
-        "reflection_request_timeout_seconds": HOTPOTQA_REQUEST_TIMEOUT_SECONDS,
+        "reflection_num_retries": 0,
+        "reflection_request_timeout_seconds": 3600,
     }
 
 
-def test_deepseek_serving_environment_identity_is_material_to_contract_and_run_key(monkeypatch) -> None:
-    """Persist the frozen vLLM environment identity for DeepSeek and isolate its changes.
+def test_deepseek_serving_environment_is_material_to_contract_and_run_key(monkeypatch) -> None:
+    """Persist local vLLM environment identity and isolate runtime changes.
 
     Args:
-        monkeypatch: Pytest fixture used to change the realized serving environment digest.
+        monkeypatch: Pytest fixture used to change the serving environment digest.
     """
     for name, value in DEEPSEEK_SCIENTIFIC_RUNTIME.items():
         monkeypatch.setenv(name, value)
@@ -1078,10 +1434,7 @@ def test_deepseek_serving_environment_identity_is_material_to_contract_and_run_k
     first_key = hotpotqa_run_key("react_v2", args)
 
     assert first_contract["execution_runtime"]["serving_engine"] == "vllm"
-    assert first_contract["execution_runtime"]["serving_lock_sha256"] == "b" * 64
-    assert first_contract["execution_runtime"]["serving_env_sha256"] == "3" * 64
-    assert "serving_image_uri" not in first_contract["execution_runtime"]
-    assert "sglang_version" not in first_contract["execution_runtime"]
+    assert first_contract["execution_runtime"]["serving_env_sha256"] == "1" * 64
 
     monkeypatch.setenv("HOTPOTQA_SERVING_ENV_SHA256", "4" * 64)
 
@@ -1171,10 +1524,7 @@ def test_random_controller_react_v2_changes_only_controller_selection(
     assert verbalized_strategy.template_family == random_strategy.template_family
     assert verbalized_strategy.rng.getstate() == random_strategy.rng.getstate() == random.Random(args.seed).getstate()
     assert verbalized_contract["optimizer"]["semantic_controller_policy"] == CONTROLLER_POLICY_CONTRACT
-    assert (
-        random_contract["optimizer"]["semantic_controller_policy"]
-        == UNIFORM_RANDOM_CONTROLLER_POLICY_CONTRACT
-    )
+    assert random_contract["optimizer"]["semantic_controller_policy"] == UNIFORM_RANDOM_CONTROLLER_POLICY_CONTRACT
     assert random_contract["optimizer"]["stateless_action_menu"] is None
     assert random_contract["optimizer"]["stateless_selector_policy"] is None
 
@@ -1225,6 +1575,7 @@ def test_hover_react_v2_uses_an_experiment_seeded_controller_rng() -> None:
     assert config.reflection.reflection_prompt_template == InstructionProposalSignature.default_prompt_template
     assert config.reflection.reflection_strategy is not None
     assert config.reflection.reflection_strategy.rng.getstate() == random.Random(19).getstate()
+    assert config.reflection.reflection_strategy.manifestor_lm.completion_kwargs["temperature"] == 0.0
     assert vanilla_config.engine.seed == config.engine.seed
     assert vanilla_config.engine.max_workers == config.engine.max_workers
     assert vanilla_config.engine.val_evaluation_policy == config.engine.val_evaluation_policy
@@ -1237,6 +1588,21 @@ def test_hover_react_v2_uses_an_experiment_seeded_controller_rng() -> None:
     assert vanilla_config.reflection.reflection_minibatch_size == config.reflection.reflection_minibatch_size
     assert vanilla_config.reflection.module_selector == config.reflection.module_selector
     assert vanilla_config.reflection.reflection_prompt_template == config.reflection.reflection_prompt_template
+
+
+@pytest.mark.parametrize("field", ["cache_evaluation", "dspy_disk_cache", "dspy_memory_cache"])
+@pytest.mark.parametrize("missing", [False, True])
+def test_hotpot_rejects_changed_or_unrecorded_caching(tmp_path: Path, field: str, missing: bool) -> None:
+    """Reject checkpoints that could reuse earlier evaluations or model responses."""
+    contract = build_hotpotqa_run_contract("react_v2", _hotpot_args())
+    changed = deepcopy(contract)
+    if missing:
+        del changed["program"][field]
+    else:
+        changed["program"][field] = True
+    ensure_wikipedia_run_contract(tmp_path, changed)
+    with pytest.raises(ValueError, match="different Wikipedia benchmark configuration"):
+        ensure_wikipedia_run_contract(tmp_path, contract)
 
 
 def test_run_contract_rejects_drift_and_legacy_state(tmp_path: Path) -> None:
@@ -1253,6 +1619,15 @@ def test_run_contract_rejects_drift_and_legacy_state(tmp_path: Path) -> None:
     assert ensure_wikipedia_run_contract(run_dir, contract) == path
     with pytest.raises(ValueError, match="different Wikipedia benchmark configuration"):
         ensure_wikipedia_run_contract(run_dir, {**contract, "tag": "drift"})
+    assert contract["provider_retry_policy"]["max_attempts"] == 3
+    for missing in (True, False):
+        changed = deepcopy(contract)
+        if missing:
+            del changed["provider_retry_policy"]
+        else:
+            changed["provider_retry_policy"]["max_attempts"] = 9
+        with pytest.raises(ValueError, match="different Wikipedia benchmark configuration"):
+            ensure_wikipedia_run_contract(run_dir, changed)
 
     legacy_dir = tmp_path / "legacy"
     legacy_dir.mkdir()
@@ -1336,7 +1711,7 @@ def test_stateless_action_menu_contract_matches_between_wikipedia_benchmarks() -
     expected = build_hotpotqa_run_contract("random", args)["optimizer"]["stateless_action_menu"]
 
     for build_contract, schema_version in (
-        (build_hotpotqa_run_contract, 15),
+        (build_hotpotqa_run_contract, 28),
         (build_hover_run_contract, 4),
     ):
         contract = build_contract("random", args)

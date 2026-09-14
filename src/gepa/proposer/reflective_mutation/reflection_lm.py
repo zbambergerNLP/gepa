@@ -28,6 +28,7 @@ from gepa.strategies.intervention import (
     StatelessActionConstraint,
     format_stateless_action_constraint,
 )
+from gepa.strategies.text_limits import TextLimitError, TextLimits, clip_text, resolve_text_limits
 
 # One reflection job = (candidate, reflective_dataset, components_to_update).
 ReflectionJob = tuple[dict[str, str], "Mapping[str, Sequence[Mapping[str, Any]]]", list[str]]
@@ -136,6 +137,7 @@ class StatelessReflectionLM:
         action_selector: ActionSelector[StatelessActionConstraint] | None = None,
         rng: random.Random | None = None,
         per_job_action_selection: bool = False,
+        text_limits: TextLimits | None = None,
     ):
         """Configure stateless reflection and optional action conditioning.
 
@@ -148,8 +150,16 @@ class StatelessReflectionLM:
             rng: Seeded selector RNG, or ``None`` for a deterministic default.
             per_job_action_selection: Whether to condition and sample each job
                 separately instead of sharing one batch-level selector call.
+            text_limits: Optional feedback, prompt, and proposed-document limits.
         """
         self.lm = lm
+        self.text_limits = resolve_text_limits(
+            text_limits if text_limits is not None else (
+                action_selector.text_limits if isinstance(action_selector, VerbalizedActionSelector) else None
+            )
+        )
+        if isinstance(action_selector, VerbalizedActionSelector):
+            action_selector.text_limits = self.text_limits
         self.reflection_prompt_template = reflection_prompt_template
         self.logger = logger
         self.action_selector = action_selector
@@ -236,14 +246,14 @@ class StatelessReflectionLM:
     @staticmethod
     def _summarize_feedback(
         reflective_dataset: Mapping[str, Sequence[Mapping[str, Any]]],
-        max_chars: int = 500,
+        max_chars: int | None = None,
     ) -> str:
-        """Extract a bounded feedback summary from a reflective dataset.
+        """Join feedback with no cutoff unless one is explicitly configured.
 
         Args:
             reflective_dataset: Per-component rows containing feedback or
                 execution-feedback fields.
-            max_chars: Maximum feedback characters retained before an ellipsis.
+            max_chars: Source characters retained before a marker, or ``None``.
 
         Returns:
             Joined non-empty feedback, truncated to ``max_chars``, or an
@@ -256,8 +266,7 @@ class StatelessReflectionLM:
                 if fb:
                     parts.append(str(fb))
         summary = "\n".join(parts)
-        if len(summary) > max_chars:
-            summary = summary[:max_chars] + "..."
+        summary = clip_text(summary, max_chars)
         return summary or "(no feedback available)"
 
     def _resolve_template(self, name: str) -> str | None:
@@ -300,7 +309,7 @@ class StatelessReflectionLM:
         )
 
         if action is not None:
-            suffix = format_stateless_action_constraint(action)
+            suffix = format_stateless_action_constraint(action, self.text_limits.selector_target_chars)
             if isinstance(prompt, str):
                 prompt = prompt + suffix
             else:
@@ -347,6 +356,8 @@ class StatelessReflectionLM:
             ResponseJournalError: A replay slot is corrupt or belongs to a
                 different scientific request.
         """
+        for prompt in prompts:
+            self.text_limits.check_prompt(prompt)
         if not prompts:
             return []
         if len(prompts) == 1:
@@ -400,7 +411,10 @@ class StatelessReflectionLM:
             distinct_parents = any(job[0] != jobs[0][0] for job in jobs[1:])
             if distinct_parents:
                 candidate_text += f"\n\n(1 of {len(jobs)} distinct parent candidates shown)"
-            feedback_summary = "\n---\n".join(self._summarize_feedback(job[1]) for job in jobs)
+            feedback_summary = clip_text(
+                "\n---\n".join(self._summarize_feedback(job[1]) for job in jobs),
+                self.text_limits.stateless_feedback_chars,
+            )
         if isinstance(selector, VerbalizedActionSelector):
             verbalized_selector = cast(VerbalizedActionSelector[StatelessActionConstraint], selector)
             return list(
@@ -439,7 +453,9 @@ class StatelessReflectionLM:
                         1,
                         self.rng,
                         candidate="\n\n".join(candidate.values()),
-                        feedback_summary=self._summarize_feedback(reflective_dataset),
+                        feedback_summary=self._summarize_feedback(
+                            reflective_dataset, self.text_limits.stateless_feedback_chars
+                        ),
                     )
                 )
             else:
@@ -542,6 +558,12 @@ class StatelessReflectionLM:
                         f"Action-conditioned reflection for component '{name}' returned an invalid section body: {exc}"
                     )
                     continue
+            try:
+                self.text_limits.check_candidate({name: new_instruction})
+            except TextLimitError as exc:
+                self._log(str(exc))
+                proposals[job_idx].metadata.setdefault("length_capped_dropped", []).append(name)
+                continue
             proposals[job_idx].new_texts[name] = new_instruction
             proposals[job_idx].prompts[name] = prompt
             proposals[job_idx].raw_lm_outputs[name] = raw_output
@@ -558,4 +580,12 @@ class StatelessReflectionLM:
                     }
                 )
 
+        for (candidate, _, _), proposal in zip(jobs, proposals, strict=True):
+            if self.text_limits.max_candidate_chars is not None:
+                try:
+                    self.text_limits.check_candidate({**candidate, **proposal.new_texts})
+                except TextLimitError as exc:
+                    self._log(str(exc))
+                    proposal.metadata.setdefault("length_capped_dropped", []).extend(proposal.new_texts)
+                    proposal.new_texts.clear()
         return [(proposal, self) for proposal in proposals]

@@ -25,7 +25,16 @@ SMOKE_MESSAGES = [
     {"role": "user", "content": "What is the capital of France? Answer with one word."},
 ]
 # LiteLLM-only settings that are not part of the JSON body it sends to the server.
-_CLIENT_ONLY_FIELDS = {"api_base", "num_retries", "timeout", "extra_body"}
+_CLIENT_ONLY_FIELDS = {
+    "api_base",
+    "num_retries",
+    "max_retries",
+    "timeout",
+    "extra_body",
+    "model_info",
+    "cache",
+    "_gepa_provider_retry",
+}
 
 
 def _post_json(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:

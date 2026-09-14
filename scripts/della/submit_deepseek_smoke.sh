@@ -18,6 +18,23 @@ if [[ ! -f "${ENV_FILE}" ]]; then
     echo "ERROR: ${ENV_FILE} not found." >&2
     exit 1
 fi
+if [[ -L "${ENV_FILE}" || ! -O "${ENV_FILE}" ]]; then
+    echo "ERROR: ${ENV_FILE} must be a regular file owned by the current user" >&2
+    exit 1
+fi
+if ENV_MODE="$(stat -f '%Lp' "${ENV_FILE}" 2>/dev/null)"; then
+    :
+elif ENV_MODE="$(stat -c '%a' "${ENV_FILE}" 2>/dev/null)"; then
+    :
+else
+    echo "ERROR: could not verify permissions for ${ENV_FILE}" >&2
+    exit 1
+fi
+if [[ ! "${ENV_MODE}" =~ ^[0-7]{3,4}$ ]] || (( (8#${ENV_MODE} & 8#077) != 0 )); then
+    echo "ERROR: ${ENV_FILE} contains credentials and must not grant group or other access; run chmod 600 ${ENV_FILE}" >&2
+    exit 1
+fi
+
 source "${ENV_FILE}"
 
 SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=yes)
@@ -27,9 +44,15 @@ case "${1:-}" in
     submit)
         echo "==> syncing the checkout to ${REMOTE_DIR}"
         "${SCRIPT_DIR}/sync_to_della.sh"
+        printf -v SUBMIT_COMMAND \
+            'mkdir -p %q && cd %q && env SCRATCH_BASE=%q MODEL_STORAGE=%q GEPA_VENV_DIR=%q SERVING_VENV_DIR=%q sbatch --parsable --output=%q scripts/della/smoke_deepseek_serving.sbatch' \
+            "${VERIFY_LOG_DIR}" "${REMOTE_DIR}" "${SCRATCH_BASE}" \
+            "${MODEL_STORAGE:-/projects/BSTEWART/model_storage}" \
+            "${REMOTE_DIR%/}/.venv" "${REMOTE_DIR%/}/.serving-venv-deepseek-v4.1-flash" \
+            "${VERIFY_LOG_DIR}/smoke-%j.out"
         JOB_ID="$(
             ssh "${SSH_OPTS[@]}" "${REMOTE_USER}@${REMOTE_HOST}" \
-                "mkdir -p '${VERIFY_LOG_DIR}' && cd '${REMOTE_DIR}' && sbatch --parsable --output='${VERIFY_LOG_DIR}/smoke-%j.out' scripts/della/smoke_deepseek_serving.sbatch"
+                "${SUBMIT_COMMAND}"
         )"
         JOB_ID="${JOB_ID%%;*}"
         if [[ ! "${JOB_ID}" =~ ^[0-9]+$ ]]; then
@@ -41,6 +64,10 @@ case "${1:-}" in
         ;;
     fetch)
         JOB_ID="${2:?usage: $0 fetch <job-id>}"
+        if [[ ! "${JOB_ID}" =~ ^[0-9]+$ ]]; then
+            echo "ERROR: job ID must contain only digits" >&2
+            exit 1
+        fi
         DESTINATION="${REPO_ROOT}/outputs/deepseek-smoke/${JOB_ID}"
         mkdir -p "${DESTINATION}"
         rsync -a -e "ssh ${SSH_OPTS[*]}" \

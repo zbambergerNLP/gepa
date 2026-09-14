@@ -1,4 +1,5 @@
 from gepa.adapters.terminal_bench_adapter.terminal_bench_adapter import (
+    TERMINUS_ADAPTER_CONTRACT,
     HarborCLI,
     HarborEvaluation,
     HarborExecutionError,
@@ -16,6 +17,7 @@ from gepa.adapters.terminal_bench_adapter.terminal_bench_adapter import (
 )
 
 __all__ = [
+    "TERMINUS_ADAPTER_CONTRACT",
     "HarborCLI",
     "HarborEvaluation",
     "HarborExecutionError",

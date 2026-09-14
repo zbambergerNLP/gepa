@@ -4,7 +4,7 @@
 # Usage:
 #   scripts/della/submit_hotpotqa.sh
 #
-# Use MODEL_PROFILE=qwen3.8-27b or MODEL_PROFILE=deepseek-v4-flash. Each
+# Use MODEL_PROFILE=qwen3.8-27b or MODEL_PROFILE=deepseek-v4.1-flash. Each
 # profile uses the same model for the student and proposer. The default
 # BUDGET_PROFILE=campaign submits exactly six serial jobs: vanilla, ReAct V2,
 # random-Controller ReAct V2, and selected-action GEPA at 6,871 calls, followed
@@ -57,12 +57,32 @@ trap cleanup_local_files EXIT
 
 # Tunable knobs (env overrides).
 MODEL_PROFILE="${MODEL_PROFILE:-qwen3.8-27b}"
+HOTPOTQA_PREPARE_ONLY="${HOTPOTQA_PREPARE_ONLY:-0}"
+if [[ "${HOTPOTQA_PREPARE_ONLY}" != "0" && "${HOTPOTQA_PREPARE_ONLY}" != "1" ]]; then
+    echo "ERROR: HOTPOTQA_PREPARE_ONLY must be 0 or 1" >&2
+    exit 1
+fi
+HOTPOTQA_JOB_KIND="${HOTPOTQA_JOB_KIND:-experiment}"
+HOTPOTQA_PILOT_ONLY=0
+if [[ "${HOTPOTQA_JOB_KIND}" != "experiment" && "${HOTPOTQA_JOB_KIND}" != "pilot" ]]; then
+    echo "ERROR: HOTPOTQA_JOB_KIND must be experiment or pilot" >&2
+    exit 1
+fi
+if [[ "${HOTPOTQA_JOB_KIND}" == "pilot" ]]; then
+    BUDGET_PROFILE=standard
+    CONDITION=vanilla
+    HOTPOTQA_PILOT_ONLY=1
+fi
+if [[ "${HOTPOTQA_PREPARE_ONLY}" == "1" && "${HOTPOTQA_JOB_KIND}" != "pilot" ]]; then
+    echo "ERROR: interactive preparation requires HOTPOTQA_JOB_KIND=pilot" >&2
+    exit 1
+fi
 BUDGET_PROFILE="${BUDGET_PROFILE:-campaign}"
 CONDITION="${CONDITION:-all}"
+HOTPOTQA_TEXT_LIMITS_B64="$(printf '%s' "${HOTPOTQA_TEXT_LIMITS_JSON:-null}" | base64 | tr -d '\n')"
 HOTPOTQA_CAMPAIGN_ID="${HOTPOTQA_CAMPAIGN_ID:-hotpotqa-final-v1}"
-# Defined locally: the remote heredoc below is unquoted, so every ${...} it
-# contains expands on the laptop, and set -u aborts on an unset name.
 HOTPOTQA_LOG_DIR="${SCRATCH_BASE}/logs/hotpotqa/${HOTPOTQA_CAMPAIGN_ID}/${HOTPOTQA_SOURCE_COMMIT}"
+HOTPOTQA_PILOT_ROOT="${REMOTE_SOURCE_DIR}/outputs/hotpotqa-pilots/${HOTPOTQA_CAMPAIGN_ID}/${MODEL_PROFILE}"
 MAX_WORKERS="${MAX_WORKERS:-}"
 WIKI17_DIR="${WIKI17_DIR:-${SCRATCH_BASE}/.cache/gepa/wiki17}"
 GEN_GMU=0.92
@@ -72,8 +92,9 @@ VLLM_API_SERVER_COUNT="${VLLM_API_SERVER_COUNT:-}"
 VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-}"
 VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-}"
 VLLM_MAX_NUM_BATCHED_TOKENS="${VLLM_MAX_NUM_BATCHED_TOKENS:-16384}"
-HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-}"
-SERVING_VENV_DIR="${SERVING_VENV_DIR:-}"
+HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-1800}"
+SERVING_VENV_DIR="${REMOTE_DIR%/}/.serving-venv"
+SERVING_LOCK_RELATIVE="examples/hotpotqa/serving/requirements-x86_64-linux-py312.txt"
 DELLA_GPUS="${DELLA_GPUS:-}"
 DELLA_CPUS_PER_TASK="${DELLA_CPUS_PER_TASK:-}"
 DELLA_MEMORY="${DELLA_MEMORY:-}"
@@ -128,28 +149,24 @@ case "${MODEL_PROFILE}" in
             echo "ERROR: Qwen3.8-27B production runs require GPU_PARTITION=ailab" >&2
             exit 1
         fi
-        DELLA_GPUS="${DELLA_GPUS:-8}"
-        DELLA_CPUS_PER_TASK="${DELLA_CPUS_PER_TASK:-64}"
-        DELLA_MEMORY="${DELLA_MEMORY:-768G}"
+        DELLA_GPUS="${DELLA_GPUS:-1}"
+        DELLA_CPUS_PER_TASK="${DELLA_CPUS_PER_TASK:-8}"
+        DELLA_MEMORY="${DELLA_MEMORY:-128G}"
         JOB_PARTITION="${GPU_PARTITION}"
-        # Eight single-sequence replicas: 12 concurrent examples keep every replica
-        # busy while at most one request waits behind another on the same replica.
         MAX_WORKERS="${MAX_WORKERS:-12}"
-        HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-1800}"
-        SERVING_VENV_DIR="${SERVING_VENV_DIR:-${REMOTE_DIR%/}/.serving-venv}"
-        SERVING_LOCK_RELATIVE="examples/hotpotqa/serving/requirements-x86_64-linux-py312.txt"
         VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-1}"
         VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-${DELLA_GPUS}}"
         VLLM_API_SERVER_COUNT="${VLLM_API_SERVER_COUNT:-${VLLM_DATA_PARALLEL_SIZE}}"
         VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-1}"
-        if [[ "${DELLA_GPUS}" != "8" \
-            || "${VLLM_DATA_PARALLEL_SIZE}" != "8" \
-            || "${VLLM_API_SERVER_COUNT}" != "8" ]]; then
-            echo "ERROR: scientific Qwen runs require 8 H200 data-parallel replicas and 8 API servers" >&2
+        if [[ "${DELLA_GPUS}" != "1" \
+            || "${VLLM_TENSOR_PARALLEL_SIZE}" != "1" \
+            || "${VLLM_DATA_PARALLEL_SIZE}" != "1" \
+            || "${VLLM_API_SERVER_COUNT}" != "1" ]]; then
+            echo "ERROR: scientific Qwen runs require one H200, TP1/DP1, and one API server" >&2
             exit 1
         fi
-        if [[ "${VLLM_MAX_NUM_SEQS}" != "1" ]]; then
-            echo "ERROR: scientific Qwen runs require VLLM_MAX_NUM_SEQS=1" >&2
+        if [[ ! "${VLLM_MAX_NUM_SEQS}" =~ ^(1|2|4)$ ]]; then
+            echo "ERROR: VLLM_MAX_NUM_SEQS must be 1, 2, or 4" >&2
             exit 1
         fi
         MODEL="Qwen3.8-27B"
@@ -163,25 +180,22 @@ case "${MODEL_PROFILE}" in
         EXPANDED_TIME="${EXPANDED_TIME:-${TIME:-144:00:00}}"
         ;;
     deepseek-v4.1-flash)
+        SERVING_VENV_DIR="${REMOTE_DIR%/}/.serving-venv-deepseek-v4.1-flash"
+        SERVING_LOCK_RELATIVE="examples/hotpotqa/serving/requirements-deepseek-v4.1-flash-x86_64-linux-py312.txt"
         if [[ "${GPU_PARTITION}" != "ailab" ]]; then
             echo "ERROR: DeepSeek-V4.1-Flash production runs require GPU_PARTITION=ailab" >&2
             exit 1
         fi
-        DELLA_GPUS="${DELLA_GPUS:-8}"
-        DELLA_CPUS_PER_TASK="${DELLA_CPUS_PER_TASK:-64}"
-        DELLA_MEMORY="${DELLA_MEMORY:-768G}"
+        DELLA_GPUS="${DELLA_GPUS:-4}"
+        DELLA_CPUS_PER_TASK="${DELLA_CPUS_PER_TASK:-32}"
+        DELLA_MEMORY="${DELLA_MEMORY:-512G}"
         JOB_PARTITION="${GPU_PARTITION}"
-        # One single-sequence replica serves every request, so each extra concurrent
-        # example only adds queueing; four keeps the wait under the request timeout.
         MAX_WORKERS="${MAX_WORKERS:-4}"
-        # Loading 510 GB of weights and warming DeepGEMM takes longer than Qwen's startup.
-        HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-3600}"
-        SERVING_VENV_DIR="${SERVING_VENV_DIR:-${REMOTE_DIR%/}/.serving-venv-deepseek-v4.1-flash}"
-        SERVING_LOCK_RELATIVE="examples/hotpotqa/serving/requirements-deepseek-v4.1-flash-x86_64-linux-py312.txt"
-        VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-8}"
+        VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-4}"
         VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-1}"
         VLLM_API_SERVER_COUNT="${VLLM_API_SERVER_COUNT:-1}"
         VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-1}"
+        GEN_MAX_LEN=262144
         MODEL="DeepSeek-V4.1-Flash"
         SOLVER_MODEL_PATH="${MODEL_STORAGE}/${MODEL}"
         MODEL_SNAPSHOT_PROFILE="deepseek-v4.1-flash"
@@ -189,15 +203,12 @@ case "${MODEL_PROFILE}" in
         SOLVER_MODEL="hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash"
         SOLVER_API_BASE=""
         REFLECTION_API_BASE=""
-        if [[ "${DELLA_GPUS}" != "8" \
-            || "${VLLM_TENSOR_PARALLEL_SIZE}" != "8" \
+        if [[ "${DELLA_GPUS}" != "4" \
+            || "${VLLM_TENSOR_PARALLEL_SIZE}" != "4" \
             || "${VLLM_DATA_PARALLEL_SIZE}" != "1" \
-            || "${VLLM_API_SERVER_COUNT}" != "1" ]]; then
-            echo "ERROR: scientific DeepSeek runs require one TP8/EP8 replica on one eight-H200 node" >&2
-            exit 1
-        fi
-        if [[ "${VLLM_MAX_NUM_SEQS}" != "1" ]]; then
-            echo "ERROR: scientific DeepSeek runs require VLLM_MAX_NUM_SEQS=1" >&2
+            || "${VLLM_API_SERVER_COUNT}" != "1" \
+            || ! "${VLLM_MAX_NUM_SEQS}" =~ ^(1|2|4)$ ]]; then
+            echo "ERROR: scientific DeepSeek runs require one TP4 replica on four H200s on one node" >&2
             exit 1
         fi
         STANDARD_TIME="${STANDARD_TIME:-${TIME:-144:00:00}}"
@@ -252,6 +263,7 @@ validate_della_wall_time "${STANDARD_TIME}" "STANDARD_TIME"
 validate_della_wall_time "${EXPANDED_TIME}" "EXPANDED_TIME"
 
 for positive_integer in \
+    "${DELLA_GPUS}" \
     "${DELLA_CPUS_PER_TASK}" \
     "${MAX_WORKERS}" \
     "${VLLM_TENSOR_PARALLEL_SIZE}" \
@@ -261,14 +273,10 @@ for positive_integer in \
     "${VLLM_MAX_NUM_BATCHED_TOKENS}"
 do
     if [[ ! "${positive_integer}" =~ ^[1-9][0-9]*$ ]]; then
-        echo "ERROR: concurrency and CPU settings must be positive integers" >&2
+        echo "ERROR: concurrency, GPU, and CPU settings must be positive integers" >&2
         exit 1
     fi
 done
-if [[ "${DELLA_GPUS}" != "8" ]]; then
-    echo "ERROR: DELLA_GPUS must be 8 for either scientific model profile" >&2
-    exit 1
-fi
 if (( DELLA_CPUS_PER_TASK > DELLA_GPUS * 8 )); then
     echo "ERROR: Della permits at most 8 CPU cores per AI Lab H200" >&2
     exit 1
@@ -280,7 +288,7 @@ if [[ "${MODEL_PROFILE}" == "qwen3.8-27b" ]]; then
     fi
 fi
 if (( VLLM_TENSOR_PARALLEL_SIZE * VLLM_DATA_PARALLEL_SIZE != DELLA_GPUS )); then
-    echo "ERROR: tensor-parallel size times data-parallel size must use all eight allocated GPUs" >&2
+    echo "ERROR: tensor-parallel size times data-parallel size must use all allocated GPUs" >&2
     exit 1
 fi
 
@@ -310,15 +318,19 @@ if [[ ! "${HOTPOTQA_SOURCE_MANIFEST_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
     exit 1
 fi
 
-# Step 2: submit sbatch on della login node.
-echo "==> submitting HotpotQA: profile=${MODEL_PROFILE} solver=${SOLVER_MODEL} reflection=${REFLECTION_MODEL}"
+# Resolve the same environment before either interactive execution or submission.
+if [[ "${HOTPOTQA_PREPARE_ONLY}" == "1" ]]; then
+    echo "==> preparing HotpotQA for salloc: profile=${MODEL_PROFILE} solver=${SOLVER_MODEL} reflection=${REFLECTION_MODEL}"
+else
+    echo "==> submitting HotpotQA: profile=${MODEL_PROFILE} solver=${SOLVER_MODEL} reflection=${REFLECTION_MODEL}"
+fi
 echo "==> scientific contract: budget_profile=${BUDGET_PROFILE} budget=${CAMPAIGN_BUDGET_LABEL} condition=${CONDITION} merge=off"
 echo "==> method: frozen Wiki-2017/BM25 k=7 seed=0 workers=${MAX_WORKERS} two-stage structured prompts"
 echo "==> Della resources: partition=${JOB_PARTITION:-cluster-default} gpus=${DELLA_GPUS} cpus=${DELLA_CPUS_PER_TASK} memory=${DELLA_MEMORY}"
 if [[ "${MODEL_PROFILE}" == "qwen3.8-27b" ]]; then
-    echo "==> Qwen vLLM: tp=1 dp=8 api_servers=8 max_num_seqs=1/replica max_batched_tokens=${VLLM_MAX_NUM_BATCHED_TOKENS}"
+    echo "==> Qwen vLLM: tp=1 dp=1 api_servers=1 max_num_seqs=${VLLM_MAX_NUM_SEQS} max_batched_tokens=${VLLM_MAX_NUM_BATCHED_TOKENS}"
 else
-    echo "==> DeepSeek vLLM: tp=8 ep=8 api_servers=1 max_num_seqs=1 FP8-KV tokenizer=deepseek_v41 no-speculation no-DP-attention max_batched_tokens=${VLLM_MAX_NUM_BATCHED_TOKENS}"
+    echo "==> DeepSeek vLLM: tp=4 ep=4 dp=1 max_num_seqs=${VLLM_MAX_NUM_SEQS} FP8-KV Engram-CPU-offload deepseek_v41 parsers no-speculation"
 fi
 
 ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
@@ -469,6 +481,13 @@ fi
 HOTPOTQA_LOG_DIR="${SCRATCH_BASE}/logs/hotpotqa/${HOTPOTQA_CAMPAIGN_ID}/${HOTPOTQA_SOURCE_COMMIT}"
 mkdir -p "${HOTPOTQA_LOG_DIR}"
 umask 077
+CONTINUATION_DIR="${HOTPOTQA_LOG_DIR}/continuation-${MODEL_PROFILE}-${HOTPOTQA_JOB_KIND}-${BUDGET_PROFILE}-${CONDITION}"
+mkdir -p "\${CONTINUATION_DIR}"
+PLAN_PATH="\${CONTINUATION_DIR}/plan.json"
+if [[ -e "\${PLAN_PATH}" ]]; then
+    echo "ERROR: a continuation plan already exists; inspect it before resubmission" >&2
+    exit 1
+fi
 SBATCH_EXPORT_FILE=""
 cleanup_export_file() {
     if [[ -n "\${SBATCH_EXPORT_FILE}" ]]; then
@@ -477,17 +496,28 @@ cleanup_export_file() {
 }
 trap cleanup_export_file EXIT
 
+export HOTPOTQA_TEXT_LIMITS_JSON="\$(printf '%s' '${HOTPOTQA_TEXT_LIMITS_B64}' | base64 --decode)"
+"\${GEPA_UV_BIN}" run --no-sync python -c \
+    'import os; from gepa.strategies.text_limits import parse_text_limits; parse_text_limits(os.environ["HOTPOTQA_TEXT_LIMITS_JSON"])'
+
 write_sbatch_export_file() {
     local run_budget_profile="\$1"
     local run_max_metric_calls="\$2"
     local run_condition="\$3"
+    local canary_only="\$4"
 
-    SBATCH_EXPORT_FILE="\$(mktemp)"
+    SBATCH_EXPORT_FILE="\${CONTINUATION_DIR}/\${CELL_NAME}.env"
     printf '%s\0' \
         "MODEL_PROFILE=${MODEL_PROFILE}" \
         "BUDGET_PROFILE=\${run_budget_profile}" \
         "MAX_METRIC_CALLS=\${run_max_metric_calls}" \
         "CONDITION=\${run_condition}" \
+        "HOTPOTQA_TEXT_LIMITS_JSON=\${HOTPOTQA_TEXT_LIMITS_JSON}" \
+        "HOTPOTQA_CANARY_ONLY=\${canary_only}" \
+        "HOTPOTQA_PILOT_ONLY=${HOTPOTQA_PILOT_ONLY}" \
+        "HOTPOTQA_PILOT_ROOT=${HOTPOTQA_PILOT_ROOT}" \
+        "GEPA_RECOVERY_REGISTRY=\${RECOVERY_REGISTRY}" \
+        "GEPA_RECOVERY_ERROR_FILE=\${RECOVERY_ERROR_FILE}" \
         "HOTPOTQA_CAMPAIGN_ID=${HOTPOTQA_CAMPAIGN_ID}" \
         "MAX_WORKERS=${MAX_WORKERS}" \
         "WIKI17_DIR=${WIKI17_DIR}" \
@@ -521,57 +551,51 @@ write_sbatch_export_file() {
         > "\${SBATCH_EXPORT_FILE}"
 }
 
-PREVIOUS_JOB_ID=""
-
+CANARY_FLAGS=()
+if [[ "${HOTPOTQA_PREPARE_ONLY}" == "1" ]]; then
+    CELL_NAME=interactive
+    RECOVERY_REGISTRY="\${CONTINUATION_DIR}/interactive-registry.json"
+    RECOVERY_ERROR_FILE="\${CONTINUATION_DIR}/interactive-error.json"
+    write_sbatch_export_file standard 6871 vanilla 0
+    echo "INTERACTIVE_EXPORT_FILE=\${SBATCH_EXPORT_FILE}"
+    SBATCH_EXPORT_FILE=""
+    exit 0
+fi
+for _ in "\${SUBMIT_CONDITIONS[@]}"; do CANARY_FLAGS+=(0); done
+if [[ "${MODEL_PROFILE}" == "deepseek-v4.1-flash" ]]; then
+    SUBMIT_BUDGET_PROFILES=(standard "\${SUBMIT_BUDGET_PROFILES[@]}")
+    SUBMIT_CONDITIONS=(react_v2 "\${SUBMIT_CONDITIONS[@]}")
+    CANARY_FLAGS=(1 "\${CANARY_FLAGS[@]}")
+fi
 for CELL_INDEX in "\${!SUBMIT_CONDITIONS[@]}"; do
     RUN_BUDGET_PROFILE="\${SUBMIT_BUDGET_PROFILES[\${CELL_INDEX}]}"
     RUN_CONDITION="\${SUBMIT_CONDITIONS[\${CELL_INDEX}]}"
-    case "\${RUN_BUDGET_PROFILE}" in
-        standard)
-            RUN_MAX_METRIC_CALLS=6871
-            RUN_TIME="${STANDARD_TIME}"
-            ;;
-        expanded)
-            RUN_MAX_METRIC_CALLS=13742
-            RUN_TIME="${EXPANDED_TIME}"
-            ;;
-        *)
-            echo "ERROR: generated an unsupported HotPotQA budget profile: \${RUN_BUDGET_PROFILE}" >&2
-            exit 1
-            ;;
-    esac
-    write_sbatch_export_file "\${RUN_BUDGET_PROFILE}" "\${RUN_MAX_METRIC_CALLS}" "\${RUN_CONDITION}"
-
-    DEPENDENCY_ARGS=()
-    if [[ -n "\${PREVIOUS_JOB_ID}" ]]; then
-        DEPENDENCY_ARGS+=("--dependency=afterok:\${PREVIOUS_JOB_ID}")
+    CANARY_ONLY="\${CANARY_FLAGS[\${CELL_INDEX}]}"
+    if [[ "\${RUN_BUDGET_PROFILE}" == "expanded" ]]; then
+        RUN_MAX_METRIC_CALLS=13742
+        RUN_TIME="${EXPANDED_TIME}"
+    else
+        RUN_MAX_METRIC_CALLS=6871
+        RUN_TIME="${STANDARD_TIME}"
     fi
-    SBATCH_OUTPUT="\$(
-        env -i \
-            HOME="\${HOME}" \
-            USER="${REMOTE_USER}" \
-            PATH="\${PATH}" \
-            LANG=C.UTF-8 \
-            LC_ALL=C.UTF-8 \
-            "\${SBATCH_BIN}"${SBATCH_RESOURCE_COMMAND} \
-            --parsable \
-            --job-name="gepa-hp-${MODEL_PROFILE}-\${RUN_BUDGET_PROFILE}-\${RUN_CONDITION}" \
-            --output="${HOTPOTQA_LOG_DIR}/hotpotqa-%x-%j.log" \
-            --time="\${RUN_TIME}" \
-            --export=ALL \
-            --export-file="\${SBATCH_EXPORT_FILE}" \
-            "\${DEPENDENCY_ARGS[@]}" \
-            examples/hotpotqa/run_hotpotqa.sbatch
-    )"
-    PREVIOUS_JOB_ID="\${SBATCH_OUTPUT%%;*}"
-    if [[ ! "\${PREVIOUS_JOB_ID}" =~ ^[0-9]+$ ]]; then
-        echo "ERROR: sbatch returned an invalid job id: \${SBATCH_OUTPUT}" >&2
-        exit 1
+    CELL_NAME="\${RUN_BUDGET_PROFILE}-\${RUN_CONDITION}"
+    if [[ "\${CANARY_ONLY}" == "1" ]]; then
+        CELL_NAME=canary
+        RUN_TIME=04:00:00
     fi
-    rm -f -- "\${SBATCH_EXPORT_FILE}"
+    RECOVERY_REGISTRY="\${CONTINUATION_DIR}/\${CELL_NAME}-registry.json"
+    RECOVERY_ERROR_FILE="\${CONTINUATION_DIR}/\${CELL_NAME}-error.json"
+    write_sbatch_export_file "\${RUN_BUDGET_PROFILE}" "\${RUN_MAX_METRIC_CALLS}" "\${RUN_CONDITION}" "\${CANARY_ONLY}"
+    "${GEPA_VENV_DIR}/bin/python" -m examples.common.slurm_continuation add \
+        --plan "\${PLAN_PATH}" --source-commit "${HOTPOTQA_SOURCE_COMMIT}" \
+        --name "\${CELL_NAME}" --export-file "\${SBATCH_EXPORT_FILE}" \
+        --registry "\${RECOVERY_REGISTRY}" --error-file "\${RECOVERY_ERROR_FILE}" -- \
+        "\${SBATCH_BIN}"${SBATCH_RESOURCE_COMMAND} --parsable \
+        --job-name="gepa-hp-${MODEL_PROFILE}-${HOTPOTQA_JOB_KIND}-\${CELL_NAME}" \
+        --output="${HOTPOTQA_LOG_DIR}/hotpotqa-%x-%j.log" --time="\${RUN_TIME}" \
+        --export=ALL --export-file="\${SBATCH_EXPORT_FILE}" examples/hotpotqa/run_hotpotqa.sbatch
     SBATCH_EXPORT_FILE=""
-    echo "==> submitted \${RUN_BUDGET_PROFILE}/\${RUN_CONDITION}: job \${PREVIOUS_JOB_ID}"
 done
-
-echo "==> approved HotPotQA campaign chain submitted. Check status with: squeue -u ${REMOTE_USER}"
+"${GEPA_VENV_DIR}/bin/python" -m examples.common.slurm_continuation start --plan "\${PLAN_PATH}"
+echo "==> continuation plan: \${PLAN_PATH}"
 REMOTE_SCRIPT

@@ -37,6 +37,7 @@ from gepa.strategies.intervention import (
     StatelessActionConstraint,
     format_stateless_action_constraint,
 )
+from gepa.strategies.text_limits import TextLimits
 
 
 @dataclass(frozen=True)
@@ -227,14 +228,14 @@ class TestRandomActionSelector:
     def test_stateless_selector_policy_contract_records_material_defaults(self):
         """Verify selector contracts record behavior-bearing defaults."""
         assert stateless_selector_policy_contract("random") == {
-            "version": 1,
+            "version": 3,
             "selector": "random",
             "selection_granularity": "batch_shared",
             "context": "none",
             "sampling": "uniform",
         }
         assert stateless_selector_policy_contract("verbalized") == {
-            "version": 1,
+            "version": 3,
             "selector": "verbalized",
             "selection_granularity": "batch_shared",
             "context": "first_parent_and_aggregated_feedback",
@@ -243,6 +244,7 @@ class TestRandomActionSelector:
             "tau": 0.2,
             "require_full_support": False,
             "exploration_epsilon": 0.0,
+            "text_limits": TextLimits().to_dict(),
         }
 
 
@@ -1484,25 +1486,31 @@ class TestVerbalizedHistory:
 
 
 # ---------------------------------------------------------------------------
-# Length control: soft budget, length-aware selection, hard cap
+# Document length: preserve size information without character targets
 # ---------------------------------------------------------------------------
 
 
 class TestLengthControl:
-    def test_suffix_includes_length_budget(self):
-        """Verify the action suffix states the active length budget."""
-        from gepa.strategies.action_space import SOFT_PROMPT_CHAR_BUDGET
-
+    def test_suffix_preserves_scope_without_a_character_budget(self):
+        """Keep the semantic edit constraint without forcing a smaller section."""
         suffix = format_stateless_action_constraint(STATELESS_ACTIONS[0])
-        assert f"under {SOFT_PROMPT_CHAR_BUDGET} characters" in suffix
+        assert "Length budget" not in suffix
+        assert "8000" not in suffix
+        assert "Do not reference or modify any other section" in suffix
+        assert "Make no other changes" in suffix
 
     def test_verbalized_prompt_includes_length_stats(self):
-        """Verify verbalized sampling receives current length statistics."""
+        """Show the complete large component without a target or forced shortening."""
         lm = FakeLM(VALID_LM_OUTPUT)
         selector = VerbalizedActionSelector(TEST_ACTIONS, lm=lm, rng=random.Random(0))
-        selector.select(1, candidate="p" * 1234, feedback_summary="some feedback")
-        assert "Current component length: 1234 characters" in lm.calls[0]
-        assert "favor actions that shorten or replace existing text" in lm.calls[0]
+        candidate = "p" * 12345
+        selector.select(1, candidate=candidate, feedback_summary="some feedback")
+        assert "Current component length: 12345 characters." in lm.calls[0]
+        assert candidate in lm.calls[0]
+        assert "length budget" not in lm.calls[0]
+        assert "budget: ~" not in lm.calls[0]
+        assert "favor actions that shorten" not in lm.calls[0]
+        assert "avoid unnecessary repetition" in lm.calls[0]
 
 
 class TestConfigWiring:

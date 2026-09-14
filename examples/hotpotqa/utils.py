@@ -21,10 +21,12 @@ except ImportError:
 
 from examples.common.experiment_models import (
     DEEPSEEK_V4_1_FLASH_MODEL,
+    EXPERIMENT_NUM_RETRIES,
     QWEN3_8_27B_MODEL,
     experiment_decoding,
     experiment_request_overrides,
 )
+from examples.common.provider_retries import provider_retry_kwargs
 from examples.common.wikipedia import WikipediaPassage, WikipediaRetriever
 
 DEFAULT_DATA_PATH = os.path.join(
@@ -43,16 +45,11 @@ HOTPOTQA_SCIENTIFIC_SPLIT_SHA256 = {
     "test": "55cd1c7a999476ea4c7ec67f964ad4fa0ae662a2b9f7ade59c64108e659add31",
 }
 HOTPOTQA_SCIENTIFIC_REQUEST_SEED = 0
-# Every local replica decodes one sequence at a time, so a request can wait behind
-# every other in-flight request on its replica before it starts, and one thinking
-# response may run to the 16,384-token output cap. The timeout covers that queue
-# plus one full generation; the retries resend the identical seeded request, so a
-# transient stall no longer aborts a multi-day run.
 HOTPOTQA_REQUEST_TIMEOUT_SECONDS = 3600
-HOTPOTQA_NUM_RETRIES = 2
 
 
 if dspy is not None:
+
     class _HotPotQAChatAdapter(dspy.ChatAdapter):
         """Parse artifact fields after repairing one observed marker near-miss."""
 
@@ -77,9 +74,7 @@ if dspy is not None:
                     completion remains invalid after the narrow marker repair.
             """
             if completion is None:
-                raise ValueError(
-                    "Failed to parse response as per signature: provider returned no completion text."
-                )
+                raise ValueError("Failed to parse response as per signature: provider returned no completion text.")
             try:
                 return super().parse(signature, completion)
             except ValueError:
@@ -160,22 +155,32 @@ def validate_hotpotqa_dspy_runtime() -> tuple[str, str]:
 def resolve_hotpotqa_lm_kwargs(
     model: str,
     api_base: str | None,
+    *,
+    role: str = "solver",
 ) -> dict[str, object]:
     """Resolve the fixed HotPotQA scientific request settings.
 
     Args:
         model: Exact LiteLLM runtime model identifier.
         api_base: Optional role-specific API endpoint.
+        role: Solver or optimizer, selecting its approved output ceiling.
 
     Returns:
         Independent LM keyword arguments for the requested local runtime.
     """
+    if role not in {"solver", "optimizer"}:
+        raise ValueError(f"Unknown HotPotQA model role: {role!r}")
     kwargs: dict[str, object] = {
-        "num_retries": HOTPOTQA_NUM_RETRIES,
+        "num_retries": EXPERIMENT_NUM_RETRIES,
         "timeout": HOTPOTQA_REQUEST_TIMEOUT_SECONDS,
-        **experiment_decoding(model),
-        **experiment_request_overrides(model),
+        **provider_retry_kwargs(role=role),
+        **experiment_decoding(model, agentic=False),
+        **experiment_request_overrides(model, explicit_reasoning=True),
     }
+    if model == DEEPSEEK_V4_1_FLASH_MODEL:
+        kwargs["max_tokens"] = 131_072 if role == "optimizer" else 32_768
+    elif model == QWEN3_8_27B_MODEL and role == "optimizer":
+        kwargs["max_tokens"] = 32_768
     if model in {QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL}:
         kwargs["seed"] = HOTPOTQA_SCIENTIFIC_REQUEST_SEED
     if api_base is not None:
@@ -211,6 +216,7 @@ def build_hotpotqa_task_lm(
     else:
         kwargs = deepcopy(lm_kwargs)
     dspy.settings.configure(disable_history=True)
+    kwargs["cache"] = False
     kwargs["cache_in_memory"] = False
     return dspy.LM(model=model, **kwargs)
 
@@ -347,6 +353,7 @@ def _call_lm(
         kwargs = deepcopy(lm_kwargs)
     kwargs["model"] = model
     kwargs["messages"] = messages
+    kwargs["cache"] = {"no-cache": True, "no-store": True}
     response = None
     max_token_fallbacks = dict.fromkeys((kwargs["max_tokens"], 4096, 1024, 256))
     for max_tokens in max_token_fallbacks:

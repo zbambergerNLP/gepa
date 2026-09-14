@@ -6,6 +6,13 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture
+def openrouter_credentials():
+    """Require credentials before a test makes live OpenRouter requests."""
+    if not os.environ.get("OPENROUTER_API_KEY"):
+        pytest.skip("Live OpenRouter test requires OPENROUTER_API_KEY.")
+
+
 def create_mocked_lms_context(cache_dir: Path):
     """
     Generator for mocked LLM functions that handle record/replay logic.

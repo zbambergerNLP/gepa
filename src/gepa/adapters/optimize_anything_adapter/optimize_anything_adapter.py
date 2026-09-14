@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 from gepa.core.adapter import DataInst, EvaluationBatch, GEPAAdapter
 from gepa.proposer.reflective_mutation.base import LanguageModel
+from gepa.strategies.text_limits import clip_text, resolve_text_limits
 
 logger = logging.getLogger(__name__)
 
@@ -790,6 +791,7 @@ class OptimizeAnythingAdapter(GEPAAdapter):
         )
 
         current_params = params_dict
+        text_limits = resolve_text_limits(getattr(self.refiner_config, "text_limits", None))
         for refinement_iter in range(self.refiner_config.max_refinements):
             # Format ALL attempts so far for the refiner (provides full history)
             current_feedback = self._format_all_attempts_feedback(all_attempts)
@@ -800,6 +802,7 @@ class OptimizeAnythingAdapter(GEPAAdapter):
                     candidate_to_improve=json.dumps(current_params, indent=2),
                     evaluation_feedback=current_feedback,
                 )
+                text_limits.check_prompt(prompt)
                 raw_output = refiner_lm(prompt).strip()
                 # Strip markdown code fences if present
                 if raw_output.startswith("```"):
@@ -817,7 +820,7 @@ class OptimizeAnythingAdapter(GEPAAdapter):
                         {
                             "iteration": refinement_iter + 1,
                             "error": f"JSON parse error: {parse_err}",
-                            "raw_output": raw_output[:2000],
+                            "raw_output": clip_text(raw_output, text_limits.history_text_chars),
                             "score": -1e9,
                         }
                     )
@@ -825,6 +828,7 @@ class OptimizeAnythingAdapter(GEPAAdapter):
 
                 # Reconstruct full candidate: refined params + original refiner_prompt
                 refined_candidate_dict = {**parsed_refined, "refiner_prompt": candidate.get("refiner_prompt", "")}
+                text_limits.check_candidate({name: str(value) for name, value in refined_candidate_dict.items()})
                 refined_score, _refined_output, refined_eval_side_info = self._call_evaluator(
                     refined_candidate_dict, example
                 )

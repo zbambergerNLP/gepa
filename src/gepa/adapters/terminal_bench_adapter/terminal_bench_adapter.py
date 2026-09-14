@@ -1,97 +1,90 @@
-"""Terminal-Bench v3 adapter backed by the pinned Harbor CLI.
+"""Port GEPA's TerminusAdapter to Terminal-Bench 2.1 and the pinned Harbor CLI.
 
 Harbor runs in a separate Python environment through a subprocess, so GEPA
 retains Python 3.10+ support. Harbor supplies the official Docker verifier and
-ATIF trajectories.
+ATIF trajectories. This maintained port replaces the upstream legacy ``tb run``
+transport and single-prompt feedback; see ``TERMINUS_ADAPTER_CONTRACT`` for its
+upstream source and the README for the compatibility differences.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import shutil
 import subprocess
 import uuid
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import Any, TypedDict
 
+from gepa.adapters.terminal_bench_adapter.documents import (
+    COMPONENT_KINDS,
+    render_instruction,
+    validate_documents,
+    write_document_bundle,
+)
+from gepa.adapters.terminal_bench_adapter.text_scope import TerminalBenchTextScope
 from gepa.core.adapter import EvaluationBatch, GEPAAdapter
+from gepa.strategies.text_limits import TextLimits, clip_text, resolve_text_limits, validate_char_limit
 
 PINNED_HARBOR_VERSION = "0.22.0"
-PINNED_DATASET_IDENTIFIER = "terminal-bench/terminal-bench"
-PINNED_DATASET_VERSION = "3.0.0"
-PINNED_DATASET_REFERENCE = f"{PINNED_DATASET_IDENTIFIER}@{PINNED_DATASET_VERSION}"
-PINNED_DATASET_CONTENT_HASH = "sha256:a32a61879ea94eb9dc16fa1fbeb398759f0c07ca633d9d1f6aec760207036da3"
-PINNED_SOURCE_REPOSITORY = "https://github.com/harbor-framework/terminal-bench"
-PINNED_SOURCE_TAG = "v3.0.0"
-PINNED_SOURCE_COMMIT = "2b0442c3c583b710ca8da14c8e601b99f2f1f244"
-PINNED_TASK_COUNT = 74
+TASK_CONTEXT_SETTINGS = {
+    "enable_summarize": True,
+    "proactive_summarization_threshold": 8_000,
+}
+EXPERIMENT_DATASETS = {
+    "tb2.1": {
+        "identifier": "terminal-bench/terminal-bench-2-1",
+        "version": "2.1",
+        "reference": "terminal-bench/terminal-bench-2-1",
+        "registry_content_hash": "sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a",
+        "source_repository": "https://github.com/harbor-framework/terminal-bench-2-1",
+        "source_tag": None,
+        "source_commit": None,
+        "task_count": 89,
+        "task_refs_digest": "c3ff7071ba153cac0c12523235ddee0e6ce942777748c260aebc9cbaf6c0c1ed",
+        "registry_version_id": "f92eea12-ff70-4d30-ace0-003abf294998",
+        "harbor_version": PINNED_HARBOR_VERSION,
+    },
+}
+EXPERIMENT_SPLIT_COUNTS = {
+    "tb2.1": {"train": 30, "val": 19, "test": 40},
+}
 PROMPTED_TERMINUS_IMPORT_PATH = "examples.terminalbench.terminus_agent:PromptedTerminus"
-INSTRUCTION_COMPONENT = "instruction_prompt"
 SPLIT_NAMES = ("train", "val", "test")
 SPLIT_WEIGHTS = {"train": 0.40, "val": 0.30, "test": 0.30}
 SUPPORTED_ATIF_SCHEMA_VERSIONS = {f"ATIF-v1.{minor}" for minor in range(8)}
-
-# This is the Terminus 2 JSON interaction contract from Harbor v0.22.0. GEPA
-# evolves only the instruction prefix placed above it. The braces remain
-# doubled because Harbor applies ``str.format`` with the task instruction and
-# current tmux state at runtime.
-TERMINUS_JSON_CONTRACT = r"""Format your response as JSON with the following structure:
-
-{{
-  "analysis": "Analyze the current state based on the terminal output provided. What do you see? What has been accomplished? What still needs to be done?",
-  "plan": "Describe your plan for the next steps. What commands will you run and why? Be specific about what you expect each command to accomplish.",
-  "commands": [
-    {{
-      "keystrokes": "ls -la\n",
-      "duration": 0.1
-    }},
-    {{
-      "keystrokes": "cd project\n",
-      "duration": 0.1
-    }}
-  ],
-  "task_complete": true
-}}
-
-Required fields:
-- "analysis": Your analysis of the current situation
-- "plan": Your plan for the next steps
-- "commands": Array of command objects to execute
-
-Optional fields:
-- "task_complete": Boolean indicating if the task is complete (defaults to false if not present)
-
-Command object structure:
-- "keystrokes": String containing the exact keystrokes to send to the terminal (required)
-- "duration": Number of seconds to wait for the command to complete before the next command will be executed (defaults to 1.0 if not present)
-
-IMPORTANT: The text inside "keystrokes" will be used completely verbatim as keystrokes. Write commands exactly as you want them sent to the terminal:
-- You must end every command with a newline (\n) or it will not execute.
-- For special key sequences, use tmux-style escape sequences:
-  - C-c for Ctrl+C
-  - C-d for Ctrl+D
-
-The "duration" attribute specifies the number of seconds to wait for the command to complete (default: 1.0) before the next command will be executed. On immediate tasks (e.g., cd, ls, echo, cat) set a duration of 0.1 seconds. On commands (e.g., gcc, find, rustc) set a duration of 1.0 seconds. On slow commands (e.g., make, python3 [long running script], wget [file]) set an appropriate duration as you determine necessary.
-
-It is better to set a smaller duration than a longer duration. It is always possible to wait again if the prior output has not finished, by running {{"keystrokes": "", "duration": 10.0}} on subsequent requests to wait longer. Never wait longer than 60 seconds; prefer to poll to see intermediate result status.
-
-Important notes:
-- Each command's keystrokes are sent exactly as written to the terminal
-- Do not include extra whitespace before or after the keystrokes unless it is part of the intended command
-- Extra text before or after the JSON will generate warnings but be tolerated
-- The JSON must be valid; use proper escaping for quotes and special characters within strings
-- The commands array can be empty if you want to wait without taking action
-
-Task Description:
-{instruction}
-
-Current terminal state:
-{terminal_state}
-"""
+VERIFIER_LOG_FILENAMES = ("test-stdout.txt", "test-stderr.txt")
+REFLECTION_FEEDBACK_CONTRACT = {
+    "version": 5,
+    "score": "official_verifier_reward",
+    "reflection_split": "train",
+    "trajectory_directories": ["agent", "steps/*/agent"],
+    "trajectory_projection": "complete_atif_without_deduplication",
+    "raw_trial_and_process_metadata": "included_in_reflection",
+    "verifier_log_filenames": list(VERIFIER_LOG_FILENAMES),
+    "verifier_log_directories": ["verifier", "steps/*/verifier"],
+    "max_chars_per_verifier_log": None,
+    "log_truncation": "optional_equal_head_and_tail_with_omitted_character_marker",
+    "log_decoding": "utf-8-replace",
+    "missing_verifier_logs": "explicitly_unavailable",
+}
+FAILURE_POLICY_CONTRACT = {
+    "version": 1,
+    "accepted_trial_exceptions": ["AgentTimeoutError"],
+    "agent_timeout_score": "official_verifier_reward",
+    "timed_out_step_requires_verifier_rewards": True,
+    "harbor_max_retries": 0,
+    "infrastructure_or_evidence_failure": "raise_without_score",
+    "recovery": "explicit_resume_after_repair",
+    "failed_job_usage": "preserved_in_harbor_artifacts_separate_from_scored_evaluations",
+}
 
 
 class TerminalBenchOutput(TypedDict):
@@ -102,6 +95,9 @@ class TerminalBenchOutput(TypedDict):
     rewards: dict[str, float]
     errors: list[str]
     evaluation_id: str
+    candidate_digest: str
+    job_dir: str
+    config_path: str
     harbor_returncode: int
     harbor_stdout_path: str
     harbor_stderr_path: str
@@ -112,11 +108,12 @@ class TerminalBenchTrajectory(TypedDict):
     """Complete Harbor evidence used to construct reflection records."""
 
     task_id: str
-    candidate_prompt: str
+    candidate_documents: dict[str, str]
     reward: float
     rewards: dict[str, float]
     errors: list[str]
     atif_trajectories: list[dict[str, Any]]
+    verifier_logs: dict[str, str]
     trial_result: dict[str, Any]
     evaluation_id: str
     harbor_returncode: int
@@ -130,8 +127,7 @@ class TerminalBenchTask:
     """One pinned Terminal-Bench task selected from the checked-in manifest.
 
     Args:
-        task_id: Fully qualified Harbor task ID, such as
-            ``terminal-bench/cad-model``.
+        task_id: Qualified Hub task name such as ``terminal-bench/bn-fit-modify``.
     """
 
     task_id: str
@@ -142,10 +138,40 @@ class TerminalBenchManifest:
     """Validated task refs and deterministic train/validation/test splits."""
 
     path: Path
+    experiment: str
     dataset: dict[str, Any]
     split_policy: dict[str, Any]
     task_refs: dict[str, str]
     splits: dict[str, list[str]]
+
+    @property
+    def component_kinds(self) -> dict[str, str]:
+        """Return the full text and skill surface shared by all methods."""
+        return dict(COMPONENT_KINDS)
+
+    def validate_candidate(self, candidate: Mapping[str, str]) -> None:
+        """Reject candidates from a different optimization target.
+
+        Args:
+            candidate: Documents proposed for this experiment.
+
+        Raises:
+            ValueError: The component set or value types differ from the target.
+        """
+        validate_documents(candidate)
+
+    def candidate_digest(self, candidate: Mapping[str, str]) -> str:
+        """Hash the experiment identity together with its candidate text.
+
+        Args:
+            candidate: Complete candidate for this experiment.
+
+        Returns:
+            Stable SHA-256 digest independent of component insertion order.
+        """
+        self.validate_candidate(candidate)
+        payload = {"experiment": self.experiment, "documents": dict(candidate)}
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
     def tasks(self, split: str, limit: int | None = None) -> list[TerminalBenchTask]:
         """Return tasks from one split without changing manifest order.
@@ -179,6 +205,7 @@ class HarborTrialResult:
     atif_trajectories: list[dict[str, Any]]
     raw_result: dict[str, Any]
     trial_dir: Path
+    verifier_logs: dict[str, str] = dataclass_field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -203,17 +230,53 @@ class HarborExecutionError(RuntimeError):
     """Raised when a Harbor job fails before producing complete task results."""
 
 
-def _validate_job_result(raw_result: Any, expected_trials: int, result_path: Path) -> None:
-    """Require Harbor's completed-job counters to describe a clean run.
+def _read_verifier_logs(trial_dir: Path, max_chars: int | None = None) -> dict[str, str]:
+    """Read complete verifier logs unless a character cutoff is configured.
+
+    Args:
+        trial_dir: One completed Harbor trial's artifact directory.
+        max_chars: Source-character allowance per log, or ``None`` for unlimited.
+
+    Returns:
+        Relative log paths mapped to UTF-8 text. Oversized files retain their
+        beginning and end with an explicit omitted-character count between them.
+
+    Raises:
+        HarborExecutionError: A present log is unreadable or resolves outside
+            this trial's directory.
+    """
+    validate_char_limit("verifier_log_chars", max_chars)
+    logs = {}
+    directories = [trial_dir / "verifier", *sorted((trial_dir / "steps").glob("*/verifier"))]
+    for directory in directories:
+        for filename in VERIFIER_LOG_FILENAMES:
+            path = directory / filename
+            if not path.resolve().is_relative_to(trial_dir.resolve()):
+                raise HarborExecutionError(f"Verifier log {path} resolves outside its trial directory")
+            try:
+                text = clip_text(path.read_bytes().decode("utf-8", errors="replace"), max_chars, head_and_tail=True)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise HarborExecutionError(f"Verifier log {path} is unreadable") from exc
+            logs[path.relative_to(trial_dir).as_posix()] = text
+    return logs
+
+
+def _validate_job_result(raw_result: Any, expected_trials: int, result_path: Path, *, verified_timeouts: int) -> None:
+    """Reconcile Harbor's completed-job counters with verified timeout trials.
 
     Args:
         raw_result: Decoded Harbor job result.
         expected_trials: Exact requested trial count.
         result_path: Result path included in boundary errors.
+        verified_timeouts: Trial-level timeouts already validated against
+            official verifier results. Harbor counts these as both completed
+            and errored; step-level exceptions do not increment that counter.
 
     Raises:
         HarborExecutionError: The result shape, completion marker, or trial
-            counters do not describe a clean finished job.
+            counters do not describe a complete, single-attempt evaluation.
     """
     if not isinstance(raw_result, dict):
         raise HarborExecutionError(f"Harbor job result {result_path} is not a JSON object")
@@ -229,19 +292,51 @@ def _validate_job_result(raw_result: Any, expected_trials: int, result_path: Pat
             "n_running_trials",
             "n_pending_trials",
             "n_cancelled_trials",
+            "n_retries",
         )
     }
     if (
         raw_result.get("finished_at") is None
         or raw_result.get("n_total_trials") != expected_trials
         or counts["n_completed_trials"] != expected_trials
-        or any(counts[name] != 0 for name in counts if name != "n_completed_trials")
+        or counts["n_errored_trials"] != verified_timeouts
+        or any(counts[name] != 0 for name in counts if name not in {"n_completed_trials", "n_errored_trials"})
     ):
         raise HarborExecutionError(
-            f"Harbor job result {result_path} is not a clean completed job: "
+            f"Harbor job result {result_path} is not a complete single-attempt job: "
             f"finished_at={raw_result.get('finished_at')!r}, "
             f"n_total_trials={raw_result.get('n_total_trials')!r}, stats={counts!r}"
         )
+
+
+def _read_verifier_rewards(
+    raw_result: Mapping[str, Any], task_id: str, *, require_canonical: bool = True
+) -> dict[str, float]:
+    """Require finite official rewards before accepting a trial or timed-out step.
+
+    Args:
+        raw_result: Trial or step result containing verifier evidence.
+        task_id: Task identity, including step name when applicable.
+        require_canonical: Require the overall trial's canonical score key.
+
+    Returns:
+        Official verifier rewards converted to finite floats.
+
+    Raises:
+        HarborExecutionError: Verification is missing or its rewards are invalid.
+    """
+    verifier_result = raw_result.get("verifier_result")
+    raw_rewards = verifier_result.get("rewards") if isinstance(verifier_result, dict) else None
+    if not isinstance(raw_rewards, dict) or not raw_rewards or (require_canonical and "reward" not in raw_rewards):
+        required = "canonical verifier reward" if require_canonical else "verifier rewards"
+        raise HarborExecutionError(f"Harbor trial {task_id!r} did not return the required {required}")
+    try:
+        rewards = {name: float(value) for name, value in raw_rewards.items()}
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise HarborExecutionError(f"Harbor trial {task_id!r} returned non-numeric rewards") from exc
+    if not all(math.isfinite(value) for value in rewards.values()):
+        raise HarborExecutionError(f"Harbor trial {task_id!r} returned non-finite verifier rewards")
+    return rewards
 
 
 def _load_atif_trajectory(trajectory_path: Path) -> dict[str, Any]:
@@ -304,18 +399,22 @@ def _load_atif_trajectory(trajectory_path: Path) -> dict[str, Any]:
     return trajectory
 
 
-def derive_terminalbench_splits(task_ids: Sequence[str], seed: str) -> dict[str, list[str]]:
-    """Derive stable 40/30/30 splits with hash ordering and Hamilton allocation.
+def derive_terminalbench_splits(
+    task_ids: Sequence[str], seed: str, counts: Mapping[str, int] | None = None
+) -> dict[str, list[str]]:
+    """Derive stable splits with hash ordering and explicit or 40/30/30 counts.
 
     Args:
-        task_ids: Unique fully qualified task IDs.
+        task_ids: Unique task IDs; hash names without the terminal-bench namespace
+            to preserve the approved assignments when moving to Hub packages.
         seed: Versioned text seed recorded in the manifest.
+        counts: Explicit split sizes; omitted uses Hamilton 40/30/30 allocation.
 
     Returns:
         ``train``, ``val``, and ``test`` lists in deterministic hash order.
 
     Raises:
-        ValueError: Task IDs are empty or contain duplicates.
+        ValueError: Task IDs are empty or duplicated, or counts are invalid.
     """
     if not task_ids:
         raise ValueError("task_ids must not be empty")
@@ -325,18 +424,23 @@ def derive_terminalbench_splits(task_ids: Sequence[str], seed: str) -> dict[str,
     ordered = [
         task_id
         for _, task_id in sorted(
-            (hashlib.sha256(f"{seed}\0{task_id}".encode()).hexdigest(), task_id) for task_id in task_ids
+            (hashlib.sha256(f"{seed}\0{task_id.removeprefix('terminal-bench/')}".encode()).hexdigest(), task_id)
+            for task_id in task_ids
         )
     ]
-    quotas = {name: len(ordered) * SPLIT_WEIGHTS[name] for name in SPLIT_NAMES}
-    counts = {name: int(quotas[name]) for name in SPLIT_NAMES}
-    unassigned = len(ordered) - sum(counts.values())
-    remainder_order = [
-        name
-        for _, name in sorted((-(quotas[name] - counts[name]), name) for name in SPLIT_NAMES)
-    ]
-    for name in remainder_order[:unassigned]:
-        counts[name] += 1
+    if counts is None:
+        quotas = {name: len(ordered) * SPLIT_WEIGHTS[name] for name in SPLIT_NAMES}
+        counts = {name: int(quotas[name]) for name in SPLIT_NAMES}
+        unassigned = len(ordered) - sum(counts.values())
+        remainder_order = [name for _, name in sorted((-(quotas[name] - counts[name]), name) for name in SPLIT_NAMES)]
+        for name in remainder_order[:unassigned]:
+            counts[name] += 1
+    elif (
+        set(counts) != set(SPLIT_NAMES)
+        or any(type(count) is not int or count < 0 for count in counts.values())
+        or sum(counts.values()) != len(ordered)
+    ):
+        raise ValueError("split counts must be non-negative integers covering every task exactly once")
 
     train_end = counts["train"]
     val_end = train_end + counts["val"]
@@ -348,7 +452,7 @@ def derive_terminalbench_splits(task_ids: Sequence[str], seed: str) -> dict[str,
 
 
 def load_terminalbench_manifest(path: str | Path) -> TerminalBenchManifest:
-    """Load and verify the pinned v3 manifest before any benchmark work begins.
+    """Load and verify the pinned TB2.1 experiment before benchmark work begins.
 
     Args:
         path: JSON manifest generated from the official Harbor registry.
@@ -361,23 +465,16 @@ def load_terminalbench_manifest(path: str | Path) -> TerminalBenchManifest:
     """
     manifest_path = Path(path).expanduser().resolve()
     payload = json.loads(manifest_path.read_text())
-    if payload.get("schema_version") != 1:
-        raise ValueError("Terminal-Bench manifest schema_version must be 1")
+    if payload.get("schema_version") != 2:
+        raise ValueError("Terminal-Bench manifest schema_version must be 2")
+    experiment = payload.get("experiment")
+    if experiment not in EXPERIMENT_DATASETS:
+        raise ValueError(f"Unknown Terminal-Bench experiment: {experiment!r}")
 
     dataset = payload.get("dataset")
     if not isinstance(dataset, dict):
         raise ValueError("Terminal-Bench manifest must contain a dataset object")
-    expected_pins = {
-        "identifier": PINNED_DATASET_IDENTIFIER,
-        "version": PINNED_DATASET_VERSION,
-        "reference": PINNED_DATASET_REFERENCE,
-        "registry_content_hash": PINNED_DATASET_CONTENT_HASH,
-        "source_repository": PINNED_SOURCE_REPOSITORY,
-        "source_tag": PINNED_SOURCE_TAG,
-        "source_commit": PINNED_SOURCE_COMMIT,
-        "task_count": PINNED_TASK_COUNT,
-        "harbor_version": PINNED_HARBOR_VERSION,
-    }
+    expected_pins = EXPERIMENT_DATASETS[experiment]
     for field, expected in expected_pins.items():
         if dataset.get(field) != expected:
             raise ValueError(f"manifest dataset.{field} must be {expected!r}; got {dataset.get(field)!r}")
@@ -386,15 +483,18 @@ def load_terminalbench_manifest(path: str | Path) -> TerminalBenchManifest:
         raise ValueError("Terminal-Bench manifest task_refs must be a non-empty object")
     normalized_refs: dict[str, str] = {}
     for task_id, ref in task_refs.items():
-        if not isinstance(task_id, str) or not task_id.startswith("terminal-bench/"):
+        if not isinstance(task_id, str) or not task_id:
             raise ValueError(f"invalid Terminal-Bench task ID: {task_id!r}")
-        if not isinstance(ref, str) or not ref.startswith("sha256:"):
-            raise ValueError(f"task {task_id!r} must have a sha256 registry ref")
+        if not isinstance(ref, str):
+            raise ValueError(f"task {task_id!r} must have an immutable source ref")
         normalized_refs[task_id] = ref
     if dataset.get("task_count") != len(normalized_refs):
         raise ValueError(
             f"manifest task_count is {dataset.get('task_count')!r}, but task_refs contains {len(normalized_refs)} tasks"
         )
+    refs_digest = hashlib.sha256(json.dumps(normalized_refs, sort_keys=True).encode()).hexdigest()
+    if refs_digest != dataset["task_refs_digest"]:
+        raise ValueError("manifest task refs differ from the pinned official task set")
 
     split_policy = payload.get("split_policy")
     if not isinstance(split_policy, dict) or not isinstance(split_policy.get("seed"), str):
@@ -414,7 +514,9 @@ def load_terminalbench_manifest(path: str | Path) -> TerminalBenchManifest:
         raise ValueError("Terminal-Bench manifest splits overlap")
     if set(flattened) != set(normalized_refs):
         raise ValueError("Terminal-Bench manifest splits must contain every task ref exactly once")
-    expected_splits = derive_terminalbench_splits(list(normalized_refs), split_policy["seed"])
+    expected_splits = derive_terminalbench_splits(
+        list(normalized_refs), split_policy["seed"], EXPERIMENT_SPLIT_COUNTS[experiment]
+    )
     if normalized_splits != expected_splits:
         raise ValueError("Terminal-Bench manifest splits do not match the recorded deterministic split policy")
     expected_counts = {name: len(expected_splits[name]) for name in SPLIT_NAMES}
@@ -423,6 +525,7 @@ def load_terminalbench_manifest(path: str | Path) -> TerminalBenchManifest:
 
     return TerminalBenchManifest(
         path=manifest_path,
+        experiment=experiment,
         dataset=dataset,
         split_policy=split_policy,
         task_refs=normalized_refs,
@@ -430,29 +533,25 @@ def load_terminalbench_manifest(path: str | Path) -> TerminalBenchManifest:
     )
 
 
-def render_terminus_prompt(candidate_prompt: str) -> str:
-    """Combine an evolvable instruction prefix with the fixed Terminus contract.
+def render_terminus_prompt(candidate: Mapping[str, str]) -> str:
+    """Render main-agent guidance and command instructions above runtime inputs.
 
     Args:
-        candidate_prompt: GEPA's current ``instruction_prompt`` component.
+        candidate: Complete candidate bundle.
 
     Returns:
-        A complete Terminus template ready for Harbor's later ``str.format``.
-        When ``candidate_prompt`` is blank, only the fixed output contract
-        remains.
+        Terminus template with task and terminal-state placeholders.
     """
-    if not candidate_prompt.strip():
-        return TERMINUS_JSON_CONTRACT
-    escaped_candidate = candidate_prompt.replace("{", "{{").replace("}", "}}")
-    return f"{escaped_candidate.rstrip()}\n\n{TERMINUS_JSON_CONTRACT}"
+    return render_instruction(candidate)
 
 
 class HarborCLI:
-    """Create isolated candidate jobs and execute them with pinned Harbor.
+    """Run pinned experiment candidates in isolated Harbor jobs.
 
     Args:
+        manifest: Validated experiment whose dataset and target this runner uses.
         student_model: Model used by Terminus to solve benchmark tasks.
-        work_dir: Root for immutable candidate prompt/config/job artifacts.
+        work_dir: Root for immutable document-bundle/config/job artifacts.
         agent_python_path: Directory added to ``PYTHONPATH`` so Harbor can load
             the checked-in ``PromptedTerminus`` wrapper.
         n_concurrent: Maximum trials Harbor may run concurrently.
@@ -460,7 +559,8 @@ class HarborCLI:
         docker_executable: Docker CLI name or path used for readiness checks.
         student_api_base: Optional LiteLLM API base for the student model.
         student_agent_kwargs: Extra Terminus kwargs that do not alter the fixed
-            prompt, tmux tool, skill policy, or unbounded-turn default.
+            documents, tmux tool, skill loading, context management, or
+            unbounded-turn default.
         process_timeout_sec: Optional whole-job subprocess timeout. ``None``
             leaves long-horizon completion governed by each pinned task's
             Harbor agent/verifier timeouts.
@@ -469,6 +569,7 @@ class HarborCLI:
     def __init__(
         self,
         *,
+        manifest: TerminalBenchManifest,
         student_model: str,
         work_dir: str | Path,
         agent_python_path: str | Path,
@@ -478,10 +579,12 @@ class HarborCLI:
         student_api_base: str | None = None,
         student_agent_kwargs: Mapping[str, Any] | None = None,
         process_timeout_sec: float | None = None,
+        text_limits: TextLimits | None = None,
     ) -> None:
         """Configure the pinned Harbor subprocess boundary.
 
         Args:
+            manifest: Validated experiment whose dataset and target this runner uses.
             student_model: Model used by Terminus to solve benchmark tasks.
             work_dir: Root for candidate prompt, config, and job artifacts.
             agent_python_path: Directory added to ``PYTHONPATH`` for the
@@ -493,6 +596,7 @@ class HarborCLI:
             student_agent_kwargs: Additional Terminus settings that do not
                 override fixed harness behavior.
             process_timeout_sec: Optional whole-job subprocess timeout.
+            text_limits: Optional verifier-log character allowance.
 
         Raises:
             ValueError: Model or numeric settings are invalid, or extra agent
@@ -506,12 +610,14 @@ class HarborCLI:
             raise ValueError("process_timeout_sec must be positive when provided")
         extra_kwargs = dict(student_agent_kwargs or {})
         fixed_keys = {
+            *TASK_CONTEXT_SETTINGS,
             "disable_skills",
             "max_episodes",
             "max_turns",
             "mcp_servers",
             "parser_name",
             "prompt_template_path",
+            "document_bundle_path",
             "record_terminal_session",
             "skills_dir",
             "store_all_messages",
@@ -523,6 +629,7 @@ class HarborCLI:
         if overridden:
             raise ValueError(f"student_agent_kwargs cannot override fixed harness keys: {sorted(overridden)}")
 
+        self.manifest = manifest
         self.student_model = student_model
         self.work_dir = Path(work_dir).expanduser().resolve()
         self.agent_python_path = Path(agent_python_path).expanduser().resolve()
@@ -532,6 +639,7 @@ class HarborCLI:
         self.student_api_base = student_api_base
         self.student_agent_kwargs = extra_kwargs
         self.process_timeout_sec = process_timeout_sec
+        self.text_limits = resolve_text_limits(text_limits)
 
     @staticmethod
     def _resolve_executable(executable: str, label: str) -> str:
@@ -599,14 +707,16 @@ class HarborCLI:
         task_ids: Sequence[str],
         *,
         prompt_path: Path,
+        bundle_path: Path | None,
         jobs_dir: Path,
         job_name: str,
     ) -> dict[str, Any]:
         """Build the exact Harbor job for one candidate/batch evaluation.
 
         Args:
-            task_ids: Fully qualified pinned task IDs.
+            task_ids: Pinned task IDs using this dataset's native naming.
             prompt_path: Candidate-specific rendered Terminus template.
+            bundle_path: Complete prompts and skills for the full-text experiment.
             jobs_dir: Candidate-specific Harbor jobs directory.
             job_name: Unique job name inside ``jobs_dir``.
 
@@ -614,19 +724,26 @@ class HarborCLI:
             JSON-serializable Harbor v0.22.0 job configuration.
         """
         agent_kwargs: dict[str, Any] = {
-            "disable_skills": True,
             "prompt_template_path": str(prompt_path),
             "record_terminal_session": True,
             "store_all_messages": True,
             "trajectory_config": {"linear_history": False},
+            **TASK_CONTEXT_SETTINGS,
             **self.student_agent_kwargs,
         }
         if self.student_api_base is not None:
             agent_kwargs["api_base"] = self.student_api_base
-        return {
+        if bundle_path is None:
+            raise ValueError(f"{self.manifest.experiment} requires a document bundle")
+        agent_kwargs["document_bundle_path"] = str(bundle_path)
+        unknown = sorted(set(task_ids).difference(self.manifest.task_refs))
+        if unknown:
+            raise ValueError(f"tasks are not in pinned {self.manifest.dataset['reference']}: {unknown}")
+        config: dict[str, Any] = {
             "job_name": job_name,
             "jobs_dir": str(jobs_dir),
             "n_attempts": 1,
+            "retry": {"max_retries": FAILURE_POLICY_CONTRACT["harbor_max_retries"]},
             "timeout_multiplier": 1.0,
             "n_concurrent_trials": self.n_concurrent,
             "quiet": True,
@@ -639,21 +756,22 @@ class HarborCLI:
                     "kwargs": agent_kwargs,
                 }
             ],
-            "datasets": [
-                {
-                    "name": PINNED_DATASET_IDENTIFIER,
-                    "ref": PINNED_DATASET_CONTENT_HASH,
-                    "task_names": list(task_ids),
-                }
-            ],
         }
+        config["datasets"] = [
+            {
+                "name": self.manifest.dataset["identifier"],
+                "ref": self.manifest.dataset["registry_content_hash"],
+                "task_names": list(task_ids),
+            }
+        ]
+        return config
 
-    def run(self, task_ids: Sequence[str], candidate_prompt: str) -> HarborEvaluation:
+    def run(self, task_ids: Sequence[str], candidate: Mapping[str, str]) -> HarborEvaluation:
         """Run one isolated Harbor job and parse every task by exact ID.
 
         Args:
-            task_ids: Unique fully qualified task IDs in desired output order.
-            candidate_prompt: Current GEPA instruction prompt.
+            task_ids: Unique pinned task IDs in desired output order.
+            candidate: Complete set of editable documents for this experiment.
 
         Returns:
             Evaluation metadata and a task-ID keyed trial map.
@@ -672,19 +790,29 @@ class HarborCLI:
             raise ValueError("task_ids must not be empty")
         if len(set(task_ids)) != len(task_ids):
             raise ValueError("task_ids must be unique within one Harbor job")
+        self.manifest.validate_candidate(candidate)
         harbor, _docker = self.check_requirements()
 
-        candidate_digest = hashlib.sha256(candidate_prompt.encode()).hexdigest()
+        candidate_digest = self.manifest.candidate_digest(candidate)
         evaluation_id = f"{candidate_digest[:12]}-{uuid.uuid4().hex}"
         evaluation_dir = self.work_dir / "evaluations" / evaluation_id
         evaluation_dir.mkdir(parents=True, exist_ok=False)
         prompt_path = evaluation_dir / "terminus-prompt.txt"
-        prompt_path.write_text(render_terminus_prompt(candidate_prompt))
+        bundle_path = write_document_bundle(evaluation_dir, candidate)
+        (evaluation_dir / "candidate.json").write_text(
+            json.dumps(
+                {"experiment": self.manifest.experiment, "digest": candidate_digest, "documents": dict(candidate)},
+                indent=2,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
         jobs_dir = evaluation_dir / "jobs"
         job_name = f"candidate-{candidate_digest[:12]}"
         config = self.build_job_config(
             task_ids,
             prompt_path=prompt_path,
+            bundle_path=bundle_path,
             jobs_dir=jobs_dir,
             job_name=job_name,
         )
@@ -733,7 +861,6 @@ class HarborCLI:
             raw_job_result = json.loads(job_result_path.read_text())
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise HarborExecutionError(f"Harbor job result {job_result_path} is unreadable") from exc
-        _validate_job_result(raw_job_result, len(task_ids), job_result_path)
 
         trials: dict[str, HarborTrialResult] = {}
         for result_path in sorted(job_dir.glob("*/result.json")):
@@ -744,37 +871,32 @@ class HarborCLI:
             if task_id in trials:
                 raise HarborExecutionError(f"Harbor produced duplicate results for task {task_id!r}")
 
-            verifier_result = raw_result.get("verifier_result")
-            raw_rewards = verifier_result.get("rewards") if isinstance(verifier_result, dict) else None
-            if not isinstance(raw_rewards, dict) or "reward" not in raw_rewards:
-                raise HarborExecutionError(
-                    f"Harbor trial {task_id!r} did not return the canonical verifier reward in {result_path}"
-                )
-            try:
-                rewards = {name: float(value) for name, value in raw_rewards.items()}
-            except (TypeError, ValueError) as exc:
-                raise HarborExecutionError(f"Harbor trial {task_id!r} returned non-numeric rewards") from exc
+            rewards = _read_verifier_rewards(raw_result, task_id)
             errors: list[str] = []
-            exception_info = raw_result.get("exception_info")
-            if isinstance(exception_info, dict):
+            step_results = raw_result.get("step_results")
+            if step_results is not None and not isinstance(step_results, list):
+                raise HarborExecutionError(f"Harbor trial {task_id!r} returned invalid step results")
+            for record in [raw_result, *(step_results or [])]:
+                if not isinstance(record, dict):
+                    raise HarborExecutionError(f"Harbor trial {task_id!r} returned an invalid step result")
+                exception_info = record.get("exception_info")
+                if exception_info is None:
+                    continue
+                if not isinstance(exception_info, dict):
+                    raise HarborExecutionError(f"Harbor trial {task_id!r} returned invalid exception evidence")
                 exception_type = exception_info.get("exception_type", "Exception")
                 exception_message = exception_info.get("exception_message", "")
-                errors.append(f"{exception_type}: {exception_message}".rstrip())
-            step_results = raw_result.get("step_results")
-            if isinstance(step_results, list):
-                for step in step_results:
-                    if not isinstance(step, dict) or not isinstance(step.get("exception_info"), dict):
-                        continue
-                    step_exception = step["exception_info"]
-                    step_name = step.get("step_name", "unknown step")
-                    exception_type = step_exception.get("exception_type", "Exception")
-                    exception_message = step_exception.get("exception_message", "")
-                    errors.append(f"{step_name}: {exception_type}: {exception_message}".rstrip())
-            if errors:
-                raise HarborExecutionError(f"Harbor trial {task_id!r} reported execution errors: {'; '.join(errors)}")
-            agent_dir = result_path.parent / "agent"
+                scope = f"{record.get('step_name', 'unknown step')}: " if record is not raw_result else ""
+                error = f"{scope}{exception_type}: {exception_message}".rstrip()
+                if exception_type not in FAILURE_POLICY_CONTRACT["accepted_trial_exceptions"]:
+                    raise HarborExecutionError(f"Harbor trial {task_id!r} reported execution errors: {error}")
+                if record is not raw_result:
+                    _read_verifier_rewards(record, f"{task_id}/{record.get('step_name')}", require_canonical=False)
+                errors.append(error)
             atif_trajectories: list[dict[str, Any]] = []
-            for trajectory_path in sorted(agent_dir.glob("trajectory*.json")):
+            trajectory_paths = sorted(result_path.parent.glob("agent/trajectory*.json"))
+            trajectory_paths.extend(sorted(result_path.parent.glob("steps/*/agent/trajectory*.json")))
+            for trajectory_path in trajectory_paths:
                 atif_trajectories.append(_load_atif_trajectory(trajectory_path))
             if not atif_trajectories:
                 raise HarborExecutionError(f"Harbor trial {task_id!r} did not emit an ATIF trajectory")
@@ -787,6 +909,7 @@ class HarborCLI:
                 atif_trajectories=atif_trajectories,
                 raw_result=raw_result,
                 trial_dir=result_path.parent,
+                verifier_logs=_read_verifier_logs(result_path.parent, self.text_limits.verifier_log_chars),
             )
 
         missing = [task_id for task_id in task_ids if task_id not in trials]
@@ -795,6 +918,12 @@ class HarborCLI:
             raise HarborExecutionError(
                 f"Harbor result/task mismatch for evaluation {evaluation_id}: missing={missing}, unexpected={unexpected}"
             )
+        _validate_job_result(
+            raw_job_result,
+            len(task_ids),
+            job_result_path,
+            verified_timeouts=sum(trial.raw_result.get("exception_info") is not None for trial in trials.values()),
+        )
         return HarborEvaluation(
             evaluation_id=evaluation_id,
             candidate_digest=candidate_digest,
@@ -807,24 +936,40 @@ class HarborCLI:
         )
 
 
-class TerminalBenchAdapter(GEPAAdapter[TerminalBenchTask, TerminalBenchTrajectory, TerminalBenchOutput]):
-    """Evaluate one prompt component with Terminus and official Harbor rewards.
+class TerminusAdapter(GEPAAdapter[TerminalBenchTask, TerminalBenchTrajectory, TerminalBenchOutput]):
+    """Evaluate prompts and skills through GEPA's Terminus adapter port for Harbor.
+
+    The upstream adapter name and GEPA evaluation/reflection interface are retained.
+    Its legacy runner, result parsing, and single-prompt feedback are replaced for
+    TB2.1; this is not the unmodified upstream implementation or constructor API.
+    Candidates expose one unified initial prompt with fixed auxiliary text by
+    default, or all prompts and skills when the all-text scope is selected.
 
     Args:
-        manifest: Checked-in, validated v3 manifest.
+        manifest: Checked-in, validated experiment manifest.
         harbor: Pinned Harbor subprocess runner configured with the student
             model. The proposer model is supplied separately to ``gepa.optimize``.
+        text_scope: Editable candidate boundary and provider seed family.
     """
 
-    def __init__(self, manifest: TerminalBenchManifest, harbor: HarborCLI) -> None:
+    def __init__(
+        self, manifest: TerminalBenchManifest, harbor: HarborCLI, *, text_scope: TerminalBenchTextScope | None = None
+    ) -> None:
         """Bind the validated manifest to its Harbor runner.
 
         Args:
-            manifest: Checked-in, validated Terminal-Bench v3 manifest.
+            manifest: Checked-in, validated experiment manifest.
             harbor: Pinned runner configured with the student model.
+            text_scope: Editable candidate boundary; omitted means the unified initial prompt.
+
+        Raises:
+            ValueError: The adapter and runner use different manifests.
         """
+        if manifest != harbor.manifest:
+            raise ValueError("Adapter and Harbor runner must use the same Terminal-Bench manifest")
         self.manifest = manifest
         self.harbor = harbor
+        self.text_scope = text_scope or TerminalBenchTextScope()
 
     def evaluate(
         self,
@@ -836,7 +981,7 @@ class TerminalBenchAdapter(GEPAAdapter[TerminalBenchTask, TerminalBenchTrajector
 
         Args:
             batch: Pinned task records.
-            candidate: Exactly one ``instruction_prompt`` component.
+            candidate: The full prompt-and-skill bundle.
             capture_traces: Whether to return full ATIF/result evidence to GEPA.
 
         Returns:
@@ -846,13 +991,12 @@ class TerminalBenchAdapter(GEPAAdapter[TerminalBenchTask, TerminalBenchTrajector
             ValueError: Candidate components or task IDs violate the harness
                 contract.
         """
-        if set(candidate) != {INSTRUCTION_COMPONENT}:
-            raise ValueError(f"TerminalBenchAdapter optimizes only {INSTRUCTION_COMPONENT!r}; got {sorted(candidate)}")
+        documents = self.text_scope.materialize(candidate)
         task_ids = [task.task_id for task in batch]
         unknown = sorted(set(task_ids).difference(self.manifest.task_refs))
         if unknown:
-            raise ValueError(f"tasks are not in pinned {PINNED_DATASET_REFERENCE}: {unknown}")
-        evaluation = self.harbor.run(task_ids, candidate[INSTRUCTION_COMPONENT])
+            raise ValueError(f"tasks are not in pinned {self.manifest.dataset['reference']}: {unknown}")
+        evaluation = self.harbor.run(task_ids, documents)
 
         outputs: list[TerminalBenchOutput] = []
         scores: list[float] = []
@@ -866,6 +1010,9 @@ class TerminalBenchAdapter(GEPAAdapter[TerminalBenchTask, TerminalBenchTrajector
                 "rewards": trial.rewards,
                 "errors": errors,
                 "evaluation_id": evaluation.evaluation_id,
+                "candidate_digest": evaluation.candidate_digest,
+                "job_dir": str(evaluation.job_dir),
+                "config_path": str(evaluation.config_path),
                 "harbor_returncode": evaluation.returncode,
                 "harbor_stdout_path": str(evaluation.stdout_path),
                 "harbor_stderr_path": str(evaluation.stderr_path),
@@ -877,11 +1024,12 @@ class TerminalBenchAdapter(GEPAAdapter[TerminalBenchTask, TerminalBenchTrajector
                 trajectories.append(
                     {
                         "task_id": task_id,
-                        "candidate_prompt": candidate[INSTRUCTION_COMPONENT],
+                        "candidate_documents": documents,
                         "reward": trial.reward,
                         "rewards": trial.rewards,
                         "errors": errors,
                         "atif_trajectories": trial.atif_trajectories,
+                        "verifier_logs": dict(trial.verifier_logs),
                         "trial_result": trial.raw_result,
                         "evaluation_id": evaluation.evaluation_id,
                         "harbor_returncode": evaluation.returncode,
@@ -903,7 +1051,7 @@ class TerminalBenchAdapter(GEPAAdapter[TerminalBenchTask, TerminalBenchTrajector
         eval_batch: EvaluationBatch[TerminalBenchTrajectory, TerminalBenchOutput],
         components_to_update: list[str],
     ) -> Mapping[str, Sequence[Mapping[str, Any]]]:
-        """Expose complete ATIF trajectories, rewards, and errors for reflection.
+        """Expose training trajectories, verifier diagnostics, and rewards for reflection.
 
         Args:
             candidate: Candidate used for the captured evaluation.
@@ -911,33 +1059,33 @@ class TerminalBenchAdapter(GEPAAdapter[TerminalBenchTask, TerminalBenchTrajector
             components_to_update: Components requested by GEPA.
 
         Returns:
-            Reflection rows for the single optimized instruction component.
+            Execution evidence for each selected document component.
 
         Raises:
-            ValueError: A different component is requested or the candidate
-                does not contain exactly the optimized instruction component.
+            ValueError: A component is unknown, the candidate is incomplete,
+                or feedback contains a task outside the training split.
             RuntimeError: The evaluation omitted trajectories.
         """
-        if components_to_update != [INSTRUCTION_COMPONENT]:
-            raise ValueError(
-                f"TerminalBenchAdapter can update only [{INSTRUCTION_COMPONENT!r}]; got {components_to_update!r}"
-            )
-        if set(candidate) != {INSTRUCTION_COMPONENT}:
-            raise ValueError(f"TerminalBenchAdapter optimizes only {INSTRUCTION_COMPONENT!r}; got {sorted(candidate)}")
+        if not components_to_update or not set(components_to_update).issubset(self.text_scope.component_kinds):
+            raise ValueError(f"Unknown Terminal Bench document selection: {components_to_update}")
+        self.text_scope.materialize(candidate)
         if eval_batch.trajectories is None:
             raise RuntimeError("Terminal-Bench reflection requires capture_traces=True")
+        if any(trajectory["task_id"] not in self.manifest.splits["train"] for trajectory in eval_batch.trajectories):
+            raise ValueError("Terminal-Bench reflection feedback is restricted to training tasks")
 
         rows: list[dict[str, Any]] = []
         for trajectory in eval_batch.trajectories:
             rows.append(
                 {
                     "Inputs": {
-                        "dataset": PINNED_DATASET_REFERENCE,
+                        "dataset": self.manifest.dataset["reference"],
+                        "experiment": self.manifest.experiment,
                         "task_id": trajectory["task_id"],
                     },
                     "Generated Outputs": {
-                        "atif_trajectories": trajectory["atif_trajectories"],
-                        "trial_result": trajectory["trial_result"],
+                        "atif_trajectories": deepcopy(trajectory["atif_trajectories"]),
+                        "trial_result": deepcopy(trajectory["trial_result"]),
                         "harbor_process": {
                             "returncode": trajectory["harbor_returncode"],
                             "stdout_path": trajectory["harbor_stdout_path"],
@@ -949,12 +1097,41 @@ class TerminalBenchAdapter(GEPAAdapter[TerminalBenchTask, TerminalBenchTrajector
                             "reward": trajectory["reward"],
                             "rewards": trajectory["rewards"],
                             "errors": trajectory["errors"],
+                            "verifier_log_status": "available" if trajectory["verifier_logs"] else "unavailable",
+                            "verifier_logs": trajectory["verifier_logs"],
                         },
                         sort_keys=True,
+                        ensure_ascii=False,
                     ),
                 }
             )
-        return {INSTRUCTION_COMPONENT: rows}
+        return {
+            component: [
+                {
+                    **row,
+                    "Document": {
+                        "name": component,
+                        "kind": self.text_scope.component_kinds[component],
+                        "text": candidate[component],
+                    },
+                }
+                for row in rows
+            ]
+            for component in components_to_update
+        }
 
 
-TerminusAdapter = TerminalBenchAdapter
+TerminalBenchAdapter = TerminusAdapter
+
+TERMINUS_ADAPTER_CONTRACT = {
+    "version": 1,
+    "entry_point": f"{TerminusAdapter.__module__}.{TerminusAdapter.__qualname__}",
+    "implementation": "harbor_port",
+    "upstream_repository": "https://github.com/gepa-ai/gepa",
+    "upstream_commit": "4f1613773d0c13c8f1551543a801b299bd8acf73",
+    "upstream_path": "src/gepa/adapters/terminal_bench_adapter/terminal_bench_adapter.py",
+    "upstream_blob": "1786e06b8e4bdee4129d85521bca4a26fcab7c7e",
+    "upstream_class": "TerminusAdapter",
+    "runtime": "harbor_cli",
+    "harbor_version": PINNED_HARBOR_VERSION,
+}

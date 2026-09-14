@@ -28,6 +28,23 @@ if [[ ! -f "${ENV_FILE}" ]]; then
     echo "ERROR: ${ENV_FILE} not found." >&2
     exit 1
 fi
+if [[ -L "${ENV_FILE}" || ! -O "${ENV_FILE}" ]]; then
+    echo "ERROR: ${ENV_FILE} must be a regular file owned by the current user" >&2
+    exit 1
+fi
+if ENV_MODE="$(stat -f '%Lp' "${ENV_FILE}" 2>/dev/null)"; then
+    :
+elif ENV_MODE="$(stat -c '%a' "${ENV_FILE}" 2>/dev/null)"; then
+    :
+else
+    echo "ERROR: could not verify permissions for ${ENV_FILE}" >&2
+    exit 1
+fi
+if [[ ! "${ENV_MODE}" =~ ^[0-7]{3,4}$ ]] || (( (8#${ENV_MODE} & 8#077) != 0 )); then
+    echo "ERROR: ${ENV_FILE} contains credentials and must not grant group or other access; run chmod 600 ${ENV_FILE}" >&2
+    exit 1
+fi
+
 source "${ENV_FILE}"
 
 HOSTS=("${REMOTE_HOST}" "${REMOTE_VIS_HOST}")

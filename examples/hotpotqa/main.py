@@ -23,6 +23,7 @@ Usage:
 """
 
 import argparse
+import fcntl
 import hashlib
 import itertools
 import json
@@ -37,12 +38,15 @@ from urllib.parse import urlsplit
 from examples.common.experiment_models import (
     DEEPSEEK_V4_1_FLASH_MODEL,
     EXPERIMENT_MODELS,
+    EXPERIMENT_NUM_RETRIES,
     QWEN3_8_27B_MODEL,
     experiment_decoding,
     experiment_model_version,
     experiment_request_overrides,
     validate_experiment_model_pair,
+    validate_experiment_vllm_version,
 )
+from examples.common.provider_retries import PROVIDER_RETRY_KEY, PROVIDER_RETRY_POLICY, provider_retry_kwargs
 from examples.common.react_v2 import (
     benchmark_data_identity,
     build_react_v2_strategy,
@@ -52,8 +56,17 @@ from examples.common.react_v2 import (
     resolve_template_family,
     structured_prompt,
 )
+from examples.common.recovery import RecoveryCallback, run_guarded, seal_progress
 from examples.common.wiki17_bm25 import DEFAULT_WIKI17_ROOT, GEPA_ARTIFACT_COMMIT, Wiki17BM25Retriever
 from examples.common.wikipedia import WikipediaRetriever
+from examples.hotpotqa.baseline import (
+    BASELINE_CONTRACT_FILENAME,
+    BASELINE_PROTOCOL,
+    baseline_digest,
+    baseline_directory,
+    build_baseline_contract,
+    load_baseline_record,
+)
 from examples.hotpotqa.utils import (
     HOTPOTQA_DSPY_COMMIT,
     HOTPOTQA_DSPY_VERSION,
@@ -79,12 +92,14 @@ from gepa.optimize_anything import (
     SideInfo,
     optimize_anything,
 )
+from gepa.proposer.reflective_mutation.react_v2_proposer import REACT_V2_EXECUTION_CONTRACT
 from gepa.response_journal import RESPONSE_JOURNAL_SCHEMA_VERSION, RESPONSE_JOURNAL_SCOPE_POLICY
 from gepa.strategies.action_space import (
     RandomActionSelector,
     VerbalizedActionSelector,
     stateless_selector_policy_contract,
 )
+from gepa.strategies.batch_sampler import IndependentEpochShuffledBatchSampler
 from gepa.strategies.document_template import TEMPLATE_FAMILIES
 from gepa.strategies.instruction_proposal import InstructionProposalSignature
 from gepa.strategies.intervention import (
@@ -97,6 +112,8 @@ from gepa.strategies.intervention import (
 )
 from gepa.strategies.proposal_sampling import SingleMutationSampling
 from gepa.strategies.proposal_selection import AllImprovements
+from gepa.strategies.reflection_context import REFLECTION_CONTEXT_CONTRACT
+from gepa.strategies.text_limits import parse_text_limits, resolve_text_limits
 
 # GEPA artifact components: summarize1 -> create_query_hop2 -> summarize2 -> final_answer.
 SEED_CANDIDATE = {
@@ -144,53 +161,7 @@ _SCIENTIFIC_UV_VERSION = "0.9.13"
 _SCIENTIFIC_SPLIT_COUNTS = {"train": 150, "val": 300, "test": 300}
 _REACT_V2_CONDITIONS = {"react_v2", "react_v2_random"}
 _SEMANTIC_CONDITIONS = {"react_v2", "react_v2_random", "random", "action"}
-# Serve-argument tokens every arm must record: one sequence per replica on the frozen
-# vLLM environment, no prefix caching, seeded decoding, native tool calls.
-_COMMON_VLLM_SERVE_SETTINGS = (
-    "gpu_memory_utilization=0.92",
-    "max_model_len=262144",
-    "rope_scaling=none",
-    "max_num_seqs=1",
-    "dtype=bfloat16",
-    "prefix_caching=false",
-    "auto_tool_choice=true",
-    "seed=0",
-    "batch_invariant=false",
-    "single_sequence_replicas=true",
-)
-_MODEL_VLLM_CONTRACTS = {
-    QWEN3_8_27B_MODEL: {
-        "weight_dtype": "bfloat16",
-        "kv_cache_dtype": "auto",
-        "serve_settings": (
-            "tp=1",
-            "kv_cache_dtype=auto",
-            "reasoning_parser=qwen3",
-            "tool_parser=qwen3_coder",
-        ),
-    },
-    # DeepSeek-V4.1-Flash through its own frozen vLLM build (main at e77daef89): FP8
-    # block-quantized dense weights and FP4 experts as shipped in the checkpoint, one
-    # TP8/EP8 replica, the fp8_ds_mla KV cache its sparse-MLA path uses with vLLM's
-    # default KV block size, the checkpoint's native deepseek_v41 prompt encoding, and
-    # no MTP/DSpark speculative decoding.
-    DEEPSEEK_V4_1_FLASH_MODEL: {
-        "weight_dtype": "fp8",
-        "kv_cache_dtype": "fp8",
-        "serve_settings": (
-            "tp=8",
-            "ep=8",
-            "dp_attention=false",
-            "speculative_decoding=false",
-            "expert_dtype=fp4",
-            "kv_cache_dtype=fp8",
-            "block_size=auto",
-            "tokenizer_mode=deepseek_v41",
-            "reasoning_parser=deepseek_v41",
-            "tool_parser=deepseek_v41",
-        ),
-    },
-}
+_HELDOUT_RECOVERY_LOCK = threading.Lock()
 
 
 def _validate_hotpotqa_model_pair(student_model: str, proposer_model: str) -> None:
@@ -258,9 +229,7 @@ def _validate_scientific_contract(args) -> None:
         if len(source_commit) != 40 or any(character not in "0123456789abcdef" for character in source_commit):
             changed_axes.append("HOTPOTQA_SOURCE_COMMIT must identify the exact experiment source")
         source_manifest = os.environ.get("HOTPOTQA_SOURCE_MANIFEST_SHA256", "")
-        if len(source_manifest) != 64 or any(
-            character not in "0123456789abcdef" for character in source_manifest
-        ):
+        if len(source_manifest) != 64 or any(character not in "0123456789abcdef" for character in source_manifest):
             changed_axes.append("HOTPOTQA_SOURCE_MANIFEST_SHA256 must identify the exact source bytes")
         if os.environ.get("HOTPOTQA_PYTHON_VERSION") != _SCIENTIFIC_PYTHON_VERSION:
             changed_axes.append(f"HOTPOTQA_PYTHON_VERSION must be {_SCIENTIFIC_PYTHON_VERSION!r}")
@@ -285,9 +254,7 @@ def _validate_scientific_contract(args) -> None:
         if os.environ.get("HOTPOTQA_MODEL_REVISION") != expected_model_version:
             changed_axes.append(f"HOTPOTQA_MODEL_REVISION must be {expected_model_version!r}")
         solver_api_base = args.solver_api_base if args.solver_api_base is not None else args.api_base
-        reflection_api_base = (
-            args.reflection_api_base if args.reflection_api_base is not None else args.api_base
-        )
+        reflection_api_base = args.reflection_api_base if args.reflection_api_base is not None else args.api_base
         for role, api_base in (("solver", solver_api_base), ("reflection", reflection_api_base)):
             parsed_api_base = urlsplit(api_base or "")
             try:
@@ -304,9 +271,7 @@ def _validate_scientific_contract(args) -> None:
             if not valid_loopback:
                 changed_axes.append(f"--{role}-api-base must identify the local serving /v1 endpoint")
         model_integrity = os.environ.get("HOTPOTQA_MODEL_INTEGRITY_SHA256", "")
-        if len(model_integrity) != 64 or any(
-            character not in "0123456789abcdef" for character in model_integrity
-        ):
+        if len(model_integrity) != 64 or any(character not in "0123456789abcdef" for character in model_integrity):
             changed_axes.append("HOTPOTQA_MODEL_INTEGRITY_SHA256 must identify the verified checkpoint bytes")
         if not os.environ.get("HOTPOTQA_TRANSFORMERS_VERSION"):
             changed_axes.append("HOTPOTQA_TRANSFORMERS_VERSION must identify the serving runtime")
@@ -319,12 +284,13 @@ def _validate_scientific_contract(args) -> None:
             changed_axes.append("HOTPOTQA_GPU_RUNTIME must identify the allocated H200 runtime")
         else:
             gpu_count = gpu_runtime.get("count")
+            expected_gpu_count = 4 if args.solver_model == DEEPSEEK_V4_1_FLASH_MODEL else 1
             gpu_names = gpu_runtime.get("names")
             gpu_capabilities = gpu_runtime.get("compute_capabilities")
             driver_version = gpu_runtime.get("driver_version")
             canonical_runtime = json.dumps(gpu_runtime, sort_keys=True, separators=(",", ":"))
             if (
-                gpu_count != 8
+                gpu_count != expected_gpu_count
                 or not isinstance(gpu_names, list)
                 or len(gpu_names) != gpu_count
                 or not all(isinstance(name, str) and "H200" in name.upper() for name in gpu_names)
@@ -335,36 +301,96 @@ def _validate_scientific_contract(args) -> None:
                 or canonical_runtime != gpu_runtime_text
             ):
                 changed_axes.append(
-                    "HOTPOTQA_GPU_RUNTIME must record only H200 devices with compute capability 9.0 "
+                    f"HOTPOTQA_GPU_RUNTIME must record exactly {expected_gpu_count} H200 devices with compute capability 9.0 "
                     "and one NVIDIA driver version"
                 )
+        if not os.environ.get("HOTPOTQA_VLLM_VERSION"):
+            changed_axes.append("HOTPOTQA_VLLM_VERSION must identify the serving runtime")
+        serving_lock = os.environ.get("HOTPOTQA_SERVING_LOCK_SHA256", "")
+        if len(serving_lock) != 64 or any(character not in "0123456789abcdef" for character in serving_lock):
+            changed_axes.append("HOTPOTQA_SERVING_LOCK_SHA256 must identify the exact serving dependency lock")
+        serving_environment = os.environ.get("HOTPOTQA_SERVING_ENV_SHA256", "")
+        if len(serving_environment) != 64 or any(
+            character not in "0123456789abcdef" for character in serving_environment
+        ):
+            changed_axes.append("HOTPOTQA_SERVING_ENV_SHA256 must identify the frozen serving environment")
+        if os.environ.get("HOTPOTQA_SERVING_ENGINE") != "vllm":
+            changed_axes.append("HOTPOTQA_SERVING_ENGINE must be 'vllm'")
+        try:
+            validate_experiment_vllm_version(args.solver_model, os.environ.get("HOTPOTQA_VLLM_VERSION", ""))
+        except ValueError as exc:
+            changed_axes.append(f"HOTPOTQA_VLLM_VERSION: {exc}")
         serve_arguments = os.environ.get("HOTPOTQA_SERVE_ARGUMENTS", "")
-        model_contract = _MODEL_VLLM_CONTRACTS.get(args.solver_model)
-        if model_contract is not None:
-            model_label = "Qwen3.8-27B" if args.solver_model == QWEN3_8_27B_MODEL else "DeepSeek-V4.1-Flash"
-            if os.environ.get("HOTPOTQA_SERVING_ENGINE") != "vllm":
-                changed_axes.append(f"HOTPOTQA_SERVING_ENGINE must be 'vllm' for {model_label}")
-            if os.environ.get("HOTPOTQA_WEIGHT_DTYPE") != model_contract["weight_dtype"]:
-                changed_axes.append(f"HOTPOTQA_WEIGHT_DTYPE must be {model_contract['weight_dtype']!r}")
-            if os.environ.get("HOTPOTQA_KV_CACHE_DTYPE") != model_contract["kv_cache_dtype"]:
-                changed_axes.append(f"HOTPOTQA_KV_CACHE_DTYPE must be {model_contract['kv_cache_dtype']!r}")
+        sequence_settings = [item for item in serve_arguments.split(";") if item.startswith("max_num_seqs=")]
+        if len(sequence_settings) != 1 or sequence_settings[0] not in {
+            "max_num_seqs=1",
+            "max_num_seqs=2",
+            "max_num_seqs=4",
+        }:
+            changed_axes.append("HOTPOTQA_SERVE_ARGUMENTS must record one max_num_seqs setting in {1, 2, 4}")
+        sequence_setting = sequence_settings[0] if sequence_settings else "max_num_seqs=1"
+        single_sequence = "true" if sequence_setting == "max_num_seqs=1" else "false"
+        if args.solver_model == QWEN3_8_27B_MODEL:
+            if os.environ.get("HOTPOTQA_WEIGHT_DTYPE") != "bfloat16":
+                changed_axes.append("HOTPOTQA_WEIGHT_DTYPE must be 'bfloat16'")
+            if os.environ.get("HOTPOTQA_KV_CACHE_DTYPE") != "auto":
+                changed_axes.append("HOTPOTQA_KV_CACHE_DTYPE must be 'auto'")
             if os.environ.get("HOTPOTQA_VLLM_BATCH_INVARIANT") != "false":
                 changed_axes.append("HOTPOTQA_VLLM_BATCH_INVARIANT must be 'false'")
-            if os.environ.get("HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS") != "true":
-                changed_axes.append("HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS must be 'true'")
-            if not os.environ.get("HOTPOTQA_VLLM_VERSION"):
-                changed_axes.append("HOTPOTQA_VLLM_VERSION must identify the serving runtime")
-            serving_lock = os.environ.get("HOTPOTQA_SERVING_LOCK_SHA256", "")
-            if len(serving_lock) != 64 or any(character not in "0123456789abcdef" for character in serving_lock):
-                changed_axes.append("HOTPOTQA_SERVING_LOCK_SHA256 must identify the serving lockfile")
-            serving_environment = os.environ.get("HOTPOTQA_SERVING_ENV_SHA256", "")
-            if len(serving_environment) != 64 or any(
-                character not in "0123456789abcdef" for character in serving_environment
-            ):
-                changed_axes.append(
-                    "HOTPOTQA_SERVING_ENV_SHA256 must identify the frozen serving environment"
-                )
-            required_serve_settings = _COMMON_VLLM_SERVE_SETTINGS + model_contract["serve_settings"]
+            if os.environ.get("HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS") != single_sequence:
+                changed_axes.append("HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS must match max_num_seqs")
+            required_serve_settings = (
+                "tp=1",
+                "gpu_memory_utilization=0.92",
+                "max_model_len=262144",
+                "rope_scaling=none",
+                sequence_setting,
+                "dtype=bfloat16",
+                "kv_cache_dtype=auto",
+                "prefix_caching=false",
+                "reasoning_parser=qwen3",
+                "auto_tool_choice=true",
+                "tool_parser=qwen3_coder",
+                "seed=0",
+                "batch_invariant=false",
+                f"single_sequence_replicas={single_sequence}",
+            )
+            for setting in required_serve_settings:
+                if setting not in serve_arguments.split(";"):
+                    changed_axes.append(f"HOTPOTQA_SERVE_ARGUMENTS must include {setting!r}")
+        elif args.solver_model == DEEPSEEK_V4_1_FLASH_MODEL:
+            if os.environ.get("HOTPOTQA_WEIGHT_DTYPE") != "fp8":
+                changed_axes.append("HOTPOTQA_WEIGHT_DTYPE must be 'fp8'")
+            if os.environ.get("HOTPOTQA_KV_CACHE_DTYPE") != "fp8":
+                changed_axes.append("HOTPOTQA_KV_CACHE_DTYPE must be 'fp8'")
+            if os.environ.get("HOTPOTQA_VLLM_BATCH_INVARIANT") != "false":
+                changed_axes.append("HOTPOTQA_VLLM_BATCH_INVARIANT must be 'false'")
+            if os.environ.get("HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS") != single_sequence:
+                changed_axes.append("HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS must match max_num_seqs")
+            required_serve_settings = (
+                "tp=4",
+                "ep=4",
+                "dp=1",
+                "api_servers=1",
+                "gpu_memory_utilization=0.92",
+                "max_model_len=262144",
+                sequence_setting,
+                "dtype=bfloat16",
+                "weight_dtype=fp8",
+                "expert_dtype=fp4",
+                "engram_cpu_offload=true",
+                "kv_cache_dtype=fp8",
+                "block_size=auto",
+                "prefix_caching=false",
+                "tokenizer_mode=deepseek_v41",
+                "reasoning_parser=deepseek_v41",
+                "auto_tool_choice=true",
+                "tool_parser=deepseek_v41",
+                "speculative_decoding=false",
+                "seed=0",
+                "batch_invariant=false",
+                f"single_sequence_replicas={single_sequence}",
+            )
             for setting in required_serve_settings:
                 if setting not in serve_arguments.split(";"):
                     changed_axes.append(f"HOTPOTQA_SERVE_ARGUMENTS must include {setting!r}")
@@ -389,8 +415,7 @@ def _validate_scientific_data_identity(args) -> None:
     source = args.data_identity.get("source", {})
     if source.get("revision") != HOTPOTQA_HF_REVISION:
         raise ValueError(
-            "The enforced HotPotQA scientific contract requires Hugging Face revision "
-            f"{HOTPOTQA_HF_REVISION}."
+            f"The enforced HotPotQA scientific contract requires Hugging Face revision {HOTPOTQA_HF_REVISION}."
         )
     for split_name, expected_count in _SCIENTIFIC_SPLIT_COUNTS.items():
         split = args.data_identity.get("splits", {}).get(split_name, {})
@@ -471,6 +496,7 @@ def build_run_contract(condition: str, args) -> dict:
     """
     _validate_hotpotqa_model_pair(args.solver_model, args.reflection_model)
     family = resolve_template_family(args.template_family, args.solver_model)
+    text_limits = resolve_text_limits(getattr(args, "text_limits", None))
     solver_api_base = args.solver_api_base if args.solver_api_base is not None else args.api_base
     reflection_api_base = args.reflection_api_base if args.reflection_api_base is not None else args.api_base
     scientific_contract = bool(getattr(args, "enforce_scientific_contract", False))
@@ -478,23 +504,25 @@ def build_run_contract(condition: str, args) -> dict:
     reflection_api_identity = _contract_api_base(reflection_api_base, scientific_contract=scientific_contract)
     _validate_scientific_contract(args)
     solver_lm_kwargs = resolve_hotpotqa_lm_kwargs(args.solver_model, None)
-    reflection_lm_kwargs = resolve_hotpotqa_lm_kwargs(args.reflection_model, None)
-    solver_decoding_fields = list(experiment_decoding(args.solver_model))
+    reflection_lm_kwargs = resolve_hotpotqa_lm_kwargs(args.reflection_model, None, role="optimizer")
+    solver_decoding_fields = list(experiment_decoding(args.solver_model, agentic=False))
     if "seed" in solver_lm_kwargs:
         solver_decoding_fields.append("seed")
-    solver_request_fields = experiment_request_overrides(args.solver_model)
-    reflection_decoding_fields = list(experiment_decoding(args.reflection_model))
+    solver_request_fields = experiment_request_overrides(args.solver_model, explicit_reasoning=True)
+    reflection_decoding_fields = list(experiment_decoding(args.reflection_model, agentic=False))
     if "seed" in reflection_lm_kwargs:
         reflection_decoding_fields.append("seed")
-    reflection_request_fields = experiment_request_overrides(args.reflection_model)
-    reflection_decoding = {
-        field: deepcopy(reflection_lm_kwargs[field]) for field in reflection_decoding_fields
-    }
+    reflection_request_fields = experiment_request_overrides(args.reflection_model, explicit_reasoning=True)
+    reflection_decoding = {field: deepcopy(reflection_lm_kwargs[field]) for field in reflection_decoding_fields}
     reflection_level = args.reflection_level if condition in _REACT_V2_CONDITIONS else 0
     reflection_role_decoding = None
     if condition in _REACT_V2_CONDITIONS:
         manifestor_decoding = deepcopy(reflection_decoding)
-        manifestor_decoding["temperature"] = 0
+        manifestor_decoding["temperature"] = float(
+            experiment_decoding(args.reflection_model, agentic=False)["temperature"]
+        )
+        react_decoding = deepcopy(reflection_decoding)
+        react_decoding["top_p"] = experiment_decoding(args.reflection_model, agentic=True)["top_p"]
         reflection_role_decoding = {
             "controller": (
                 {
@@ -513,7 +541,7 @@ def build_run_contract(condition: str, args) -> dict:
                 else None
             ),
             "react_v2_proposer": {
-                "requested": deepcopy(reflection_decoding),
+                "requested": react_decoding,
                 "provider_ignored_fields": [],
             },
         }
@@ -555,7 +583,9 @@ def build_run_contract(condition: str, args) -> dict:
         else:
             semantic_controller_policy = deepcopy(CONTROLLER_POLICY_CONTRACT)
     return {
-        "schema_version": 15,
+        "schema_version": 28,
+        "baseline_protocol": dict(BASELINE_PROTOCOL),
+        "provider_retry_policy": deepcopy(PROVIDER_RETRY_POLICY),
         "benchmark": "hotpotqa-fullwiki-wiki17",
         "reference_artifact_commit": GEPA_ARTIFACT_COMMIT,
         "scientific_contract_enforced": scientific_contract,
@@ -566,7 +596,7 @@ def build_run_contract(condition: str, args) -> dict:
             "solver_api_base": solver_api_identity,
             "solver_decoding": {field: deepcopy(solver_lm_kwargs[field]) for field in solver_decoding_fields},
             "solver_request_overrides": {field: deepcopy(solver_lm_kwargs[field]) for field in solver_request_fields},
-            "solver_num_retries": solver_lm_kwargs["num_retries"],
+            "solver_num_retries": EXPERIMENT_NUM_RETRIES,
             "solver_request_timeout_seconds": solver_lm_kwargs["timeout"],
             "reflection": args.reflection_model,
             "reflection_version": experiment_model_version(args.reflection_model),
@@ -576,7 +606,7 @@ def build_run_contract(condition: str, args) -> dict:
             "reflection_request_overrides": {
                 field: deepcopy(reflection_lm_kwargs[field]) for field in reflection_request_fields
             },
-            "reflection_num_retries": reflection_lm_kwargs["num_retries"],
+            "reflection_num_retries": EXPERIMENT_NUM_RETRIES,
             "reflection_request_timeout_seconds": reflection_lm_kwargs["timeout"],
         },
         "optimizer": {
@@ -594,8 +624,14 @@ def build_run_contract(condition: str, args) -> dict:
             "acceptance_criterion": "strict_improvement",
             "raise_on_exception": True,
             "batch_sampler": "epoch_shuffled",
+            "training_batch_order": IndependentEpochShuffledBatchSampler(3, args.seed).contract(),
             "reflection_minibatch_size": 3,
             "component_selector": "round_robin",
+            "reflection_context": deepcopy(REFLECTION_CONTEXT_CONTRACT),
+            "manifestor_traces_chars": text_limits.manifestor_trace_chars,
+            "document_length": text_limits.document_contract(),
+            "text_limits": text_limits.to_dict(),
+            "react_execution": deepcopy(REACT_V2_EXECUTION_CONTRACT) if condition in _REACT_V2_CONDITIONS else None,
             "skip_perfect_score": True,
             "perfect_score": 1.0,
             "merge": merge,
@@ -613,7 +649,9 @@ def build_run_contract(condition: str, args) -> dict:
             "semantic_controller_policy": semantic_controller_policy,
             "stateless_action_menu": stateless_action_menu,
             "stateless_selector_policy": (
-                stateless_selector_policy_contract("random" if condition == "random" else "verbalized")
+                stateless_selector_policy_contract(
+                    "random" if condition == "random" else "verbalized", text_limits=text_limits
+                )
                 if stateless_semantic
                 else None
             ),
@@ -622,6 +660,11 @@ def build_run_contract(condition: str, args) -> dict:
                 "scope_policy": RESPONSE_JOURNAL_SCOPE_POLICY,
                 "addressing": "lm-namespace-call-ordinal",
                 "request_storage": "sha256-only",
+            },
+            "evaluation_recovery": {
+                "scope": "optimizer-iteration-and-parent-or-child-batch",
+                "stores": ["outputs", "scores", "trajectories", "adapter_state"],
+                "reuse_across_iterations": False,
             },
             "branch_history": (
                 {
@@ -640,8 +683,8 @@ def build_run_contract(condition: str, args) -> dict:
             "dspy_runtime_commit": HOTPOTQA_DSPY_COMMIT if args.program == "2stage" else None,
             "retrieval_k": args.retrieval_k,
             "parallel_workers": args.max_workers,
-            "cache_evaluation": True,
-            "dspy_disk_cache": True,
+            "cache_evaluation": False,
+            "dspy_disk_cache": False,
             "dspy_memory_cache": False,
             "dspy_history": False,
             "primary_metric": "normalized_exact_match",
@@ -674,9 +717,7 @@ def build_run_contract(condition: str, args) -> dict:
             "serving_lock_sha256": os.environ.get("HOTPOTQA_SERVING_LOCK_SHA256"),
             "serving_env_sha256": os.environ.get("HOTPOTQA_SERVING_ENV_SHA256"),
             "gpu_runtime": (
-                json.loads(os.environ["HOTPOTQA_GPU_RUNTIME"])
-                if os.environ.get("HOTPOTQA_GPU_RUNTIME")
-                else None
+                json.loads(os.environ["HOTPOTQA_GPU_RUNTIME"]) if os.environ.get("HOTPOTQA_GPU_RUNTIME") else None
             ),
             "vllm_version": os.environ.get("HOTPOTQA_VLLM_VERSION"),
             "torch_version": os.environ.get("HOTPOTQA_TORCH_VERSION"),
@@ -690,9 +731,7 @@ def build_run_contract(condition: str, args) -> dict:
             "kv_cache_dtype": os.environ.get("HOTPOTQA_KV_CACHE_DTYPE"),
             "serve_arguments": os.environ.get("HOTPOTQA_SERVE_ARGUMENTS"),
             "vllm_batch_invariant": os.environ.get("HOTPOTQA_VLLM_BATCH_INVARIANT"),
-            "vllm_single_sequence_replicas": os.environ.get(
-                "HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS"
-            ),
+            "vllm_single_sequence_replicas": os.environ.get("HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS"),
         },
         "tag": args.tag,
     }
@@ -1008,6 +1047,9 @@ def evaluate_on_set(
             temporary_path = record_path.with_suffix(f".{os.getpid()}.{threading.get_ident()}.part")
             temporary_path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             temporary_path.replace(record_path)
+            with _HELDOUT_RECOVERY_LOCK:
+                records = sorted(checkpoint_root.glob("[0-9]*.json"))
+                seal_progress(checkpoint_root, len(records), records)
         return exact_match, f1
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -1029,6 +1071,74 @@ def evaluate_on_set(
         temporary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         temporary_path.replace(summary_path)
     return mean_em, mean_f1
+
+
+def evaluate_starting_baseline(
+    run_dir: Path,
+    run_contract: dict,
+    testset: list[dict],
+    retriever: WikipediaRetriever,
+    api_base: str | None,
+    solver_lm_kwargs: dict[str, object],
+) -> dict:
+    """Evaluate or resume the shared starting prompts on the exact held-out test set.
+
+    Args:
+        run_dir: Optimization directory sharing its parent with the other ablations.
+        run_contract: Recorded model, data, initial prompts, and runtime settings.
+        testset: Ordered held-out examples used by the optimized candidate.
+        retriever: The same retriever used by the ablation.
+        api_base: Current task-server endpoint.
+        solver_lm_kwargs: Resolved task-model request settings.
+
+    Returns:
+        Verified baseline identity and test EM/F1 for the final comparison.
+
+    Raises:
+        ValueError: The baseline identity or test examples have changed.
+        RuntimeError: Another process is evaluating this same baseline.
+    """
+    contract = build_baseline_contract(run_contract)
+    test_identity = benchmark_data_identity(source={}, trainset=[], valset=[], testset=testset)["splits"]["test"]
+    if test_identity != contract["data"]["splits"]["test"]:
+        raise ValueError("Shared baseline requires the exact ordered HotPotQA test examples and content.")
+    directory = baseline_directory(run_dir, contract)
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / ".baseline.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError("Another process is evaluating this shared HotPotQA baseline.") from exc
+        path = directory / BASELINE_CONTRACT_FILENAME
+        if path.exists():
+            if json.loads(path.read_text()) != contract:
+                raise ValueError("Shared HotPotQA baseline configuration changed.")
+        else:
+            if (directory / "heldout").exists():
+                raise ValueError("Shared HotPotQA baseline results have no frozen configuration.")
+            temporary = path.with_suffix(f".{os.getpid()}.part")
+            temporary.write_text(json.dumps(contract, indent=2, sort_keys=True) + "\n")
+            temporary.replace(path)
+        summary_path = directory / "heldout" / baseline_digest(contract["candidate"]) / "summary.json"
+        if summary_path.exists():
+            return load_baseline_record(run_dir, run_contract)
+        print(f"Evaluating/resuming shared HotPotQA starting baseline: {directory}", flush=True)
+        evaluate_on_set(
+            contract["candidate"],
+            testset,
+            contract["models"]["solver"],
+            retriever,
+            api_base=api_base,
+            max_workers=contract["program"]["parallel_workers"],
+            program=contract["program"]["name"],
+            retrieval_k=contract["program"]["retrieval_k"],
+            solver_lm_kwargs={
+                **solver_lm_kwargs,
+                **provider_retry_kwargs(directory / "provider-attempts.jsonl", "baseline_solver"),
+            },
+            checkpoint_dir=directory / "heldout",
+        )
+        return load_baseline_record(run_dir, run_contract)
 
 
 def prompt_diversity(candidates: list[dict]) -> dict[str, dict[str, float]]:
@@ -1120,9 +1230,7 @@ def dump_action_summary(
     payload = {
         "schema_version": 1,
         "run_contract": run_contract,
-        "candidate_artifact_sha256": hashlib.sha256(
-            Path(candidate_artifact_path).read_bytes()
-        ).hexdigest(),
+        "candidate_artifact_sha256": hashlib.sha256(Path(candidate_artifact_path).read_bytes()).hexdigest(),
         "summary": tracker.summary(),
         "action_score_deltas": dict(tracker.action_score_deltas),
         "action_texts": dict(tracker.action_texts),
@@ -1153,7 +1261,16 @@ def build_config(condition: str, args, reflection_lm_kwargs: dict, run_dir: str 
     """
     resolved_family = resolve_template_family(args.template_family, args.solver_model)
     _validate_scientific_contract(args)
+    text_limits = resolve_text_limits(getattr(args, "text_limits", None))
     resolved_run_dir = run_dir or condition_run_dir(condition, args.program, args.tag, _run_key(condition, args))
+    observed_retry_settings = (reflection_lm_kwargs or {}).get(PROVIDER_RETRY_KEY, {})
+    reflection_lm_kwargs = {
+        **(reflection_lm_kwargs or {}),
+        **provider_retry_kwargs(Path(resolved_run_dir) / "provider-attempts.jsonl", "optimizer"),
+    }
+    for field in ("token_usage_log", "token_limits"):
+        if field in observed_retry_settings:
+            reflection_lm_kwargs[PROVIDER_RETRY_KEY][field] = observed_retry_settings[field]
     response_journal_path = os.path.join(resolved_run_dir, ".lm-response-journal", "responses.sqlite3")
     reflection_proposer_kwargs = deepcopy(reflection_lm_kwargs or {})
     reflection_proposer_kwargs["response_journal_path"] = response_journal_path
@@ -1172,6 +1289,7 @@ def build_config(condition: str, args, reflection_lm_kwargs: dict, run_dir: str 
         action_selector = VerbalizedActionSelector(
             action_space,
             lm=LM(args.reflection_model, **action_selector_kwargs),
+            text_limits=text_limits,
         )
 
     reflection_strategy = None
@@ -1189,6 +1307,9 @@ def build_config(condition: str, args, reflection_lm_kwargs: dict, run_dir: str 
             component_kinds=_component_kinds(args.program),
             controller_selection="uniform_random" if condition == "react_v2_random" else "verbalized",
             rng=random.Random(args.seed),
+            text_limits=text_limits,
+            manifestor_temperature=float(experiment_decoding(args.reflection_model, agentic=False)["temperature"]),
+            react_top_p=float(experiment_decoding(args.reflection_model, agentic=True)["top_p"]),
         )
 
     merge_config = None
@@ -1212,12 +1333,12 @@ def build_config(condition: str, args, reflection_lm_kwargs: dict, run_dir: str 
             raise_on_exception=True,
             parallel=True,
             max_workers=args.max_workers,
-            cache_evaluation=True,
+            cache_evaluation=False,
         ),
         reflection=ReflectionConfig(
             skip_perfect_score=True,
             perfect_score=1.0,
-            batch_sampler="epoch_shuffled",
+            batch_sampler=IndependentEpochShuffledBatchSampler(3, args.seed),
             reflection_minibatch_size=3,
             module_selector="round_robin",
             reflection_lm=args.reflection_model,
@@ -1225,6 +1346,7 @@ def build_config(condition: str, args, reflection_lm_kwargs: dict, run_dir: str 
             reflection_strategy=reflection_strategy,
             reflection_prompt_template=InstructionProposalSignature.default_prompt_template,
             action_selector=action_selector,
+            text_limits=text_limits,
         ),
         merge=merge_config,
     )
@@ -1290,9 +1412,7 @@ def _verify_scientific_retriever_integrity(retriever: Wiki17BM25Retriever) -> No
     """
     verified_integrity_sha256 = None
     if os.environ.get("HOTPOTQA_PRODUCTION_LAUNCH") == "1":
-        verified_integrity_sha256 = os.environ.get(
-            "HOTPOTQA_VERIFIED_WIKI17_INTEGRITY_SHA256"
-        )
+        verified_integrity_sha256 = os.environ.get("HOTPOTQA_VERIFIED_WIKI17_INTEGRITY_SHA256")
     if verified_integrity_sha256 is None:
         retriever.verify_integrity()
         return
@@ -1305,13 +1425,11 @@ def _verify_scientific_retriever_integrity(retriever: Wiki17BM25Retriever) -> No
     except OSError as exc:
         raise ValueError("The locked Wiki-2017 integrity manifest is unavailable.") from exc
     if manifest_sha256 != verified_integrity_sha256:
-        raise ValueError(
-            "The production Wiki-2017 integrity attestation does not match the locked manifest."
-        )
+        raise ValueError("The production Wiki-2017 integrity attestation does not match the locked manifest.")
 
 
-def main():
-    """Parse CLI arguments and run the requested HotPotQA conditions.
+def build_parser() -> argparse.ArgumentParser:
+    """Build the common experiment settings parser.
 
     Production runs preserve the locked benchmark, retrieval, model, and
     optimization configuration. Explicit JSONL data remains available for
@@ -1415,6 +1533,18 @@ def main():
         help="Prompt template family; auto selects one from the student/solver model",
     )
     parser.add_argument("--tag", type=str, default="", help="Suffix appended to run dirs (e.g. rev2, 6871)")
+    parser.add_argument(
+        "--text-limits",
+        type=parse_text_limits,
+        default=None,
+        help="JSON object of optional character limits; omitted or null fields are unlimited",
+    )
+    return parser
+
+
+def main():
+    """Parse CLI arguments and run the requested HotPotQA conditions."""
+    parser = build_parser()
     args = parser.parse_args()
     try:
         _validate_hotpotqa_model_pair(args.solver_model, args.reflection_model)
@@ -1477,9 +1607,7 @@ def main():
     if trainset:
         warm_passages = retriever.search(trainset[0]["question"], args.retrieval_k)
         if len(warm_passages) != args.retrieval_k:
-            parser.error(
-                f"Retriever preflight returned {len(warm_passages)} passages; expected {args.retrieval_k}."
-            )
+            parser.error(f"Retriever preflight returned {len(warm_passages)} passages; expected {args.retrieval_k}.")
         print(f"  (retrieval preflight: {len(warm_passages)} passages for the first training question)")
     solver_api_base = args.solver_api_base if args.solver_api_base is not None else args.api_base
     reflection_api_base = args.reflection_api_base if args.reflection_api_base is not None else args.api_base
@@ -1490,16 +1618,8 @@ def main():
     reflection_lm_kwargs = resolve_hotpotqa_lm_kwargs(
         args.reflection_model,
         reflection_api_base,
+        role="optimizer",
     )
-    evaluator = make_evaluator(
-        args.solver_model,
-        retriever,
-        api_base=solver_api_base,
-        program=args.program,
-        retrieval_k=args.retrieval_k,
-        solver_lm_kwargs=solver_lm_kwargs,
-    )
-
     if args.condition == "all" and args.enforce_scientific_contract:
         conditions = list(_SCIENTIFIC_CONDITIONS_BY_BUDGET[args.max_metric_calls])
     elif args.condition == "all":
@@ -1516,15 +1636,28 @@ def main():
 
     results = {}
     run_dirs: dict[str, str] = {}
+    run_contracts: dict[str, dict] = {}
     trackers: dict[str, ActionDiversityCallback] = {}
     for condition in conditions:
         run_contract = build_run_contract(condition, args)
+        run_contracts[condition] = run_contract
         run_dir = condition_run_dir(condition, args.program, args.tag, _run_key(condition, args))
         run_dirs[condition] = run_dir
         ensure_wikipedia_run_contract(run_dir, run_contract)
+        evaluator = make_evaluator(
+            args.solver_model,
+            retriever,
+            api_base=solver_api_base,
+            program=args.program,
+            retrieval_k=args.retrieval_k,
+            solver_lm_kwargs={
+                **solver_lm_kwargs,
+                **provider_retry_kwargs(Path(run_dir) / "provider-attempts.jsonl", "solver"),
+            },
+        )
         config, selector = build_config(condition, args, reflection_lm_kwargs, run_dir=run_dir)
         trackers[condition] = ActionDiversityCallback(selector=selector)
-        callbacks = [trackers[condition]]
+        callbacks = [trackers[condition], RecoveryCallback(Path(run_dir))]
         seed = seed_candidate(args.program, args.seed_style, resolved_family)
         condition_label = _CONDITION_LABELS[condition]
         if args.merge:
@@ -1578,6 +1711,9 @@ def main():
     print(f"{'=' * 60}\n")
 
     for name, result in results.items():
+        baseline = evaluate_starting_baseline(
+            Path(run_dirs[name]), run_contracts[name], testset, retriever, solver_api_base, solver_lm_kwargs
+        )
         test_em, test_f1 = evaluate_on_set(
             result.best_candidate,
             testset,
@@ -1587,12 +1723,15 @@ def main():
             max_workers=args.max_workers,
             program=args.program,
             retrieval_k=args.retrieval_k,
-            solver_lm_kwargs=solver_lm_kwargs,
+            solver_lm_kwargs={
+                **solver_lm_kwargs,
+                **provider_retry_kwargs(Path(run_dirs[name]) / "provider-attempts.jsonl", "solver"),
+            },
             checkpoint_dir=Path(run_dirs[name]) / "heldout",
         )
         diversity = prompt_diversity(result.candidates)
         final_metrics = {
-            "schema_version": 1,
+            "schema_version": 2,
             "condition": name,
             "candidate_sha256": hashlib.sha256(
                 json.dumps(
@@ -1607,6 +1746,9 @@ def main():
             "test_exact_match": float(test_em),
             "test_f1": float(test_f1),
             "test_example_count": len(testset),
+            "baseline": baseline,
+            "test_exact_match_gain": test_em - baseline["test_exact_match"],
+            "test_f1_gain": test_f1 - baseline["test_f1"],
             "diversity": diversity,
         }
         final_metrics_path = Path(run_dirs[name]) / "final_metrics.json"
@@ -1621,6 +1763,11 @@ def main():
         print(f"  best val score (EM):      {result.val_aggregate_scores[result.best_idx]:.4f}")
         print(f"  test EM:                  {test_em:.2%}")
         print(f"  test F1:                  {test_f1:.2%}")
+        print(f"  starting baseline EM/F1: {baseline['test_exact_match']:.2%} / {baseline['test_f1']:.2%}")
+        print(
+            f"  test gain EM/F1:         {final_metrics['test_exact_match_gain'] * 100:+.2f} pp / "
+            f"{final_metrics['test_f1_gain'] * 100:+.2f} pp"
+        )
         print(f"  final metrics:            {final_metrics_path}")
         for component, stats in diversity.items():
             print(
@@ -1645,4 +1792,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    run_guarded(main)

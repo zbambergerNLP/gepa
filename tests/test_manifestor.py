@@ -6,14 +6,13 @@
 import pytest
 
 from gepa.proposer.reflective_mutation.manifestor import (
-    MAX_STEERING_MESSAGE_CHARS,
-    MAX_TRACES_CHARS,
     ManifestationError,
     Manifestor,
 )
 from gepa.strategies.document_template import EditTarget
 from gepa.strategies.edit_tools import EditTool
-from gepa.strategies.intervention import ControllerChoice, SemanticActionSpec
+from gepa.strategies.intervention import SEMANTIC_ACTIONS, ControllerChoice, SemanticActionSpec
+from gepa.strategies.text_limits import TextLimitError, TextLimits
 
 SPEC = SemanticActionSpec(
     name="contextualize",
@@ -127,13 +126,21 @@ def test_instruction_spec_is_manifested_once_with_section_grounding() -> None:
     assert "do not write the edit" in prompt.lower()
 
 
-def test_overlong_manifestation_is_truncated() -> None:
-    """Keep steering within the configured length bound."""
-    lm = RecordingLM("x" * (MAX_STEERING_MESSAGE_CHARS + 50))
+@pytest.mark.parametrize("limit", [None, 1200])
+def test_steering_is_unlimited_unless_configured(limit: int | None) -> None:
+    """Keep complete steering by default and mark explicit excerpts."""
+    lm = RecordingLM("x" * 1500 + "Important final instruction.")
     choice = ControllerChoice(EditTarget("sys", "Rules"), SPEC)
-    result = Manifestor(lm).manifest(choice, "region", "feedback", "traces")
+    result = Manifestor(lm, text_limits=TextLimits(manifestor_steering_chars=limit)).manifest(
+        choice, "region", "feedback", "traces"
+    )
     assert result is not None
-    assert result == "x" * MAX_STEERING_MESSAGE_CHARS + "..."
+    if limit is None:
+        assert result == lm.reply
+    else:
+        assert result.startswith("x" * limit)
+        assert "characters omitted" in result
+        assert "Important final instruction" not in result
 
 
 def test_empty_manifestation_is_retried_once() -> None:
@@ -156,16 +163,37 @@ def test_repeated_empty_manifestation_raises_explicit_error() -> None:
 
 
 def test_controller_action_is_authoritative_for_manifestor() -> None:
-    """Realize the sampled action without a second applicability decision."""
+    """Keep the sampled action while requiring literal region grounding."""
     lm = RecordingLM("Add grounded background that addresses the observed failure.")
     choice = ControllerChoice(EditTarget("sys", "Rules"), SPEC)
     result = Manifestor(lm).manifest(choice, "region", "feedback", "traces")
     assert result == "Add grounded background that addresses the observed failure."
     assert len(lm.calls) == 1
     prompt = lm.calls[0]
-    assert "do not reassess its preconditions" in prompt
-    assert "not a Manifestor decision" in prompt
+    assert "do not substitute another action" in prompt
+    assert "If its required text is absent, say so" in prompt
     assert "<not_applicable>" not in prompt
+
+
+def test_empty_region_is_explicitly_separated_from_feedback() -> None:
+    """Prevent feedback from appearing to be the body of an empty section."""
+    lm = RecordingLM()
+    Manifestor(lm).manifest(ControllerChoice(EditTarget("sys", "Tone"), SPEC), "", "feedback", "traces")
+    assert '\'Tone\' (0 characters; JSON string)\n""\n\n## Failure feedback' in lm.calls[0]
+
+
+def test_empty_contextualize_region_exposes_append_without_inventing_a_target() -> None:
+    """Tell the Manifestor how the selected INSERT can populate an empty section."""
+    spec = next(spec for spec in SEMANTIC_ACTIONS if spec.name == "contextualize")
+    lm = RecordingLM("Append grounded supporting context with an empty anchor.")
+    Manifestor(lm).manifest(ControllerChoice(EditTarget("sys", "Examples"), spec), "", "feedback", "traces")
+    prompt = lm.calls[0]
+    assert 'INSERT_TEXT accepts anchor="" to append' in prompt
+    assert "including when the selected section is empty" in prompt
+    assert "empty anchor to append" in spec.instruction
+    assert "Do not add an operative commitment" in prompt
+    assert "do not substitute another action" in prompt
+    assert '\'Examples\' (0 characters; JSON string)\n""\n\n## Failure feedback' in prompt
 
 
 def test_blank_fixed_manifestation_is_rejected() -> None:
@@ -183,23 +211,23 @@ def test_blank_fixed_manifestation_is_rejected() -> None:
     assert lm.calls == []
 
 
-def test_only_traces_are_bounded_by_default() -> None:
-    """Keep the section and feedback whole while bounding the trace input."""
-    large_state = "s" * (MAX_TRACES_CHARS + 10)
-    large_traces = "t" * (MAX_TRACES_CHARS + 10)
+def test_manifestor_inputs_are_unlimited_by_default() -> None:
+    """Keep the section, feedback, and traces complete without configured caps."""
+    large_state = "s" * 8010
+    large_traces = "t" * 8010
     lm = RecordingLM()
     choice = ControllerChoice(EditTarget("sys", "Rules"), SPEC)
     Manifestor(lm).manifest(choice, large_state, large_state, large_traces)
     prompt = lm.calls[0]
     assert prompt.count(large_state) == 2
-    assert large_traces not in prompt
-    assert "...(+10 chars)" in prompt
+    assert large_traces in prompt
+    assert "characters omitted" not in prompt
 
 
 @pytest.mark.parametrize(
     ("limit", "expected"),
     [
-        pytest.param(5, "01234\n...(+5 chars)", id="custom_bound"),
+        pytest.param(5, "01234\n[... 5 characters omitted ...]\n", id="custom_bound"),
         pytest.param(None, "0123456789", id="unbounded"),
     ],
 )
@@ -214,3 +242,28 @@ def test_trace_bound_is_configurable(limit: int | None, expected: str) -> None:
     choice = ControllerChoice(EditTarget("sys", "Rules"), SPEC)
     Manifestor(lm, max_traces_chars=limit).manifest(choice, "region", "feedback", "0123456789")
     assert expected in lm.calls[0]
+
+
+def test_full_manifestor_prompt_limit_prevents_a_model_call() -> None:
+    """Reject an oversized assembled prompt without chopping its instructions."""
+    lm = RecordingLM()
+    choice = ControllerChoice(EditTarget("sys", "Rules"), SPEC)
+    with pytest.raises(TextLimitError, match="max_prompt_chars=100"):
+        Manifestor(lm, text_limits=TextLimits(max_prompt_chars=100)).manifest(choice, "region", "feedback", "traces")
+    assert not lm.calls
+
+
+@pytest.mark.parametrize("tool", [EditTool.DELETE_TEXT, EditTool.REPLACE_TEXT, EditTool.MOVE_TEXT])
+def test_empty_target_action_manifestation_requires_finish(tool: EditTool) -> None:
+    """Prevent insertion guidance from contradicting an inapplicable selected action."""
+    lm = RecordingLM("Tell the editor to finish without a change.")
+    spec = SemanticActionSpec(
+        name="targeted", description="Edit existing text.", edit_tool=tool, instruction="Apply it."
+    )
+    result = Manifestor(lm).manifest(ControllerChoice(EditTarget("sys", "Rules"), spec), "", "feedback", "traces")
+    assert result == lm.reply and len(lm.calls) == 1
+    prompt = lm.calls[0]
+    assert f"{tool.value} requires a non-empty target" in prompt
+    assert "selected region is empty" in prompt
+    assert "finish without editing" in prompt
+    assert "INSERT_TEXT accepts" not in prompt

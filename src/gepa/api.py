@@ -44,6 +44,7 @@ from gepa.strategies.document_template import MalformedDocumentError, infer_temp
 from gepa.strategies.eval_policy import EvaluationPolicy, FullEvaluationPolicy
 from gepa.strategies.proposal_sampling import SamplingStrategy
 from gepa.strategies.proposal_selection import SelectionStrategy
+from gepa.strategies.text_limits import TextLimits
 from gepa.utils import FileStopper, StopperProtocol
 
 
@@ -144,6 +145,7 @@ def optimize(
     component_kinds: dict[str, str] | None = None,
     template_family: Literal["auto", "generic", "openai", "anthropic", "google", "alibaba"] = "auto",
     template_model: str | None = None,
+    text_limits: TextLimits | None = None,
 ) -> GEPAResult[RolloutOutput, DataId]:
     """
     GEPA is an evolutionary optimizer that evolves (multiple) text components of a complex system to optimize them towards a given metric.
@@ -182,6 +184,8 @@ def optimize(
 
     Configuration details:
     - seed_candidate: The initial candidate to start with.
+    - text_limits: Optional character limits for built-in reflection roles and
+      proposed documents. Every field defaults to unlimited.
     - trainset: Training data supplied as an in-memory sequence or a `DataLoader` yielding batches for reflective updates.
     - valset: Validation data source (sequence or `DataLoader`) used for tracking Pareto scores. If not provided, GEPA reuses the trainset.
     - adapter: A `GEPAAdapter` instance that implements the adapter interface. This allows GEPA to plug into your system's environment. If not provided, GEPA will use a default adapter: `gepa.adapters.default_adapter.default_adapter.DefaultAdapter`, with model defined by `task_lm`.
@@ -567,6 +571,7 @@ def optimize(
             reflection_prompt_template=reflection_prompt_template,
             manifestor_lm=manifestor_lm,
             proposer_model=reflection_lm if isinstance(reflection_lm, str) else None,
+            text_limits=text_limits,
         )
         # Fail before any evaluation is spent: the roles address sections by
         # name, so the seed must already be in the canonical section format.
@@ -621,6 +626,7 @@ def optimize(
         sampling_strategy=sampling_strategy,
         reflection_strategy=reflection_strategy,
         action_selector=action_selector,
+        text_limits=text_limits,
     )
     # Seed the default reflection LM (and thus action selection) from the run
     # RNG; injected strategies were already bound above.
@@ -642,6 +648,7 @@ def optimize(
             max_merge_invocations=max_merge_invocations,
             rng=rng,
             val_overlap_floor=merge_val_overlap_floor,
+            text_limits=reflective_proposer.text_limits,
             callbacks=callbacks,
         )
 

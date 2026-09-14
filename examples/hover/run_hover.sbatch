@@ -11,8 +11,8 @@
 #
 # Qwen3.8-27B run:
 #   sbatch --export=ALL,MODEL_PROFILE=qwen3.8-27b examples/hover/run_hover.sbatch
-# DeepSeek V4 Flash run:
-#   sbatch --export=ALL,MODEL_PROFILE=deepseek-v4-flash examples/hover/run_hover.sbatch
+# DeepSeek V4.1 Flash run:
+#   sbatch --gres=gpu:8 --cpus-per-task=64 --mem=768G --export=ALL,MODEL_PROFILE=deepseek-v4.1-flash examples/hover/run_hover.sbatch
 #
 # Scaled run (48h, like ifbench scaled):
 #   sbatch --time=48:00:00 --export=ALL,MAX_METRIC_CALLS=7051 examples/hover/run_hover.sbatch
@@ -74,16 +74,20 @@ case "${MODEL_PROFILE}" in
         SOLVER_API_BASE="http://localhost:${GEN_PORT}/v1"
         LOCAL_SOLVER=1
         ;;
-    deepseek-v4-flash)
-        MODEL=""
-        SOLVER_MODEL_PATH=""
-        SOLVER_SERVED_NAME=""
-        SOLVER_MODEL="deepseek/deepseek-v4-flash"
-        SOLVER_API_BASE=""
-        REFLECTION_API_BASE=""
+    deepseek-v4.1-flash)
+        MODEL="DeepSeek-V4.1-Flash"
+        SOLVER_MODEL_PATH="${MODEL_STORAGE}/${MODEL}"
+        SOLVER_SERVED_NAME="deepseek-ai/DeepSeek-V4.1-Flash"
+        SOLVER_MODEL="hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash"
+        SOLVER_API_BASE="http://localhost:${GEN_PORT}/v1"
+        VLLM_DATA_PARALLEL_SIZE=1
+        VLLM_API_SERVER_COUNT=1
+        VLLM_MAX_NUM_SEQS=1
+        GEN_MAX_LEN=262144
+        LOCAL_SOLVER=1
         ;;
     *)
-        echo "ERROR: MODEL_PROFILE must be qwen3.8-27b or deepseek-v4-flash" >&2
+        echo "ERROR: MODEL_PROFILE must be qwen3.8-27b or deepseek-v4.1-flash" >&2
         exit 1
         ;;
 esac
@@ -146,14 +150,47 @@ if [[ "${LOCAL_SOLVER}" == "1" ]]; then
     module load "cudatoolkit/${CUDA_TAG}" 2>/dev/null \
         || module load cudatoolkit/13.0 2>/dev/null || true
 
-    env CUDA_VISIBLE_DEVICES=0 "${VLLM_BIN}" serve "${SOLVER_MODEL_PATH}" \
+    DEVICE_ENV=(env CUDA_VISIBLE_DEVICES=0)
+    MODEL_MAX_SEQS=32
+    MODEL_SERVE_ARGS=(--tensor-parallel-size 1 --reasoning-parser qwen3 --language-model-only)
+    if [[ "${MODEL_PROFILE}" == "deepseek-v4.1-flash" ]]; then
+        VISIBLE_GPU_COUNT="$(${POSIT_DIR}/src/.venv/bin/python -c 'import torch; print(torch.cuda.device_count())')"
+        if (( VISIBLE_GPU_COUNT != 8 )); then
+            echo "ERROR: DeepSeek V4.1 Flash requires eight allocated H200 GPUs" >&2
+            exit 1
+        fi
+        DEVICE_ENV=(env)
+        MODEL_MAX_SEQS=1
+        export FLASHINFER_NO_DOWNLOAD=1
+        export VLLM_ENGINE_READY_TIMEOUT_S=3600
+        if ! "${PY}" -m examples.common.model_snapshot verify \
+            --model-profile deepseek-v4.1-flash --root "${SOLVER_MODEL_PATH}" >/dev/null; then
+            exit 1
+        fi
+        if ! uv run --no-project --python "${POSIT_DIR}/src/.venv/bin/python" python - <<'PY'
+from importlib.metadata import version
+from examples.common.experiment_models import DEEPSEEK_V4_1_FLASH_MODEL, validate_experiment_vllm_version
+
+validate_experiment_vllm_version(DEEPSEEK_V4_1_FLASH_MODEL, version("vllm"))
+PY
+        then
+            exit 1
+        fi
+        MODEL_SERVE_ARGS=(
+            --tensor-parallel-size 8 --enable-expert-parallel --language-model-only
+            --tokenizer-mode deepseek_v41 --reasoning-parser deepseek_v41
+            --tool-call-parser deepseek_v41 --enable-auto-tool-choice
+            --kv-cache-dtype fp8 --dtype bfloat16
+        )
+    fi
+    "${DEVICE_ENV[@]}" "${VLLM_BIN}" serve "${SOLVER_MODEL_PATH}" \
         --served-model-name "${SOLVER_SERVED_NAME}" \
-        --reasoning-parser qwen3 \
+        "${MODEL_SERVE_ARGS[@]}" \
         --host 0.0.0.0 \
         --port "${GEN_PORT}" \
         --gpu-memory-utilization "${GEN_GMU}" \
         --max-model-len "${GEN_MAX_LEN}" \
-        --max-num-seqs 32 \
+        --max-num-seqs "${MODEL_MAX_SEQS}" \
         > "${GEN_LOG}" 2>&1 &
     GEN_PID=$!
 
@@ -180,12 +217,7 @@ if [[ "${LOCAL_SOLVER}" == "1" ]]; then
 fi
 
 # --- Run the GEPA experiment (using GEPA's own venv) ---------------------
-if [[ "${MODEL_PROFILE}" == "deepseek-v4-flash" && -z "${DEEPSEEK_API_KEY:-}" ]]; then
-    echo "ERROR: set DEEPSEEK_API_KEY for the DeepSeek V4 Flash run" >&2
-    exit 1
-fi
 export OPENAI_API_KEY="${OPENAI_API_KEY:-EMPTY}"
-export DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-}"
 # Flush python output line-by-line so the SLURM log shows live progress.
 export PYTHONUNBUFFERED=1
 LIMIT_ARGS=()

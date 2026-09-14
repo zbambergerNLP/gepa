@@ -1,5 +1,6 @@
 """Tests for the standalone local HotPotQA serving verification."""
 
+import shlex
 import sys
 from pathlib import Path
 from unittest.mock import Mock, call
@@ -13,6 +14,20 @@ from examples.hotpotqa import verify_serving
 from gepa.strategies.edit_tools import EDIT_TOOL_SETS
 
 LOCAL_API_BASE = "http://127.0.0.1:8000/v1"
+
+
+def test_diagnostic_package_inventory_python_executes(capsys) -> None:
+    """Execute the embedded inventory snippet that runs before model startup."""
+    script = Path(__file__).parents[1] / "scripts/della/verify_deepseek_serving.sh"
+    line = next(line for line in script.read_text().splitlines() if "m.distributions()" in line)
+    command = shlex.split(line.rstrip().removesuffix("\\"))
+    snippet = command[command.index("-c") + 1]
+
+    exec(compile(snippet, str(script), "exec"), {})
+
+    packages = capsys.readouterr().out.splitlines()
+    assert packages == sorted(packages)
+    assert any(package.startswith("pytest==") for package in packages)
 
 
 @pytest.mark.parametrize(
@@ -112,8 +127,16 @@ def test_run_serving_verification_cycles_every_tool_and_reports_pass(monkeypatch
 
     report = verify_serving.run_serving_verification(DEEPSEEK_V4_1_FLASH_MODEL, LOCAL_API_BASE, 8)
 
-    resolve_kwargs.assert_called_once_with(DEEPSEEK_V4_1_FLASH_MODEL, LOCAL_API_BASE)
-    lm_factory.assert_called_once_with(DEEPSEEK_V4_1_FLASH_MODEL, temperature=1.0, timeout=600)
+    resolve_kwargs.assert_called_once_with(DEEPSEEK_V4_1_FLASH_MODEL, LOCAL_API_BASE, role="optimizer")
+    lm_factory.assert_called_once()
+    assert lm_factory.call_args.args == (DEEPSEEK_V4_1_FLASH_MODEL,)
+    assert lm_factory.call_args.kwargs == {
+        "temperature": 1.0,
+        "timeout": 3600,
+        "num_retries": 0,
+        "max_retries": 0,
+        "_gepa_provider_retry": {"log_path": None, "role": "serving_verification"},
+    }
     ordinary_probe.assert_called_once_with(lm)
     continuation_probe.assert_called_once_with(lm)
     tools = EDIT_TOOL_SETS["broad"]
@@ -188,7 +211,7 @@ def test_main_exits_nonzero_only_when_a_check_failed(monkeypatch, capsys, status
         verify_serving.main()
 
     assert exc_info.value.code == exit_code
-    run.assert_called_once_with(DEEPSEEK_V4_1_FLASH_MODEL, LOCAL_API_BASE, 4, 600)
+    run.assert_called_once_with(DEEPSEEK_V4_1_FLASH_MODEL, LOCAL_API_BASE, 4, 3600, None)
     output = capsys.readouterr().out
     assert f"RESULT: {status}" in output
     assert ("PASS  ordinary_completion" if status == "PASS" else "FAIL  ordinary_completion") in output

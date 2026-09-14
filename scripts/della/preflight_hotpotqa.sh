@@ -6,14 +6,15 @@
 # node. Read-only; run before build_env.sh.
 #
 # Usage:
-#   HOTPOTQA_SOURCE_COMMIT=<sha> scripts/della/preflight_hotpotqa.sh
-# (defaults to the commit pinned in Gilad's runbook)
+#   scripts/della/preflight_hotpotqa.sh
+# Uses the current clean consolidated branch tip. An optional
+# HOTPOTQA_SOURCE_COMMIT additionally checks a specific expected revision.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 ENV_FILE="${SCRIPT_DIR}/.env"
-EXPECTED_COMMIT="${HOTPOTQA_SOURCE_COMMIT:-169ddda125b1abe305c7714bbb5b3fc38b21b587}"
+EXPECTED_BRANCH="codex/consolidated-della-experiments"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -24,17 +25,36 @@ done
 echo "ok"
 
 echo "== 2. source commit and worktree"
+CURRENT_BRANCH="$(git -C "${REPO_ROOT}" branch --show-current)"
+[[ "${CURRENT_BRANCH}" == "${EXPECTED_BRANCH}" ]] \
+    || fail "use the consolidated branch ${EXPECTED_BRANCH}; current branch is ${CURRENT_BRANCH:-detached HEAD}"
 HEAD_COMMIT="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
+EXPECTED_COMMIT="${HOTPOTQA_SOURCE_COMMIT:-${HEAD_COMMIT}}"
 [[ "${HEAD_COMMIT}" == "${EXPECTED_COMMIT}" ]] \
-    || fail "HEAD is ${HEAD_COMMIT}, expected ${EXPECTED_COMMIT} (git switch --detach ${EXPECTED_COMMIT})"
+    || fail "HEAD is ${HEAD_COMMIT}, expected ${EXPECTED_COMMIT}; review the current branch tip"
 [[ -z "$(git -C "${REPO_ROOT}" status --porcelain --untracked-files=normal)" ]] \
     || fail "worktree is dirty; the launcher rejects it"
-echo "Source is exact and clean."
+echo "Source is exact and clean: ${CURRENT_BRANCH} at ${HEAD_COMMIT}."
 
 echo "== 3. scripts/della/.env"
 [[ -f "${ENV_FILE}" ]] || fail "${ENV_FILE} missing (copy .env.example)"
-ENV_MODE="$(stat -f '%Lp' "${ENV_FILE}" 2>/dev/null || stat -c '%a' "${ENV_FILE}")"
-[[ "${ENV_MODE}" == "600" ]] || fail "${ENV_FILE} mode is ${ENV_MODE}; run chmod 600"
+if [[ -L "${ENV_FILE}" || ! -O "${ENV_FILE}" ]]; then
+    echo "ERROR: ${ENV_FILE} must be a regular file owned by the current user" >&2
+    exit 1
+fi
+if ENV_MODE="$(stat -f '%Lp' "${ENV_FILE}" 2>/dev/null)"; then
+    :
+elif ENV_MODE="$(stat -c '%a' "${ENV_FILE}" 2>/dev/null)"; then
+    :
+else
+    echo "ERROR: could not verify permissions for ${ENV_FILE}" >&2
+    exit 1
+fi
+if [[ ! "${ENV_MODE}" =~ ^[0-7]{3,4}$ ]] || (( (8#${ENV_MODE} & 8#077) != 0 )); then
+    echo "ERROR: ${ENV_FILE} contains credentials and must not grant group or other access; run chmod 600 ${ENV_FILE}" >&2
+    exit 1
+fi
+
 ! grep -qiE 'YOUR_NETID|your_princeton_netid|your_allocation' "${ENV_FILE}" \
     || fail "placeholders remain in ${ENV_FILE}"
 source "${ENV_FILE}"

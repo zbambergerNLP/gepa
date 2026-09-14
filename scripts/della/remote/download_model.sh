@@ -6,6 +6,7 @@
 #   bash scripts/della/remote/download_model.sh qwen3.8-27b|deepseek-v4.1-flash
 # DeepSeek-V4.1-Flash is 48 shards / 510 GB; run it detached (build_env.sh does).
 set -euo pipefail
+export PYTHONPATH="${PWD}/src:${PWD}"
 
 MODEL="${1:?usage: download_model.sh qwen3.8-27b|deepseek-v4.1-flash}"
 : "${SCRATCH_BASE:?}" "${MODEL_STORAGE:?}"
@@ -22,6 +23,15 @@ exec {MODEL_LOCK_FD}<"${MODEL_DIR}"
 flock -n "${MODEL_LOCK_FD}" || { echo "ERROR: ${MODEL_DIR} is being downloaded or served" >&2; exit 1; }
 
 echo "==> ${MODEL} into ${MODEL_DIR} ($(date))"
+if [[ -f "${MODEL_DIR}/.gepa-model-integrity.json" ]]; then
+    .venv/bin/python -m examples.common.model_snapshot verify --model-profile "${MODEL}" --root "${MODEL_DIR}" > /dev/null
+    echo "==> existing ${MODEL} verified without modifying the shared checkpoint ($(date))"
+    exit 0
+fi
+if [[ ! -w "${MODEL_DIR}" ]]; then
+    echo "ERROR: ${MODEL_DIR} has no verified manifest and is not writable" >&2
+    exit 1
+fi
 .venv/bin/python -m examples.common.model_snapshot prepare --model-profile "${MODEL}" --root "${MODEL_DIR}" > /dev/null
 .venv/bin/python -m examples.common.model_snapshot verify --model-profile "${MODEL}" --root "${MODEL_DIR}" > /dev/null
 echo "==> ${MODEL} verified ($(date))"

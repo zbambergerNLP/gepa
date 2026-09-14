@@ -32,6 +32,7 @@ from examples.common.experiment_models import (
     EXPERIMENT_NUM_RETRIES,
     QWEN3_8_27B_MODEL,
     experiment_decoding,
+    experiment_request_overrides,
     validate_experiment_model_pair,
 )
 from examples.common.react_v2 import (
@@ -181,10 +182,12 @@ def build_run_contract(condition: str, args) -> dict:
             "solver": args.solver_model,
             "solver_api_base": solver_api_base,
             "solver_decoding": experiment_decoding(args.solver_model),
+            "solver_request_overrides": experiment_request_overrides(args.solver_model),
             "solver_num_retries": EXPERIMENT_NUM_RETRIES,
             "reflection": args.reflection_model,
             "reflection_api_base": reflection_api_base,
             "reflection_decoding": experiment_decoding(args.reflection_model),
+            "reflection_request_overrides": experiment_request_overrides(args.reflection_model),
             "reflection_num_retries": EXPERIMENT_NUM_RETRIES,
         },
         "optimizer": {

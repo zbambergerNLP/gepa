@@ -114,6 +114,7 @@ DATASET = [{"golden": 40}, {"golden": 60}]
 class TestRefiner:
     """Tests for refiner functionality."""
 
+    @pytest.mark.usefixtures("openrouter_credentials")
     def test_refiner_without_caching(self):
         """Test refiner works without caching. RefinerConfig() with no refiner_lm defaults from reflection_lm."""
         call_counter = {"count": 0}
@@ -148,6 +149,7 @@ class TestRefiner:
         print(f"Best candidate: {result.best_candidate}")
         print(f"Best score: {result.val_aggregate_scores[result.best_idx]}")
 
+    @pytest.mark.usefixtures("openrouter_credentials")
     def test_refiner_with_memory_cache(self):
         """Test refiner works with memory caching."""
         call_counter = {"count": 0}
@@ -182,6 +184,7 @@ class TestRefiner:
         print(f"Best candidate: {result.best_candidate}")
         print(f"Best score: {result.val_aggregate_scores[result.best_idx]}")
 
+    @pytest.mark.usefixtures("openrouter_credentials")
     def test_refiner_with_disk_cache(self):
         """Test refiner works with disk caching."""
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -224,6 +227,7 @@ class TestRefiner:
             cache_files = list(cache_dir.glob("*.pkl"))
             print(f"Cache files: {len(cache_files)}")
 
+    @pytest.mark.usefixtures("openrouter_credentials")
     def test_refiner_cache_reduces_calls(self):
         """Test that caching reduces actual fitness_fn calls with refiner."""
         call_counter_no_cache = {"count": 0}
@@ -281,6 +285,7 @@ class TestRefiner:
         # With caching, we should have equal or fewer actual fitness calls
         assert call_counter_with_cache["count"] <= call_counter_no_cache["count"]
 
+    @pytest.mark.usefixtures("openrouter_credentials")
     def test_custom_refiner_prompt_respected(self):
         """Test that user-provided refiner_prompt in seed is NOT overwritten."""
         call_counter = {"count": 0}
@@ -315,6 +320,7 @@ class TestRefiner:
             f"Best candidate refiner_prompt starts with custom: {result.best_candidate.get('refiner_prompt', '').startswith('My custom')}"
         )
 
+    @pytest.mark.usefixtures("openrouter_credentials")
     def test_multi_param_refiner(self):
         """Test refiner with multiple parameters — both refined together."""
         call_counter = {"count": 0}
@@ -608,6 +614,7 @@ class TestRefiner:
         assert score == -abs(50 - GOLDEN_NUMBER)
 
 
+@pytest.mark.usefixtures("openrouter_credentials")
 class TestRefinerWithDataset:
     """Test refiner with a dataset (per-instance evaluation)."""
 
@@ -675,6 +682,7 @@ class TestRefinerFrontierTypes:
     """Test refiner with each frontier type using a dataset."""
 
     @pytest.mark.parametrize("frontier_type", ["instance", "objective", "hybrid", "cartesian"])
+    @pytest.mark.usefixtures("openrouter_credentials")
     def test_refiner_frontier_type(self, frontier_type):
         """Test refiner works with each frontier type."""
         call_counter = {"count": 0}

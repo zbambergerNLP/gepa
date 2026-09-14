@@ -18,6 +18,7 @@ from gepa.core.state import VALSET_CACHE_SPLIT, GEPAState, ObjectiveScores, Prog
 from gepa.gepa_utils import find_dominator_programs
 from gepa.logging.logger import LoggerProtocol
 from gepa.proposer.base import CandidateProposal, ProposeNewCandidate
+from gepa.strategies.text_limits import TextLimitError, TextLimits, resolve_text_limits
 
 AncestorLog = tuple[int, int, int]
 MergeDescription = tuple[int, int, tuple[int, ...]]
@@ -231,6 +232,7 @@ class MergeProposer(ProposeNewCandidate[DataId]):
         val_overlap_floor: int = 5,
         rng: random.Random | None = None,
         callbacks: list[GEPACallback] | None = None,
+        text_limits: TextLimits | None = None,
     ):
         self.logger = logger
         self.valset = valset
@@ -240,6 +242,7 @@ class MergeProposer(ProposeNewCandidate[DataId]):
         self.max_merge_invocations = max_merge_invocations
         self.rng = rng if rng is not None else random.Random(0)
         self.callbacks = callbacks
+        self.text_limits = resolve_text_limits(text_limits)
 
         if val_overlap_floor <= 0:
             raise ValueError("val_overlap_floor should be a positive integer")
@@ -325,6 +328,11 @@ class MergeProposer(ProposeNewCandidate[DataId]):
             return None
 
         new_program, id1, id2, ancestor = merge_output
+        try:
+            self.text_limits.check_candidate(new_program)
+        except TextLimitError as exc:
+            self.logger.log(f"Iteration {i}: Skipping oversized merge: {exc}")
+            return None
         state.full_program_trace[-1]["merged"] = True
         state.full_program_trace[-1]["merged_entities"] = (id1, id2, ancestor)
         self.merges_performed[0].append((id1, id2, ancestor))

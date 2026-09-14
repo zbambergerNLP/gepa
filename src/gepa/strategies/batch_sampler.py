@@ -149,3 +149,46 @@ class EpochShuffledBatchSampler(BatchSampler[DataId, DataInst]):
         end_idx = base_idx + self.minibatch_size
         assert end_idx <= len(self.shuffled_ids)
         return self.shuffled_ids[base_idx:end_idx]
+
+
+class IndependentEpochShuffledBatchSampler(EpochShuffledBatchSampler[DataId, DataInst]):
+    """Keep training batches independent of parent selection and reflection randomness."""
+
+    def __init__(self, minibatch_size: int, seed: int) -> None:
+        """Own a seeded shuffle stream while retaining the epoch and padding rules.
+
+        Args:
+            minibatch_size: Number of examples in each training minibatch.
+            seed: Experiment seed shared by the methods being compared.
+        """
+        super().__init__(minibatch_size, rng=random.Random(seed))
+        self.seed = seed
+
+    def contract(self) -> dict[str, Any]:
+        """Describe the task-order policy recorded by benchmark run contracts."""
+        return {
+            "version": 1,
+            "algorithm": "epoch_shuffled",
+            "rng_stream": "independent_training_batches",
+            "seed": self.seed,
+            "minibatch_size": self.minibatch_size,
+            "checkpoint": "permutation_cursor_and_rng",
+        }
+
+    def get_state(self) -> dict[str, Any]:
+        """Save the private RNG alongside the epoch permutation and cursor."""
+        return {**super().get_state(), "sampling_contract": self.contract(), "rng_state": self.rng.getstate()}
+
+    def set_state(self, state: Mapping[str, Any]) -> None:
+        """Restore private randomness and reject incompatible sampling checkpoints.
+
+        Args:
+            state: Snapshot produced by this sampler's ``get_state`` method.
+
+        Raises:
+            ValueError: Sampling policy changed or the private RNG state is absent.
+        """
+        if state.get("sampling_contract") != self.contract() or state.get("rng_state") is None:
+            raise ValueError("Checkpoint does not match the independent training-batch sampling policy")
+        super().set_state(state)
+        self.rng.setstate(state["rng_state"])

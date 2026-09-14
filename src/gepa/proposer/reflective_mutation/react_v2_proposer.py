@@ -843,6 +843,13 @@ class ReActV2Proposer:
                     f"received {action_count}."
                 )
             if protocol_error is not None:
+                if use_native_tools and not native_calls:
+                    protocol_error += (
+                        " No provider-native function call was received. Plain-text XML such as "
+                        "<function_calls>, <invoke>, or <tool_call> is not executed. "
+                        "Use the provided function interface to call one tool, or emit only "
+                        "<finish>...</finish> if the edit is complete."
+                    )
                 error = protocol_error
                 observation = f"ERROR: {error}"
                 steps.append(

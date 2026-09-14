@@ -420,6 +420,41 @@ def test_explicit_tool_budget_disables_more_calls_but_allows_finish() -> None:
     assert "budget is exhausted" in lm.calls[1][-1]["content"]
 
 
+def test_native_xml_reply_gets_channel_correction_before_a_valid_edit() -> None:
+    """Explain why plain XML did not invoke a tool and allow native recovery."""
+    lm = NativeScriptedLM(
+        [
+            ToolCompletion(
+                '<function_calls><invoke name="REPLACE_TEXT">'
+                '<parameter name="target">be nice</parameter>'
+                '<parameter name="text">be wrong</parameter>'
+                "</invoke></function_calls>",
+                (),
+            ),
+            ToolCompletion(
+                "",
+                (NativeToolCall("correct", "REPLACE_TEXT", '{"target":"be nice","text":"be kind"}'),),
+            ),
+            ToolCompletion("<finish>Done.</finish>", ()),
+        ]
+    )
+
+    result = run(lm, preferred_tool=EditTool.REPLACE_TEXT)
+
+    assert [step.action for step in result.steps] == ["INVALID", "REPLACE_TEXT", "FINISH"]
+    assert result.steps[0].region_text == RULES_TEXT
+    assert result.changed and result.tool_calls == 1
+    assert "be kind" in result.new_text and "be wrong" not in result.new_text
+    correction = lm.calls[1][-1]
+    assert correction["role"] == "user"
+    assert "No provider-native function call was received" in correction["content"]
+    assert "<function_calls>" in correction["content"] and "<invoke>" in correction["content"]
+    assert "not executed" in correction["content"]
+    assert "provided function interface" in correction["content"]
+    assert "<finish>...</finish>" in correction["content"]
+    assert lm.tool_choices == ["auto", "auto", "auto"]
+
+
 def test_custom_callable_uses_explicit_text_tool_compatibility_protocol() -> None:
     """Retain a documented fallback for callables without native-tool support."""
     lm = ScriptedLM([tool_call(EditTool.REPLACE_TEXT, target="be nice", text="be kind"), "<finish>Done.</finish>"])

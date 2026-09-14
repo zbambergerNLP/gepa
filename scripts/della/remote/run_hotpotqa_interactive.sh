@@ -2,13 +2,13 @@
 # Reuse the verified launch environment inside an existing salloc/srun step.
 set -euo pipefail
 if [[ $# != 2 || -z "${SLURM_JOB_ID:-}" ]]; then
-    echo "Usage inside salloc: $0 <prepared-export-file> <all|smoke|optimizer|throughput|full>" >&2
+    echo "Usage inside salloc: $0 <prepared-export-file> <all|preliminary|smoke|optimizer|throughput|full>" >&2
     exit 1
 fi
 EXPORT_FILE="$1"
 PILOT_STAGE="$2"
 case "${PILOT_STAGE}" in
-    all|smoke|optimizer|throughput|full) ;;
+    all|preliminary|smoke|optimizer|throughput|full) ;;
     *) echo "ERROR: unsupported pilot stage" >&2; exit 1 ;;
 esac
 while IFS= read -r -d '' entry; do

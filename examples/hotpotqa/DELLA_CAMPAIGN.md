@@ -324,7 +324,10 @@ and stages the clean current source and prints `INTERACTIVE_EXPORT_FILE` without
 submitting jobs. Inside an approved allocation, run the staged
 `scripts/della/remote/run_hotpotqa_interactive.sh <export-file> all` through
 `srun`. Stages `smoke`, `optimizer`, `throughput`, and `full` are individually
-resumable. Request one allocation at a time with `salloc`, for 55 minutes, using
+resumable. Use `preliminary` to run smoke, all optimizer checks, and throughput
+with one server startup, stopping before the full calibration. This supports
+batching selection before the 150-question run. Request one allocation at a time
+with `salloc`, for 55 minutes, using
 the model's resource profile. The DeepSeek interactive pilot runs its required
 20-attempt runtime canary before inference when its exact-runtime marker is absent.
 

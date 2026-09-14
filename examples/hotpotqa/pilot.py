@@ -208,7 +208,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--wiki17-dir", type=Path, required=True)
     parser.add_argument("--workers", type=int, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--stage", choices=("all", "smoke", "throughput", "full", "optimizer"), default="all")
+    parser.add_argument(
+        "--stage", choices=("all", "preliminary", "smoke", "throughput", "full", "optimizer"), default="all"
+    )
     parser.add_argument(
         "--method", choices=METHODS, help="Run one optimizer check before resuming the remaining methods"
     )
@@ -284,9 +286,9 @@ def main(argv: list[str] | None = None) -> None:
             workers=args.workers,
         )
 
-    if args.stage in ("all", "smoke"):
+    if args.stage in ("all", "preliminary", "smoke"):
         calibrate("smoke", 3)
-    if args.stage in ("all", "optimizer"):
+    if args.stage in ("all", "preliminary", "optimizer"):
         validate_calibration(args.output_dir / "smoke", 3)
         for method in (args.method,) if args.method else METHODS:
             directory = args.output_dir / "optimizer" / method
@@ -325,7 +327,7 @@ def main(argv: list[str] | None = None) -> None:
                 atomic_json(
                     directory / "token-usage-summary.json", summarize_usage([directory / "provider-attempts.jsonl"])
                 )
-    if args.stage in ("all", "throughput"):
+    if args.stage in ("all", "preliminary", "throughput"):
         validate_calibration(args.output_dir / "smoke", 3)
         calibrate("throughput", PILOT_PROTOCOL["throughput"])
     if args.stage in ("all", "full"):

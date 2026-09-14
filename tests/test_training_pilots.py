@@ -248,7 +248,8 @@ def test_completed_cycle_cannot_be_reused_after_contract_change(tmp_path):
         load_cycle(tmp_path)
 
 
-def test_hotpotqa_pilot_checks_optimizers_before_throughput_and_full_calibration(tmp_path, monkeypatch):
+@pytest.mark.parametrize("stage", ["all", "preliminary"])
+def test_hotpotqa_pilot_checks_optimizers_before_throughput_and_full_calibration(tmp_path, monkeypatch, stage):
     """Use real config builders and isolate only dataset, model transport, and GPU validation."""
     training = [{"id": f"train-{i}", "question": f"question-{i}", "answer": "gold"} for i in range(150)]
     heldout = [{"id": "never-execute", "question": "heldout", "answer": "gold"}]
@@ -308,8 +309,15 @@ def test_hotpotqa_pilot_checks_optimizers_before_throughput_and_full_calibration
             "12",
             "--output-dir",
             str(tmp_path / "pilot"),
+            "--stage",
+            stage,
         ]
     )
     assert methods == list(METHODS)
-    assert len(executed) == 165
-    assert validate_calibration(tmp_path / "pilot" / "full", 150)["qualified"]
+    assert validate_calibration(tmp_path / "pilot" / "throughput", 12)["qualified"]
+    if stage == "all":
+        assert len(executed) == 165
+        assert validate_calibration(tmp_path / "pilot" / "full", 150)["qualified"]
+    else:
+        assert len(executed) == 15
+        assert not (tmp_path / "pilot" / "full").exists()

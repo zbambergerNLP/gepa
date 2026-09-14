@@ -120,7 +120,7 @@ jobs:
       - name: Run lint with tests
         run: uv run -p .venv ruff check
       - name: Run tests with pytest
-        run: uv run -p .venv pytest -vv tests/
+        run: uv run -p .venv python -m pytest -vv tests/
       # - name: Install optional dependencies
       #   run: uv sync -p .venv --locked --extra dev --extra test_extras
       # - name: Run extra tests

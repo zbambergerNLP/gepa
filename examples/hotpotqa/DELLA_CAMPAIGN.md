@@ -329,7 +329,7 @@ submitting jobs. Inside an approved allocation, run the staged
 resumable. Use `preliminary` to run smoke, all optimizer checks, and throughput
 with one server startup, stopping before the full calibration. This supports
 batching selection before the 150-question run. The complete qualification plan
-uses one 12-hour `salloc` with four H200s, 32 CPUs and 768G host memory, releasing
+uses one nine-hour `salloc` with four H200s, 32 CPUs and 768G host memory, releasing
 it early when finished. Run DeepSeek and then Qwen sequentially; Qwen uses an
 exact one-H200/eight-CPU/128G step within that allocation. This replaces the
 earlier 55-minute partial-pilot reservations. The DeepSeek interactive pilot runs its required

@@ -188,7 +188,8 @@ SEMANTIC_ACTIONS: tuple[SemanticActionSpec, ...] = (
         EditTool.INSERT_TEXT,
         instruction=(
             "Insert supporting background, explanation, rationale, or illustration at exact anchors inside the "
-            "current text. Every current supporting proposition must remain, and at least one genuinely new supporting "
+            "current text, or use an empty anchor to append, including when the selected section is empty. "
+            "Every current supporting proposition must remain, and at least one genuinely new supporting "
             "proposition must be added, so the resulting context is a proper superset. Preserve every operative "
             "requirement, permission, prohibition, condition, exception, scope boundary, normative force, and "
             "admissible behavior, and preserve the existing text verbatim. Do not add an operative commitment. Use "

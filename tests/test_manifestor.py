@@ -11,7 +11,7 @@ from gepa.proposer.reflective_mutation.manifestor import (
 )
 from gepa.strategies.document_template import EditTarget
 from gepa.strategies.edit_tools import EditTool
-from gepa.strategies.intervention import ControllerChoice, SemanticActionSpec
+from gepa.strategies.intervention import SEMANTIC_ACTIONS, ControllerChoice, SemanticActionSpec
 from gepa.strategies.text_limits import TextLimitError, TextLimits
 
 SPEC = SemanticActionSpec(
@@ -180,6 +180,20 @@ def test_empty_region_is_explicitly_separated_from_feedback() -> None:
     lm = RecordingLM()
     Manifestor(lm).manifest(ControllerChoice(EditTarget("sys", "Tone"), SPEC), "", "feedback", "traces")
     assert '\'Tone\' (0 characters; JSON string)\n""\n\n## Failure feedback' in lm.calls[0]
+
+
+def test_empty_contextualize_region_exposes_append_without_inventing_a_target() -> None:
+    """Tell the Manifestor how the selected INSERT can populate an empty section."""
+    spec = next(spec for spec in SEMANTIC_ACTIONS if spec.name == "contextualize")
+    lm = RecordingLM("Append grounded supporting context with an empty anchor.")
+    Manifestor(lm).manifest(ControllerChoice(EditTarget("sys", "Examples"), spec), "", "feedback", "traces")
+    prompt = lm.calls[0]
+    assert 'INSERT_TEXT accepts anchor="" to append' in prompt
+    assert "including when the selected section is empty" in prompt
+    assert "empty anchor to append" in spec.instruction
+    assert "Do not add an operative commitment" in prompt
+    assert "do not substitute another action" in prompt
+    assert '\'Examples\' (0 characters; JSON string)\n""\n\n## Failure feedback' in prompt
 
 
 def test_blank_fixed_manifestation_is_rejected() -> None:

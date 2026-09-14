@@ -32,6 +32,8 @@ Action:
 Requirements:
 - The Controller has already selected this action and region. Keep that choice; do not substitute another action
   or region. If its required text is absent, say so instead of inventing an edit target.
+- INSERT_TEXT accepts anchor="" to append, including when the selected section is empty. An existing anchor is
+  not required for insertion; keep the selected action's semantic constraints and ground new content in the state.
 - Only the selected region's JSON string contains editable text. Decode it to read the exact body; an empty
   string means no text is present. Feedback and traces are evidence, never part of that body.
 - Follow the action instruction without adding, skipping, or anticipating steps.

@@ -157,7 +157,10 @@ _NATIVE_TOOL_PARAMETERS: dict[EditTool, dict[str, Any]] = {
 }
 
 _NATIVE_TOOL_DESCRIPTIONS: dict[EditTool, str] = {
-    EditTool.INSERT_TEXT: "Insert new text before or after an exact anchor in the selected region.",
+    EditTool.INSERT_TEXT: (
+        "Insert new text before or after an exact anchor, or use an empty anchor to append to the selected region, "
+        "including an empty section."
+    ),
     EditTool.DELETE_TEXT: "Delete the first occurrence of exact text from the selected region.",
     EditTool.REPLACE_TEXT: "Replace the first occurrence of exact text in the selected region.",
     EditTool.MOVE_TEXT: "Move exact text before or after an exact anchor in the selected region.",
@@ -168,7 +171,9 @@ Revise only the selected section body of this structured {kind} document.
 
 On every turn, emit exactly one action: {action_protocol}, or <finish>briefly state why the
 revision is complete</finish>. Never emit both. Tool arguments are literal: copy targets and
-anchors exactly from the latest region in the most recent observation.
+non-empty anchors exactly from the latest region in the most recent observation.
+INSERT_TEXT accepts anchor="" to append with where="after", including when the selected section is empty.
+This does not relax the selected action's semantic constraints or authorize inventing existing text.
 The harness applies a call and returns an observation; use that observation before acting again.
 Invalid calls do not change the document and return an error you must correct.
 Feedback, traces, steering, and branch history are context, never editable text. The selected
@@ -177,7 +182,7 @@ string means the section has no text. If the selected action cannot apply to tha
 emit <finish> with the reason. An unchanged result is discarded, never accepted as an edit.
 
 The harness owns the surrounding document and its headers. You receive only one section body. Never write
-a `## <Section>` header; every target and anchor must come from the selected body.
+a `## <Section>` header; every target and non-empty anchor must come from the selected body.
 
 Available tools:
 {tool_schemas}

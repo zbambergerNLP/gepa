@@ -1024,17 +1024,42 @@ def test_delete_last_text_returns_an_empty_section_body() -> None:
     assert result.new_text == ""
 
 
-def test_insert_into_an_empty_section_returns_only_the_selected_body() -> None:
-    """Allow the proposer to populate a section whose current body is empty."""
-    result = run(
-        ScriptedLM(
+@pytest.mark.parametrize("native", [False, True], ids=["text", "native"])
+def test_insert_into_an_empty_section_returns_only_the_selected_body(native: bool) -> None:
+    """Allow the proposer to populate a section whose current body is empty.
+
+    Args:
+        native: Whether to exercise the provider-native function protocol.
+    """
+    lm: ScriptedLM | NativeScriptedLM
+    if native:
+        lm = NativeScriptedLM(
+            [
+                ToolCompletion(
+                    "",
+                    (NativeToolCall("insert", "INSERT_TEXT", json.dumps({"anchor": "", "where": "after", "text": "helper"})),),
+                ),
+                ToolCompletion("<finish>Done.</finish>", ()),
+            ]
+        )
+    else:
+        lm = ScriptedLM(
             [tool_call(EditTool.INSERT_TEXT, anchor="", where="after", text="helper"), "<finish>Done.</finish>"]
-        ),
-        component_text="",
+        )
+    result = run(
+        lm,
+        component_text=TEMPLATE.render({"Role": "", "Rules": "- be brief"}),
         edit_target=EditTarget("sys", "Role"),
         preferred_tool=EditTool.INSERT_TEXT,
     )
     assert result.new_text == "helper"
+    assert result.changed and result.tool_calls == 1
+    assert [step.action for step in result.steps] == ["INSERT_TEXT", "FINISH"]
+    assert 'INSERT_TEXT accepts anchor="" to append' in lm.calls[0][0]["content"]
+    assert "- be brief" not in json.dumps(lm.calls[0], ensure_ascii=False)
+    if isinstance(lm, NativeScriptedLM):
+        insert = next(tool["function"] for tool in lm.tools[0] if tool["function"]["name"] == "INSERT_TEXT")
+        assert "empty anchor to append" in insert["description"]
 
 
 def test_move_cannot_use_an_anchor_from_an_unselected_section() -> None:

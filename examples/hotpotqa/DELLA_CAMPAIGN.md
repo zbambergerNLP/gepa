@@ -96,7 +96,7 @@ FlashInfer builds use the serving environment's CUDA headers first.
 | Weights / KV cache | BF16 / BF16 (`auto`) | Native FP4 experts + FP8 / FP8 |
 | Engram tables | Not applicable | Explicit CPU offload |
 | Active sequences | Calibrate 1, 2, 4 | Calibrate 1, 2, 4 |
-| Context / output caps | 262,144 / 32,768 solver; 32,768 optimizer | 262,144 / 65,536 solver; 131,072 optimizer |
+| Context / output caps | 262,144 / 65,536 solver; 32,768 optimizer | 262,144 / 65,536 solver; 131,072 optimizer |
 | Thinking effort | `xhigh` | `100` |
 | Approved initial pilot workers | 12 | 4 |
 
@@ -315,10 +315,12 @@ Check the actual connection and runtime before using this consolidated source.
 
 DeepSeek optimizer roles now use a 131,072-token ceiling, uniformly across
 vanilla, FOREST, random Controller, and action-only. Following observed training-pilot
-cutoffs and user approval, DeepSeek solver calls use 65,536; Qwen uses 32,768 for
-solver calls and optimizer roles. These revised caps require fresh
-qualification. The 262,144 context and provider sampling
-settings are unchanged. Run contracts use schema 27; pilot protocol uses version 2.
+cutoffs and user approval, both models' solver calls use 65,536; Qwen optimizer
+roles retain 32,768. The September 15 Qwen full pilot reached its previous 32,768
+solver cap in the first evidence summary and returned no parseable summary.
+These revised caps require fresh qualification. The 262,144 context and provider
+sampling settings are unchanged. Run contracts use schema 28; pilot protocol
+uses version 2.
 
 Set `HOTPOTQA_JOB_KIND=pilot HOTPOTQA_PREPARE_ONLY=1` with a fresh campaign ID
 and `MODEL_PROFILE`, then run `scripts/della/submit_hotpotqa.sh`. This verifies

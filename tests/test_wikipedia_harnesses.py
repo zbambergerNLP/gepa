@@ -104,7 +104,7 @@ def test_hotpot_lm_uses_local_campaign_decoding(monkeypatch, model: str) -> None
         "num_retries": EXPERIMENT_NUM_RETRIES,
         **experiment_decoding(model, agentic=False),
         **experiment_request_overrides(model, explicit_reasoning=True),
-        "max_tokens": 65_536 if model == DEEPSEEK_V4_1_FLASH_MODEL else 32_768,
+        "max_tokens": 65_536,
     }
     expected_request["seed"] = hotpot_utils.HOTPOTQA_SCIENTIFIC_REQUEST_SEED
     assert 3599 < calls[0]["timeout"] <= 3600
@@ -470,8 +470,7 @@ def test_real_dspy_provider_requests_use_three_attempts(tmp_path, monkeypatch, m
     assert result.choices[0].message.content == "done"
     assert provider.call_count == 3
     assert all(call.kwargs["num_retries"] == call.kwargs["max_retries"] == 0 for call in provider.call_args_list)
-    expected_cap = 65_536 if model == DEEPSEEK_V4_1_FLASH_MODEL else 32_768
-    assert all(call.kwargs["max_tokens"] == expected_cap for call in provider.call_args_list)
+    assert all(call.kwargs["max_tokens"] == 65_536 for call in provider.call_args_list)
     assert len(path.read_text().splitlines()) == 3
 
 

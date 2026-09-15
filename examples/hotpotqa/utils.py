@@ -180,7 +180,7 @@ def resolve_hotpotqa_lm_kwargs(
     if model == DEEPSEEK_V4_1_FLASH_MODEL:
         kwargs["max_tokens"] = 131_072 if role == "optimizer" else 65_536
     elif model == QWEN3_8_27B_MODEL:
-        kwargs["max_tokens"] = 32_768
+        kwargs["max_tokens"] = 32_768 if role == "optimizer" else 65_536
     if model in {QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL}:
         kwargs["seed"] = HOTPOTQA_SCIENTIFIC_REQUEST_SEED
     if api_base is not None:

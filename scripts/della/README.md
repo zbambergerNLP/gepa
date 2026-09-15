@@ -82,7 +82,7 @@ Provider guidance sets temperature 1.0 and top-p 0.95 for every role in both
 models. Thinking is explicit: Qwen `xhigh`; DeepSeek V4.1 numeric effort 100.
 The [provider review](../../examples/common/temperature_policy.md) records the
 sources. Context is 262,144 for both Della servers. HotPotQA output caps are
-32,768 for Qwen solver and optimizer calls, and 65,536 solver / 131,072 optimizer
+65,536 solver / 32,768 optimizer for Qwen, and 65,536 solver / 131,072 optimizer
 for DeepSeek. TB2.1 uses 32,768 per call. These practical runtime limits are below
 the providers' largest recommended budgets and require training-only review.
 

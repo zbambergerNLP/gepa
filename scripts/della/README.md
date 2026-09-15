@@ -81,8 +81,9 @@ explicit, one active sequence, FP8 KV cache and automatic block size, no specula
 Provider guidance sets temperature 1.0 and top-p 0.95 for every role in both
 models. Thinking is explicit: Qwen `xhigh`; DeepSeek V4.1 numeric effort 100.
 The [provider review](../../examples/common/temperature_policy.md) records the
-sources. Context is 262,144 for both Della servers. Output caps remain 16,384
-for HotPotQA and 32,768 for TB2.1. These practical runtime limits are below
+sources. Context is 262,144 for both Della servers. HotPotQA output caps are
+32,768 for Qwen solver and optimizer calls, and 65,536 solver / 131,072 optimizer
+for DeepSeek. TB2.1 uses 32,768 per call. These practical runtime limits are below
 the providers' largest recommended budgets and require training-only review.
 
 The FOREST ReAct editor has no assistant-turn or tool-call limit in HotPotQA

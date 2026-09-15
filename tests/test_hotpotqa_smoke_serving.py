@@ -21,7 +21,7 @@ def test_chat_request_matches_the_body_the_campaign_client_sends() -> None:
     assert body["chat_template_kwargs"] == {"thinking": True, "reasoning_effort": 100}
     assert body["seed"] == 0
     expected = experiment_decoding(DEEPSEEK_V4_1_FLASH_MODEL, agentic=False)
-    expected["max_tokens"] = 32_768
+    expected["max_tokens"] = 65_536
     for field, value in expected.items():
         assert body[field] == value
     for client_only in ("api_base", "num_retries", "max_retries", "model_info", "timeout", "extra_body"):

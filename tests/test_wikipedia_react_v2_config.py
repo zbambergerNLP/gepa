@@ -353,7 +353,7 @@ def test_hotpot_provider_sampling_reaches_every_model_role(model: str, budget: i
     assert contract["models"]["solver_decoding"]["temperature"] == expected
     assert config.reflection.reflection_lm_kwargs["temperature"] == expected
     expected_output_cap = 131_072 if model == DEEPSEEK_V4_1_FLASH_MODEL else 32_768
-    expected_solver_cap = 32_768
+    expected_solver_cap = 65_536 if model == DEEPSEEK_V4_1_FLASH_MODEL else 32_768
     assert contract["models"]["solver_decoding"]["max_tokens"] == expected_solver_cap
     assert contract["models"]["reflection_decoding"]["max_tokens"] == expected_output_cap
     assert config.reflection.reflection_lm_kwargs["max_tokens"] == expected_output_cap
@@ -1379,7 +1379,7 @@ def test_deepseek_contract_uses_the_deepseek_pair_and_local_request_settings() -
     contract = build_hotpotqa_run_contract("react_v2", args)
     deepseek_decoding = {
         **experiment_decoding(DEEPSEEK_V4_1_FLASH_MODEL, agentic=False),
-        "max_tokens": 32_768,
+        "max_tokens": 65_536,
         "seed": 0,
     }
     deepseek_request_overrides = experiment_request_overrides(DEEPSEEK_V4_1_FLASH_MODEL)

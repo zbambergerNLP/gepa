@@ -96,7 +96,7 @@ FlashInfer builds use the serving environment's CUDA headers first.
 | Weights / KV cache | BF16 / BF16 (`auto`) | Native FP4 experts + FP8 / FP8 |
 | Engram tables | Not applicable | Explicit CPU offload |
 | Active sequences | Calibrate 1, 2, 4 | Calibrate 1, 2, 4 |
-| Context / output caps | 262,144 / 32,768 solver; 32,768 optimizer | 262,144 / 32,768 solver; 131,072 optimizer |
+| Context / output caps | 262,144 / 32,768 solver; 32,768 optimizer | 262,144 / 65,536 solver; 131,072 optimizer |
 | Thinking effort | `xhigh` | `100` |
 | Approved initial pilot workers | 12 | 4 |
 
@@ -315,7 +315,7 @@ Check the actual connection and runtime before using this consolidated source.
 
 DeepSeek optimizer roles now use a 131,072-token ceiling, uniformly across
 vanilla, FOREST, random Controller, and action-only. Following observed training-pilot
-cutoffs and user approval, DeepSeek solver calls use 32,768; Qwen uses 32,768 for
+cutoffs and user approval, DeepSeek solver calls use 65,536; Qwen uses 32,768 for
 solver calls and optimizer roles. These revised caps require fresh
 qualification. The 262,144 context and provider sampling
 settings are unchanged. Run contracts use schema 27; pilot protocol uses version 2.
@@ -330,8 +330,10 @@ resumable. Use `preliminary` to run smoke, all optimizer checks, and throughput
 with one server startup, stopping before the full calibration. This supports
 batching selection before the 150-question run. The complete qualification plan
 uses one nine-hour `salloc` with four H200s, 32 CPUs and 768G host memory, releasing
-it early when finished. Run DeepSeek and then Qwen sequentially; Qwen uses an
-exact one-H200/eight-CPU/128G step within that allocation. This replaces the
+it early when finished. After DeepSeek batching selection, run Qwen's full pilot
+before the selected DeepSeek full pilot; Qwen uses an exact one-H200/eight-CPU/128G
+step within that allocation. Preserve a failed full pilot and run the other model
+when time permits; either failure prevents qualification. This replaces the
 earlier 55-minute partial-pilot reservations. The DeepSeek interactive pilot runs its required
 20-attempt runtime canary before inference when its exact-runtime marker is absent.
 

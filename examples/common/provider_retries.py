@@ -78,6 +78,47 @@ def _retryable(error: BaseException) -> bool:
     )
 
 
+def _save_incomplete_response(
+    path: Path, request: dict[str, Any], response: Any, request_id: str, attempt: int
+) -> None:
+    """Retain incomplete model output without copying transport credentials."""
+    choices = []
+    for choice in _field(response, "choices", []):
+        message = _field(choice, "message")
+        choices.append(
+            {
+                "finish_reason": _field(choice, "finish_reason"),
+                "message": {
+                    name: _field(message, name) for name in ("role", "content", "reasoning_content", "reasoning")
+                },
+            }
+        )
+    payload = {
+        "request_id": request_id,
+        "attempt": attempt,
+        "request": {
+            key: request[key]
+            for key in ("model", "messages", "tools", "max_tokens", "temperature", "top_p", "top_k", "seed")
+            if key in request
+        },
+        "response": {"id": _field(response, "id"), "model": _field(response, "model"), "choices": choices},
+    }
+    extra = request.get("extra_body") or {}
+    payload["request"]["extra_body"] = {
+        key: extra[key] for key in ("thinking_token_budget", "top_k", "min_p") if key in extra
+    }
+    payload["request"]["extra_body"]["chat_template_kwargs"] = {
+        key: value
+        for key, value in extra.get("chat_template_kwargs", {}).items()
+        if key in {"enable_thinking", "thinking", "reasoning_effort", "preserve_thinking"}
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="utf-8") as stream:
+        json.dump(payload, stream, ensure_ascii=False, allow_nan=False)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
 def _record(
     settings: dict[str, Any],
     request: dict[str, Any],
@@ -100,7 +141,14 @@ def _record(
     limits = settings.get("token_limits")
     prompt_tokens = _field(usage, "prompt_tokens")
     completion_tokens = _field(usage, "completion_tokens")
-    reasons = [_field(choice, "finish_reason") for choice in _field(response, "choices", [])]
+    reasoning_tokens = _field(_field(usage, "completion_tokens_details"), "reasoning_tokens")
+    thinking_budget = (request.get("extra_body") or {}).get("thinking_token_budget")
+    choices = _field(response, "choices", [])
+    reasons = [_field(choice, "finish_reason") for choice in choices]
+    empty_completion = error is None and any(
+        not _field(_field(choice, "message"), "content") and not _field(_field(choice, "message"), "tool_calls")
+        for choice in choices
+    )
     row = {
         "schema_version": 1,
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -119,9 +167,16 @@ def _record(
         "will_retry": will_retry,
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
-        "reasoning_tokens": _field(_field(usage, "completion_tokens_details"), "reasoning_tokens"),
+        "reasoning_tokens": reasoning_tokens,
         "cost_usd": _field(_field(response, "_hidden_params"), "response_cost"),
         "finish_reasons": reasons,
+        "empty_completion": empty_completion,
+        "thinking_token_budget": thinking_budget,
+        "thinking_budget_reached": (
+            reasoning_tokens >= thinking_budget
+            if thinking_budget is not None and thinking_budget >= 0 and reasoning_tokens is not None
+            else None
+        ),
         "length_finish": "length" in reasons if any(reason is not None for reason in reasons) else None,
         "output_cap_reached": (
             completion_tokens >= limits["max_output_tokens"]
@@ -135,8 +190,12 @@ def _record(
         ),
         "limits": limits,
     }
-    line = json.dumps(row, sort_keys=True, allow_nan=False)
     path = settings.get("log_path")
+    if path is not None and error is None and (empty_completion or "length" in reasons):
+        artifact = Path(path).parent / "provider-failures" / f"{request_id}-{attempt}.json"
+        _save_incomplete_response(artifact, request, response, request_id, attempt)
+        row["response_artifact"] = str(artifact)
+    line = json.dumps(row, sort_keys=True, allow_nan=False)
     if path is None:
         logging.getLogger(__name__).warning("Provider attempt: %s", line)
         return

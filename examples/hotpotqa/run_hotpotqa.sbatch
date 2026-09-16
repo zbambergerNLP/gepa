@@ -237,7 +237,7 @@ export JAX_PLATFORMS=cpu
 export VLLM_LOGGING_LEVEL=INFO
 export VLLM_USE_FLASHINFER_SAMPLER=0
 
-LOG_DIR="${SCRATCH_BASE}/logs/hotpotqa/${HOTPOTQA_CAMPAIGN_ID}/${HOTPOTQA_SOURCE_COMMIT}"
+LOG_DIR="${SCRATCH_BASE}/logs/hotpotqa/${HOTPOTQA_CAMPAIGN_ID}/${HOTPOTQA_SOURCE_COMMIT}/${MODEL_PROFILE}/${SLURM_JOB_ID:-local}-${SLURM_STEP_ID:-batch}"
 mkdir -p "${XDG_CACHE_HOME}" "${HF_HOME}" "${VLLM_CACHE_ROOT}" \
     "${TORCHINDUCTOR_CACHE_DIR}" "${TRITON_CACHE_DIR}" "${LOG_DIR}"
 
@@ -534,6 +534,8 @@ else
     HOTPOTQA_SERVE_ARGUMENTS="tp=4;ep=4;dp=1;api_servers=1;gpu_memory_utilization=${GEN_GMU};max_model_len=${GEN_MAX_LEN};max_num_seqs=${VLLM_MAX_NUM_SEQS};max_num_batched_tokens=${VLLM_MAX_NUM_BATCHED_TOKENS};dtype=bfloat16;weight_dtype=fp8;expert_dtype=fp4;engram_cpu_offload=true;kv_cache_dtype=fp8;block_size=auto;prefix_caching=false;tokenizer_mode=deepseek_v41;reasoning_parser=deepseek_v41;auto_tool_choice=true;tool_parser=deepseek_v41;speculative_decoding=false;seed=0;batch_invariant=false;single_sequence_replicas=${HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS}"
     export FLASHINFER_NO_DOWNLOAD=1
     export VLLM_ENGINE_READY_TIMEOUT_S=3600
+    THINKING_REPAIR_SHA256="$(sha256sum examples/hotpotqa/serving/safe_thinking_budget.py | cut -d' ' -f1)"
+    HOTPOTQA_SERVE_ARGUMENTS+=";thinking_budget_repair=${THINKING_REPAIR_SHA256}"
     echo "==> serving DeepSeek with vLLM TP4/EP4 on :${GEN_PORT}; log: ${GEN_LOG}"
     env \
         -u OMP_NUM_THREADS \
@@ -541,6 +543,8 @@ else
         -u OPENBLAS_NUM_THREADS \
         -u NUMEXPR_NUM_THREADS \
         -u TOKENIZERS_PARALLELISM \
+        GEPA_VLLM_SAFE_THINKING_BUDGET=1 \
+        PYTHONPATH="${PWD}/examples/hotpotqa/serving:${PYTHONPATH:-}" \
         "${VLLM_BIN}" serve "${SOLVER_MODEL_PATH}" \
         --served-model-name "${SOLVER_SERVED_NAME}" \
         --language-model-only \
@@ -641,6 +645,10 @@ REFLECTION_API_ARG=()
 [[ -n "${REFLECTION_API_BASE}" ]] && REFLECTION_API_ARG=(--reflection-api-base "${REFLECTION_API_BASE}")
 
 if [[ "${MODEL_PROFILE}" == "deepseek-v4.1-flash" ]]; then
+    THINKING_PROBE_PARENT="$(mktemp -d "${LOG_DIR}/thinking-budget-${MODEL_PROFILE}-${SLURM_JOB_ID:-local}.XXXXXX")"
+    "${PY}" -m examples.hotpotqa.verify_thinking_budget \
+        --model "${SOLVER_MODEL}" --api-base "${SOLVER_API_BASE}" \
+        --output-dir "${THINKING_PROBE_PARENT}/exchange"
     DEEPSEEK_CANARY_DIR="${SCRATCH_BASE}/.cache/gepa/hotpotqa-canaries/${HOTPOTQA_CAMPAIGN_ID}"
     DEEPSEEK_CANARY_MARKER="${DEEPSEEK_CANARY_DIR}/${CAMPAIGN_IDENTITY_SHA256}.ok"
     mkdir -p "${DEEPSEEK_CANARY_DIR}"
@@ -681,7 +689,7 @@ from gepa.lm import LM
 
 model = sys.argv[1]
 api_base = sys.argv[2] or None
-kwargs = resolve_hotpotqa_lm_kwargs(model, api_base)
+kwargs = resolve_hotpotqa_lm_kwargs(model, api_base, role="optimizer")
 completion = LM(model, **kwargs).complete_with_tools(
     [{"role": "user", "content": "Call the echo function exactly once with value ready."}],
     [

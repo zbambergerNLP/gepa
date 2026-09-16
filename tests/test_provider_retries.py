@@ -194,6 +194,81 @@ def test_unmarked_requests_are_unchanged(monkeypatch):
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("finish_reason,content", [("length", None), ("stop", None), ("length", "unfinished")])
+def test_incomplete_model_output_is_preserved_without_semantic_retry(
+    tmp_path, monkeypatch, asynchronous, finish_reason, content
+):
+    """Retain the two observed failure modes without changing their model results."""
+    raw = litellm.ModelResponse(
+        choices=[
+            {
+                "message": {"role": "assistant", "content": content, "reasoning_content": "unfinished reasoning"},
+                "finish_reason": finish_reason,
+            }
+        ],
+        usage={
+            "prompt_tokens": 260,
+            "completion_tokens": 65536,
+            "total_tokens": 65796,
+            "completion_tokens_details": {"reasoning_tokens": 65536},
+        },
+    )
+    provider = AsyncMock(return_value=raw) if asynchronous else Mock(return_value=raw)
+    monkeypatch.setattr(litellm, "acompletion" if asynchronous else "completion", provider)
+    path = tmp_path / "provider-attempts.jsonl"
+    kwargs = {
+        "model": "hosted_vllm/test",
+        "api_key": "secret-key",
+        "extra_headers": {"Authorization": "secret-header"},
+        "messages": [{"role": "user", "content": "captured training input"}],
+        "extra_body": {"thinking_token_budget": 32768, "api_key": "secret-body"},
+        **provider_retry_kwargs(path),
+    }
+    result = asyncio.run(litellm.acompletion(**kwargs)) if asynchronous else litellm.completion(**kwargs)
+    assert result is raw
+    provider.assert_called_once()
+    (row,) = rows(path)
+    assert row["will_retry"] is False
+    assert row["empty_completion"] is (content is None)
+    assert row["thinking_token_budget"] == 32768
+    assert row["thinking_budget_reached"] is True
+    artifact = Path(row["response_artifact"])
+    saved = json.loads(artifact.read_text())
+    assert saved["request"]["messages"] == kwargs["messages"]
+    assert saved["response"]["choices"][0]["message"]["reasoning_content"] == "unfinished reasoning"
+    assert "secret-" not in artifact.read_text()
+    assert artifact.stat().st_mode & 0o777 == 0o600
+
+
+def test_native_tool_call_is_not_mistaken_for_empty_completion(tmp_path, monkeypatch):
+    """Accept content-free native tools without generating spurious failure artifacts."""
+    raw = litellm.ModelResponse(
+        choices=[
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": "echo", "arguments": "{}"},
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ]
+    )
+    monkeypatch.setattr(litellm, "completion", Mock(return_value=raw))
+    path = tmp_path / "provider-attempts.jsonl"
+    settings = provider_retry_kwargs(path)
+    assert litellm.completion(model="hosted_vllm/test", **settings) is raw
+    assert rows(path)[0]["empty_completion"] is False
+    assert not (tmp_path / "provider-failures").exists()
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
 def test_real_sdk_makes_three_http_attempts_without_nested_retries(tmp_path, monkeypatch, asynchronous):
     """Exercise real LiteLLM and SDK transports with offline HTTP responses."""
     sent = []

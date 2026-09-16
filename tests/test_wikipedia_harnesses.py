@@ -107,13 +107,15 @@ def test_hotpot_lm_uses_local_campaign_decoding(monkeypatch, model: str) -> None
         "max_tokens": 65_536,
     }
     expected_request["seed"] = hotpot_utils.HOTPOTQA_SCIENTIFIC_REQUEST_SEED
+    if model == DEEPSEEK_V4_1_FLASH_MODEL:
+        expected_request["extra_body"]["thinking_token_budget"] = 32_768
     assert 3599 < calls[0]["timeout"] <= 3600
     assert {key: value for key, value in calls[0].items() if key not in {"model", "messages", "timeout"}} == {
         **expected_request,
         "max_retries": 0,
         "cache": {"no-cache": True, "no-store": True},
     }
-    assert calls[0].get("extra_body") == experiment_request_overrides(model, explicit_reasoning=True).get("extra_body")
+    assert calls[0].get("extra_body") == expected_request.get("extra_body")
 
 
 @pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL])
@@ -1468,7 +1470,10 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert (
         'HOTPOTQA_LOG_DIR="${SCRATCH_BASE}/logs/hotpotqa/${HOTPOTQA_CAMPAIGN_ID}/${HOTPOTQA_SOURCE_COMMIT}"' in submit
     )
-    assert 'LOG_DIR="${SCRATCH_BASE}/logs/hotpotqa/${HOTPOTQA_CAMPAIGN_ID}/${HOTPOTQA_SOURCE_COMMIT}"' in sbatch
+    assert (
+        'LOG_DIR="${SCRATCH_BASE}/logs/hotpotqa/${HOTPOTQA_CAMPAIGN_ID}/${HOTPOTQA_SOURCE_COMMIT}'
+        '/${MODEL_PROFILE}/${SLURM_JOB_ID:-local}-${SLURM_STEP_ID:-batch}"' in sbatch
+    )
     assert r'SBATCH_EXPORT_FILE="\${CONTINUATION_DIR}/\${CELL_NAME}.env"' in submit
     assert "cleanup_export_file()" in submit
     assert 'rm -f -- "\\${SBATCH_EXPORT_FILE}"' in submit

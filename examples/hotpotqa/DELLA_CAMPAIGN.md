@@ -97,6 +97,7 @@ FlashInfer builds use the serving environment's CUDA headers first.
 | Engram tables | Not applicable | Explicit CPU offload |
 | Active sequences | Calibrate 1, 2, 4 | Calibrate 1, 2, 4 |
 | Context / output caps | 262,144 / 65,536 solver; 32,768 optimizer | 262,144 / 65,536 solver; 131,072 optimizer |
+| Solver reasoning budget | Native model termination | 32,768 within the 65,536 total output cap |
 | Thinking effort | `xhigh` | `100` |
 | Approved initial pilot workers | 12 | 4 |
 
@@ -321,6 +322,32 @@ solver cap in the first evidence summary and returned no parseable summary.
 These revised caps require fresh qualification. The 262,144 context and provider
 sampling settings are unchanged. Run contracts use schema 28; pilot protocol
 uses version 2.
+
+The September 16 investigation retained two DeepSeek query calls that spent
+all 65,536 output tokens on repeated reasoning without an answer. DeepSeek
+solver calls now use vLLM's `thinking_token_budget=32768`, leaving the remaining
+output allowance for the structured answer. This is a resource choice justified
+by training diagnostics, not a provider recommendation. Optimizer calls retain
+their existing limits and have no separate thinking budget. Qwen's earlier
+empty response was not captured in full, so its cause remains unconfirmed;
+its generation settings remain unchanged pending qualification.
+
+The exact pinned DeepSeek vLLM also had a numerical bug at forced reasoning
+boundaries: its `1e9` forced logit combined with top-p 0.95 masked every token
+and emitted repeated BOS tokens. The launcher loads the guarded
+`serving/safe_thinking_budget.py` repair before Triton compilation. It forces
+the required token with probability one, preserves ordinary sampling, checks
+the exact vLLM version and original source hash, and leaves installed package
+files unchanged. Its file hash is part of serving identity; the whole repair
+is pinned by source identity. Qwen does not load this DeepSeek-specific repair.
+Each DeepSeek startup first runs a 256-token probe that verifies immediate
+reasoning closure and nonempty final content. Failed probes stop qualification.
+Empty or length-limited provider responses now retain their request and full
+reasoning in private `provider-failures` artifacts linked from attempt logs.
+Neither diagnostic continuations nor repeated trials replace failed evaluations.
+Fresh qualification is required before launching ablations with these changes.
+Serving and resource logs include the model and allocation step in their
+directory, preserving both models' logs when one interactive allocation is reused.
 
 Set `HOTPOTQA_JOB_KIND=pilot HOTPOTQA_PREPARE_ONLY=1` with a fresh campaign ID
 and `MODEL_PROFILE`, then run `scripts/della/submit_hotpotqa.sh`. This verifies

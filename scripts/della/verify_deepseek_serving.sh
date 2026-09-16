@@ -182,6 +182,8 @@ env \
     -u OPENBLAS_NUM_THREADS \
     -u NUMEXPR_NUM_THREADS \
     -u TOKENIZERS_PARALLELISM \
+    GEPA_VLLM_SAFE_THINKING_BUDGET=1 \
+    PYTHONPATH="${REPO_ROOT}/examples/hotpotqa/serving:${PYTHONPATH:-}" \
     "${VLLM_BIN}" serve "${SOLVER_MODEL_PATH}" \
     --served-model-name "${SOLVER_SERVED_NAME}" \
     --enable-auto-tool-choice \
@@ -241,6 +243,9 @@ export OPENAI_API_KEY="EMPTY"
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="${REPO_ROOT}/src:${REPO_ROOT}"
 echo "==> recording one full exchange (request, rendered prompt, reasoning, content)"
+"${PY}" -m examples.hotpotqa.verify_thinking_budget \
+    --model "${SOLVER_MODEL}" --api-base "http://127.0.0.1:${GEN_PORT}/v1" \
+    --output-dir "${RUN_DIR}/thinking-budget-probe"
 SMOKE_STATUS=0
 "${PY}" -m examples.hotpotqa.smoke_serving \
     --model "${SOLVER_MODEL}" \

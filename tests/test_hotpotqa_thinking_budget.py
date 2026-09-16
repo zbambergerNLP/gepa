@@ -18,8 +18,7 @@ def test_reasoning_budget_is_solver_specific(model):
     """Reserve solver answer space without interrupting optimizer tool arguments."""
     solver = resolve_hotpotqa_lm_kwargs(model, None)
     optimizer = resolve_hotpotqa_lm_kwargs(model, None, role="optimizer")
-    expected_budget = 32_768 if model == DEEPSEEK_V4_1_FLASH_MODEL else None
-    assert solver["extra_body"].get("thinking_token_budget") == expected_budget
+    assert solver["extra_body"]["thinking_token_budget"] == 32_768
     assert "thinking_token_budget" not in optimizer["extra_body"]
     assert solver["max_tokens"] == 65_536
     assert optimizer["max_tokens"] == (131_072 if model == DEEPSEEK_V4_1_FLASH_MODEL else 32_768)

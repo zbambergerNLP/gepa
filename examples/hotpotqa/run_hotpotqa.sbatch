@@ -644,11 +644,11 @@ SOLVER_API_ARG=()
 REFLECTION_API_ARG=()
 [[ -n "${REFLECTION_API_BASE}" ]] && REFLECTION_API_ARG=(--reflection-api-base "${REFLECTION_API_BASE}")
 
+THINKING_PROBE_PARENT="$(mktemp -d "${LOG_DIR}/thinking-budget-${MODEL_PROFILE}-${SLURM_JOB_ID:-local}.XXXXXX")"
+"${PY}" -m examples.hotpotqa.verify_thinking_budget \
+    --model "${SOLVER_MODEL}" --api-base "${SOLVER_API_BASE}" \
+    --output-dir "${THINKING_PROBE_PARENT}/exchange"
 if [[ "${MODEL_PROFILE}" == "deepseek-v4.1-flash" ]]; then
-    THINKING_PROBE_PARENT="$(mktemp -d "${LOG_DIR}/thinking-budget-${MODEL_PROFILE}-${SLURM_JOB_ID:-local}.XXXXXX")"
-    "${PY}" -m examples.hotpotqa.verify_thinking_budget \
-        --model "${SOLVER_MODEL}" --api-base "${SOLVER_API_BASE}" \
-        --output-dir "${THINKING_PROBE_PARENT}/exchange"
     DEEPSEEK_CANARY_DIR="${SCRATCH_BASE}/.cache/gepa/hotpotqa-canaries/${HOTPOTQA_CAMPAIGN_ID}"
     DEEPSEEK_CANARY_MARKER="${DEEPSEEK_CANARY_DIR}/${CAMPAIGN_IDENTITY_SHA256}.ok"
     mkdir -p "${DEEPSEEK_CANARY_DIR}"

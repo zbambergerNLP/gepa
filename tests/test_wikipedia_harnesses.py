@@ -107,8 +107,7 @@ def test_hotpot_lm_uses_local_campaign_decoding(monkeypatch, model: str) -> None
         "max_tokens": 65_536,
     }
     expected_request["seed"] = hotpot_utils.HOTPOTQA_SCIENTIFIC_REQUEST_SEED
-    if model == DEEPSEEK_V4_1_FLASH_MODEL:
-        expected_request["extra_body"]["thinking_token_budget"] = 32_768
+    expected_request["extra_body"]["thinking_token_budget"] = 32_768
     assert 3599 < calls[0]["timeout"] <= 3600
     assert {key: value for key, value in calls[0].items() if key not in {"model", "messages", "timeout"}} == {
         **expected_request,

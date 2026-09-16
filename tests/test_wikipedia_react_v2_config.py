@@ -359,7 +359,10 @@ def test_hotpot_provider_sampling_reaches_every_model_role(model: str, budget: i
     assert contract["models"]["solver_decoding"]["top_p"] == general["top_p"]
     assert config.reflection.reflection_lm_kwargs["top_p"] == general["top_p"]
     assert config.reflection.reflection_lm_kwargs["extra_body"] == request_overrides["extra_body"]
-    assert contract["models"]["solver_request_overrides"] == request_overrides
+    assert contract["models"]["solver_request_overrides"] == {
+        **request_overrides,
+        "extra_body": {**request_overrides["extra_body"], "thinking_token_budget": 32_768},
+    }
     assert contract["models"]["reflection_request_overrides"] == request_overrides
     if selector is not None:
         assert selector.lm.completion_kwargs["max_tokens"] == expected_output_cap
@@ -1388,7 +1391,10 @@ def test_deepseek_contract_uses_the_deepseek_pair_and_local_request_settings() -
         "solver_version": DEEPSEEK_V4_1_FLASH_REVISION,
         "solver_api_base": LOCAL_API_BASE,
         "solver_decoding": deepseek_decoding,
-        "solver_request_overrides": deepseek_request_overrides,
+        "solver_request_overrides": {
+            **deepseek_request_overrides,
+            "extra_body": {**deepseek_request_overrides["extra_body"], "thinking_token_budget": 32_768},
+        },
         "solver_num_retries": 0,
         "solver_request_timeout_seconds": 3600,
         "reflection": DEEPSEEK_V4_1_FLASH_MODEL,

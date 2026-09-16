@@ -179,14 +179,14 @@ def resolve_hotpotqa_lm_kwargs(
     }
     if model == DEEPSEEK_V4_1_FLASH_MODEL:
         kwargs["max_tokens"] = 131_072 if role == "optimizer" else 65_536
-        if role == "solver":
-            extra_body = kwargs["extra_body"]
-            assert isinstance(extra_body, dict)
-            kwargs["extra_body"] = {**extra_body, "thinking_token_budget": 32_768}
     elif model == QWEN3_8_27B_MODEL:
         kwargs["max_tokens"] = 32_768 if role == "optimizer" else 65_536
     if model in {QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL}:
         kwargs["seed"] = HOTPOTQA_SCIENTIFIC_REQUEST_SEED
+        if role == "solver":
+            extra_body = kwargs["extra_body"]
+            assert isinstance(extra_body, dict)
+            kwargs["extra_body"] = {**extra_body, "thinking_token_budget": 32_768}
     if api_base is not None:
         kwargs["api_base"] = api_base
     return kwargs

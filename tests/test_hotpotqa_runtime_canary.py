@@ -19,7 +19,7 @@ def test_edit_probe_requires_a_successful_edit_and_explicit_finish(finish: str) 
     """Exercise the real editor so the runtime gate follows its new protocol.
 
     Args:
-        finish: Correct finish action or plain text that must fail the gate.
+        finish: Correct finish action or plain text requiring a correction turn.
     """
     lm = Mock(spec=LM)
     lm.complete_with_tools.side_effect = [
@@ -34,13 +34,52 @@ def test_edit_probe_requires_a_successful_edit_and_explicit_finish(finish: str) 
             ),
         ),
         ToolCompletion(finish, ()),
+        ToolCompletion("<finish>Done.</finish>", ()),
     ]
-    if finish.startswith("<finish>"):
-        runtime_canary._edit_probe(lm, EditTool.REPLACE_TEXT, 1)
-    else:
-        with pytest.raises(runtime_canary.RuntimeCanaryError, match="did not complete"):
-            runtime_canary._edit_probe(lm, EditTool.REPLACE_TEXT, 1)
-    assert lm.complete_with_tools.call_count == 2
+    recovered = runtime_canary._edit_probe(lm, EditTool.REPLACE_TEXT, 1)
+    assert recovered == (0 if finish.startswith("<finish>") else 1)
+    assert lm.complete_with_tools.call_count == 2 + recovered
+
+
+def test_edit_probe_preserves_invalid_xml_and_native_recovery(tmp_path: Path) -> None:
+    """Replay the failed canary's first two actions and allow explicit finish."""
+    lm = Mock(spec=LM)
+    invalid = '<function_calls><invoke name="REPLACE_TEXT"/></function_calls>'
+    lm.complete_with_tools.side_effect = [
+        ToolCompletion(invalid, ()),
+        ToolCompletion(
+            "",
+            (
+                NativeToolCall(
+                    "replace-1",
+                    "REPLACE_TEXT",
+                    json.dumps({"target": "Cite primary sources.", "text": "Cite primary sources inline."}),
+                ),
+            ),
+        ),
+        ToolCompletion("<finish>Done.</finish>", ()),
+    ]
+    result_log = tmp_path / "edits.jsonl"
+    assert runtime_canary._edit_probe(lm, EditTool.REPLACE_TEXT, 15, result_log) == 1
+    record = json.loads(result_log.read_text())
+    result = record["result"]
+    assert [step["action"] for step in result["steps"]] == ["INVALID", "REPLACE_TEXT", "FINISH"]
+    assert result["steps"][0]["executed_edit"] == []
+    assert "Plain-text XML" in result["steps"][0]["observation"]
+    assert result["changed"] and result["tool_calls"] == 1
+    assert lm.complete_with_tools.call_count == 3
+    assert lm.complete_with_tools.call_args.kwargs["tool_choice"] == "none"
+
+
+def test_edit_probe_rejects_finish_without_edit(tmp_path: Path) -> None:
+    """Keep failed attempts recorded and require a real completed revision."""
+    lm = Mock(spec=LM)
+    lm.complete_with_tools.return_value = ToolCompletion("<finish>Done.</finish>", ())
+    result_log = tmp_path / "edits.jsonl"
+    with pytest.raises(runtime_canary.RuntimeCanaryError, match="did not complete"):
+        runtime_canary._edit_probe(lm, EditTool.REPLACE_TEXT, 1, result_log)
+    assert not json.loads(result_log.read_text())["result"]["changed"]
+    assert lm.complete_with_tools.call_count == 1
 
 
 @pytest.mark.parametrize(
@@ -135,7 +174,7 @@ def test_run_runtime_canary_cycles_all_four_tools_for_twenty_attempts(monkeypatc
     lm_factory = Mock(return_value=lm)
     ordinary_probe = Mock()
     continuation_probe = Mock()
-    edit_probe = Mock()
+    edit_probe = Mock(return_value=0)
     monkeypatch.setattr(runtime_canary, "resolve_hotpotqa_lm_kwargs", resolve_kwargs)
     monkeypatch.setattr(runtime_canary, "LM", lm_factory)
     monkeypatch.setattr(runtime_canary, "_ordinary_completion_probe", ordinary_probe)
@@ -154,7 +193,7 @@ def test_run_runtime_canary_cycles_all_four_tools_for_twenty_attempts(monkeypatc
     ordinary_probe.assert_called_once_with(lm)
     continuation_probe.assert_called_once_with(lm)
     tools = EDIT_TOOL_SETS["broad"]
-    assert edit_probe.call_args_list == [call(lm, tools[offset % len(tools)], offset + 1) for offset in range(20)]
+    assert edit_probe.call_args_list == [call(lm, tools[offset % len(tools)], offset + 1, None) for offset in range(20)]
     assert summary == {
         "provider_retry_policy": runtime_canary.PROVIDER_RETRY_POLICY,
         "status": "passed",
@@ -164,6 +203,8 @@ def test_run_runtime_canary_cycles_all_four_tools_for_twenty_attempts(monkeypatc
         "tool_attempts": {tool.value: 5 for tool in sorted(tools, key=lambda item: item.value)},
         "ordinary_completion": "passed",
         "tool_result_continuation": "passed",
+        "rejected_actions_recovered": 0,
+        "edit_probes_with_recovery": 0,
     }
 
 

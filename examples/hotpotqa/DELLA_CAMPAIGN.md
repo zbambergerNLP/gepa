@@ -98,7 +98,7 @@ FlashInfer builds use the serving environment's CUDA headers first.
 | Active sequences | Calibrate 1, 2, 4 | Calibrate 1, 2, 4 |
 | Context / output caps | 262,144 / 65,536 solver; 32,768 optimizer | 262,144 / 65,536 solver; 131,072 optimizer |
 | Solver reasoning budget | 32,768 within the 65,536 total output cap | 32,768 within the 65,536 total output cap |
-| Thinking effort | `xhigh` | `100` |
+| Thinking effort | `medium` | `75` (provider medium equivalent) |
 | Approved initial pilot workers | 12 | 4 |
 
 The initial client-worker values incorporate Zach's observed queue timeout.
@@ -109,7 +109,13 @@ across all six cells per model. This calibration remains pending. The
 September 13 qualification now compares 1, 2, and 4 active requests on the same 12 training questions. This revises the earlier single-sequence profile.
 
 Temperature is 1.0 and top-p is 0.95 for both models and all roles. DeepSeek uses
-numeric effort 100, matching its published instruct/agentic evaluations.
+numeric effort 75, using the provider mapping of medium to high/75.
+This user-selected speed/accuracy setting supersedes the earlier maximum-effort
+campaign and requires fresh baselines and optimization runs.
+For the restart, set `HOTPOTQA_INITIAL_THROUGHPUT=1`: the first standard
+vanilla allocation runs the existing smoke3/throughput12 training checks before
+optimization, using the same live server. Completed pilot records survive
+allocation continuation; they do not consume the optimization budget.
 Requests have a 3,600-second deadline shared by at most three transient-error
 attempts, with 1/2-second backoff and attempt logs; SDK retries stay disabled.
 The 262,144-token server context is Zach's Della configuration, below the model

@@ -717,6 +717,17 @@ if arguments.get("value") != "ready":
 print("Native tool-call preflight passed.")
 PY
 
+# Measure a changed reasoning profile on training data before its first ablation,
+# sharing the allocated server and preserving the existing resumable pilot records.
+if [[ "${HOTPOTQA_INITIAL_THROUGHPUT:-0}" == "1" && "${HOTPOTQA_PILOT_ONLY}" == "0" \
+    && "${BUDGET_PROFILE}" == "standard" && "${CONDITION}" == "vanilla" ]]; then
+    "${PY}" -m examples.hotpotqa.pilot \
+        --model "${SOLVER_MODEL}" --api-base "${SOLVER_API_BASE}" \
+        --wiki17-dir "${WIKI17_DIR}" --workers "${MAX_WORKERS}" \
+        --output-dir "${HOTPOTQA_PILOT_ROOT:?pilot output root required}" \
+        --text-limits "${HOTPOTQA_TEXT_LIMITS_JSON:-null}" --stage throughput
+fi
+
 if [[ "${HOTPOTQA_PILOT_ONLY}" == "1" ]]; then
     if [[ "${MODEL_PROFILE}" == "qwen3.8-27b" ]]; then
         QWEN_VERIFY_DIR="${SCRATCH_BASE}/.cache/gepa/hotpotqa-tool-verification/${HOTPOTQA_CAMPAIGN_ID}"

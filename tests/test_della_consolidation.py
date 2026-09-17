@@ -419,3 +419,42 @@ def test_smoke_submission_forwards_custom_paths(tmp_path, reply, success):
 )
 def test_della_scripts_parse(path):
     subprocess.run(["bash", "-n", str(path)], check=True, capture_output=True)
+
+
+@pytest.mark.parametrize(
+    "enabled,budget,condition,pilot,expected",
+    [
+        ("1", "standard", "vanilla", "0", True),
+        ("0", "standard", "vanilla", "0", False),
+        ("1", "expanded", "vanilla", "0", False),
+        ("1", "standard", "react_v2", "0", False),
+        ("1", "standard", "vanilla", "1", False),
+    ],
+)
+def test_initial_throughput_precedes_only_first_production_cell(tmp_path, enabled, budget, condition, pilot, expected):
+    """Measure training throughput in the existing allocation without running full150."""
+    source = (ROOT / "examples/hotpotqa/run_hotpotqa.sbatch").read_text()
+    start = source.index('if [[ "${HOTPOTQA_INITIAL_THROUGHPUT:-0}"')
+    block = source[start : source.index('\nif [[ "${HOTPOTQA_PILOT_ONLY}" == "1" ]]; then', start)]
+    calls = tmp_path / "calls"
+    python = tmp_path / "python"
+    executable(python, 'printf "%s\\n" "$*" >> "$CALLS"\nexit "${PROBE_STATUS:-0}"\n')
+    env = {
+        **os.environ,
+        **dict.fromkeys(re.findall(r"\$\{([A-Z][A-Z_0-9]*)", block), "fixture"),
+        "PY": str(python),
+        "CALLS": str(calls),
+        "HOTPOTQA_INITIAL_THROUGHPUT": enabled,
+        "BUDGET_PROFILE": budget,
+        "CONDITION": condition,
+        "HOTPOTQA_PILOT_ONLY": pilot,
+    }
+    result = subprocess.run(["bash", "-c", "set -euo pipefail\n" + block], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert calls.exists() is expected
+    if expected:
+        assert "--stage throughput" in calls.read_text()
+        failed = subprocess.run(
+            ["bash", "-c", "set -euo pipefail\n" + block], env={**env, "PROBE_STATUS": "7"}, capture_output=True
+        )
+        assert failed.returncode == 7

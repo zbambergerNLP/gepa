@@ -79,7 +79,8 @@ tool parsers. It runs TP4/EP4 on four H200s (32 CPUs, 512G), with Engram CPU off
 explicit, one active sequence, FP8 KV cache and automatic block size, no speculative decoding, and prebuilt offline FlashInfer kernels.
 
 Provider guidance sets temperature 1.0 and top-p 0.95 for every role in both
-models. Thinking is explicit: Qwen `xhigh`; DeepSeek V4.1 numeric effort 100.
+models. Thinking is explicit: Qwen `medium`; DeepSeek V4.1 numeric effort 75
+(the provider maps medium to high/75).
 The [provider review](../../examples/common/temperature_policy.md) records the
 sources. Context is 262,144 for both Della servers. HotPotQA output caps are
 65,536 solver / 32,768 optimizer for Qwen, and 65,536 solver / 131,072 optimizer

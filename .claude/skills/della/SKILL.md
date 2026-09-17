@@ -87,9 +87,9 @@ Qwen uses `.serving-venv` (vLLM 0.25.1 / Torch 2.11); DeepSeek V4.1 uses
 HotPotQA does not depend on POSIT.
 
 - Qwen: TP1/DP1, one API server, a training-selected active-request limit (1, 2, or 4), context 262,144,
-  thinking `xhigh`.
+  thinking `medium`.
 - DeepSeek V4.1: TP4/EP4/DP1, one API server and a training-selected active-request limit (1, 2, or 4), context
-  262,144, numeric thinking effort 100, native `deepseek_v41` parsers, FP8 KV,
+  262,144, numeric thinking effort 75 (the provider mapping for medium), native `deepseek_v41` parsers, FP8 KV,
   automatic block size (64 on SM90), original weight formats, explicit Engram
   CPU offload (`--engram-config '{"cpu_offload":true}'`), no speculation.
   `FLASHINFER_NO_DOWNLOAD=1`; keep compiler CUDA headers first; use wheel headers through C_INCLUDE_PATH/CPLUS_INCLUDE_PATH as fallbacks.
@@ -105,7 +105,10 @@ HotPotQA does not depend on POSIT.
 - Evaluation/response caching stays off; checkpoint/journal recovery remains.
 
 The exact DeepSeek runtime must pass its 20-attempt campaign canary before the
-six optimization cells. A failed canary or native-tool preflight cannot freeze
+six optimization cells. The canary permits the same in-conversation error correction as the production
+editor, records rejected actions, and requires the exact edit plus explicit
+finish on all 20 probes; it never restarts a failed probe until it passes.
+A failed canary or native-tool preflight cannot freeze
 campaign identity. The independent smoke does not replace that gate.
 
 Per model: standard `vanilla`, `react_v2`, `react_v2_random`, `action` at 6,871

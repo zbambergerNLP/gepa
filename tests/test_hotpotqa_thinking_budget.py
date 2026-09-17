@@ -51,7 +51,7 @@ def test_boundary_probe_requires_observed_budget_and_final_content(
     request = post.call_args.args[1]
     assert request["thinking_token_budget"] == 0 and request["max_tokens"] == 256
     assert request["top_p"] == 0.95 and request["temperature"] == 1.0
-    assert request["chat_template_kwargs"] == {"thinking": True, "reasoning_effort": 100}
+    assert request["chat_template_kwargs"] == {"thinking": True, "reasoning_effort": 75}
     assert json.loads((output / "response.json").read_text()) == response
     assert (output / "request.json").stat().st_mode & 0o777 == 0o600
     with pytest.raises(FileExistsError):

@@ -27,8 +27,9 @@ the merge. The existing branches are preserved; consolidation is local.
 | Della skill/runbook | Include and reconcile PR #62's skill and runbook with the current decisions. Remove obsolete instructions to launch the old commit; use the approved V4.1 arm. |
 
 The user explicitly approved V4.1 during integration. Its published instruct
-and agentic evaluations use temperature 1.0, top-p 0.95, and effort 100; these
-replace the older V4 role-specific top-p values and named effort. The Della
+and agentic evaluations use temperature 1.0, top-p 0.95, and effort 100. We
+retain those sampling parameters; on 2026-09-17 the user selected the provider
+medium equivalent (75) for a fresh initial campaign. The Della
 context is 262,144, as in Zach's runtime; the provider advertises 1M. Keep the
 approved smaller output caps. See the provider review for sources.
 
@@ -50,7 +51,8 @@ approved smaller output caps. See the provider review for sources.
   test repetition scores, their mean, and sample standard deviation.
 - The model executing the benchmark is also the optimizer model within each arm.
 - Provider guidance determines role-specific sampling and reasoning: temperature
-  1.0 and top-p 0.95 for both models; Qwen xhigh and DeepSeek V4.1 numeric effort 100.
+  1.0 and top-p 0.95 for both models; Qwen medium and DeepSeek V4.1 numeric effort 75
+  (provider medium equivalent), selected by the user on 2026-09-17.
 - HotPotQA output limits are 65,536 solver / 32,768 optimizer for Qwen and
   65,536 solver / 131,072 optimizer for DeepSeek. Terminal-Bench uses 32,768 per call.
   Context limits remain 262,144 Qwen and 262,144 DeepSeek.

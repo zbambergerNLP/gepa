@@ -53,14 +53,14 @@ _EXPERIMENT_REQUEST_OVERRIDES: dict[str, dict[str, object]] = {
         "extra_body": {
             "chat_template_kwargs": {
                 "enable_thinking": True,
-                "reasoning_effort": "xhigh",
+                "reasoning_effort": "medium",
             },
         }
     },
     DEEPSEEK_V4_1_FLASH_MODEL: {
         "extra_body": {
             "chat_template_kwargs": {
-                "reasoning_effort": 100,
+                "reasoning_effort": 75,
                 "thinking": True,
             },
         }
@@ -72,7 +72,7 @@ def experiment_decoding(model: str, *, agentic: bool = True) -> dict[str, int | 
     """Return provider decoding settings for the model and kind of work.
 
     Qwen3.8-27B and DeepSeek-V4.1-Flash use their published thinking-mode sampling
-    parameters. Maximum DeepSeek reasoning is carried separately in its request
+    parameters. DeepSeek reasoning effort is carried separately in its request
     override so the local serving runtime applies it through the checkpoint's
     template.
 
@@ -119,14 +119,15 @@ def experiment_request_overrides(model: str, *, explicit_reasoning: bool = False
     """Return provider-specific request fields for one runtime model.
 
     The reviewed HotPotQA and Terminal-Bench profiles explicitly enable thinking
-    with Qwen xhigh or DeepSeek max through the checkpoint's chat-template
-    arguments. A deep copy isolates settings across clients.
+    with Qwen medium or DeepSeek 75 through the checkpoint's chat-template
+    arguments. DeepSeek maps requested medium to high (75). A deep copy isolates
+    settings across clients.
 
     Args:
         model: Exact LiteLLM model identifier used by a benchmark run.
         explicit_reasoning: Pin Qwen's thinking mode and effort instead of
             relying on its defaults. The default preserves unreviewed callers;
-            DeepSeek already requests thinking and max effort explicitly.
+            DeepSeek already requests thinking and effort 75 explicitly.
 
     Returns:
         Independent provider-request mapping, or an empty mapping when the

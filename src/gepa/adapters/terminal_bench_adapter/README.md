@@ -746,7 +746,7 @@ The campaign supports two separate model arms: Qwen3.8-27B with Qwen3.8-27B
 (the model default), and DeepSeek V4.1 Flash with DeepSeek V4.1 Flash. Student,
 proposer, and Controller use the same model within an arm. Both are served through
 local vLLM. DeepSeek uses revision `dba1be0a40aa45a94ad051997016db3960a90277`,
-numeric effort 100, and native `deepseek_v41` tokenizer/parsers on the exact
+numeric effort 75 (provider medium equivalent), and native `deepseek_v41` tokenizer/parsers on the exact
 vLLM commit wheel `e77daef89`; see the
 [serving configuration](../../../../scripts/della/README.md).
 
@@ -782,13 +782,12 @@ V4.1's instruct and agentic evaluation settings. Role decoding is recorded and
 validated before resume or final comparison. These values apply at both
 optimization budgets and during final task evaluation.
 
-Every role explicitly enables thinking: Qwen requests `xhigh`, its provider
-default, and DeepSeek V4.1 requests numeric effort `100`, used in its published
-code-agent evaluations. Both pass the controls through
-`extra_body.chat_template_kwargs`; Qwen uses `enable_thinking=true` and
-DeepSeek uses `thinking=true`. Applying DeepSeek effort `100` to optimizer roles and
-HotPotQA is our approved experimental choice, documented in the provider source
-review. Contracts and final evaluation preserve these fields and reject
+Every role explicitly enables thinking: Qwen requests `medium` and DeepSeek
+V4.1 requests numeric effort `75`, the provider mapping for medium. This is the
+user-selected setting for the initial experiments, effective 2026-09-17.
+Both pass the controls through `extra_body.chat_template_kwargs`; Qwen uses
+`enable_thinking=true` and DeepSeek uses `thinking=true`. Maximum-effort runs
+remain separate and cannot resume under these new settings. Contracts and final evaluation preserve these fields and reject
 missing or changed reasoning settings. Every TB2.1 role uses a **32,768-token
 output ceiling per call**, including reasoning and final output. HotPotQA keeps
 16,384. This is the approved practical budget, not the providers' larger

@@ -8,9 +8,13 @@ justify different sampling.
 
 ## Current settings
 
+On 2026-09-17 the user selected medium-equivalent reasoning for the initial
+experiments. Restart both model arms from the original prompts under a fresh
+campaign; earlier maximum-effort checkpoints remain separate.
+
 | Work | Qwen3.8-27B | DeepSeek-V4.1-Flash |
 | --- | --- | --- |
-| HotPotQA summaries, retrieval queries, factual answers | temperature 1.0 / top-p 0.95 / xhigh | temperature 1.0 / top-p 0.95 / effort 100 |
+| HotPotQA summaries, retrieval queries, factual answers | temperature 1.0 / top-p 0.95 / medium | temperature 1.0 / top-p 0.95 / effort 75 |
 | TB2.1 terminal execution | Same | Same |
 | GEPA prompt/skill rewriting and stateless selection | Same | Same |
 | FOREST Controller, Manifestor, tool-using editor | Same | Same |
@@ -37,13 +41,19 @@ The shared decoding helper still accepts the role classification argument.
 - [Pinned vLLM V4.1 tokenizer](https://github.com/vllm-project/vllm/blob/e77daef89e18e08321ae7b8b24827eedd5fe8673/vllm/tokenizers/deepseek_v41.py)
   and [encoder](https://github.com/vllm-project/vllm/blob/e77daef89e18e08321ae7b8b24827eedd5fe8673/vllm/tokenizers/deepseek_v41_encoding.py):
   accept numeric effort 1–100 through `chat_template_kwargs`, with `max` mapped
-  to 100. Sending 100 explicitly avoids ambiguity between named effort aliases.
+  to 100 and `high` to 75.
+- [DeepSeek thinking-mode mapping](https://api-docs.deepseek.com/guides/thinking_mode/):
+  a requested `medium` maps to `high`. We implement that provider-defined
+  medium equivalent as numeric 75 in the local encoder, rather than assuming
+  that the arithmetic midpoint 50 means medium.
 
-Qwen sends `enable_thinking=true` and `reasoning_effort=xhigh` through
+Qwen sends `enable_thinking=true` and `reasoning_effort=medium` through
 `extra_body.chat_template_kwargs`. DeepSeek sends `thinking=true` and numeric
-`reasoning_effort=100`. V4.1 uses its native Python prompt encoding, not a Jinja
+`reasoning_effort=75`. V4.1 uses its native Python prompt encoding, not a Jinja
 template. Both the request fields and checkpoint identity are recorded for resume.
-Hosted DeepSeek API behavior does not determine this local-vLLM experiment.
+The hosted API supplies the medium alias mapping; the pinned local encoder
+defines and applies the numeric value. Lower effort does not guarantee a
+proportional speedup; measure completed training pipelines and optimizer turns.
 
 ## Serving and token budgets
 

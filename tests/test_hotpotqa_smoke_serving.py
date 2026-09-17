@@ -18,7 +18,7 @@ def test_chat_request_matches_the_body_the_campaign_client_sends() -> None:
 
     assert body["model"] == SERVED_NAME
     assert body["messages"] == smoke_serving.SMOKE_MESSAGES
-    assert body["chat_template_kwargs"] == {"thinking": True, "reasoning_effort": 100}
+    assert body["chat_template_kwargs"] == {"thinking": True, "reasoning_effort": 75}
     assert body["seed"] == 0
     expected = experiment_decoding(DEEPSEEK_V4_1_FLASH_MODEL, agentic=False)
     expected["max_tokens"] = 65_536
@@ -81,7 +81,7 @@ def test_smoke_exchange_records_rendered_prompt_reasoning_and_content(monkeypatc
         "http://127.0.0.1:8000/detokenize",
         "http://127.0.0.1:8000/v1/chat/completions",
     ]
-    assert posts[0][1]["chat_template_kwargs"] == {"thinking": True, "reasoning_effort": 100}
+    assert posts[0][1]["chat_template_kwargs"] == {"thinking": True, "reasoning_effort": 75}
     assert transcript["rendered_prompt"] == "<rendered prompt>"
     assert transcript["rendered_prompt_token_count"] == 3
     assert transcript["reasoning"] == "France's capital is Paris."

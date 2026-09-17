@@ -45,7 +45,7 @@ def test_deepseek_profile_uses_fixed_sampling_and_maximum_reasoning() -> None:
     assert experiment_request_overrides(DEEPSEEK_V4_1_FLASH_MODEL) == {
         "extra_body": {
             "chat_template_kwargs": {
-                "reasoning_effort": 100,
+                "reasoning_effort": 75,
                 "thinking": True,
             },
         }
@@ -67,8 +67,8 @@ def test_provider_sampling_depends_on_the_work_without_mutating_other_profiles(m
 @pytest.mark.parametrize(
     ("model", "template_kwargs"),
     [
-        (QWEN3_8_27B_MODEL, {"enable_thinking": True, "reasoning_effort": "xhigh"}),
-        (DEEPSEEK_V4_1_FLASH_MODEL, {"thinking": True, "reasoning_effort": 100}),
+        (QWEN3_8_27B_MODEL, {"enable_thinking": True, "reasoning_effort": "medium"}),
+        (DEEPSEEK_V4_1_FLASH_MODEL, {"thinking": True, "reasoning_effort": 75}),
     ],
 )
 def test_explicit_reasoning_uses_provider_template_fields_without_shared_mutation(

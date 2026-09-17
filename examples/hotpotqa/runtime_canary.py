@@ -6,6 +6,7 @@ import argparse
 import json
 import re
 from collections import Counter
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -234,23 +235,29 @@ def _validate_edit_result(tool: EditTool, edited_text: str) -> None:
             raise RuntimeCanaryError("MOVE_TEXT probe did not move the target before its anchor.")
 
 
-def _edit_probe(lm: LM, tool: EditTool, attempt: int) -> None:
+def _edit_probe(lm: LM, tool: EditTool, attempt: int, result_log: Path | None = None) -> int:
     """Exercise one real ReAct V2 proposal with the complete four-tool menu.
 
     Args:
         lm: Configured local model client.
         tool: Direct operator coupled to this attempt's semantic action.
         attempt: One-based repetition number used in diagnostic labels.
+        result_log: Optional append-only record of every completed probe trajectory.
+
+    Returns:
+        Number of rejected actions corrected within this same conversation.
 
     Raises:
-        RuntimeCanaryError: ReAct V2 emits malformed or unknown tool JSON,
-            retries after a protocol error, fails to edit, or degenerates.
+        RuntimeCanaryError: ReAct V2 fails to complete the exact requested edit
+            and explicit finish, or emits degenerate content.
     """
     proposer = ReActV2Proposer(
         lm,
         TEMPLATE_FAMILIES["generic"]["system_prompt"],
         EDIT_TOOL_SETS["broad"],
-        max_iterations=2,
+        # Match the production editor's correction loop. The allocation and
+        # request deadlines still bound a model that never finishes.
+        max_iterations=None,
         max_tool_calls=1,
     )
     result = proposer.propose(
@@ -274,18 +281,26 @@ def _edit_probe(lm: LM, tool: EditTool, attempt: int) -> None:
         ],
         max_chars=None,
     )
+    if result_log is not None:
+        result_log.parent.mkdir(parents=True, exist_ok=True)
+        with result_log.open("a") as stream:
+            stream.write(json.dumps({"attempt": attempt, "tool": tool.value, "result": asdict(result)}) + "\n")
     if not result.changed or result.tool_calls != 1 or result.dropped_reason is not None:
         raise RuntimeCanaryError(
             f"ReAct V2 {tool.value} attempt {attempt} did not complete exactly one edit: {result!r}"
         )
-    if [step.action for step in result.steps] != [tool.value, "FINISH"] or any(
-        step.error is not None for step in result.steps
+    completed_steps = [step for step in result.steps if step.error is None]
+    rejected_steps = [step for step in result.steps if step.error is not None]
+    if [step.action for step in completed_steps] != [tool.value, "FINISH"] or any(
+        step.action != "INVALID" or step.executed_edit for step in rejected_steps
     ):
         raise RuntimeCanaryError(
-            f"ReAct V2 {tool.value} attempt {attempt} contained a malformed or retried action: {result.steps!r}"
+            f"ReAct V2 {tool.value} attempt {attempt} did not preserve the requested operation: {result.steps!r}"
         )
-    _require_healthy_text(result.steps[0].assistant, f"ReAct V2 {tool.value} attempt {attempt}")
+    for step in result.steps:
+        _require_healthy_text(step.assistant, f"ReAct V2 {tool.value} attempt {attempt}")
     _validate_edit_result(tool, result.new_text)
+    return len(rejected_steps)
 
 
 def run_runtime_canary(
@@ -323,10 +338,15 @@ def run_runtime_canary(
     _tool_continuation_probe(lm)
 
     tool_counts: Counter[str] = Counter()
+    recovered_actions = 0
+    probes_with_recovery = 0
+    result_log = attempt_log.with_suffix(".edits.jsonl") if attempt_log is not None else None
     tools = EDIT_TOOL_SETS["broad"]
     for offset in range(attempts):
         tool = tools[offset % len(tools)]
-        _edit_probe(lm, tool, offset + 1)
+        recovered = _edit_probe(lm, tool, offset + 1, result_log)
+        recovered_actions += recovered
+        probes_with_recovery += int(recovered > 0)
         tool_counts[tool.value] += 1
     missing_tools = [tool.value for tool in tools if tool_counts[tool.value] == 0]
     if missing_tools:
@@ -340,6 +360,8 @@ def run_runtime_canary(
         "tool_attempts": dict(sorted(tool_counts.items())),
         "ordinary_completion": "passed",
         "tool_result_continuation": "passed",
+        "rejected_actions_recovered": recovered_actions,
+        "edit_probes_with_recovery": probes_with_recovery,
     }
 
 

@@ -255,9 +255,9 @@ def test_evaluation_cli_freezes_validation_winners_and_repeats_test_only(
         **contract["student_request_overrides"],
     }
     assert kwargs["student_agent_kwargs"]["llm_kwargs"]["extra_body"]["chat_template_kwargs"] == (
-        {"enable_thinking": True, "reasoning_effort": "xhigh"}
+        {"enable_thinking": True, "reasoning_effort": "medium"}
         if model == QWEN3_8_27B_MODEL
-        else {"thinking": True, "reasoning_effort": 100}
+        else {"thinking": True, "reasoning_effort": 75}
     )
     evaluate.main()
     assert runner.run.call_count == 39
@@ -427,9 +427,7 @@ def test_invalid_source_runs_are_rejected_before_test_execution(tmp_path: Path, 
 
 @pytest.mark.parametrize("experiment", EXPERIMENT_MANIFESTS)
 @pytest.mark.parametrize("damage", ["disabled", "changed_threshold", "missing"])
-def test_task_context_drift_cannot_resume_or_enter_final_test(
-    tmp_path: Path, experiment: str, damage: str
-) -> None:
+def test_task_context_drift_cannot_resume_or_enter_final_test(tmp_path: Path, experiment: str, damage: str) -> None:
     """Reject disabled, changed, or unrecorded task summarization across methods."""
     run_dirs = _write_comparison(tmp_path, experiment)
     forest = run_dirs["all_text__react_v2"]

@@ -6,8 +6,8 @@
 #
 # Use MODEL_PROFILE=qwen3.8-27b or MODEL_PROFILE=deepseek-v4.1-flash. Each
 # profile uses the same model for the student and proposer. The default
-# BUDGET_PROFILE=campaign submits exactly six serial jobs: vanilla, ReAct V2,
-# random-Controller ReAct V2, and selected-action GEPA at 6,871 calls, followed
+# BUDGET_PROFILE=campaign submits exactly seven serial jobs: vanilla, ReAct V2,
+# random-Controller ReAct V2, selected-action and random-action GEPA at 6,871 calls, followed
 # by vanilla and ReAct V2 at 13,742 calls. BUDGET_PROFILE=standard or expanded
 # resubmits only the approved cells at one budget.
 set -euo pipefail
@@ -125,9 +125,9 @@ case "${BUDGET_PROFILE}" in
     standard)
         CAMPAIGN_BUDGET_LABEL="6871"
         case "${CONDITION}" in
-            vanilla|react_v2|react_v2_random|action|all) ;;
+            vanilla|react_v2|react_v2_random|action|random|all) ;;
             *)
-                echo "ERROR: standard production runs allow vanilla, react_v2, react_v2_random, action, or all" >&2
+                echo "ERROR: standard production runs allow vanilla, react_v2, react_v2_random, action, random, or all" >&2
                 exit 1
                 ;;
         esac
@@ -466,11 +466,11 @@ if [[ "\${SBATCH_HELP}" != *"--export-file"* ]]; then
 fi
 
 if [[ "${BUDGET_PROFILE}" == "campaign" ]]; then
-    SUBMIT_BUDGET_PROFILES=(standard standard standard standard expanded expanded)
-    SUBMIT_CONDITIONS=(vanilla react_v2 react_v2_random action vanilla react_v2)
+    SUBMIT_BUDGET_PROFILES=(standard standard standard standard standard expanded expanded)
+    SUBMIT_CONDITIONS=(vanilla react_v2 react_v2_random action random vanilla react_v2)
 elif [[ "${BUDGET_PROFILE}" == "standard" && "${CONDITION}" == "all" ]]; then
-    SUBMIT_BUDGET_PROFILES=(standard standard standard standard)
-    SUBMIT_CONDITIONS=(vanilla react_v2 react_v2_random action)
+    SUBMIT_BUDGET_PROFILES=(standard standard standard standard standard)
+    SUBMIT_CONDITIONS=(vanilla react_v2 react_v2_random action random)
 elif [[ "${BUDGET_PROFILE}" == "expanded" && "${CONDITION}" == "all" ]]; then
     SUBMIT_BUDGET_PROFILES=(expanded expanded)
     SUBMIT_CONDITIONS=(vanilla react_v2)

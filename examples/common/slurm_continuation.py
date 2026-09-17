@@ -15,10 +15,10 @@ from pathlib import Path
 from examples.common.recovery import _write, file_digest, snapshot
 
 
-def run(command: list[str]) -> str:
+def run(command: list[str], *, cwd: str | None = None) -> str:
     """Execute a scheduler command without inherited Slurm resource overrides."""
     env = {key: value for key, value in os.environ.items() if not key.startswith(("SBATCH_", "SLURM_"))}
-    return subprocess.run(command, check=True, capture_output=True, text=True, env=env).stdout.strip()
+    return subprocess.run(command, check=True, capture_output=True, text=True, env=env, cwd=cwd).stdout.strip()
 
 
 def job_id(output: str) -> str:
@@ -90,15 +90,35 @@ def dispatch(path: Path, plan: dict) -> None:
     cell = plan["cells"][plan["index"]]
     if file_digest(Path(cell["export_file"])) != cell["export_sha256"]:
         raise ValueError("Submission environment changed; refusing to alter the resumed runtime")
-    before = snapshot(Path(cell["registry"]), plan["source_commit"])
+    if "source_dir" in cell:
+        verify_source(cell["source_dir"], cell["source_commit"])
+    before = snapshot(Path(cell["registry"]), cell.get("source_commit", plan["source_commit"]))
     plan["status"] = "submitting"
     plan["before"] = before
     _write(path, plan)
     command = cell["command"]
-    worker = job_id(run([command[0], "--hold", *command[1:]]))
+    worker = job_id(run([command[0], "--hold", *command[1:]], cwd=cell.get("source_dir", plan["source_dir"])))
     plan["worker"] = worker
     _write(path, plan)
-    source = Path(plan["source_dir"])
+    controller = submit_controller(path, plan, worker)
+    plan.update(status="active", controller=controller)
+    _write(path, plan)
+    run(["scontrol", "release", worker])
+    print(f"Submitted {cell['name']}: worker {worker}, continuation controller {controller}")
+
+
+def verify_source(directory: str, commit: str) -> None:
+    """Reject missing or changed immutable source identities."""
+    marker = Path(directory) / ".gepa-source-commit"
+    if not marker.exists() or marker.read_text().strip() != commit:
+        raise ValueError("Pinned source marker changed; refusing to submit")
+
+
+def submit_controller(path: Path, plan: dict, worker: str, *, held: bool = False) -> str:
+    """Submit one watcher from the explicitly pinned controller revision."""
+    source = Path(plan.get("controller_source_dir", plan["source_dir"]))
+    if "controller_source_dir" in plan:
+        verify_source(str(source), plan["controller_source_commit"])
     wrapped = shlex.join(
         [
             "env",
@@ -113,10 +133,11 @@ def dispatch(path: Path, plan: dict) -> None:
             worker,
         ]
     )
-    controller = job_id(
+    return job_id(
         run(
             [
-                command[0],
+                plan["cells"][plan["index"]]["command"][0],
+                *(["--hold"] if held else []),
                 "--parsable",
                 "--nodes=1",
                 "--ntasks=1",
@@ -133,10 +154,53 @@ def dispatch(path: Path, plan: dict) -> None:
             ]
         )
     )
-    plan.update(status="active", controller=controller)
+
+
+def extend(path: Path, plan: dict, extension: dict, after: str, worker: str, controller: str) -> None:
+    """Insert a reviewed future cell while replacing only the pending watcher."""
+    if plan.get("status") != "active" or plan.get("worker") != worker or plan.get("controller") != controller:
+        raise ValueError("The active campaign changed; inspect it before extending")
+    if extension.get("status") != "draft" or len(extension.get("cells", [])) != 1:
+        raise ValueError("An extension must be an unsubmitted single-cell plan")
+    cell = dict(extension["cells"][0])
+    names = [existing["name"] for existing in plan["cells"]]
+    if cell["name"] in names or after not in names or names.index(after) <= plan["index"]:
+        raise ValueError("An extension may only insert a new cell after an unstarted future cell")
+    verify_source(extension["source_dir"], extension["source_commit"])
+    if Path(extension["source_dir"]).resolve() != Path(__file__).resolve().parents[2]:
+        raise ValueError("Run the extension controller from the new immutable source")
+    if file_digest(Path(cell["export_file"])) != cell["export_sha256"]:
+        raise ValueError("Extension environment changed")
+    if snapshot(Path(cell["registry"]), extension["source_commit"]) or Path(cell["error_file"]).exists():
+        raise ValueError("The added cell already has recovery evidence")
+    if accounting(worker)[0] not in {"PENDING", "RUNNING"} or accounting(controller)[0] != "PENDING":
+        raise ValueError("Extend only while the worker is live and its watcher is pending")
+    backup = path.with_name(f"plan-before-{cell['name']}.json")
+    if backup.exists():
+        raise ValueError("An extension backup already exists; inspect the previous attempt")
+    _write(backup, plan)
+    # Holding a pending watcher closes the completion race; never signal the
+    # active worker. Persist partial transitions so uncertain submits cannot repeat.
+    run(["scontrol", "hold", controller])
+    cell.update(source_commit=extension["source_commit"], source_dir=extension["source_dir"])
+    plan["cells"].insert(names.index(after) + 1, cell)
+    plan.update(
+        status="extending",
+        controller_source_dir=extension["source_dir"],
+        controller_source_commit=extension["source_commit"],
+    )
     _write(path, plan)
-    run(["scontrol", "release", worker])
-    print(f"Submitted {cell['name']}: worker {worker}, continuation controller {controller}")
+    replacement = submit_controller(path, plan, worker, held=True)
+    plan["replacement_controller"] = replacement
+    _write(path, plan)
+    run(["scancel", controller])
+    plan.setdefault("controller_replacements", []).append(
+        {"previous": controller, "replacement": replacement, "worker_unchanged": worker, "added_cell": cell["name"]}
+    )
+    plan.update(status="active", controller=replacement)
+    _write(path, plan)
+    run(["scontrol", "release", replacement])
+    print(f"Added {cell['name']}; worker {worker} unchanged, continuation controller {replacement}")
 
 
 def advance(path: Path, plan: dict, identifier: str) -> None:
@@ -159,7 +223,7 @@ def advance(path: Path, plan: dict, identifier: str) -> None:
             print("All campaign cells completed successfully")
             return
     elif state == "TIMEOUT":
-        after = snapshot(Path(cell["registry"]), plan["source_commit"])
+        after = snapshot(Path(cell["registry"]), cell.get("source_commit", plan["source_commit"]))
         if not can_continue(plan["before"], after):
             raise RuntimeError("Allocation expired without new verified saved work; continuation stopped")
         plan["history"][-1]["saved_progress"] = after
@@ -171,7 +235,7 @@ def advance(path: Path, plan: dict, identifier: str) -> None:
 def main(argv: list[str] | None = None) -> None:
     """Build a pinned plan, then submit or advance it under an exclusive lock."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("add", "start", "advance"))
+    parser.add_argument("action", choices=("add", "start", "advance", "extend"))
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--source-commit")
     parser.add_argument("--name")
@@ -179,6 +243,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--registry", type=Path)
     parser.add_argument("--error-file", type=Path)
     parser.add_argument("--job-id")
+    parser.add_argument("--controller-id")
+    parser.add_argument("--extension-plan", type=Path)
+    parser.add_argument("--after")
     args, command = parser.parse_known_args(argv)
     path = args.plan.resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -225,9 +292,12 @@ def main(argv: list[str] | None = None) -> None:
             return
         if plan is None:
             raise ValueError("No campaign plan exists")
-        marker = Path(plan["source_dir"]) / ".gepa-source-commit"
-        if not marker.exists() or marker.read_text().strip() != plan["source_commit"]:
-            raise ValueError("Pinned source marker changed; refusing to submit")
+        verify_source(plan["source_dir"], plan["source_commit"])
+        if args.action == "extend":
+            if not all((args.extension_plan, args.after, args.job_id, args.controller_id)):
+                parser.error("extend requires extension-plan, after, job-id, and controller-id")
+            extend(path, plan, json.loads(args.extension_plan.read_text()), args.after, args.job_id, args.controller_id)
+            return
         if args.action == "start" and (plan["status"] != "draft" or not plan["cells"]):
             raise ValueError("Campaign has already been submitted or has no cells")
         try:

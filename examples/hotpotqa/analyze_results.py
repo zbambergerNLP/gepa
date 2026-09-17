@@ -16,6 +16,7 @@ from typing import Any
 
 from examples.common.react_v2 import WIKIPEDIA_RUN_CONTRACT_FILENAME
 from examples.hotpotqa.baseline import load_baseline_record
+from examples.hotpotqa.source_compatibility import comparison_runtime
 
 _BUDGET_LABELS = {6_871: "standard", 13_742: "expanded"}
 _CONDITION_ORDER = {
@@ -23,6 +24,7 @@ _CONDITION_ORDER = {
     "react_v2": 1,
     "react_v2_random": 2,
     "action": 3,
+    "random": 4,
 }
 _MODEL_LABELS = {
     "hosted_vllm/Qwen/Qwen3.8-27B": "Qwen3.8-27B",
@@ -33,6 +35,7 @@ _APPROVED_CELLS = {
     (6_871, "react_v2"),
     (6_871, "react_v2_random"),
     (6_871, "action"),
+    (6_871, "random"),
     (13_742, "vanilla"),
     (13_742, "react_v2"),
 }
@@ -382,7 +385,7 @@ def analyze_run(run_dir: Path, fallback_tau: float) -> dict[str, Any]:
         raise ValueError(f"Run {run_dir} has malformed optimizer, model, or runtime metadata.")
     max_metric_calls = int(optimizer.get("max_metric_calls", 0))
     if (max_metric_calls, condition) not in _APPROVED_CELLS:
-        raise ValueError(f"Run {run_dir} is not one of the six approved campaign cells.")
+        raise ValueError(f"Run {run_dir} is not one of the seven approved campaign cells.")
     solver_model = str(models.get("solver", ""))
     reflection_model = str(models.get("reflection", ""))
     if solver_model not in _MODEL_LABELS or reflection_model != solver_model:
@@ -496,6 +499,8 @@ def analyze_run(run_dir: Path, fallback_tau: float) -> dict[str, Any]:
         "path": str(run_dir.resolve()),
         "campaign_id": runtime.get("campaign_id"),
         "source_commit": runtime.get("source_commit"),
+        "comparison_source_commit": comparison_runtime(contract).get("source_commit"),
+        "source_compatibility": contract.get("source_compatibility"),
         "model": solver_model,
         "model_label": _MODEL_LABELS[solver_model],
         "condition": condition,
@@ -584,7 +589,7 @@ def discover_completed_runs(
         seen_cells.add(cell)
         baseline = report.get("baseline")
         if baseline is not None:
-            arm = (report["campaign_id"], report["source_commit"], report["model"])
+            arm = (report["campaign_id"], report["comparison_source_commit"], report["model"])
             if arm in baselines and baselines[arm] != baseline:
                 raise ValueError("A model's HotPotQA ablations must share the same starting baseline.")
             baselines[arm] = baseline
@@ -697,7 +702,28 @@ def write_campaign_analysis(
         raise ValueError("Analysis source commit must be a full lowercase Git commit.")
     campaign_ids = {str(report["campaign_id"]) for report in reports}
     source_commits = {str(report["source_commit"]) for report in reports}
-    if len(campaign_ids) > 1 or len(source_commits) > 1:
+    comparison_sources = {str(report.get("comparison_source_commit", report["source_commit"])) for report in reports}
+    for report in reports:
+        if report.get("comparison_source_commit", report["source_commit"]) != report["source_commit"]:
+            review = report.get("source_compatibility")
+            if (
+                not review
+                or comparison_runtime(
+                    {
+                        "condition": report["condition"],
+                        "optimizer": {"max_metric_calls": report["max_metric_calls"]},
+                        "source_compatibility": review,
+                        "execution_runtime": {
+                            "campaign_id": report["campaign_id"],
+                            "source_commit": report["source_commit"],
+                            "source_manifest_sha256": review["source_manifest_sha256"],
+                        },
+                    }
+                )["source_commit"]
+                != report["comparison_source_commit"]
+            ):
+                raise ValueError("Campaign analysis lacks a matching source compatibility review.")
+    if len(campaign_ids) > 1 or len(comparison_sources) > 1:
         raise ValueError("Campaign analysis cannot mix campaign IDs or source revisions.")
     payload = {
         "schema_version": 1,

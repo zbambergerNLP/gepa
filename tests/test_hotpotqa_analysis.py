@@ -491,3 +491,26 @@ def test_campaign_writer_rejects_mixed_campaigns(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="cannot mix"):
         write_campaign_analysis([first, second], tmp_path / "analysis.json", "c" * 40)
+
+
+def test_campaign_writer_requires_explicit_source_review_for_addition(tmp_path: Path) -> None:
+    first = analyze_run(create_completed_run(tmp_path, condition="action"), 0.1)
+    added = analyze_run(create_completed_run(tmp_path, condition="random"), 0.1)
+    added["source_commit"] = "b" * 40
+    with pytest.raises(ValueError, match="compatibility review"):
+        write_campaign_analysis([first, added], tmp_path / "analysis.json", "c" * 40)
+    added["source_compatibility"] = {
+        "schema_version": 1,
+        "campaign_id": added["campaign_id"],
+        "review_sha256": "3" * 64,
+        "base_source_commit": "a" * 40,
+        "base_source_manifest_sha256": "1" * 64,
+        "source_commit": "b" * 40,
+        "source_manifest_sha256": "2" * 64,
+    }
+    write_campaign_analysis([first, added], tmp_path / "analysis.json", "c" * 40)
+    payload = json.loads((tmp_path / "analysis.json").read_text())
+    assert payload["source_commits"] == ["a" * 40, "b" * 40]
+    added["condition"] = "react_v2"
+    with pytest.raises(ValueError, match="restricted"):
+        write_campaign_analysis([first, added], tmp_path / "analysis.json", "c" * 40)

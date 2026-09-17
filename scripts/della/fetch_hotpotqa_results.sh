@@ -100,7 +100,7 @@ trap cleanup EXIT
 mkdir -p "${FETCH_ROOT}/runs" "${FETCH_ROOT}/logs" "${FETCH_ROOT}/campaign-locks"
 
 echo "==> fetching run artifacts for ${HOTPOTQA_SOURCE_COMMIT}"
-rsync -avz --partial \
+rsync -avz --partial --copy-dirlinks \
     -e "${SSH_OPTIONS}" \
     "${SSH_TARGET}:${REMOTE_SOURCE_DIR}/outputs/" \
     "${FETCH_ROOT}/runs/"

@@ -6,6 +6,8 @@ import math
 from copy import deepcopy
 from pathlib import Path
 
+from examples.hotpotqa.source_compatibility import comparison_runtime
+
 BASELINE_PROTOCOL = {
     "version": 1,
     "candidate": "initial_prompts",
@@ -43,9 +45,9 @@ def build_baseline_contract(run_contract: dict) -> dict:
                     "program",
                     "retrieval",
                     "data",
-                    "execution_runtime",
                 )
             },
+            "execution_runtime": comparison_runtime(run_contract),
         }
     )
 

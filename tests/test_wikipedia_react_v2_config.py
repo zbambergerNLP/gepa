@@ -65,6 +65,7 @@ from examples.hover.main import build_run_contract as build_hover_run_contract
 from examples.hover.main import dump_candidates as dump_hover_candidates
 from examples.hover.main import seed_candidate as hover_seed_candidate
 from gepa.strategies.action_space import (
+    RandomActionSelector,
     stateless_selector_policy_contract,
 )
 from gepa.strategies.document_template import TEMPLATE_FAMILIES
@@ -311,7 +312,7 @@ def test_hotpotqa_text_limits_reach_roles_and_contracts(condition: str, model: s
     ],
 )
 def test_hotpot_provider_sampling_reaches_every_model_role(model: str, budget: int, condition: str) -> None:
-    """Apply role-specific provider sampling through all six cells and persist actual values."""
+    """Apply role-specific provider sampling through all seven cells and persist actual values."""
     args = _hotpot_args(solver_model=model, reflection_model=model, max_metric_calls=budget)
     general = experiment_decoding(model, agentic=False)
     agentic = experiment_decoding(model, agentic=True)
@@ -364,7 +365,10 @@ def test_hotpot_provider_sampling_reaches_every_model_role(model: str, budget: i
         "extra_body": {**request_overrides["extra_body"], "thinking_token_budget": 32_768},
     }
     assert contract["models"]["reflection_request_overrides"] == request_overrides
-    if selector is not None:
+    if condition == "random":
+        assert isinstance(selector, RandomActionSelector)
+        assert not hasattr(selector, "lm")
+    elif selector is not None:
         assert selector.lm.completion_kwargs["max_tokens"] == expected_output_cap
         assert selector.lm.completion_kwargs["temperature"] == expected
         assert selector.lm.completion_kwargs["top_p"] == general["top_p"]
@@ -643,6 +647,7 @@ def test_experiment_model_version_rejects_unknown_models() -> None:
         (6_871, "react_v2"),
         (6_871, "react_v2_random"),
         (6_871, "action"),
+        (6_871, "random"),
         (13_742, "vanilla"),
         (13_742, "react_v2"),
     ],
@@ -675,14 +680,14 @@ def test_hotpot_scientific_contract_accepts_only_the_pinned_qwen_runtime(
     _validate_scientific_data_identity(args)
 
 
-def test_hotpot_scientific_campaign_contains_only_the_six_approved_cells() -> None:
-    """Lock the six comparisons and their shared classic GEPA topology."""
+def test_hotpot_scientific_campaign_contains_only_the_seven_approved_cells() -> None:
+    """Lock the seven comparisons and their shared classic GEPA topology."""
     assert _SCIENTIFIC_CONDITIONS_BY_BUDGET == {
-        6_871: ("vanilla", "react_v2", "react_v2_random", "action"),
+        6_871: ("vanilla", "react_v2", "react_v2_random", "action", "random"),
         13_742: ("vanilla", "react_v2"),
     }
     assert 13_742 == 2 * 6_871
-    assert sum(len(conditions) for conditions in _SCIENTIFIC_CONDITIONS_BY_BUDGET.values()) == 6
+    assert sum(len(conditions) for conditions in _SCIENTIFIC_CONDITIONS_BY_BUDGET.values()) == 7
     for max_metric_calls, conditions in _SCIENTIFIC_CONDITIONS_BY_BUDGET.items():
         for condition in conditions:
             config, _ = build_hotpotqa_config(
@@ -861,7 +866,7 @@ def test_hotpot_scientific_contract_rejects_nonlocal_deepseek_endpoints(
         ({"test_limit": 299}, "--test-limit"),
         ({"merge": True}, "--merge"),
         ({"max_metric_calls": 6_870}, "--max-metric-calls"),
-        ({"condition": "random"}, "--condition"),
+        ({"condition": "random", "max_metric_calls": 13_742}, "--condition"),
         ({"condition": "action", "max_metric_calls": 13_742}, "--condition"),
         ({"condition": "react_v2_random", "max_metric_calls": 13_742}, "--condition"),
         ({"max_workers": 0}, "--max-workers"),

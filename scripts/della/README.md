@@ -25,7 +25,7 @@ schema 26 records this policy, the starting baseline, and serving provenance; us
 campaign for older checkpoints.
 
 Each HotPotQA model has one shared unoptimized starting-prompt baseline on the
-same 300 test examples used by all six ablations. It runs alongside the first
+same 300 test examples used by all seven ablations. It runs alongside the first
 completed ablation's test; later cells reuse that recorded reference and report
 EM/F1 gains. Baseline task executions are separate from optimization budgets.
 `outputs/hotpotqa-baselines/` contains the frozen identities and resumable
@@ -120,7 +120,7 @@ MODEL_PROFILE=qwen3.8-27b scripts/della/submit_hotpotqa.sh
 MODEL_PROFILE=deepseek-v4.1-flash scripts/della/submit_hotpotqa.sh
 ```
 
-Each HotPotQA arm contains the existing six optimization cells. DeepSeek first
+Each HotPotQA arm contains the existing seven optimization cells. DeepSeek first
 runs the multi-tool canary; a failed canary prevents its campaign from starting.
 Use a fresh campaign ID after changing models or serving environments. Previous
 GLM results and checkpoints cannot be resumed as DeepSeek runs.

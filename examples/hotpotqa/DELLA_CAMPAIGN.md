@@ -105,7 +105,7 @@ The initial client-worker values incorporate Zach's observed queue timeout.
 The smaller GPU allocations follow the checkpoint-byte sizing review and await
 empirical qualification. Client workers may queue behind one active sequence. Check
 throughput and timeouts on training examples, then freeze the chosen concurrency
-across all six cells per model. This calibration remains pending. The
+across all seven cells per model. This calibration remains pending. The
 September 13 qualification now compares 1, 2, and 4 active requests on the same 12 training questions. This revises the earlier single-sequence profile.
 
 Temperature is 1.0 and top-p is 0.95 for both models and all roles. DeepSeek uses
@@ -131,7 +131,7 @@ limits remain. See [shared decisions](../../scripts/della/README.md).
 
 Final testing includes one shared starting-prompt baseline per model. Alongside
 the first completed cell's held-out evaluation, run the original prompts once
-over the same 300 test questions using that model's frozen task runtime. All six
+over the same 300 test questions using that model's frozen task runtime. All seven
 cells reference those same baseline scores and report EM/F1 gains. This adds 300
 question executions per model, accounted separately from optimization. Training
 pilot scores continue to serve calibration only.
@@ -157,7 +157,7 @@ It uses the approved V4.1 serving flags and shared edit probes, including explic
 `<finish>`. It does not write a campaign qualification marker.
 
 The production DeepSeek chain retains its mandatory 20-attempt canary on the
-exact campaign runtime before six optimization jobs. A short Slurm controller
+exact campaign runtime before seven optimization jobs. A short Slurm controller
 advances the chain only after each allocation completes successfully.
 Its marker is written only on success. A failed canary or native-tool preflight
 cannot freeze campaign locks. Every optimization job verifies source, model
@@ -174,7 +174,7 @@ The approved HotPotQA calibration pilot then evaluates, for each model:
 Use the pinned training split, Wiki-2017 BM25 k=7, and approved model settings.
 Start with 12 Qwen workers / 4 DeepSeek workers. Keep validation and test
 examples outside calibration, and review the evidence before freezing the
-runtime settings across the six experiment cells per model. These stages
+runtime settings across the seven experiment cells per model. These stages
 evaluate the initial prompts without optimizing them. The dedicated
 `submit_hotpotqa_pilots.sh` launcher runs smoke and the four optimizer checks before throughput and full calibration on
 each model. It uses the production serving gates and writes isolated outputs
@@ -228,7 +228,7 @@ active-request limits 1, 2, and 4. Rank completed questions per hour using
 request errors before selecting a profile. A timing winner alone is not production qualification. If queueing causes timeouts,
 reduce concurrency and repeat the affected model's 150-question training
 pilot. Investigate parsing failures and output cutoffs separately. Freeze the
-successful setting across that model's six experiment cells.
+successful setting across that model's seven experiment cells.
 
 Use one interactive allocation at a time, following the user's updated resource
 instructions. Qwen and DeepSeek qualification runs are sequential; concurrency
@@ -258,10 +258,66 @@ completed question records are reused only when resuming the same pilot.
 
 ## Campaign and results
 
-Per model: standard `vanilla`, `react_v2`, `react_v2_random`, and `action` at
+Per model: standard `vanilla`, `react_v2`, `react_v2_random`, `action`, and `random` at
 6,871 metric calls; then independent expanded `vanilla` and `react_v2` at
-13,742 calls. There are 12 optimization cells across both models. Expanded runs
+13,742 calls. There are 14 optimization cells across both models. Expanded runs
 start from the initial prompt.
+
+`random` is stateless action-conditioned GEPA with uniform action/section
+selection. It shares `action`'s constrained reflection path and full action
+menu, including legitimate no-ops. It has no model-based Controller,
+Manifestor, or iterative tool editor. Full FOREST remains immediately after
+vanilla. Seven cells total 61,839 optimization evaluations and 2,400 held-out
+evaluations per model: one 300-question original baseline and seven winners.
+
+### Adding the random-action cell to an active six-cell campaign
+
+The September 17 campaign extension preserves every existing worker command,
+export, source directory, checkpoint, and budget. Only the added standard
+`random` cell uses the new revision. Never sync over an active staged source.
+Commit/push the new revision, sync the working checkout, stage it separately,
+and verify all tracked bytes and modes against GitHub and both Della copies.
+
+Before extending, archive a source-comparability review: all solver, optimizer,
+provider, retrieval, data and dependency code must remain identical; review
+the allowlist, source bookkeeping, analyzer and controller changes explicitly.
+Pin the review hash, campaign ID, both source commits and both source-manifest
+hashes in `HOTPOTQA_SOURCE_COMPATIBILITY_JSON` in the new cell's sealed export.
+This exception accepts only standard `random`. It normalizes only the two
+source provenance fields for campaign qualification and baseline comparison;
+the actual source stays in logs, run contracts and recovery records. Every
+other runtime/model/data setting remains subject to exact equality. No
+canary marker is fabricated or copied: the unchanged qualified runtime is
+matched through that reviewed comparison identity.
+
+Link the new source's `outputs/hotpotqa-baselines` to the original source's
+baseline directory. The added run requires completed matching baseline
+evidence and fails if it is absent or changed; it never evaluates a second
+baseline. Fetching dereferences this directory link into a portable archive.
+Keep each revision's artifacts separate, then run the analyzer on their
+combined archive with the campaign filter and without a single-source filter.
+Analysis records both actual revisions and permits only the explicit review.
+
+Prepare a one-cell **draft**, using `slurm_continuation add`, with new source
+and recovery paths but the same model/resources/runtime as standard `action`.
+With the existing worker live and its controller pending, run from the new
+immutable source:
+
+```bash
+uv run --no-sync python -m examples.common.slurm_continuation extend \
+  --plan <existing-plan> --extension-plan <new-single-cell-draft> \
+  --after standard-action --job-id <current-worker> --controller-id <current-controller>
+```
+
+The plan lock, expected IDs and unstarted-cell guard prevent concurrent or
+duplicate changes. The operation backs up the original plan, holds its pending
+CPU watcher, installs a held replacement, cancels only the old watcher, and
+releases the replacement. The GPU worker is never signalled. Existing cells
+retain their original source; only the addition carries a per-cell source.
+TIMEOUT still requires new hash-verified progress from that cell's own source.
+If a transition fails, inspect the saved plan and held jobs before any retry.
+Verify unchanged old exports/source, the seven-cell order, and worker/controller
+states after installation. Update monitoring to follow each cell's source.
 
 After source, training calibration, and runtime checks are reviewed, choose a
 new campaign ID and use the production launcher:
@@ -275,7 +331,7 @@ MODEL_PROFILE=deepseek-v4.1-flash scripts/della/submit_hotpotqa.sh
 These commands submit independent model chains. Apply the schedule selected
 from the pilots: submit both chains for concurrent scheduling, or wait for one
 model's chain to finish before submitting the other for sequential scheduling.
-Each model's six ablations and their test evaluations remain sequential.
+Each model's seven ablations and their test evaluations remain sequential.
 
 Qwen requests one H200, 8 CPUs, and 128G; DeepSeek requests four H200s, 32 CPUs,
 and 768G on one `ailab` node, with Engram tables explicitly offloaded to CPU.

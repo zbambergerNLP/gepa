@@ -3,7 +3,7 @@
 The default benchmark path follows the GEPA paper artifact's data split,
 frozen Wiki-2017 BM25 retrieval, two-hop four-component program, component
 feedback, exact-match objective, and 6,871-call budget. The locked production
-campaign runs four methods at that standard budget and only the headline
+campaign runs five methods at that standard budget and only the headline
 vanilla/ReAct V2 pair at the 13,742-call two-times budget. Model identities
 remain configurable, and all conditions receive the same model assignments and
 task evidence.
@@ -67,6 +67,7 @@ from examples.hotpotqa.baseline import (
     build_baseline_contract,
     load_baseline_record,
 )
+from examples.hotpotqa.source_compatibility import compatibility_contract
 from examples.hotpotqa.utils import (
     HOTPOTQA_DSPY_COMMIT,
     HOTPOTQA_DSPY_VERSION,
@@ -152,7 +153,7 @@ _CONDITION_LABELS = {
 _PAPER_MAX_MERGE_INVOCATIONS = 5
 _PAPER_MERGE_VAL_OVERLAP_FLOOR = 5
 _SCIENTIFIC_CONDITIONS_BY_BUDGET = {
-    6_871: ("vanilla", "react_v2", "react_v2_random", "action"),
+    6_871: ("vanilla", "react_v2", "react_v2_random", "action", "random"),
     13_742: ("vanilla", "react_v2"),
 }
 _SCIENTIFIC_METRIC_CALL_BUDGETS = set(_SCIENTIFIC_CONDITIONS_BY_BUDGET)
@@ -733,6 +734,7 @@ def build_run_contract(condition: str, args) -> dict:
             "vllm_batch_invariant": os.environ.get("HOTPOTQA_VLLM_BATCH_INVARIANT"),
             "vllm_single_sequence_replicas": os.environ.get("HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS"),
         },
+        **compatibility_contract(condition, args.max_metric_calls),
         "tag": args.tag,
     }
 
@@ -1103,6 +1105,10 @@ def evaluate_starting_baseline(
     if test_identity != contract["data"]["splits"]["test"]:
         raise ValueError("Shared baseline requires the exact ordered HotPotQA test examples and content.")
     directory = baseline_directory(run_dir, contract)
+    if run_contract.get("source_compatibility") is not None:
+        # An additive run must reuse completed evidence, never silently create
+        # a second baseline if the shared archive/link is missing.
+        return load_baseline_record(run_dir, run_contract)
     directory.mkdir(parents=True, exist_ok=True)
     with (directory / ".baseline.lock").open("a") as lock:
         try:

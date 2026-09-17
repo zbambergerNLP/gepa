@@ -28,6 +28,11 @@ old `169ddda` commit or switch to a separate tooling branch.
   `$REMOTE_DIR/sources/<sha>` and records the source manifest.
 - Source, runtime, checkpoint, or experiment changes require a fresh campaign.
   Keep the same configuration for resume.
+- The explicitly approved standard random-action addition has a narrower
+  exception in `examples/hotpotqa/DELLA_CAMPAIGN.md`: preserve all existing
+  workers and sources, pin a reviewed compatible source for the added cell,
+  and use the guarded continuation `extend` operation. This does not authorize
+  changing an existing cell or relaxing any non-source runtime/data checks.
 
 ## Connection and machines
 
@@ -105,13 +110,13 @@ HotPotQA does not depend on POSIT.
 - Evaluation/response caching stays off; checkpoint/journal recovery remains.
 
 The exact DeepSeek runtime must pass its 20-attempt campaign canary before the
-six optimization cells. The canary permits the same in-conversation error correction as the production
+seven optimization cells. The canary permits the same in-conversation error correction as the production
 editor, records rejected actions, and requires the exact edit plus explicit
 finish on all 20 probes; it never restarts a failed probe until it passes.
 A failed canary or native-tool preflight cannot freeze
 campaign identity. The independent smoke does not replace that gate.
 
-Per model: standard `vanilla`, `react_v2`, `react_v2_random`, `action` at 6,871
+Per model: standard `vanilla`, `react_v2`, `react_v2_random`, `action`, `random` at 6,871
 metric calls, then independent expanded `vanilla`, `react_v2` at 13,742. Workers
 are held until their short `afterany` controller is saved. Only allocation
 `TIMEOUT` with newly saved, verified work permits automatic continuation, with

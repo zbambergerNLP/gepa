@@ -17,7 +17,7 @@ the merge. The existing branches are preserved; consolidation is local.
 | Models | Adopt Qwen3.8-27B and DeepSeek-V4.1-Flash, homogeneous across all roles, as explicitly approved during consolidation. Update both benchmarks and shared catalog consumers. |
 | Serving environment | Adopt Zach's separate hash-locked vLLM environments: 0.25.1 for Qwen, exact commit wheel e77daef89 for V4.1. Replace HotPotQA's POSIT provenance with serving-lock and realized-environment hashes. HoVer shared model references are updated; its separate deployment remains outside this campaign. |
 | Serving settings | Qwen TP1/DP1/one API/one sequence on 1 H200 (8 CPUs, 128G) and DeepSeek V4.1 TP4/EP4/DP1/one API/one sequence on 4 H200s (32 CPUs, 512G), with explicit Engram CPU offload, context 262,144, bfloat16 activations, checkpoint FP8/FP4 weights, FP8 KV/automatic block size, native V4.1 parsers, and no speculative decoding. |
-| Workers | Confirmed for the initial HotPotQA pilot: 12 Qwen / 4 DeepSeek. Check throughput and timeouts on training examples, then freeze the chosen concurrency across all six cells per model. Calibration remains pending. |
+| Workers | Confirmed for the initial HotPotQA pilot: 12 Qwen / 4 DeepSeek. Check throughput and timeouts on training examples, then freeze the chosen concurrency across all seven cells per model. Calibration remains pending. |
 | Request timeout/retries | Adopt 3,600 seconds per HotPotQA logical request, shared by our maximum of three transient-error attempts. Keep nested SDK retries zero, 1/2-second backoff, and per-attempt logs. |
 | Runtime verification | Keep our mandatory exact-runtime DeepSeek canary and Zach's independent transcript/tool diagnostic. Both use the current editor probes. Write campaign locks only after canary/native-tool success. |
 | Setup | Adopt checked-in remote stages, detached downloads, scratch storage, SSH helpers, CUDA-header precedence, and rsync environment exclusions. Propagate custom Wiki-2017 paths and use this checkout's source in uninstalled remote environments. |
@@ -129,9 +129,9 @@ approved smaller output caps. See the provider review for sources.
 
 The pinned two-stage DSPy program, 150/300/300 train/validation/test split, seed
 0, frozen Wiki-2017 BM25 k=7, and three-example reflection minibatches remain.
-Per model: standard `vanilla`, `react_v2`, `react_v2_random`, `action` at 6,871
+Per model: standard `vanilla`, `react_v2`, `react_v2_random`, `action`, `random` at 6,871
 metric calls; expanded independent `vanilla`, `react_v2` at 13,742 calls.
-This gives six cells per model, 12 total. Preserve single mutation, merge off,
+This gives seven cells per model, 14 total. Preserve single mutation, merge off,
 Pareto parent selection, strict training improvement, and validation-based final
 selection. Start operational work with HotPotQA after this consolidation review.
 The scientific launcher runs one cell per job and evaluates test at the end of
@@ -139,7 +139,7 @@ that cell. Its preflight checks the pinned dataset revision and the ordered
 content hash of each of the three splits; keep these checks for every ablation.
 
 Each model's starting prompts receive one evaluation on the same 300 held-out
-questions alongside its first completed ablation's test. All six ablations share
+questions alongside its first completed ablation's test. All seven ablations share
 that baseline and report test EM/F1 gains against it. The baseline adds 300
 question executions per model outside the optimization budget. It is separate
 from the training-only pilot. Baseline contracts include initial prompts, exact
@@ -152,7 +152,7 @@ training questions to check the complete task pipeline, then all 150 training
 questions to measure throughput, timeouts, token usage, and output cutoffs.
 Both stages use the initial prompts and the fixed two-stage task program.
 Validation and test examples are excluded from calibration. Review the pilot
-evidence before freezing runtime settings across that model's six cells.
+evidence before freezing runtime settings across that model's seven cells.
 Approved acceptance criteria: every question must complete the pipeline with a
 usable prediction. Unresolved provider/parsing errors or output cutoffs require
 investigation before the full campaign. Record baseline EM/F1 without a minimum

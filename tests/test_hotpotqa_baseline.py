@@ -60,7 +60,7 @@ def offline_task_lm(monkeypatch):
     monkeypatch.setattr(hotpot, "build_hotpotqa_task_lm", Mock(return_value=object()))
 
 
-def test_all_six_ablations_share_one_baseline_per_model(tmp_path, monkeypatch):
+def test_all_seven_ablations_share_one_baseline_per_model(tmp_path, monkeypatch):
     """Reuse one starting-prompt evaluation across methods and budgets, separately for each model."""
     task = Mock(return_value=("query", "Alpha", {}))
     monkeypatch.setattr(hotpot, "run_program", task)
@@ -80,6 +80,42 @@ def test_all_six_ablations_share_one_baseline_per_model(tmp_path, monkeypatch):
     assert records[0]["contract_sha256"] != records[1]["contract_sha256"]
     assert hotpot.build_hotpotqa_task_lm.call_count == len(EXPERIMENT_MODELS)
     assert len(list((tmp_path / "hotpotqa-baselines").iterdir())) == len(EXPERIMENT_MODELS)
+
+
+def test_reviewed_random_addition_reuses_baseline_without_extra_calls(tmp_path, monkeypatch):
+    """Share only the reviewed source change; runtime drift must still fail."""
+    task = Mock(return_value=("query", "Alpha", {}))
+    monkeypatch.setattr(hotpot, "run_program", task)
+    monkeypatch.setenv("HOTPOTQA_CAMPAIGN_ID", "campaign")
+    monkeypatch.setenv("HOTPOTQA_SOURCE_COMMIT", "a" * 40)
+    monkeypatch.setenv("HOTPOTQA_SOURCE_MANIFEST_SHA256", "1" * 64)
+    base = run_contract()
+    expected = evaluate(tmp_path / "vanilla", base)
+    review = {
+        "schema_version": 1,
+        "campaign_id": "campaign",
+        "review_sha256": "3" * 64,
+        "base_source_commit": "a" * 40,
+        "base_source_manifest_sha256": "1" * 64,
+        "source_commit": "b" * 40,
+        "source_manifest_sha256": "2" * 64,
+    }
+    monkeypatch.setenv("HOTPOTQA_SOURCE_COMPATIBILITY_JSON", json.dumps(review))
+    monkeypatch.setenv("HOTPOTQA_SOURCE_COMMIT", "b" * 40)
+    monkeypatch.setenv("HOTPOTQA_SOURCE_MANIFEST_SHA256", "2" * 64)
+    added = run_contract(condition="random")
+    assert added["execution_runtime"]["source_commit"] == "b" * 40
+    assert build_baseline_contract(added) == build_baseline_contract(base)
+    assert evaluate(tmp_path / "random", added) == expected
+    assert task.call_count == len(DATASET)
+    for key in ("serving_env_sha256", "model_revision", "source_manifest_sha256"):
+        changed = deepcopy(added)
+        changed["execution_runtime"][key] = "different"
+        with pytest.raises((ValueError, FileNotFoundError)):
+            evaluate(tmp_path / "random", changed)
+    with pytest.raises(FileNotFoundError):
+        evaluate(tmp_path / "missing-archive" / "random", added)
+    assert task.call_count == len(DATASET)
 
 
 def test_interrupted_baseline_resumes_only_missing_questions(tmp_path, monkeypatch):

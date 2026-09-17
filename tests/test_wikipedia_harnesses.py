@@ -1509,11 +1509,11 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert "HOTPOTQA_SERVING_ENV_SHA256=\\${HOTPOTQA_SERVING_ENV_SHA256}" in submit
     assert 'examples.common.python_environment verify --path "\\${GEPA_ENV_MANIFEST}"' in submit
     assert "load_hotpotqa_dataset(seed=0)" in submit
-    assert "SUBMIT_BUDGET_PROFILES=(standard standard standard standard expanded expanded)" in submit
-    assert "SUBMIT_CONDITIONS=(vanilla react_v2 react_v2_random action vanilla react_v2)" in submit
+    assert "SUBMIT_BUDGET_PROFILES=(standard standard standard standard standard expanded expanded)" in submit
+    assert "SUBMIT_CONDITIONS=(vanilla react_v2 react_v2_random action random vanilla react_v2)" in submit
     assert "SUBMIT_CONDITIONS=(vanilla random" not in submit
-    assert "SUBMIT_BUDGET_PROFILES=(standard standard standard standard)" in submit
-    assert "SUBMIT_CONDITIONS=(vanilla react_v2 react_v2_random action)" in submit
+    assert "SUBMIT_BUDGET_PROFILES=(standard standard standard standard standard)" in submit
+    assert "SUBMIT_CONDITIONS=(vanilla react_v2 react_v2_random action random)" in submit
     assert "SUBMIT_BUDGET_PROFILES=(expanded expanded)" in submit
     assert "SUBMIT_CONDITIONS=(vanilla react_v2)" in submit
     assert r'RUN_BUDGET_PROFILE="\${SUBMIT_BUDGET_PROFILES[\${CELL_INDEX}]}"' in submit
@@ -1580,7 +1580,6 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert "standard:vanilla|standard:react_v2|standard:react_v2_random|standard:action" in sbatch
     assert "expanded:vanilla|expanded:react_v2" in sbatch
     for rejected_cell in (
-        "standard:random",
         "expanded:random",
         "expanded:action",
         "expanded:react_v2_random",

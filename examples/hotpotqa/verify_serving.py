@@ -82,7 +82,7 @@ def run_serving_verification(
 
     checks: dict[str, str] = {}
 
-    def record(name: str, probe: Callable[[], None]) -> None:
+    def record(name: str, probe: Callable[[], object]) -> None:
         """Run one probe and record PASS or the failure message.
 
         Args:

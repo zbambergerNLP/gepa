@@ -137,7 +137,9 @@ def test_existing_shared_model_is_verified_without_preparing_it(tmp_path, verifi
     assert "model_snapshot verify" in calls.read_text() and "prepare" not in calls.read_text()
 
 
-@pytest.mark.parametrize("profile,workers", [("qwen3.8-27b", 12), ("deepseek-v4.1-flash", 4)])
+@pytest.mark.parametrize(
+    "profile,workers", [("qwen3.8-27b", 12), ("deepseek-v4.1-flash", 4), ("deepseek-teacher-qwen-student", 12)]
+)
 @pytest.mark.parametrize("kind", ["experiment", "pilot", "prepare"])
 @pytest.mark.parametrize("invalid_setting", [None, "DELLA_GPUS", "DELLA_CPUS_PER_TASK", "VLLM_TENSOR_PARALLEL_SIZE"])
 def test_submit_expands_the_remote_script_without_running_jobs(tmp_path, profile, workers, kind, invalid_setting):
@@ -196,7 +198,9 @@ def test_submit_expands_the_remote_script_without_running_jobs(tmp_path, profile
     assert 'local canary_only="$4"' in remote
     assert f'"MAX_WORKERS={workers}"' in remote
     gpus, cpus, memory, tp = (1, 8, "128G", 1) if profile == "qwen3.8-27b" else (4, 32, "768G", 4)
-    for resource in (f"--gres=gpu:{gpus}", f"--cpus-per-task={cpus}", f"--mem={memory}"):
+    if profile == "deepseek-teacher-qwen-student":
+        gpus, cpus, memory, tp = 5, 40, "896G", 1
+    for resource in (f"--gres=gpu:h200:{gpus}", f"--cpus-per-task={cpus}", f"--mem={memory}"):
         assert resource in remote
     for setting in (f"VLLM_TENSOR_PARALLEL_SIZE={tp}", "VLLM_DATA_PARALLEL_SIZE=1", "VLLM_API_SERVER_COUNT=1"):
         assert f'"{setting}"' in remote
@@ -234,7 +238,9 @@ def test_submit_expands_the_remote_script_without_running_jobs(tmp_path, profile
 @pytest.mark.parametrize("probe_status", [0, 1])
 def test_qwen_tool_verification_gates_pilot_and_resumes(tmp_path, probe_status):
     """Start a pilot only after all tool probes pass, reusing only its exact attestation."""
-    source = (ROOT / "examples/hotpotqa/run_hotpotqa.sbatch").read_text()
+    source = (ROOT / "examples/hotpotqa/run_hotpotqa.sbatch").read_text() + (
+        ROOT / "scripts/della/remote/hotpotqa_workload.sh"
+    ).read_text()
     start = source.index('if [[ "${HOTPOTQA_PILOT_ONLY}" == "1" ]]; then\n')
     block = source[start : source.index("CAMPAIGN_LOCK_DIR=", start)]
     calls = tmp_path / "calls"
@@ -278,7 +284,9 @@ def test_qwen_tool_verification_gates_pilot_and_resumes(tmp_path, probe_status):
 )
 def test_failed_probes_cannot_freeze_campaign(tmp_path, profile, canary_only, probe_status, qualified):
     """Execute the actual gate/lock block with a controlled local model process."""
-    source = (ROOT / "examples/hotpotqa/run_hotpotqa.sbatch").read_text()
+    source = (ROOT / "examples/hotpotqa/run_hotpotqa.sbatch").read_text() + (
+        ROOT / "scripts/della/remote/hotpotqa_workload.sh"
+    ).read_text()
     block = source[source.index("CAMPAIGN_IDENTITY_SHA256=") : source.index('echo "==> running GEPA experiment:')]
     env = {**os.environ, **dict.fromkeys(re.findall(r"\$\{([A-Z][A-Z_0-9]*)", block), "fixture")}
     fake_python = tmp_path / "fake-python"
@@ -286,6 +294,9 @@ def test_failed_probes_cannot_freeze_campaign(tmp_path, profile, canary_only, pr
     env.update(
         SCRATCH_BASE=str(tmp_path),
         MODEL_PROFILE=profile,
+        REFLECTION_MODEL="hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash"
+        if profile == "deepseek-v4.1-flash"
+        else "fixture",
         HOTPOTQA_CANARY_ONLY=canary_only,
         HOTPOTQA_CAMPAIGN_ID="fixture",
         PY=str(fake_python),
@@ -433,7 +444,9 @@ def test_della_scripts_parse(path):
 )
 def test_initial_throughput_precedes_only_first_production_cell(tmp_path, enabled, budget, condition, pilot, expected):
     """Measure training throughput in the existing allocation without running full150."""
-    source = (ROOT / "examples/hotpotqa/run_hotpotqa.sbatch").read_text()
+    source = (ROOT / "examples/hotpotqa/run_hotpotqa.sbatch").read_text() + (
+        ROOT / "scripts/della/remote/hotpotqa_workload.sh"
+    ).read_text()
     start = source.index('if [[ "${HOTPOTQA_INITIAL_THROUGHPUT:-0}"')
     block = source[start : source.index('\nif [[ "${HOTPOTQA_PILOT_ONLY}" == "1" ]]; then', start)]
     calls = tmp_path / "calls"

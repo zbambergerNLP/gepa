@@ -205,6 +205,9 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True)
     parser.add_argument("--api-base", required=True)
+    parser.add_argument("--reflection-model", help="Teacher model; defaults to the task model")
+    parser.add_argument("--reflection-api-base", help="Teacher endpoint; defaults to the task endpoint")
+    parser.add_argument("--throughput-questions", type=int, default=12)
     parser.add_argument("--wiki17-dir", type=Path, required=True)
     parser.add_argument("--workers", type=int, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -218,6 +221,10 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     if args.workers < 1:
         parser.error("--workers must be positive")
+    if not 12 <= args.throughput_questions <= 150:
+        parser.error("--throughput-questions must be between 12 and 150 training questions")
+    reflection_model = args.reflection_model or args.model
+    reflection_api_base = args.reflection_api_base or args.api_base
     if args.method and args.stage != "optimizer":
         parser.error("--method is only valid with --stage optimizer")
     settings = build_parser().parse_args(
@@ -225,9 +232,11 @@ def main(argv: list[str] | None = None) -> None:
             "--solver-model",
             args.model,
             "--reflection-model",
-            args.model,
-            "--api-base",
+            reflection_model,
+            "--solver-api-base",
             args.api_base,
+            "--reflection-api-base",
+            reflection_api_base,
             "--wiki17-dir",
             str(args.wiki17_dir),
             "--max-workers",
@@ -307,7 +316,10 @@ def main(argv: list[str] | None = None) -> None:
             kwargs = observed_kwargs(args.model, args.api_base, directory, "solver")
             evaluator = strict_evaluator(make_evaluator(args.model, retriever, args.api_base, solver_lm_kwargs=kwargs))
             config, _ = build_config(
-                method, settings, observed_kwargs(args.model, args.api_base, directory, "optimizer"), str(directory)
+                method,
+                settings,
+                observed_kwargs(reflection_model, reflection_api_base, directory, "optimizer"),
+                str(directory),
             )
             config.engine.max_metric_calls = None
             config.engine.max_candidate_proposals = None
@@ -329,7 +341,7 @@ def main(argv: list[str] | None = None) -> None:
                 )
     if args.stage in ("all", "preliminary", "throughput"):
         validate_calibration(args.output_dir / "smoke", 3)
-        calibrate("throughput", PILOT_PROTOCOL["throughput"])
+        calibrate("throughput", args.throughput_questions)
     if args.stage in ("all", "full"):
         validate_calibration(args.output_dir / "smoke", 3)
         for method in METHODS:

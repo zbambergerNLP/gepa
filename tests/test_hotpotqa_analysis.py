@@ -354,6 +354,36 @@ def test_discovery_reports_incomplete_runs_and_orders_the_campaign(tmp_path: Pat
     assert incomplete == [f"{incomplete_dir}: missing candidates.json, final_metrics.json, action_summary.json"]
 
 
+def test_teacher_campaign_requires_seven_cells_and_excludes_old_arm(tmp_path):
+    """Keep a completed cell separate from final mixed-model campaign completeness."""
+    reports = []
+    cells = [(6871, c) for c in ("vanilla", "react_v2", "react_v2_random", "action", "random")]
+    cells += [(13742, "vanilla"), (13742, "react_v2")]
+    for budget, condition in cells:
+        run = create_completed_run(tmp_path, condition=condition, budget=budget)
+        contract = json.loads((run / "wikipedia-run-contract.json").read_text())
+        contract["models"]["reflection"] = "hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash"
+        contract["execution_runtime"]["teacher_runtime"] = {"HOTPOTQA_MODEL_REVISION": "teacher"}
+        write_json(run / "wikipedia-run-contract.json", contract)
+        candidates = json.loads((run / "candidates.json").read_text())
+        candidates["run_contract"] = contract
+        write_json(run / "candidates.json", candidates)
+        action_summary = json.loads((run / "action_summary.json").read_text())
+        action_summary["run_contract"] = contract
+        action_summary["candidate_artifact_sha256"] = hashlib.sha256((run / "candidates.json").read_bytes()).hexdigest()
+        write_json(run / "action_summary.json", action_summary)
+        reports.append(analyze_run(run, 0.1))
+    output = tmp_path / "analysis.json"
+    with pytest.raises(ValueError, match="6 of 7"):
+        write_campaign_analysis(reports[:-1], output, "c" * 40, require_complete=True)
+    write_campaign_analysis(reports, output, "c" * 40, require_complete=True)
+    assert json.loads(output.read_text())["campaign_complete"] is True
+    assert "DeepSeek teacher" in render_markdown(reports)
+    old = analyze_run(create_completed_run(tmp_path / "old"), 0.1)
+    with pytest.raises(ValueError, match="cannot mix homogeneous"):
+        write_campaign_analysis([*reports, old], output, "c" * 40)
+
+
 def test_discovery_filters_other_campaigns_from_a_reused_source_tree(tmp_path: Path) -> None:
     """Select only the requested campaign when one source tree holds several.
 

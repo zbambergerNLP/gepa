@@ -85,13 +85,19 @@ Environment installation, including ordered CUTLASS reinstalls, uses lock hashes
 
 ## Approved HotPotQA experiment
 
-Use Qwen3.8-27B and DeepSeek-V4.1-Flash, each homogeneous across all roles.
+The September 18 campaign uses Qwen3.8-27B for task execution and
+DeepSeek-V4.1-Flash for every optimizer role (Controller, Manifestor, Editor,
+vanilla proposer, and stateless reflection). Use the canonical
+`deepseek-teacher-qwen-student` profile: five H200s on one node, disjoint
+one/four GPU UUID assignments, 40 CPUs, 896G. This is seven cells total.
+Homogeneous profiles remain for reproduction, but do not resume the superseded
+fourteen-cell campaign. A fresh source/campaign isolates the new model roles.
 Qwen uses `.serving-venv` (vLLM 0.25.1 / Torch 2.11); DeepSeek V4.1 uses
 `.serving-venv-deepseek-v4.1-flash`, the exact hash-locked `e77daef89` vLLM wheel
 (`0.1.1.dev5+ge77daef89`), Torch 2.13, and prebuilt FlashInfer kernel wheels.
 HotPotQA does not depend on POSIT.
 
-- Qwen: TP1/DP1, one API server, a training-selected active-request limit (1, 2, or 4), context 262,144,
+- Qwen: TP1/DP1, one API server, a training-selected active-request limit (1, 2, 4, 8, 16, or 32), context 262,144,
   thinking `medium`.
 - DeepSeek V4.1: TP4/EP4/DP1, one API server and a training-selected active-request limit (1, 2, or 4), context
   262,144, numeric thinking effort 75 (the provider mapping for medium), native `deepseek_v41` parsers, FP8 KV,
@@ -116,7 +122,7 @@ finish on all 20 probes; it never restarts a failed probe until it passes.
 A failed canary or native-tool preflight cannot freeze
 campaign identity. The independent smoke does not replace that gate.
 
-Per model: standard `vanilla`, `react_v2`, `react_v2_random`, `action`, `random` at 6,871
+For the paired campaign: standard `vanilla`, `react_v2`, `react_v2_random`, `action`, `random` at 6,871
 metric calls, then independent expanded `vanilla`, `react_v2` at 13,742. Workers
 are held until their short `afterany` controller is saved. Only allocation
 `TIMEOUT` with newly saved, verified work permits automatic continuation, with

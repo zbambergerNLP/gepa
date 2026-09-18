@@ -6,8 +6,10 @@ import argparse
 import json
 import re
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
+from threading import Lock
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -20,6 +22,7 @@ from gepa.strategies.edit_tools import EDIT_TOOL_SETS, EditTool
 
 _CANARY_TIMEOUT_SECONDS = 3600
 _MINIMUM_ATTEMPTS = 20
+_EDIT_LOG_LOCK = Lock()
 _REPEATED_CHARACTER_RE = re.compile(r"(\S)\1{31,}")
 _EDIT_REGION = (
     "Act as a careful research assistant. Verify every claim. Cite primary sources. "
@@ -283,7 +286,7 @@ def _edit_probe(lm: LM, tool: EditTool, attempt: int, result_log: Path | None = 
     )
     if result_log is not None:
         result_log.parent.mkdir(parents=True, exist_ok=True)
-        with result_log.open("a") as stream:
+        with _EDIT_LOG_LOCK, result_log.open("a") as stream:
             stream.write(json.dumps({"attempt": attempt, "tool": tool.value, "result": asdict(result)}) + "\n")
     if not result.changed or result.tool_calls != 1 or result.dropped_reason is not None:
         raise RuntimeCanaryError(
@@ -308,6 +311,8 @@ def run_runtime_canary(
     api_base: str,
     attempts: int,
     attempt_log: Path | None = None,
+    *,
+    workers: int = 1,
 ) -> dict[str, object]:
     """Run the complete local completion and ReAct V2 compatibility gate.
 
@@ -316,6 +321,7 @@ def run_runtime_canary(
         api_base: Local OpenAI-compatible /v1 endpoint.
         attempts: Number of representative four-tool-menu repetitions.
         attempt_log: Optional destination for physical provider-attempt records.
+        workers: Concurrent independent edit probes, without parallelizing dependent turns.
 
     Returns:
         JSON-serializable pass summary with per-operator attempt counts.
@@ -326,6 +332,8 @@ def run_runtime_canary(
         ValueError: The model identifier is outside the scientific catalog.
     """
     _validate_loopback_api_base(api_base)
+    if workers not in (1, 2, 4):
+        raise ValueError("Canary workers must be 1, 2, or 4")
     if attempts < _MINIMUM_ATTEMPTS:
         raise RuntimeCanaryError(
             f"The fail-closed runtime gate requires at least {_MINIMUM_ATTEMPTS} repetitions; received {attempts}."
@@ -342,9 +350,15 @@ def run_runtime_canary(
     probes_with_recovery = 0
     result_log = attempt_log.with_suffix(".edits.jsonl") if attempt_log is not None else None
     tools = EDIT_TOOL_SETS["broad"]
-    for offset in range(attempts):
+
+    def probe(offset: int) -> tuple[EditTool, int]:
+        """Give each independent edit its own client and sequential tool conversation."""
         tool = tools[offset % len(tools)]
-        recovered = _edit_probe(lm, tool, offset + 1, result_log)
+        return tool, _edit_probe(LM(model, **lm_kwargs), tool, offset + 1, result_log)
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        results = list(pool.map(probe, range(attempts)))
+    for tool, recovered in results:
         recovered_actions += recovered
         probes_with_recovery += int(recovered > 0)
         tool_counts[tool.value] += 1
@@ -357,6 +371,7 @@ def run_runtime_canary(
         "model": model,
         "api_base": api_base,
         "attempts": attempts,
+        "workers": workers,
         "tool_attempts": dict(sorted(tool_counts.items())),
         "ordinary_completion": "passed",
         "tool_result_continuation": "passed",
@@ -373,6 +388,7 @@ def main() -> None:
     parser.add_argument("--model", required=True, help="Exact local LiteLLM model identifier")
     parser.add_argument("--api-base", required=True, help="Local OpenAI-compatible /v1 endpoint")
     parser.add_argument("--attempt-log", type=Path, help="JSONL destination for provider attempts")
+    parser.add_argument("--workers", type=int, default=1, choices=(1, 2, 4))
     parser.add_argument(
         "--attempts",
         required=True,
@@ -381,7 +397,7 @@ def main() -> None:
     )
     args = parser.parse_args()
     try:
-        summary = run_runtime_canary(args.model, args.api_base, args.attempts, args.attempt_log)
+        summary = run_runtime_canary(args.model, args.api_base, args.attempts, args.attempt_log, workers=args.workers)
     except (RuntimeError, ValueError, TypeError) as exc:
         parser.exit(1, f"Runtime canary failed: {exc}\n")
     print(json.dumps(summary, indent=2, sort_keys=True))

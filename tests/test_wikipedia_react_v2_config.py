@@ -1451,6 +1451,73 @@ def test_deepseek_serving_environment_is_material_to_contract_and_run_key(monkey
     assert hotpotqa_run_key("react_v2", args) != first_key
 
 
+@pytest.mark.parametrize(
+    "condition,budget", [(c, b) for b, cells in _SCIENTIFIC_CONDITIONS_BY_BUDGET.items() for c in cells]
+)
+def test_hotpot_teacher_student_all_roles_and_separate_runtime(monkeypatch, tmp_path, condition, budget):
+    """Route all optimizer roles to DeepSeek and keep the original Qwen task prompts."""
+    from examples.hotpotqa.main import TEACHER_RUNTIME_KEYS
+
+    for name, value in QWEN_SCIENTIFIC_RUNTIME.items():
+        monkeypatch.setenv(name, value)
+    teacher = {
+        "HOTPOTQA_" + key: DEEPSEEK_SCIENTIFIC_RUNTIME.get("HOTPOTQA_" + key, "fixture") for key in TEACHER_RUNTIME_KEYS
+    }
+    monkeypatch.setenv("HOTPOTQA_TEACHER_RUNTIME", json.dumps(teacher))
+    args = _hotpot_args(
+        condition=condition,
+        max_metric_calls=budget,
+        enforce_scientific_contract=True,
+        reflection_model=DEEPSEEK_V4_1_FLASH_MODEL,
+        solver_api_base=LOCAL_API_BASE,
+        reflection_api_base="http://127.0.0.1:8201/v1",
+        train_limit=None,
+        val_limit=None,
+        test_limit=None,
+        data_identity=_scientific_data_identity(),
+    )
+    contract = build_hotpotqa_run_contract(condition, args)
+    assert contract["models"]["solver"] == QWEN3_8_27B_MODEL
+    assert contract["models"]["reflection"] == DEEPSEEK_V4_1_FLASH_MODEL
+    assert contract["models"]["reflection_decoding"]["max_tokens"] == 131072
+    assert contract["execution_runtime"]["teacher_runtime"] == teacher
+    assert contract["optimizer"]["rendered_seed"] == hotpotqa_seed_candidate("2stage", "structured", "alibaba")
+    config, selector = build_hotpotqa_config(condition, args, {}, str(tmp_path / condition))
+    assert config.reflection.reflection_lm == DEEPSEEK_V4_1_FLASH_MODEL
+    strategy = config.reflection.reflection_strategy
+    if strategy is not None:
+        assert strategy.base_lm.model == DEEPSEEK_V4_1_FLASH_MODEL
+        assert strategy.controller_lm.model == DEEPSEEK_V4_1_FLASH_MODEL
+        assert strategy.manifestor_lm.model == DEEPSEEK_V4_1_FLASH_MODEL
+    if condition == "action":
+        assert selector.lm.model == DEEPSEEK_V4_1_FLASH_MODEL
+    first_key = hotpotqa_run_key(condition, args)
+    teacher["HOTPOTQA_MODEL_INTEGRITY_SHA256"] = "e" * 64
+    monkeypatch.setenv("HOTPOTQA_TEACHER_RUNTIME", json.dumps(teacher))
+    assert hotpotqa_run_key(condition, args) != first_key
+    teacher["HOTPOTQA_GPU_RUNTIME"] = h200_gpu_runtime(1)
+    monkeypatch.setenv("HOTPOTQA_TEACHER_RUNTIME", json.dumps(teacher))
+    with pytest.raises(ValueError, match="exactly 4 H200"):
+        build_hotpotqa_run_contract(condition, args)
+
+
+def test_hotpot_cross_model_requires_complete_teacher_identity(monkeypatch):
+    """Reject a mixed run whose second serving environment has not been verified."""
+    for name, value in QWEN_SCIENTIFIC_RUNTIME.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("HOTPOTQA_TEACHER_RUNTIME", raising=False)
+    args = _hotpot_args(
+        reflection_model=DEEPSEEK_V4_1_FLASH_MODEL,
+        enforce_scientific_contract=True,
+        train_limit=None,
+        val_limit=None,
+        test_limit=None,
+        data_identity=_scientific_data_identity(),
+    )
+    with pytest.raises(ValueError, match="complete separate serving identity"):
+        _validate_scientific_contract(args)
+
+
 def test_experiment_model_pair_rejects_cross_model_runs() -> None:
     """Reject a Qwen student paired with the DeepSeek proposer."""
     with pytest.raises(ValueError, match="same model"):

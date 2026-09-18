@@ -166,31 +166,53 @@ _HELDOUT_RECOVERY_LOCK = threading.Lock()
 
 
 def _validate_hotpotqa_model_pair(student_model: str, proposer_model: str) -> None:
-    """Require one homogeneous local model from the HotPotQA campaign.
+    """Allow homogeneous arms or the Qwen student with a DeepSeek teacher.
 
     Args:
         student_model: Model that executes the task program.
         proposer_model: Model that selects and proposes prompt revisions.
 
     Raises:
-        ValueError: The roles differ or use a model outside the Qwen/DeepSeek
-            campaign pair.
+        ValueError: The roles use an unsupported direction or model.
     """
-    validate_experiment_model_pair(student_model, proposer_model)
+    if (student_model, proposer_model) != (QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL):
+        validate_experiment_model_pair(student_model, proposer_model)
     if student_model not in EXPERIMENT_MODELS:
         supported = ", ".join(EXPERIMENT_MODELS)
         raise ValueError(f"Unsupported HotPotQA campaign model {student_model!r}; expected one of: {supported}")
 
 
-def _validate_scientific_contract(args) -> None:
+TEACHER_RUNTIME_KEYS = (
+    "MODEL_REVISION",
+    "MODEL_INTEGRITY_SHA256",
+    "SERVING_ENGINE",
+    "SERVING_LOCK_SHA256",
+    "SERVING_ENV_SHA256",
+    "GPU_RUNTIME",
+    "VLLM_VERSION",
+    "TORCH_VERSION",
+    "CUDA_VERSION",
+    "CUDA_MODULE",
+    "TRANSFORMERS_VERSION",
+    "WEIGHT_DTYPE",
+    "KV_CACHE_DTYPE",
+    "SERVE_ARGUMENTS",
+    "VLLM_BATCH_INVARIANT",
+    "VLLM_SINGLE_SEQUENCE_REPLICAS",
+)
+
+
+def _validate_scientific_contract(args, runtime_environment: dict | None = None) -> None:
     """Reject production runs that change a locked methodology axis.
 
     Args:
         args: Parsed arguments or an equivalent configuration namespace.
+        runtime_environment: Explicit role runtime, avoiding global environment mutation.
 
     Raises:
         ValueError: An enforced scientific run changes a methodology axis.
     """
+    environment = os.environ if runtime_environment is None else runtime_environment
     if getattr(args, "enforce_scientific_contract", False):
         changed_axes = []
         required_values = (
@@ -226,33 +248,33 @@ def _validate_scientific_contract(args) -> None:
                 )
         if getattr(args, "max_workers", 1) < 1:
             changed_axes.append("--max-workers must be positive")
-        source_commit = os.environ.get("HOTPOTQA_SOURCE_COMMIT", "")
+        source_commit = environment.get("HOTPOTQA_SOURCE_COMMIT", "")
         if len(source_commit) != 40 or any(character not in "0123456789abcdef" for character in source_commit):
             changed_axes.append("HOTPOTQA_SOURCE_COMMIT must identify the exact experiment source")
-        source_manifest = os.environ.get("HOTPOTQA_SOURCE_MANIFEST_SHA256", "")
+        source_manifest = environment.get("HOTPOTQA_SOURCE_MANIFEST_SHA256", "")
         if len(source_manifest) != 64 or any(character not in "0123456789abcdef" for character in source_manifest):
             changed_axes.append("HOTPOTQA_SOURCE_MANIFEST_SHA256 must identify the exact source bytes")
-        if os.environ.get("HOTPOTQA_PYTHON_VERSION") != _SCIENTIFIC_PYTHON_VERSION:
+        if environment.get("HOTPOTQA_PYTHON_VERSION") != _SCIENTIFIC_PYTHON_VERSION:
             changed_axes.append(f"HOTPOTQA_PYTHON_VERSION must be {_SCIENTIFIC_PYTHON_VERSION!r}")
-        if os.environ.get("HOTPOTQA_UV_VERSION") != _SCIENTIFIC_UV_VERSION:
+        if environment.get("HOTPOTQA_UV_VERSION") != _SCIENTIFIC_UV_VERSION:
             changed_axes.append(f"HOTPOTQA_UV_VERSION must be {_SCIENTIFIC_UV_VERSION!r}")
-        uv_sha256 = os.environ.get("HOTPOTQA_UV_SHA256", "")
+        uv_sha256 = environment.get("HOTPOTQA_UV_SHA256", "")
         if len(uv_sha256) != 64 or any(character not in "0123456789abcdef" for character in uv_sha256):
             changed_axes.append("HOTPOTQA_UV_SHA256 must identify the exact uv binary")
-        if not os.environ.get("HOTPOTQA_LITELLM_VERSION"):
+        if not environment.get("HOTPOTQA_LITELLM_VERSION"):
             changed_axes.append("HOTPOTQA_LITELLM_VERSION must identify the client runtime")
-        if not os.environ.get("HOTPOTQA_CAMPAIGN_ID"):
+        if not environment.get("HOTPOTQA_CAMPAIGN_ID"):
             changed_axes.append("HOTPOTQA_CAMPAIGN_ID must identify the experiment campaign")
-        env_spec = os.environ.get("HOTPOTQA_ENV_SPEC_SHA256", "")
+        env_spec = environment.get("HOTPOTQA_ENV_SPEC_SHA256", "")
         if len(env_spec) != 64 or any(character not in "0123456789abcdef" for character in env_spec):
             changed_axes.append("HOTPOTQA_ENV_SPEC_SHA256 must identify the exact dependency lock")
-        realized_environment = os.environ.get("HOTPOTQA_GEPA_ENV_SHA256", "")
+        realized_environment = environment.get("HOTPOTQA_GEPA_ENV_SHA256", "")
         if len(realized_environment) != 64 or any(
             character not in "0123456789abcdef" for character in realized_environment
         ):
             changed_axes.append("HOTPOTQA_GEPA_ENV_SHA256 must identify the frozen task environment")
         expected_model_version = experiment_model_version(args.solver_model)
-        if os.environ.get("HOTPOTQA_MODEL_REVISION") != expected_model_version:
+        if environment.get("HOTPOTQA_MODEL_REVISION") != expected_model_version:
             changed_axes.append(f"HOTPOTQA_MODEL_REVISION must be {expected_model_version!r}")
         solver_api_base = args.solver_api_base if args.solver_api_base is not None else args.api_base
         reflection_api_base = args.reflection_api_base if args.reflection_api_base is not None else args.api_base
@@ -271,12 +293,12 @@ def _validate_scientific_contract(args) -> None:
                 valid_loopback = False
             if not valid_loopback:
                 changed_axes.append(f"--{role}-api-base must identify the local serving /v1 endpoint")
-        model_integrity = os.environ.get("HOTPOTQA_MODEL_INTEGRITY_SHA256", "")
+        model_integrity = environment.get("HOTPOTQA_MODEL_INTEGRITY_SHA256", "")
         if len(model_integrity) != 64 or any(character not in "0123456789abcdef" for character in model_integrity):
             changed_axes.append("HOTPOTQA_MODEL_INTEGRITY_SHA256 must identify the verified checkpoint bytes")
-        if not os.environ.get("HOTPOTQA_TRANSFORMERS_VERSION"):
+        if not environment.get("HOTPOTQA_TRANSFORMERS_VERSION"):
             changed_axes.append("HOTPOTQA_TRANSFORMERS_VERSION must identify the serving runtime")
-        gpu_runtime_text = os.environ.get("HOTPOTQA_GPU_RUNTIME", "")
+        gpu_runtime_text = environment.get("HOTPOTQA_GPU_RUNTIME", "")
         try:
             gpu_runtime = json.loads(gpu_runtime_text)
         except json.JSONDecodeError:
@@ -305,40 +327,47 @@ def _validate_scientific_contract(args) -> None:
                     f"HOTPOTQA_GPU_RUNTIME must record exactly {expected_gpu_count} H200 devices with compute capability 9.0 "
                     "and one NVIDIA driver version"
                 )
-        if not os.environ.get("HOTPOTQA_VLLM_VERSION"):
+        if not environment.get("HOTPOTQA_VLLM_VERSION"):
             changed_axes.append("HOTPOTQA_VLLM_VERSION must identify the serving runtime")
-        serving_lock = os.environ.get("HOTPOTQA_SERVING_LOCK_SHA256", "")
+        serving_lock = environment.get("HOTPOTQA_SERVING_LOCK_SHA256", "")
         if len(serving_lock) != 64 or any(character not in "0123456789abcdef" for character in serving_lock):
             changed_axes.append("HOTPOTQA_SERVING_LOCK_SHA256 must identify the exact serving dependency lock")
-        serving_environment = os.environ.get("HOTPOTQA_SERVING_ENV_SHA256", "")
+        serving_environment = environment.get("HOTPOTQA_SERVING_ENV_SHA256", "")
         if len(serving_environment) != 64 or any(
             character not in "0123456789abcdef" for character in serving_environment
         ):
             changed_axes.append("HOTPOTQA_SERVING_ENV_SHA256 must identify the frozen serving environment")
-        if os.environ.get("HOTPOTQA_SERVING_ENGINE") != "vllm":
+        if environment.get("HOTPOTQA_SERVING_ENGINE") != "vllm":
             changed_axes.append("HOTPOTQA_SERVING_ENGINE must be 'vllm'")
         try:
-            validate_experiment_vllm_version(args.solver_model, os.environ.get("HOTPOTQA_VLLM_VERSION", ""))
+            validate_experiment_vllm_version(args.solver_model, environment.get("HOTPOTQA_VLLM_VERSION", ""))
         except ValueError as exc:
             changed_axes.append(f"HOTPOTQA_VLLM_VERSION: {exc}")
-        serve_arguments = os.environ.get("HOTPOTQA_SERVE_ARGUMENTS", "")
+        serve_arguments = environment.get("HOTPOTQA_SERVE_ARGUMENTS", "")
         sequence_settings = [item for item in serve_arguments.split(";") if item.startswith("max_num_seqs=")]
         if len(sequence_settings) != 1 or sequence_settings[0] not in {
             "max_num_seqs=1",
             "max_num_seqs=2",
             "max_num_seqs=4",
+            *(
+                {"max_num_seqs=8", "max_num_seqs=16", "max_num_seqs=32"}
+                if args.solver_model == QWEN3_8_27B_MODEL
+                else set()
+            ),
         }:
-            changed_axes.append("HOTPOTQA_SERVE_ARGUMENTS must record one max_num_seqs setting in {1, 2, 4}")
+            changed_axes.append(
+                "HOTPOTQA_SERVE_ARGUMENTS must record one approved max_num_seqs setting (Qwen: 1/2/4/8/16/32; DeepSeek: 1/2/4)"
+            )
         sequence_setting = sequence_settings[0] if sequence_settings else "max_num_seqs=1"
         single_sequence = "true" if sequence_setting == "max_num_seqs=1" else "false"
         if args.solver_model == QWEN3_8_27B_MODEL:
-            if os.environ.get("HOTPOTQA_WEIGHT_DTYPE") != "bfloat16":
+            if environment.get("HOTPOTQA_WEIGHT_DTYPE") != "bfloat16":
                 changed_axes.append("HOTPOTQA_WEIGHT_DTYPE must be 'bfloat16'")
-            if os.environ.get("HOTPOTQA_KV_CACHE_DTYPE") != "auto":
+            if environment.get("HOTPOTQA_KV_CACHE_DTYPE") != "auto":
                 changed_axes.append("HOTPOTQA_KV_CACHE_DTYPE must be 'auto'")
-            if os.environ.get("HOTPOTQA_VLLM_BATCH_INVARIANT") != "false":
+            if environment.get("HOTPOTQA_VLLM_BATCH_INVARIANT") != "false":
                 changed_axes.append("HOTPOTQA_VLLM_BATCH_INVARIANT must be 'false'")
-            if os.environ.get("HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS") != single_sequence:
+            if environment.get("HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS") != single_sequence:
                 changed_axes.append("HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS must match max_num_seqs")
             required_serve_settings = (
                 "tp=1",
@@ -360,13 +389,13 @@ def _validate_scientific_contract(args) -> None:
                 if setting not in serve_arguments.split(";"):
                     changed_axes.append(f"HOTPOTQA_SERVE_ARGUMENTS must include {setting!r}")
         elif args.solver_model == DEEPSEEK_V4_1_FLASH_MODEL:
-            if os.environ.get("HOTPOTQA_WEIGHT_DTYPE") != "fp8":
+            if environment.get("HOTPOTQA_WEIGHT_DTYPE") != "fp8":
                 changed_axes.append("HOTPOTQA_WEIGHT_DTYPE must be 'fp8'")
-            if os.environ.get("HOTPOTQA_KV_CACHE_DTYPE") != "fp8":
+            if environment.get("HOTPOTQA_KV_CACHE_DTYPE") != "fp8":
                 changed_axes.append("HOTPOTQA_KV_CACHE_DTYPE must be 'fp8'")
-            if os.environ.get("HOTPOTQA_VLLM_BATCH_INVARIANT") != "false":
+            if environment.get("HOTPOTQA_VLLM_BATCH_INVARIANT") != "false":
                 changed_axes.append("HOTPOTQA_VLLM_BATCH_INVARIANT must be 'false'")
-            if os.environ.get("HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS") != single_sequence:
+            if environment.get("HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS") != single_sequence:
                 changed_axes.append("HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS must match max_num_seqs")
             required_serve_settings = (
                 "tp=4",
@@ -395,6 +424,19 @@ def _validate_scientific_contract(args) -> None:
             for setting in required_serve_settings:
                 if setting not in serve_arguments.split(";"):
                     changed_axes.append(f"HOTPOTQA_SERVE_ARGUMENTS must include {setting!r}")
+        if args.solver_model != args.reflection_model:
+            _validate_hotpotqa_model_pair(args.solver_model, args.reflection_model)
+            try:
+                teacher = json.loads(environment.get("HOTPOTQA_TEACHER_RUNTIME", "null"))
+                expected_keys = {"HOTPOTQA_" + key for key in TEACHER_RUNTIME_KEYS}
+                if not isinstance(teacher, dict) or set(teacher) != expected_keys:
+                    raise ValueError("teacher runtime must record the complete separate serving identity")
+                teacher_args = deepcopy(args)
+                teacher_args.solver_model = args.reflection_model
+                teacher_args.solver_api_base = reflection_api_base
+                _validate_scientific_contract(teacher_args, {**environment, **teacher})
+            except (ValueError, TypeError) as exc:
+                changed_axes.append(f"HOTPOTQA_TEACHER_RUNTIME: {exc}")
         if changed_axes:
             details = "; ".join(changed_axes)
             raise ValueError(f"The enforced HotPotQA scientific contract rejected changed methodology: {details}.")
@@ -714,6 +756,11 @@ def build_run_contract(condition: str, args) -> dict:
             "uv_sha256": os.environ.get("HOTPOTQA_UV_SHA256"),
             "env_spec_sha256": os.environ.get("HOTPOTQA_ENV_SPEC_SHA256"),
             "gepa_env_sha256": os.environ.get("HOTPOTQA_GEPA_ENV_SHA256"),
+            **(
+                {"teacher_runtime": json.loads(os.environ.get("HOTPOTQA_TEACHER_RUNTIME", "null"))}
+                if args.solver_model != args.reflection_model
+                else {}
+            ),
             "serving_engine": os.environ.get("HOTPOTQA_SERVING_ENGINE"),
             "serving_lock_sha256": os.environ.get("HOTPOTQA_SERVING_LOCK_SHA256"),
             "serving_env_sha256": os.environ.get("HOTPOTQA_SERVING_ENV_SHA256"),

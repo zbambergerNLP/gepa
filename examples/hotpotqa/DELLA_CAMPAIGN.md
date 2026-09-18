@@ -9,6 +9,52 @@ runbook commit predates these decisions and is not a launch target.
 These are instructions for future operations. Consolidation does not submit
 jobs. Start with HotPotQA; Terminal-Bench's Apptainer integration is paused.
 
+## DeepSeek teacher with Qwen task execution
+
+The September 18 campaign uses `MODEL_PROFILE=deepseek-teacher-qwen-student`:
+Qwen runs every task-program call on one H200; DeepSeek runs the vanilla
+rewriter, verbalized Controller, Manifestor, Editor, and stateless optimization
+roles on four other H200s. This is seven ablations total. The homogeneous
+profiles below remain available for historical reproduction. Their checkpoints
+and results do not seed the new campaign.
+
+The paired allocation requests one node, five H200s, 40 CPUs, and 896G host
+memory. Each model reuses its canonical verified launcher, pinned model bytes,
+and separate serving environment. Physical GPU UUIDs and CPU affinities are
+disjoint. Both endpoints stay on loopback, and both runtime identities are
+recorded in contracts, qualification markers, and recovery. A server failure
+stops the paired worker; its owner releases both serving processes.
+
+Prepare a training-only qualification without submitting production:
+
+```bash
+MODEL_PROFILE=deepseek-teacher-qwen-student \
+HOTPOTQA_CAMPAIGN_ID=<fresh-campaign> HOTPOTQA_JOB_KIND=pilot HOTPOTQA_PREPARE_ONLY=1 \
+VLLM_MAX_NUM_SEQS=32 TEACHER_MAX_NUM_SEQS=2 MAX_WORKERS=12 \
+HOTPOTQA_THROUGHPUT_QUESTIONS=48 HOTPOTQA_BATCHING_WORKERS='4 8 16 32' \
+scripts/della/submit_hotpotqa.sh
+```
+
+Use the returned sealed export inside a five-GPU `salloc`/`srun` allocation with
+`scripts/della/remote/run_hotpotqa_interactive.sh <export> preliminary`.
+The preliminary stage checks three original-prompt training questions, real
+optimizer cycles, and throughput. The worker sweep uses the same 48 ordered
+training questions and unchanged decoding. Review request failures, task
+format errors, overlap, queueing, preemption, and GPU/host memory, then freeze
+the selected worker count across all seven production cells. The teacher
+canary batches independent edit conversations; turns inside each conversation
+and Controller → Manifestor → Editor dependencies remain sequential. Active
+request capacity does not imply every optimization stage has independent work
+to fill it.
+
+Submit production with the same source/campaign and selected runtime settings,
+`HOTPOTQA_JOB_KIND=experiment BUDGET_PROFILE=campaign`. Omit the calibration
+worker sweep. The teacher's exact-runtime canary must already have passed.
+The seven serial cells start from the original Qwen structured prompts and
+share one new matching Qwen baseline; winner testing follows each cell's
+validation selection. The previous campaign's result remains a separate
+homogeneous-model result, even when its Qwen model and dataset match.
+
 ## Source and connection
 
 Run the laptop launchers from the reviewed, clean consolidated checkout. They

@@ -30,6 +30,7 @@ _MODEL_LABELS = {
     "hosted_vllm/Qwen/Qwen3.8-27B": "Qwen3.8-27B",
     "hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash": "DeepSeek-V4.1-Flash",
 }
+_TEACHER_STUDENT_PAIR = ("hosted_vllm/Qwen/Qwen3.8-27B", "hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash")
 _APPROVED_CELLS = {
     (6_871, "vanilla"),
     (6_871, "react_v2"),
@@ -388,8 +389,11 @@ def analyze_run(run_dir: Path, fallback_tau: float) -> dict[str, Any]:
         raise ValueError(f"Run {run_dir} is not one of the seven approved campaign cells.")
     solver_model = str(models.get("solver", ""))
     reflection_model = str(models.get("reflection", ""))
-    if solver_model not in _MODEL_LABELS or reflection_model != solver_model:
-        raise ValueError(f"Run {run_dir} does not use an approved homogeneous model pair.")
+    paired = (solver_model, reflection_model) == _TEACHER_STUDENT_PAIR
+    if solver_model not in _MODEL_LABELS or (reflection_model != solver_model and not paired):
+        raise ValueError(f"Run {run_dir} does not use an approved model pair.")
+    if paired and not isinstance(runtime.get("teacher_runtime"), Mapping):
+        raise ValueError(f"Run {run_dir} lacks the separate teacher runtime identity.")
     campaign_id = runtime.get("campaign_id")
     source_commit = runtime.get("source_commit")
     if not isinstance(campaign_id, str) or not campaign_id:
@@ -502,7 +506,8 @@ def analyze_run(run_dir: Path, fallback_tau: float) -> dict[str, Any]:
         "comparison_source_commit": comparison_runtime(contract).get("source_commit"),
         "source_compatibility": contract.get("source_compatibility"),
         "model": solver_model,
-        "model_label": _MODEL_LABELS[solver_model],
+        "reflection_model": reflection_model,
+        "model_label": "Qwen3.8-27B / DeepSeek teacher" if paired else _MODEL_LABELS[solver_model],
         "condition": condition,
         "budget_profile": _BUDGET_LABELS.get(max_metric_calls, str(max_metric_calls)),
         "max_metric_calls": max_metric_calls,
@@ -683,6 +688,8 @@ def write_campaign_analysis(
     reports: Sequence[Mapping[str, Any]],
     output_path: Path,
     analysis_source_commit: str,
+    *,
+    require_complete: bool = False,
 ) -> None:
     """Atomically write the combined machine-readable campaign analysis.
 
@@ -690,6 +697,7 @@ def write_campaign_analysis(
         reports: Ordered completed-run analyses.
         output_path: Destination JSON file.
         analysis_source_commit: Exact Git commit containing the analyzer.
+        require_complete: Reject final reports until every campaign cell is present.
 
     Raises:
         ValueError: Reports contain more than one campaign or source revision,
@@ -725,11 +733,27 @@ def write_campaign_analysis(
                 raise ValueError("Campaign analysis lacks a matching source compatibility review.")
     if len(campaign_ids) > 1 or len(comparison_sources) > 1:
         raise ValueError("Campaign analysis cannot mix campaign IDs or source revisions.")
+    pairs = {(report["model"], report.get("reflection_model", report["model"])) for report in reports}
+    paired = _TEACHER_STUDENT_PAIR in pairs
+    if paired and pairs != {_TEACHER_STUDENT_PAIR}:
+        raise ValueError("Teacher/student analysis cannot mix homogeneous-model results.")
+    expected = {
+        (model, budget, condition)
+        for model in ((_TEACHER_STUDENT_PAIR[0],) if paired else _MODEL_LABELS)
+        for budget, condition in _APPROVED_CELLS
+    }
+    actual = {(report["model"], report["max_metric_calls"], report["condition"]) for report in reports}
+    complete = actual == expected and len(actual) == len(reports)
+    if require_complete and not complete:
+        raise ValueError(f"Campaign incomplete: {len(actual)} of {len(expected)} distinct cells.")
     payload = {
         "schema_version": 1,
         "analysis_source_commit": analysis_source_commit,
         "campaign_ids": sorted(campaign_ids),
         "source_commits": sorted(source_commits),
+        "campaign_complete": complete,
+        "expected_cell_count": len(expected),
+        "missing_cells": sorted(expected - actual),
         "runs": list(reports),
     }
     temporary_path = output_path.with_suffix(f"{output_path.suffix}.{os.getpid()}.part")
@@ -777,6 +801,9 @@ def main() -> None:
         required=True,
         help="Git commit containing the analyzer used for this report",
     )
+    parser.add_argument(
+        "--require-complete", action="store_true", help="Require every campaign cell for a final report"
+    )
     args = parser.parse_args()
     output_path = args.output if args.output is not None else args.root / "hotpotqa_analysis.json"
     reports, incomplete = discover_completed_runs(
@@ -789,7 +816,9 @@ def main() -> None:
         raise ValueError("No completed HotPotQA runs matched the requested campaign.")
     for notice in incomplete:
         print(f"Incomplete run: {notice}", file=sys.stderr)
-    write_campaign_analysis(reports, output_path, analysis_source_commit=args.analysis_source_commit)
+    write_campaign_analysis(
+        reports, output_path, analysis_source_commit=args.analysis_source_commit, require_complete=args.require_complete
+    )
     print(render_markdown(reports))
     print(f"\nWrote {output_path}")
 

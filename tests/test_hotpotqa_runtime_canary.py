@@ -2,6 +2,7 @@
 
 import json
 import sys
+import threading
 from pathlib import Path
 from unittest.mock import Mock, call
 
@@ -12,6 +13,28 @@ sys.path.insert(0, str(Path(__file__).parents[1]))
 from examples.hotpotqa import runtime_canary
 from gepa.lm import LM, NativeToolCall, ToolCompletion
 from gepa.strategies.edit_tools import EDIT_TOOL_SETS, EditTool
+
+
+def test_canary_batches_independent_conversations_without_retry(monkeypatch):
+    """Exercise two simultaneous probes and retain exactly twenty independent attempts."""
+    barrier = threading.Barrier(2)
+    attempts = []
+    lock = threading.Lock()
+
+    def edit(lm, tool, attempt, result_log):
+        barrier.wait(timeout=5)
+        with lock:
+            attempts.append(attempt)
+        return 0
+
+    monkeypatch.setattr(runtime_canary, "resolve_hotpotqa_lm_kwargs", Mock(return_value={}))
+    monkeypatch.setattr(runtime_canary, "LM", Mock(side_effect=lambda *a, **kw: object()))
+    monkeypatch.setattr(runtime_canary, "_ordinary_completion_probe", Mock())
+    monkeypatch.setattr(runtime_canary, "_tool_continuation_probe", Mock())
+    monkeypatch.setattr(runtime_canary, "_edit_probe", edit)
+    result = runtime_canary.run_runtime_canary("fixture", "http://127.0.0.1:8000/v1", 20, workers=2)
+    assert result["workers"] == 2
+    assert sorted(attempts) == list(range(1, 21))
 
 
 @pytest.mark.parametrize("finish", ["<finish>Done.</finish>", "Done."])
@@ -200,6 +223,7 @@ def test_run_runtime_canary_cycles_all_four_tools_for_twenty_attempts(monkeypatc
         "model": model,
         "api_base": api_base,
         "attempts": 20,
+        "workers": 1,
         "tool_attempts": {tool.value: 5 for tool in sorted(tools, key=lambda item: item.value)},
         "ordinary_completion": "passed",
         "tool_result_continuation": "passed",

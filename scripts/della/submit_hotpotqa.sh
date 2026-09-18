@@ -5,7 +5,8 @@
 #   scripts/della/submit_hotpotqa.sh
 #
 # Use MODEL_PROFILE=qwen3.8-27b or MODEL_PROFILE=deepseek-v4.1-flash. Each
-# profile uses the same model for the student and proposer. The default
+# homogeneous profile uses the same model for both roles.
+# MODEL_PROFILE=deepseek-teacher-qwen-student pairs Qwen TP1 with DeepSeek TP4. The default
 # BUDGET_PROFILE=campaign submits exactly seven serial jobs: vanilla, ReAct V2,
 # random-Controller ReAct V2, selected-action and random-action GEPA at 6,871 calls, followed
 # by vanilla and ReAct V2 at 13,742 calls. BUDGET_PROFILE=standard or expanded
@@ -184,6 +185,37 @@ case "${MODEL_PROFILE}" in
         STANDARD_TIME="${STANDARD_TIME:-${TIME:-72:00:00}}"
         EXPANDED_TIME="${EXPANDED_TIME:-${TIME:-144:00:00}}"
         ;;
+    deepseek-teacher-qwen-student)
+        if [[ "${GPU_PARTITION}" != "ailab" ]]; then
+            echo "ERROR: the paired profile requires GPU_PARTITION=ailab" >&2
+            exit 1
+        fi
+        DELLA_GPUS="${DELLA_GPUS:-5}"
+        DELLA_CPUS_PER_TASK="${DELLA_CPUS_PER_TASK:-40}"
+        DELLA_MEMORY="${DELLA_MEMORY:-896G}"
+        JOB_PARTITION="${GPU_PARTITION}"
+        MAX_WORKERS="${MAX_WORKERS:-12}"
+        VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-1}"
+        VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-1}"
+        VLLM_API_SERVER_COUNT="${VLLM_API_SERVER_COUNT:-1}"
+        VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-4}"
+        TEACHER_MAX_NUM_SEQS="${TEACHER_MAX_NUM_SEQS:-2}"
+        MODEL="Qwen3.8-27B"
+        SOLVER_MODEL_PATH="${MODEL_STORAGE}/${MODEL}"
+        MODEL_SNAPSHOT_PROFILE=qwen3.8-27b
+        SOLVER_SERVED_NAME="Qwen/Qwen3.8-27B"
+        SOLVER_MODEL="hosted_vllm/Qwen/Qwen3.8-27B"
+        SOLVER_API_BASE=""
+        if [[ "${DELLA_GPUS}" != 5 || "${DELLA_CPUS_PER_TASK}" != 40 \
+            || "${VLLM_TENSOR_PARALLEL_SIZE}" != 1 || "${VLLM_DATA_PARALLEL_SIZE}" != 1 || "${VLLM_API_SERVER_COUNT}" != 1 \
+            || ! "${VLLM_MAX_NUM_SEQS}" =~ ^(1|2|4|8|16|32)$ \
+            || ! "${TEACHER_MAX_NUM_SEQS}" =~ ^(1|2|4)$ ]]; then
+            echo "ERROR: the paired profile requires five H200s, forty CPUs and approved role batching" >&2
+            exit 1
+        fi
+        STANDARD_TIME="${STANDARD_TIME:-${TIME:-09:00:00}}"
+        EXPANDED_TIME="${EXPANDED_TIME:-${TIME:-09:00:00}}"
+        ;;
     deepseek-v4.1-flash)
         SERVING_VENV_DIR="${REMOTE_DIR%/}/.serving-venv-deepseek-v4.1-flash"
         SERVING_LOCK_RELATIVE="examples/hotpotqa/serving/requirements-deepseek-v4.1-flash-x86_64-linux-py312.txt"
@@ -220,11 +252,14 @@ case "${MODEL_PROFILE}" in
         EXPANDED_TIME="${EXPANDED_TIME:-${TIME:-144:00:00}}"
         ;;
     *)
-        echo "ERROR: MODEL_PROFILE must be qwen3.8-27b or deepseek-v4.1-flash" >&2
+        echo "ERROR: MODEL_PROFILE must be qwen3.8-27b, deepseek-v4.1-flash or deepseek-teacher-qwen-student" >&2
         exit 1
         ;;
 esac
 REFLECTION_MODEL="${SOLVER_MODEL}"
+if [[ "${MODEL_PROFILE}" == "deepseek-teacher-qwen-student" ]]; then
+    REFLECTION_MODEL="hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash"
+fi
 REFLECTION_API_BASE="${SOLVER_API_BASE}"
 
 validate_della_wall_time() {
@@ -292,7 +327,7 @@ if [[ "${MODEL_PROFILE}" == "qwen3.8-27b" ]]; then
         exit 1
     fi
 fi
-if (( VLLM_TENSOR_PARALLEL_SIZE * VLLM_DATA_PARALLEL_SIZE != DELLA_GPUS )); then
+if [[ "${MODEL_PROFILE}" != "deepseek-teacher-qwen-student" ]] && (( VLLM_TENSOR_PARALLEL_SIZE * VLLM_DATA_PARALLEL_SIZE != DELLA_GPUS )); then
     echo "ERROR: tensor-parallel size times data-parallel size must use all allocated GPUs" >&2
     exit 1
 fi
@@ -307,7 +342,10 @@ if [[ -n "${JOB_PARTITION}" ]]; then
     SBATCH_RESOURCE_ARGS+=("--partition=${JOB_PARTITION}")
 fi
 if (( DELLA_GPUS > 0 )); then
-    SBATCH_RESOURCE_ARGS+=("--gres=gpu:${DELLA_GPUS}")
+    SBATCH_RESOURCE_ARGS+=("--gres=gpu:h200:${DELLA_GPUS}")
+fi
+if [[ -n "${DELLA_QOS:-}" ]]; then
+    SBATCH_RESOURCE_ARGS+=("--qos=${DELLA_QOS}")
 fi
 printf -v SBATCH_RESOURCE_COMMAND ' %q' "${SBATCH_RESOURCE_ARGS[@]}"
 
@@ -458,6 +496,22 @@ if [[ ! "\${HOTPOTQA_SERVING_ENV_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
     exit 1
 fi
 
+HOTPOTQA_TEACHER_SERVING_ENV_SHA256=""
+if [[ "${MODEL_PROFILE}" == "deepseek-teacher-qwen-student" ]]; then
+    TEACHER_VENV="${REMOTE_DIR%/}/.serving-venv-deepseek-v4.1-flash"
+    TEACHER_LOCK_SHA256="\$(sha256sum examples/hotpotqa/serving/requirements-deepseek-v4.1-flash-x86_64-linux-py312.txt | cut -d' ' -f1)"
+    if [[ "\$(cat "\${TEACHER_VENV}/.gepa-serving-lock.sha256")" != "\${TEACHER_LOCK_SHA256}" \
+        || ! -s "${MODEL_STORAGE}/DeepSeek-V4.1-Flash/.gepa-model-integrity.json" ]]; then
+        echo "ERROR: the paired teacher's pinned artifacts are unavailable" >&2
+        exit 1
+    fi
+    HOTPOTQA_TEACHER_SERVING_ENV_SHA256="\$(
+        "\${GEPA_UV_BIN}" run --no-project --python "\${TEACHER_VENV}/bin/python" python \
+            -m examples.common.python_environment verify \
+            --path "${SCRATCH_BASE}/.cache/gepa/serving-environments/\${TEACHER_LOCK_SHA256}.json"
+    )"
+fi
+
 SBATCH_BIN="\$(command -v sbatch)"
 SBATCH_HELP="\$("\${SBATCH_BIN}" --help 2>&1)"
 if [[ "\${SBATCH_HELP}" != *"--export-file"* ]]; then
@@ -533,6 +587,10 @@ write_sbatch_export_file() {
         "VLLM_DATA_PARALLEL_SIZE=${VLLM_DATA_PARALLEL_SIZE}" \
         "VLLM_API_SERVER_COUNT=${VLLM_API_SERVER_COUNT}" \
         "VLLM_MAX_NUM_SEQS=${VLLM_MAX_NUM_SEQS}" \
+        "TEACHER_MAX_NUM_SEQS=${TEACHER_MAX_NUM_SEQS:-2}" \
+        "HOTPOTQA_THROUGHPUT_QUESTIONS=${HOTPOTQA_THROUGHPUT_QUESTIONS:-12}" \
+        "HOTPOTQA_BATCHING_WORKERS=${HOTPOTQA_BATCHING_WORKERS:-}" \
+        "HOTPOTQA_TEACHER_SERVING_ENV_SHA256=\${HOTPOTQA_TEACHER_SERVING_ENV_SHA256}" \
         "VLLM_MAX_NUM_BATCHED_TOKENS=${VLLM_MAX_NUM_BATCHED_TOKENS}" \
         "HEALTH_TIMEOUT=${HEALTH_TIMEOUT}" \
         "SERVING_VENV_DIR=${SERVING_VENV_DIR}" \

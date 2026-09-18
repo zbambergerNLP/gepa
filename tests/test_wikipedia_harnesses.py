@@ -1283,6 +1283,9 @@ def test_wikipedia_sbatch_exposes_both_homogeneous_model_profiles(benchmark: str
         benchmark: Wikipedia benchmark whose batch script is inspected.
     """
     script = (REPO_ROOT / "examples" / benchmark / f"run_{benchmark}.sbatch").read_text()
+    if benchmark == "hotpotqa":
+        assert "source scripts/della/remote/hotpotqa_workload.sh" in script
+        script += (REPO_ROOT / "scripts/della/remote/hotpotqa_workload.sh").read_text()
 
     assert 'MODEL_PROFILE="${MODEL_PROFILE:-qwen3.8-27b}"' in script
     assert 'SOLVER_MODEL="hosted_vllm/Qwen/Qwen3.8-27B"' in script
@@ -1329,7 +1332,7 @@ def test_hotpotqa_della_submit_scales_resources_by_model_profile() -> None:
     assert 'if [[ -n "${JOB_PARTITION}" ]]; then' in submit
     assert 'SBATCH_RESOURCE_ARGS+=("--partition=${JOB_PARTITION}")' in submit
     assert "if (( DELLA_GPUS > 0 )); then" in submit
-    assert 'SBATCH_RESOURCE_ARGS+=("--gres=gpu:${DELLA_GPUS}")' in submit
+    assert 'SBATCH_RESOURCE_ARGS+=("--gres=gpu:h200:${DELLA_GPUS}")' in submit
     assert r'"\${SBATCH_BIN}"${SBATCH_RESOURCE_COMMAND}' in submit
 
 
@@ -1357,6 +1360,8 @@ def test_hotpotqa_sbatch_limits_nested_cpu_threads_after_vllm_starts() -> None:
     """Apply CPU thread caps after the HotPotQA vLLM server starts."""
     benchmark = "hotpotqa"
     script = (REPO_ROOT / "examples" / benchmark / f"run_{benchmark}.sbatch").read_text()
+    assert "source scripts/della/remote/hotpotqa_workload.sh" in script
+    script += (REPO_ROOT / "scripts/della/remote/hotpotqa_workload.sh").read_text()
     vllm_start = script.index('"${VLLM_BIN}" serve "${SOLVER_MODEL_PATH}"')
     evaluator_start = script.index(f'"${{PY}}" -m examples.{benchmark}.main')
 
@@ -1401,6 +1406,8 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     """Pin methodology while retaining only quality-neutral throughput knobs."""
     submit = (REPO_ROOT / "scripts" / "della" / "submit_hotpotqa.sh").read_text()
     sbatch = (REPO_ROOT / "examples" / "hotpotqa" / "run_hotpotqa.sbatch").read_text()
+    assert "source scripts/della/remote/hotpotqa_workload.sh" in sbatch
+    sbatch += (REPO_ROOT / "scripts/della/remote/hotpotqa_workload.sh").read_text()
     build = (REPO_ROOT / "scripts" / "della" / "build_env.sh").read_text()
     sync = (REPO_ROOT / "scripts" / "della" / "sync_to_della.sh").read_text()
     fetch = (REPO_ROOT / "scripts" / "della" / "fetch_hotpotqa_results.sh").read_text()

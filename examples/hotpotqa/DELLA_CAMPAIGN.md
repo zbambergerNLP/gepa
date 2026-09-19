@@ -541,3 +541,11 @@ matching completed qualification review. It preserves the current worker, cell,
 exports and same-source timeout recovery, and replaces only the pending controller.
 An attached draft must never be started independently. A source handoff requires its
 own review; the earlier random-action source exception does not cover editor changes.
+
+HotPotQA calls `gepa.gepa_launcher.optimize_anything` directly so GEPA can finish
+the iteration that crosses the configured metric-call threshold. The generic
+`gepa.optimize_anything` API has a hard per-evaluation server cap and can interrupt
+that validation pass; it does not implement this experiment's stopping rule.
+Persist `budget_stopping=whole_iteration_threshold` and report the actual completed
+metric calls, including overshoot. A run stopped by the generic cap before a full
+iteration is partial evidence, not a completed ablation or a held-out result.

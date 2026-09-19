@@ -85,8 +85,7 @@ from examples.hotpotqa.utils import (
     run_two_stage,
 )
 from gepa.core.action_tracking import ActionDiversityCallback
-from gepa.lm import LM
-from gepa.optimize_anything import (
+from gepa.gepa_launcher import (
     EngineConfig,
     GEPAConfig,
     MergeConfig,
@@ -94,6 +93,7 @@ from gepa.optimize_anything import (
     SideInfo,
     optimize_anything,
 )
+from gepa.lm import LM
 from gepa.proposer.reflective_mutation.react_v2_proposer import REACT_V2_EXECUTION_CONTRACT
 from gepa.proposer.reflective_mutation.single_call_proposer import SINGLE_CALL_EXECUTION_CONTRACT
 from gepa.response_journal import RESPONSE_JOURNAL_SCHEMA_VERSION, RESPONSE_JOURNAL_SCOPE_POLICY
@@ -656,6 +656,7 @@ def build_run_contract(condition: str, args) -> dict:
         },
         "optimizer": {
             "max_metric_calls": args.max_metric_calls,
+            "budget_stopping": "whole_iteration_threshold",
             "seed": args.seed,
             "candidate_selection_strategy": "pareto",
             "proposal_sampling_strategy": {
@@ -1418,7 +1419,7 @@ def run_condition(
     evaluator,
     callbacks: list | None = None,
 ):
-    """Run one optimization condition and return its GEPA result.
+    """Run one condition with GEPA's whole-iteration budget threshold.
 
     Args:
         name: Human-readable condition label printed before execution.

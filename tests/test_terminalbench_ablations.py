@@ -47,6 +47,12 @@ def test_campaign_runs_prompt_only_first_and_forwards_shared_settings(
             "17",
             "--n-concurrent",
             "3",
+            "--wandb-project",
+            "forest-terminalbench",
+            "--wandb-entity",
+            "gilad-mo12",
+            "--wandb-group",
+            "campaign",
             "--reviewed-pilot",
             str(tmp_path / "reviewed full pilot"),
             "--runtime-record",
@@ -83,6 +89,11 @@ def test_campaign_runs_prompt_only_first_and_forwards_shared_settings(
         assert cell.proposer_runtime_record == tmp_path / "optimizer server.json"
         assert cell.student_api_base == cell.proposer_api_base == "http://localhost:8000/v1"
         assert cell.seed == 17 and cell.n_concurrent == 3
+        assert (cell.wandb_project, cell.wandb_entity, cell.wandb_group) == (
+            "forest-terminalbench",
+            "gilad-mo12",
+            "campaign",
+        )
         assert cell.reviewed_pilot == tmp_path / "reviewed full pilot"
     assert not root.exists()
     if dry_run:

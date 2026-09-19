@@ -108,8 +108,8 @@ vLLM commit `e77daef89e18e08321ae7b8b24827eedd5fe8673` (package version
 `0.1.1.dev5+ge77daef89`), Torch 2.13, and prebuilt FlashInfer kernels for offline
 GPU nodes. Both serving environments use Python 3.12.7 / Transformers 5.13.
 GEPA uses Python 3.11.13 / uv 0.9.13 with pinned DSPy. HotPotQA does not need
-a POSIT checkout. HoVer's shared model references are updated, but its separate
-POSIT-based deployment is outside this HotPotQA campaign.
+a POSIT checkout. HoVer support has been retired; historical outputs and immutable
+campaign snapshots remain preserved.
 
 ```bash
 scripts/della/build_env.sh qwen3.8-27b deepseek-v4.1-flash

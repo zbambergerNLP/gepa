@@ -35,6 +35,7 @@ from examples.hotpotqa.main import (
     run_program,
     seed_candidate,
 )
+from examples.hotpotqa.tracking import HotpotqaWandb
 from examples.hotpotqa.utils import (
     HOTPOTQA_HF_REVISION,
     build_hotpotqa_task_lm,
@@ -218,6 +219,9 @@ def main(argv: list[str] | None = None) -> None:
         "--method", choices=METHODS, help="Run one optimizer check before resuming the remaining methods"
     )
     parser.add_argument("--text-limits", default="null")
+    parser.add_argument("--wandb-project")
+    parser.add_argument("--wandb-entity")
+    parser.add_argument("--editor-mode", choices=("react", "single_call"), default="react")
     args = parser.parse_args(argv)
     if args.workers < 1:
         parser.error("--workers must be positive")
@@ -246,6 +250,8 @@ def main(argv: list[str] | None = None) -> None:
             "--enforce-scientific-contract",
             "--text-limits",
             args.text_limits,
+            "--editor-mode",
+            args.editor_mode,
         ]
     )
     train, validation, test = load_hotpotqa_dataset(seed=0)
@@ -313,6 +319,9 @@ def main(argv: list[str] | None = None) -> None:
                 load_cycle(directory)
                 continue
             evidence = CycleEvidence(directory)
+            callbacks = [RecoveryCallback(directory), evidence]
+            if args.wandb_project:
+                callbacks.append(HotpotqaWandb(directory, contract["runtime"], args.wandb_project, args.wandb_entity, kind="qualification"))
             kwargs = observed_kwargs(args.model, args.api_base, directory, "solver")
             evaluator = strict_evaluator(make_evaluator(args.model, retriever, args.api_base, solver_lm_kwargs=kwargs))
             config, _ = build_config(
@@ -332,7 +341,7 @@ def main(argv: list[str] | None = None) -> None:
                     train[:3],
                     config,
                     evaluator,
-                    callbacks=[RecoveryCallback(directory), evidence],
+                    callbacks=callbacks,
                 )
                 evidence.verify()
             finally:

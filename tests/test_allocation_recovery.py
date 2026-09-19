@@ -241,6 +241,41 @@ def test_extended_cell_timeout_verifies_its_own_source(extension, monkeypatch):
         controller.advance(path, plan, "10")
 
 
+def test_future_replacement_preserves_current_worker_and_source(extension, monkeypatch):
+    path, plan, added = extension
+    plan["cells"][1]["registry"] = str(path.parent / "unstarted-registry.json")
+    original = json.loads(json.dumps(plan))
+    added["cells"] = [dict(added["cells"][0], name=cell["name"]) for cell in plan["cells"]]
+    replacement = path.with_name("replacement.json")
+    replacement.write_text(json.dumps(added))
+    proof = path.with_name("qualification.json")
+    proof.write_text(json.dumps({"status": "qualified", "job_id": "20", "source_commit": added["source_commit"]}))
+    commands = []
+    monkeypatch.setattr(controller, "accounting", lambda job: ("COMPLETED" if job == "20" else "RUNNING" if job == "10" else "PENDING", "0:0"))
+    monkeypatch.setattr(controller, "run", lambda cmd: commands.append(cmd) or ("12" if cmd[0] == "sbatch" else ""))
+    controller.replace_future(path, plan, replacement, proof, "10", "11")
+    assert plan["cells"][0] == original["cells"][0]
+    assert plan["source_commit"] == original["source_commit"]
+    assert plan["worker"] == "10" and plan["index"] == 0 and plan["before"] == original["before"]
+    assert plan["cells"][1]["source_commit"] == added["source_commit"]
+    assert commands[0] == ["scontrol", "hold", "11"]
+    assert commands[-2:] == [["scancel", "11"], ["scontrol", "release", "12"]]
+    assert json.loads(replacement.read_text())["status"] == "attached"
+
+
+def test_future_replacement_rejects_incomplete_qualification(extension, monkeypatch):
+    path, plan, added = extension
+    added["cells"] = [dict(added["cells"][0], name=cell["name"]) for cell in plan["cells"]]
+    replacement = path.with_name("replacement.json")
+    replacement.write_text(json.dumps(added))
+    proof = path.with_name("qualification.json")
+    proof.write_text(json.dumps({"status": "qualified", "job_id": "20", "source_commit": added["source_commit"]}))
+    monkeypatch.setattr(controller, "accounting", lambda _: ("RUNNING", "0:0"))
+    monkeypatch.setattr(controller, "run", lambda _: pytest.fail("Scheduler mutation"))
+    with pytest.raises(ValueError, match="Qualification"):
+        controller.replace_future(path, plan, replacement, proof, "10", "11")
+
+
 def test_new_controller_submits_old_and_new_workers_from_their_pinned_directories(extension, monkeypatch):
     """A newer CPU watcher must not move an old worker to its own checkout."""
     path, plan, added = extension

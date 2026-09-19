@@ -59,6 +59,10 @@ trap cleanup_local_files EXIT
 # Tunable knobs (env overrides).
 MODEL_PROFILE="${MODEL_PROFILE:-qwen3.8-27b}"
 HOTPOTQA_PREPARE_ONLY="${HOTPOTQA_PREPARE_ONLY:-0}"
+HOTPOTQA_STAGE_ONLY="${HOTPOTQA_STAGE_ONLY:-0}"
+if [[ "${HOTPOTQA_STAGE_ONLY}" != "0" && "${HOTPOTQA_STAGE_ONLY}" != "1" ]]; then
+    echo "ERROR: HOTPOTQA_STAGE_ONLY must be 0 or 1" >&2; exit 1
+fi
 HOTPOTQA_INITIAL_THROUGHPUT="${HOTPOTQA_INITIAL_THROUGHPUT:-0}"
 if [[ "${HOTPOTQA_INITIAL_THROUGHPUT}" != "0" && "${HOTPOTQA_INITIAL_THROUGHPUT}" != "1" ]]; then
     echo "ERROR: HOTPOTQA_INITIAL_THROUGHPUT must be 0 or 1" >&2
@@ -68,6 +72,17 @@ if [[ "${HOTPOTQA_PREPARE_ONLY}" != "0" && "${HOTPOTQA_PREPARE_ONLY}" != "1" ]];
     echo "ERROR: HOTPOTQA_PREPARE_ONLY must be 0 or 1" >&2
     exit 1
 fi
+HOTPOTQA_EDITOR_MODE="${HOTPOTQA_EDITOR_MODE:-react}"
+HOTPOTQA_WANDB_PROJECT="${HOTPOTQA_WANDB_PROJECT:-}"
+HOTPOTQA_WANDB_ENTITY="${HOTPOTQA_WANDB_ENTITY:-}"
+if [[ "${HOTPOTQA_EDITOR_MODE}" != "react" && "${HOTPOTQA_EDITOR_MODE}" != "single_call" ]]; then
+    echo "ERROR: unsupported HOTPOTQA_EDITOR_MODE" >&2; exit 1
+fi
+for tracking_name in "${HOTPOTQA_WANDB_PROJECT}" "${HOTPOTQA_WANDB_ENTITY}"; do
+    if [[ -n "${tracking_name}" && ! "${tracking_name}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        echo "ERROR: W&B project/entity must be a simple slug" >&2; exit 1
+    fi
+done
 HOTPOTQA_JOB_KIND="${HOTPOTQA_JOB_KIND:-experiment}"
 HOTPOTQA_PILOT_ONLY=0
 if [[ "${HOTPOTQA_JOB_KIND}" != "experiment" && "${HOTPOTQA_JOB_KIND}" != "pilot" ]]; then
@@ -568,6 +583,9 @@ write_sbatch_export_file() {
     SBATCH_EXPORT_FILE="\${CONTINUATION_DIR}/\${CELL_NAME}.env"
     printf '%s\0' \
         "MODEL_PROFILE=${MODEL_PROFILE}" \
+        "HOTPOTQA_EDITOR_MODE=${HOTPOTQA_EDITOR_MODE}" \
+        "HOTPOTQA_WANDB_PROJECT=${HOTPOTQA_WANDB_PROJECT}" \
+        "HOTPOTQA_WANDB_ENTITY=${HOTPOTQA_WANDB_ENTITY}" \
         "BUDGET_PROFILE=\${run_budget_profile}" \
         "MAX_METRIC_CALLS=\${run_max_metric_calls}" \
         "CONDITION=\${run_condition}" \
@@ -660,6 +678,10 @@ for CELL_INDEX in "\${!SUBMIT_CONDITIONS[@]}"; do
         --export=ALL --export-file="\${SBATCH_EXPORT_FILE}" examples/hotpotqa/run_hotpotqa.sbatch
     SBATCH_EXPORT_FILE=""
 done
-"${GEPA_VENV_DIR}/bin/python" -m examples.common.slurm_continuation start --plan "\${PLAN_PATH}"
+if [[ "${HOTPOTQA_STAGE_ONLY}" != "1" ]]; then
+    "${GEPA_VENV_DIR}/bin/python" -m examples.common.slurm_continuation start --plan "\${PLAN_PATH}"
+else
+    echo "==> staged only; no jobs submitted"
+fi
 echo "==> continuation plan: \${PLAN_PATH}"
 REMOTE_SCRIPT

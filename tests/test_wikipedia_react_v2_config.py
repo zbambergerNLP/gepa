@@ -423,6 +423,26 @@ def test_hotpot_rejects_changed_training_batch_order(tmp_path: Path, damage: str
         ensure_wikipedia_run_contract(tmp_path, contract)
 
 
+def test_editor_mode_changes_only_forest_contract_and_wandb_changes_neither(tmp_path):
+    """Keep ordinary GEPA comparable while preventing editor checkpoint migration."""
+    args = _hotpot_args()
+    vanilla = build_hotpotqa_run_contract("vanilla", args)
+    forest = build_hotpotqa_run_contract("react_v2", args)
+    args.editor_mode = "single_call"
+    args.wandb_project = "reporting"
+    args.wandb_entity = "team"
+    assert build_hotpotqa_run_contract("vanilla", args) == vanilla
+    updated = build_hotpotqa_run_contract("react_v2", args)
+    assert updated["optimizer"]["react_execution"]["max_iterations"] == 1
+    normalized = deepcopy(updated)
+    normalized["optimizer"]["react_execution"] = forest["optimizer"]["react_execution"]
+    normalized["optimizer"]["branch_history"] = forest["optimizer"]["branch_history"]
+    assert normalized == forest
+    ensure_wikipedia_run_contract(tmp_path, forest)
+    with pytest.raises(ValueError):
+        ensure_wikipedia_run_contract(tmp_path, updated)
+
+
 def test_hotpot_training_order_survives_real_engine_resume(tmp_path: Path) -> None:
     """Exercise HotPotQA's launcher and checkpoints without making model requests."""
     args = _hotpot_args(seed=19, max_metric_calls=1000)

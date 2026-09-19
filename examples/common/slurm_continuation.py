@@ -232,10 +232,72 @@ def advance(path: Path, plan: dict, identifier: str) -> None:
     dispatch(path, plan)
 
 
+def replace_future(path: Path, plan: dict, replacement_path: Path, proof_path: Path, worker: str, controller: str) -> None:
+    """Replace only untouched future cells after a separately verified qualification.
+
+    Preserve the current cell's source, exports and checkpoint registry, including
+    when its next allocation must resume after a timeout. Never signal its worker.
+    """
+    replacement = json.loads(replacement_path.read_text())
+    proof = json.loads(proof_path.read_text())
+    if plan.get("status") != "active" or plan.get("worker") != worker or plan.get("controller") != controller:
+        raise ValueError("The active campaign changed; inspect before replacing future cells")
+    if replacement.get("status") != "draft" or replacement["source_commit"] == plan["source_commit"]:
+        raise ValueError("Future cells require a fresh, unsubmitted source plan")
+    names = [cell["name"] for cell in plan["cells"]]
+    if names != [cell["name"] for cell in replacement["cells"]] or plan["index"] >= len(names) - 1:
+        raise ValueError("The replacement must preserve the complete ordered cell menu")
+    verify_source(replacement["source_dir"], replacement["source_commit"])
+    if Path(replacement["source_dir"]).resolve() != Path(__file__).resolve().parents[2]:
+        raise ValueError("Execute the handoff from the new immutable source")
+    if proof.get("status") != "qualified" or proof.get("source_commit") != replacement["source_commit"]:
+        raise ValueError("A matching completed qualification review is required")
+    if accounting(str(proof["job_id"])) != ("COMPLETED", "0:0"):
+        raise ValueError("Qualification did not complete successfully")
+    future = replacement["cells"][plan["index"] + 1:]
+    for cell in future:
+        if file_digest(Path(cell["export_file"])) != cell["export_sha256"]:
+            raise ValueError("Replacement environment changed")
+        if snapshot(Path(cell["registry"]), replacement["source_commit"]) or Path(cell["error_file"]).exists():
+            raise ValueError("A replacement cell already has execution evidence")
+    for cell in plan["cells"][plan["index"] + 1:]:
+        if snapshot(Path(cell["registry"]), cell.get("source_commit", plan["source_commit"])) or Path(cell["error_file"]).exists():
+            raise ValueError("An old future cell has started; its evidence cannot be replaced")
+    if accounting(worker)[0] not in {"PENDING", "RUNNING", "TIMEOUT", "COMPLETED"} or accounting(controller)[0] != "PENDING":
+        raise ValueError("Worker or controller needs investigation before handoff")
+    backup = path.with_name(f"plan-before-source-{replacement['source_commit'][:12]}.json")
+    if backup.exists():
+        raise ValueError("A handoff backup exists; inspect the previous transition")
+    run(["scontrol", "hold", controller])
+    _write(backup, plan)
+    plan["cells"] = [*plan["cells"][:plan["index"] + 1], *[
+        {**cell, "source_dir": replacement["source_dir"], "source_commit": replacement["source_commit"]}
+        for cell in future
+    ]]
+    plan.update(status="replacing_future", controller_source_dir=replacement["source_dir"],
+                controller_source_commit=replacement["source_commit"],
+                handoff_qualification={"path": str(proof_path), "sha256": file_digest(proof_path)})
+    _write(path, plan)
+    watcher = submit_controller(path, plan, worker, held=True)
+    plan["replacement_controller"] = watcher
+    _write(path, plan)
+    replacement.update(status="attached", attached_to=str(path), replacement_cells=[cell["name"] for cell in future])
+    _write(replacement_path, replacement)
+    run(["scancel", controller])
+    plan.setdefault("controller_replacements", []).append({
+        "previous": controller, "replacement": watcher, "worker_unchanged": worker,
+        "future_source": replacement["source_commit"],
+    })
+    plan.update(status="active", controller=watcher)
+    _write(path, plan)
+    run(["scontrol", "release", watcher])
+    print(f"Replaced {len(future)} unstarted cells; worker {worker} unchanged; controller {watcher}")
+
+
 def main(argv: list[str] | None = None) -> None:
     """Build a pinned plan, then submit or advance it under an exclusive lock."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("add", "start", "advance", "extend"))
+    parser.add_argument("action", choices=("add", "start", "advance", "extend", "replace-future"))
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--source-commit")
     parser.add_argument("--name")
@@ -246,6 +308,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--controller-id")
     parser.add_argument("--extension-plan", type=Path)
     parser.add_argument("--after")
+    parser.add_argument("--qualification-proof", type=Path)
     args, command = parser.parse_known_args(argv)
     path = args.plan.resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -293,6 +356,11 @@ def main(argv: list[str] | None = None) -> None:
         if plan is None:
             raise ValueError("No campaign plan exists")
         verify_source(plan["source_dir"], plan["source_commit"])
+        if args.action == "replace-future":
+            if not all((args.extension_plan, args.qualification_proof, args.job_id, args.controller_id)):
+                parser.error("replace-future requires extension-plan, qualification-proof, job-id, and controller-id")
+            replace_future(path, plan, args.extension_plan, args.qualification_proof, args.job_id, args.controller_id)
+            return
         if args.action == "extend":
             if not all((args.extension_plan, args.after, args.job_id, args.controller_id)):
                 parser.error("extend requires extension-plan, after, job-id, and controller-id")

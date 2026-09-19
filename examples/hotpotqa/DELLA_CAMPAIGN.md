@@ -504,3 +504,40 @@ model-response and evaluation caches remain disabled. See
 `DELLA_QUALIFICATION_2026-09-13.md` for the original measurements; the new batching
 comparison, larger-token DeepSeek cycle, full calibration, and live recovery
 are not established by that earlier report.
+
+## Single-response FOREST and offline reporting
+
+`HOTPOTQA_EDITOR_MODE=single_call` keeps the verbalized Controller and Manifestor,
+then gives the Editor exactly one logical model response. That response may contain
+several native edit calls. They execute in order against the selected section and
+commit atomically; an invalid call discards the batch without a model correction
+turn. The full menu and uniform random choices remain intact, including legitimate
+no-ops. The existing `react` mode remains the default. Editor mode is part of the
+scientific run contract, so its checkpoints cannot be exchanged with ReAct state.
+
+Set `HOTPOTQA_WANDB_PROJECT` and optionally `HOTPOTQA_WANDB_ENTITY` to collect
+offline W&B logs during qualification and production. Logging observes validation,
+actual evaluation counts, proposal outcomes, prompt sizes and provider-reported
+token usage. Each allocation has a separate run linked by campaign and logical-cell
+identity. Only completed result reports contain held-out scores. Missing token
+counts stay marked as unreported; transport success is not task-format success.
+
+Completed vanilla runs can be backfilled without rerunning inference:
+
+```bash
+uv run python -m examples.hotpotqa.tracking /path/to/verified/cell \
+  --project forest-hotpotqa --entity your-team
+wandb sync /path/to/verified/cell/tracking/wandb/offline-run-...
+```
+
+Fetch the whole tracking directory, including its media files, before syncing from
+a machine with network access. Final reports retain input checksums and the actual
+source contract. Archive/checksum validation remains required before claiming a
+verified scientific result; W&B is a reporting destination, not the run authority.
+
+`HOTPOTQA_STAGE_ONLY=1` prepares an experiment plan without submitting jobs.
+`slurm_continuation replace-future` can install its unstarted suffix only after a
+matching completed qualification review. It preserves the current worker, cell,
+exports and same-source timeout recovery, and replaces only the pending controller.
+An attached draft must never be started independently. A source handoff requires its
+own review; the earlier random-action source exception does not cover editor changes.

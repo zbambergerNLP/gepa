@@ -220,6 +220,7 @@ def test_run_runtime_canary_cycles_all_four_tools_for_twenty_attempts(monkeypatc
     assert summary == {
         "provider_retry_policy": runtime_canary.PROVIDER_RETRY_POLICY,
         "status": "passed",
+        "editor_mode": "react",
         "model": model,
         "api_base": api_base,
         "attempts": 20,

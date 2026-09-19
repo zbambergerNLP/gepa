@@ -1,5 +1,7 @@
 """Keep additive source reviews narrower than experiment compatibility."""
 
+import hashlib
+import json
 from copy import deepcopy
 
 import pytest
@@ -58,3 +60,19 @@ def test_review_cannot_authorize_another_experiment(reviewed_contract, change):
 def test_unreviewed_sources_remain_distinct(reviewed_contract):
     reviewed_contract.pop("source_compatibility")
     assert comparison_runtime(reviewed_contract) == reviewed_contract["execution_runtime"]
+
+
+def test_editor_handoff_requires_its_own_review_and_exact_optimizer(reviewed_contract):
+    contract = reviewed_contract
+    contract["condition"] = "react_v2"
+    contract["optimizer"].update(rendered_seed={"sys": "original"}, react_execution={"completion": "single_response_ordered_tool_batch"})
+    review = contract["source_compatibility"]
+    review.update(schema_version=2, kind="single_call_editor_tracking_handoff",
+                  optimizer_sha256=hashlib.sha256(json.dumps(contract["optimizer"], sort_keys=True, separators=(",", ":")).encode()).hexdigest())
+    assert comparison_runtime(contract)["source_commit"] == "a" * 40
+    contract["optimizer"]["react_execution"]["completion"] = "different_algorithm"
+    with pytest.raises(ValueError):
+        comparison_runtime(contract)
+    contract["condition"] = "vanilla"
+    with pytest.raises(ValueError):
+        comparison_runtime(contract)

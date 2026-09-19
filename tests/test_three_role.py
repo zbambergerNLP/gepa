@@ -629,6 +629,22 @@ def test_level2_selects_semantic_action_manifests_edits_and_finishes() -> None:
     assert record["controller_sampling"] == sampling
 
 
+def test_single_call_editor_preserves_three_roles_and_rejects_old_resume(tmp_path):
+    """Keep the Controller and Manifestor, remove only the editor observation loop."""
+    lm = ThreeRoleLM([tool_call(EditTool.REPLACE_TEXT, target="be nice", text="be kind")])
+    strat, _ = strategy(2, lm=lm, editor_mode="single_call")
+    proposal, _ = strat.reflect({"sys":PROMPT}, deepcopy(SYS_REFLECTIVE_DATASET), ["sys"])
+    assert lm.roles == ["controller", "manifestor", "react_v2"]
+    assert proposal.new_texts["sys"] != PROMPT
+    assert proposal.metadata["proposer_backend"] == "single_call"
+    assert proposal.metadata["action_choice"] == "reexpress@Rules/REPLACE_TEXT"
+    assert proposal.metadata["three_role_actions"][0]["react_iterations"] == 1
+    old, _ = strategy(2)
+    ensure_reflection_run_contract(str(tmp_path), old.run_contract({"sys":PROMPT}))
+    with pytest.raises(ValueError, match="different reflection strategy contract"):
+        ensure_reflection_run_contract(str(tmp_path), strat.run_contract({"sys":PROMPT}))
+
+
 @pytest.mark.parametrize("selection", ["verbalized", "uniform_random"])
 def test_default_strategy_keeps_one_controller_choice_across_ten_edits(selection: str) -> None:
     """Let both FOREST variants finish ten edits under one section/action choice.

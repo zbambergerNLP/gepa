@@ -4,6 +4,13 @@ set -euo pipefail
 
 python() { "${GEPA_UV_BIN}" run --no-project --python "${GEPA_VENV_DIR}/bin/python" python "$@"; }
 PY=python
+HOTPOTQA_EDITOR_MODE="${HOTPOTQA_EDITOR_MODE:-react}"
+TRACKING_ARGS=()
+if [[ -n "${HOTPOTQA_WANDB_PROJECT:-}" ]]; then
+    export WANDB_MODE=offline
+    TRACKING_ARGS=(--wandb-project "${HOTPOTQA_WANDB_PROJECT}")
+    [[ -n "${HOTPOTQA_WANDB_ENTITY:-}" ]] && TRACKING_ARGS+=(--wandb-entity "${HOTPOTQA_WANDB_ENTITY}")
+fi
 
 generator_reports_expected_model() {
     curl --max-time 10 -fsS "${REFLECTION_API_BASE}/models" | "${PY}" -c \
@@ -55,6 +62,9 @@ if [[ "${REFLECTION_MODEL}" == "hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash" ]];
         CANARY_IDENTITY_SHA256="$(printf '%s' "${HOTPOTQA_SOURCE_COMMIT};${HOTPOTQA_SOURCE_MANIFEST_SHA256};${HOTPOTQA_GEPA_ENV_SHA256};${HOTPOTQA_TEACHER_RUNTIME}" | sha256sum | cut -d' ' -f1)"
         CANARY_WORKERS="${TEACHER_MAX_NUM_SEQS}"
     fi
+    if [[ "${HOTPOTQA_EDITOR_MODE}" != "react" ]]; then
+        CANARY_IDENTITY_SHA256="$(printf '%s' "${CANARY_IDENTITY_SHA256};editor=${HOTPOTQA_EDITOR_MODE}" | sha256sum | cut -d' ' -f1)"
+    fi
     DEEPSEEK_CANARY_MARKER="${DEEPSEEK_CANARY_DIR}/${CANARY_IDENTITY_SHA256}.ok"
     mkdir -p "${DEEPSEEK_CANARY_DIR}"
     if [[ "${HOTPOTQA_CANARY_ONLY}" == "1" \
@@ -63,7 +73,7 @@ if [[ "${REFLECTION_MODEL}" == "hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash" ]];
         "${PY}" -m examples.hotpotqa.runtime_canary \
             --model "${REFLECTION_MODEL}" \
             --api-base "${REFLECTION_API_BASE}" \
-            --attempts 20 --workers "${CANARY_WORKERS}" \
+            --attempts 20 --workers "${CANARY_WORKERS}" --editor-mode "${HOTPOTQA_EDITOR_MODE}" \
             --attempt-log "${LOG_DIR}/provider-attempts-${SLURM_JOB_ID:-local}.jsonl"
         if ! kill -0 "${GEN_PID}" 2>/dev/null || ! generator_reports_expected_model; then
             echo "ERROR: DeepSeek endpoint failed after the runtime canary" >&2
@@ -130,6 +140,7 @@ if [[ "${HOTPOTQA_INITIAL_THROUGHPUT:-0}" == "1" && "${HOTPOTQA_PILOT_ONLY}" == 
         --model "${SOLVER_MODEL}" --api-base "${SOLVER_API_BASE}" \
         --wiki17-dir "${WIKI17_DIR}" --workers "${MAX_WORKERS}" \
         --output-dir "${HOTPOTQA_PILOT_ROOT:?pilot output root required}" \
+        --editor-mode "${HOTPOTQA_EDITOR_MODE}" "${TRACKING_ARGS[@]}" \
         --text-limits "${HOTPOTQA_TEXT_LIMITS_JSON:-null}" --stage throughput
 fi
 
@@ -141,6 +152,7 @@ if [[ "${HOTPOTQA_PILOT_ONLY}" == "1" ]]; then
             --wiki17-dir "${WIKI17_DIR}" --workers "${MAX_WORKERS}" \
             --output-dir "${HOTPOTQA_PILOT_ROOT:?pilot output root required}" \
             --throughput-questions "${HOTPOTQA_THROUGHPUT_QUESTIONS:-12}" \
+            --editor-mode "${HOTPOTQA_EDITOR_MODE}" "${TRACKING_ARGS[@]}" \
             --text-limits "${HOTPOTQA_TEXT_LIMITS_JSON:-null}" --stage "${HOTPOTQA_PILOT_STAGE:-preliminary}"
         if [[ -n "${HOTPOTQA_BATCHING_WORKERS:-}" ]]; then
             for calibration_workers in ${HOTPOTQA_BATCHING_WORKERS}; do
@@ -151,6 +163,7 @@ if [[ "${HOTPOTQA_PILOT_ONLY}" == "1" ]]; then
                     --wiki17-dir "${WIKI17_DIR}" --workers "${calibration_workers}" \
                     --output-dir "${HOTPOTQA_PILOT_ROOT}/batching-w${calibration_workers}" \
                     --throughput-questions "${HOTPOTQA_THROUGHPUT_QUESTIONS:-48}" \
+                    --editor-mode "${HOTPOTQA_EDITOR_MODE}" "${TRACKING_ARGS[@]}" \
                     --text-limits "${HOTPOTQA_TEXT_LIMITS_JSON:-null}" --stage throughput
             done
         fi
@@ -185,6 +198,7 @@ if [[ "${HOTPOTQA_PILOT_ONLY}" == "1" ]]; then
         --model "${SOLVER_MODEL}" --api-base "${SOLVER_API_BASE}" \
         --wiki17-dir "${WIKI17_DIR}" --workers "${MAX_WORKERS}" \
         --output-dir "${HOTPOTQA_PILOT_ROOT:?pilot output root required}" \
+        --editor-mode "${HOTPOTQA_EDITOR_MODE}" "${TRACKING_ARGS[@]}" \
         --text-limits "${HOTPOTQA_TEXT_LIMITS_JSON:-null}" --stage "${HOTPOTQA_PILOT_STAGE:-all}"
     exit 0
 fi
@@ -228,6 +242,7 @@ echo "==> retrieval=Wiki-2017/BM25 k=7 concurrent_examples=${MAX_WORKERS} root=$
     "${REFLECTION_API_ARG[@]}" \
     --max-metric-calls "${MAX_METRIC_CALLS}" \
     --condition "${CONDITION}" \
+    --editor-mode "${HOTPOTQA_EDITOR_MODE}" "${TRACKING_ARGS[@]}" \
     --text-limits "${HOTPOTQA_TEXT_LIMITS_JSON:-null}" \
     --program 2stage \
     --seed-style structured \

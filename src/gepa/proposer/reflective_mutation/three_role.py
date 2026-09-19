@@ -32,6 +32,7 @@ from gepa.proposer.reflective_mutation.reflection_lm import (
     ReflectionProposal,
     StatelessReflectionLM,
 )
+from gepa.proposer.reflective_mutation.single_call_proposer import SINGLE_CALL_EXECUTION_CONTRACT, SingleCallProposer
 from gepa.response_journal import stable_api_base_identity
 from gepa.strategies.action_space import IncompleteActionDistributionError
 from gepa.strategies.document_template import TEMPLATE_FAMILIES, DocumentTemplate, MalformedDocumentError
@@ -461,6 +462,7 @@ class ThreeRoleReflectionLM:
         proposer_model: str | None = None,
         react_max_iterations: int | None = None,
         react_max_tool_calls: int | None = None,
+        editor_mode: str = "react",
         text_limits: TextLimits | None = None,
     ):
         """Validate and store the complete three-role strategy configuration.
@@ -498,6 +500,7 @@ class ThreeRoleReflectionLM:
                 Manifestor model.
             manifestor_traces_chars: Maximum trace characters shown to the
                 Manifestor.
+            editor_mode: Multi-turn ``react`` or one-response ``single_call`` editing.
             proposer_model: Model identifier persisted in the run contract.
             react_max_iterations: Maximum ReAct turns, or ``None`` for no limit.
             react_max_tool_calls: Maximum valid calls, or ``None`` for no limit.
@@ -523,6 +526,12 @@ class ThreeRoleReflectionLM:
             if kind not in self.templates:
                 raise ValueError(f"component_kinds[{name!r}] must be one of {sorted(self.templates)}; got {kind!r}")
 
+        if editor_mode not in {"react", "single_call"}:
+            raise ValueError("editor_mode must be react or single_call")
+        if editor_mode == "single_call" and edit_tool_set != "broad":
+            raise ValueError("Single-call editing requires the broad direct-tool basis")
+        self.editor_mode = editor_mode
+        self.proposer_backend = "single_call" if editor_mode == "single_call" else "react_v2"
         self.base_lm = base_lm
         self.level = level
         self.edit_tool_set = edit_tool_set
@@ -693,19 +702,19 @@ class ThreeRoleReflectionLM:
             "branch_history": {
                 "storage": "target_scoped_user_assistant_messages",
                 "direct_deepseek_native_delivery": "quoted_user_context",
-                "other_delivery": "provider_chat_messages",
+                "other_delivery": "quoted_user_context" if self.editor_mode == "single_call" else "provider_chat_messages",
             },
             "proposer_model": self.proposer_model,
-            "proposer_backend": "react_v2",
+            "proposer_backend": self.proposer_backend,
             "proposer_lm": proposer_lm_identity,
             "controller_lm": controller_lm_identity,
             "manifestor_lm": manifestor_lm_identity,
-            "max_proposer_model_calls": self.react_max_iterations,
+            "max_proposer_model_calls": 1 if self.editor_mode == "single_call" else self.react_max_iterations,
             "react_max_iterations": self.react_max_iterations,
             "react_max_tool_calls": self.react_max_tool_calls,
             "react_execution": {
-                **REACT_V2_EXECUTION_CONTRACT,
-                "max_iterations": self.react_max_iterations,
+                **(SINGLE_CALL_EXECUTION_CONTRACT if self.editor_mode == "single_call" else REACT_V2_EXECUTION_CONTRACT),
+                "max_iterations": 1 if self.editor_mode == "single_call" else self.react_max_iterations,
                 "max_tool_calls": self.react_max_tool_calls,
             },
         }
@@ -1057,7 +1066,7 @@ class ThreeRoleReflectionLM:
                     }
                     records.append(
                         {
-                            "backend": "react_v2",
+                            "backend": self.proposer_backend,
                             "component": name,
                             "edit_target": action.edit_target.label,
                             "action_choice": action.menu_id,
@@ -1089,7 +1098,8 @@ class ThreeRoleReflectionLM:
                         self.logger.log(f"Component {name!r} dropped after Manifestor failure: {exc}")
                     continue
 
-            react = ReActV2Proposer(
+            proposer_class = SingleCallProposer if self.editor_mode == "single_call" else ReActV2Proposer
+            react = proposer_class(
                 self.base_lm,
                 template,
                 self.edit_tools,
@@ -1147,7 +1157,7 @@ class ThreeRoleReflectionLM:
                         new_component = None
 
             record = {
-                "backend": "react_v2",
+                "backend": self.proposer_backend,
                 "component": name,
                 "edit_target": action.edit_target.label,
                 "action_choice": action.menu_id,
@@ -1187,7 +1197,7 @@ class ThreeRoleReflectionLM:
                 {
                     "action": primary["tracking_id"],
                     "reflection_level": self.level,
-                    "proposer_backend": "react_v2",
+                    "proposer_backend": self.proposer_backend,
                     "edit_target": primary["edit_target"],
                     "action_choice": primary["action_choice"],
                     "action_operator": primary["action_operator"],

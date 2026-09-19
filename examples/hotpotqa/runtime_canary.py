@@ -17,6 +17,7 @@ from examples.common.provider_retries import PROVIDER_RETRY_POLICY, provider_ret
 from examples.hotpotqa.utils import resolve_hotpotqa_lm_kwargs
 from gepa.lm import LM, ToolCompletion
 from gepa.proposer.reflective_mutation.react_v2_proposer import ReActV2Proposer
+from gepa.proposer.reflective_mutation.single_call_proposer import SingleCallProposer
 from gepa.strategies.document_template import TEMPLATE_FAMILIES, EditTarget
 from gepa.strategies.edit_tools import EDIT_TOOL_SETS, EditTool
 
@@ -238,7 +239,7 @@ def _validate_edit_result(tool: EditTool, edited_text: str) -> None:
             raise RuntimeCanaryError("MOVE_TEXT probe did not move the target before its anchor.")
 
 
-def _edit_probe(lm: LM, tool: EditTool, attempt: int, result_log: Path | None = None) -> int:
+def _edit_probe(lm: LM, tool: EditTool, attempt: int, result_log: Path | None = None, editor_mode: str = "react") -> int:
     """Exercise one real ReAct V2 proposal with the complete four-tool menu.
 
     Args:
@@ -254,7 +255,8 @@ def _edit_probe(lm: LM, tool: EditTool, attempt: int, result_log: Path | None = 
         RuntimeCanaryError: ReAct V2 fails to complete the exact requested edit
             and explicit finish, or emits degenerate content.
     """
-    proposer = ReActV2Proposer(
+    proposer_class = SingleCallProposer if editor_mode == "single_call" else ReActV2Proposer
+    proposer = proposer_class(
         lm,
         TEMPLATE_FAMILIES["generic"]["system_prompt"],
         EDIT_TOOL_SETS["broad"],
@@ -268,7 +270,7 @@ def _edit_probe(lm: LM, tool: EditTool, attempt: int, result_log: Path | None = 
         edit_target=EditTarget("final_answer", "Task"),
         preferred_tool=tool,
         steering_message=(
-            f"This compatibility probe requires one literal operation followed by <finish>: {_EDIT_STEERING[tool]}"
+            f"This compatibility probe requires one literal operation{'' if editor_mode == 'single_call' else ' followed by <finish>'}: {_EDIT_STEERING[tool]}"
         ),
         feedback_summary=(
             "The current answer sometimes overlooks uncertainty and source attribution. Preserve the task's "
@@ -294,7 +296,8 @@ def _edit_probe(lm: LM, tool: EditTool, attempt: int, result_log: Path | None = 
         )
     completed_steps = [step for step in result.steps if step.error is None]
     rejected_steps = [step for step in result.steps if step.error is not None]
-    if [step.action for step in completed_steps] != [tool.value, "FINISH"] or any(
+    expected_actions = [tool.value] if editor_mode == "single_call" else [tool.value, "FINISH"]
+    if (editor_mode == "single_call" and result.iterations != 1) or [step.action for step in completed_steps] != expected_actions or any(
         step.action != "INVALID" or step.executed_edit for step in rejected_steps
     ):
         raise RuntimeCanaryError(
@@ -306,6 +309,23 @@ def _edit_probe(lm: LM, tool: EditTool, attempt: int, result_log: Path | None = 
     return len(rejected_steps)
 
 
+def _ordered_batch_probe(lm: LM, result_log: Path | None) -> None:
+    """Verify two dependent edits can execute in one native model response."""
+    proposer = SingleCallProposer(lm, TEMPLATE_FAMILIES["generic"]["system_prompt"], EDIT_TOOL_SETS["broad"])
+    result = proposer.propose(
+        "Cite primary sources.", EditTarget("final_answer", "Task"), EditTool.REPLACE_TEXT,
+        "Emit exactly two REPLACE_TEXT calls in this single response. First replace 'Cite primary sources.' "
+        "with 'Cite sources inline.'. Then replace 'Cite sources inline.' with 'Cite primary sources inline.'. "
+        "The second call must target the intermediate text. Do not combine the calls or emit a finish action.",
+        "Test ordered application of a batch.", "", [], None,
+    )
+    if result_log is not None:
+        with result_log.open("a") as stream:
+            stream.write(json.dumps({"probe": "ordered_batch", "result": asdict(result)}) + "\n")
+    if result.iterations != 1 or result.tool_calls != 2 or result.new_text != "Cite primary sources inline." or result.dropped_reason:
+        raise RuntimeCanaryError(f"Single-response ordered batch failed: {result!r}")
+
+
 def run_runtime_canary(
     model: str,
     api_base: str,
@@ -313,6 +333,7 @@ def run_runtime_canary(
     attempt_log: Path | None = None,
     *,
     workers: int = 1,
+    editor_mode: str = "react",
 ) -> dict[str, object]:
     """Run the complete local completion and ReAct V2 compatibility gate.
 
@@ -331,6 +352,8 @@ def run_runtime_canary(
             repetitions are requested, or any completion/tool probe fails.
         ValueError: The model identifier is outside the scientific catalog.
     """
+    if editor_mode not in ("react", "single_call"):
+        raise ValueError("Unknown editor mode")
     _validate_loopback_api_base(api_base)
     if workers not in (1, 2, 4):
         raise ValueError("Canary workers must be 1, 2, or 4")
@@ -354,7 +377,8 @@ def run_runtime_canary(
     def probe(offset: int) -> tuple[EditTool, int]:
         """Give each independent edit its own client and sequential tool conversation."""
         tool = tools[offset % len(tools)]
-        return tool, _edit_probe(LM(model, **lm_kwargs), tool, offset + 1, result_log)
+        kwargs = {"editor_mode": editor_mode} if editor_mode != "react" else {}
+        return tool, _edit_probe(LM(model, **lm_kwargs), tool, offset + 1, result_log, **kwargs)
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         results = list(pool.map(probe, range(attempts)))
@@ -365,8 +389,12 @@ def run_runtime_canary(
     missing_tools = [tool.value for tool in tools if tool_counts[tool.value] == 0]
     if missing_tools:
         raise RuntimeCanaryError(f"Runtime canary did not exercise every broad edit tool: {', '.join(missing_tools)}")
+    if editor_mode == "single_call":
+        _ordered_batch_probe(LM(model, **lm_kwargs), result_log)
     return {
         "status": "passed",
+        "editor_mode": editor_mode,
+        **({"ordered_single_response_batch": "passed"} if editor_mode == "single_call" else {}),
         "provider_retry_policy": PROVIDER_RETRY_POLICY,
         "model": model,
         "api_base": api_base,
@@ -388,6 +416,7 @@ def main() -> None:
     parser.add_argument("--model", required=True, help="Exact local LiteLLM model identifier")
     parser.add_argument("--api-base", required=True, help="Local OpenAI-compatible /v1 endpoint")
     parser.add_argument("--attempt-log", type=Path, help="JSONL destination for provider attempts")
+    parser.add_argument("--editor-mode", choices=("react", "single_call"), default="react")
     parser.add_argument("--workers", type=int, default=1, choices=(1, 2, 4))
     parser.add_argument(
         "--attempts",
@@ -397,7 +426,7 @@ def main() -> None:
     )
     args = parser.parse_args()
     try:
-        summary = run_runtime_canary(args.model, args.api_base, args.attempts, args.attempt_log, workers=args.workers)
+        summary = run_runtime_canary(args.model, args.api_base, args.attempts, args.attempt_log, workers=args.workers, editor_mode=args.editor_mode)
     except (RuntimeError, ValueError, TypeError) as exc:
         parser.exit(1, f"Runtime canary failed: {exc}\n")
     print(json.dumps(summary, indent=2, sort_keys=True))

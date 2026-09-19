@@ -1,5 +1,6 @@
-"""Record an explicitly reviewed random-action addition to an immutable campaign."""
+"""Preserve actual revisions while narrowly qualifying reviewed source handoffs."""
 
+import hashlib
 import json
 import os
 import re
@@ -11,16 +12,29 @@ def comparison_runtime(contract: dict) -> dict:
     review = contract.get("source_compatibility")
     if review is None:
         return runtime
+    cell = (contract.get("condition"), contract.get("optimizer", {}).get("max_metric_calls"))
+    if not isinstance(review, dict):
+        raise ValueError("Source compatibility requires an explicit review record.")
+    if review.get("schema_version") == 1:
+        allowed = cell == ("random", 6_871)
+    elif review.get("schema_version") == 2:
+        allowed = review.get("kind") == "single_call_editor_tracking_handoff" and cell in {
+            ("react_v2", 6_871), ("react_v2_random", 6_871), ("action", 6_871), ("random", 6_871),
+            ("vanilla", 13_742), ("react_v2", 13_742),
+        }
+        optimizer = contract.get("optimizer", {})
+        if "rendered_seed" in optimizer:
+            digest = hashlib.sha256(json.dumps(optimizer, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+            allowed = allowed and digest == review.get("optimizer_sha256")
+    else:
+        allowed = False
     if (
-        not isinstance(review, dict)
-        or review.get("schema_version") != 1
-        or contract.get("condition") != "random"
-        or contract.get("optimizer", {}).get("max_metric_calls") != 6_871
+        not allowed
         or review.get("campaign_id") != runtime.get("campaign_id")
         or review.get("source_commit") != runtime.get("source_commit")
         or review.get("source_manifest_sha256") != runtime.get("source_manifest_sha256")
     ):
-        raise ValueError("Source compatibility is restricted to the reviewed standard random-action addition.")
+        raise ValueError("Source compatibility is restricted to the exact reviewed cell and optimizer contract.")
     for key, length in (
         ("source_commit", 40),
         ("base_source_commit", 40),

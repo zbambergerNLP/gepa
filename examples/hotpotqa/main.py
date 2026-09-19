@@ -68,6 +68,7 @@ from examples.hotpotqa.baseline import (
     load_baseline_record,
 )
 from examples.hotpotqa.source_compatibility import compatibility_contract
+from examples.hotpotqa.tracking import HotpotqaWandb, report_completed
 from examples.hotpotqa.utils import (
     HOTPOTQA_DSPY_COMMIT,
     HOTPOTQA_DSPY_VERSION,
@@ -94,6 +95,7 @@ from gepa.optimize_anything import (
     optimize_anything,
 )
 from gepa.proposer.reflective_mutation.react_v2_proposer import REACT_V2_EXECUTION_CONTRACT
+from gepa.proposer.reflective_mutation.single_call_proposer import SINGLE_CALL_EXECUTION_CONTRACT
 from gepa.response_journal import RESPONSE_JOURNAL_SCHEMA_VERSION, RESPONSE_JOURNAL_SCOPE_POLICY
 from gepa.strategies.action_space import (
     RandomActionSelector,
@@ -674,7 +676,7 @@ def build_run_contract(condition: str, args) -> dict:
             "manifestor_traces_chars": text_limits.manifestor_trace_chars,
             "document_length": text_limits.document_contract(),
             "text_limits": text_limits.to_dict(),
-            "react_execution": deepcopy(REACT_V2_EXECUTION_CONTRACT) if condition in _REACT_V2_CONDITIONS else None,
+            "react_execution": deepcopy(SINGLE_CALL_EXECUTION_CONTRACT if getattr(args, "editor_mode", "react") == "single_call" else REACT_V2_EXECUTION_CONTRACT) if condition in _REACT_V2_CONDITIONS else None,
             "skip_perfect_score": True,
             "perfect_score": 1.0,
             "merge": merge,
@@ -712,7 +714,7 @@ def build_run_contract(condition: str, args) -> dict:
             "branch_history": (
                 {
                     "storage": "target_scoped_user_assistant_messages",
-                    "delivery": "provider_chat_messages",
+                    "delivery": "quoted_user_context" if getattr(args, "editor_mode", "react") == "single_call" else "provider_chat_messages",
                 }
                 if condition in _REACT_V2_CONDITIONS
                 else None
@@ -1356,6 +1358,7 @@ def build_config(condition: str, args, reflection_lm_kwargs: dict, run_dir: str 
             lm_kwargs=react_v2_kwargs,
             level=args.reflection_level,
             edit_tool_set=args.edit_tool_set,
+            editor_mode=getattr(args, "editor_mode", "react"),
             template_family=args.template_family,
             component_kinds=_component_kinds(args.program),
             controller_selection="uniform_random" if condition == "react_v2_random" else "verbalized",
@@ -1574,6 +1577,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Reflection level: 1 selects a section; 2 also selects and applies a semantic action",
     )
     parser.add_argument(
+        "--editor-mode", choices=["react", "single_call"], default="react",
+        help="FOREST editor: observation loop or one response with an atomic ordered edit batch",
+    )
+    parser.add_argument(
         "--edit-tool-set",
         choices=["minimal", "broad"],
         default="broad",
@@ -1585,6 +1592,8 @@ def build_parser() -> argparse.ArgumentParser:
         default="auto",
         help="Prompt template family; auto selects one from the student/solver model",
     )
+    parser.add_argument("--wandb-project", help="Record portable offline W&B logs for later sync")
+    parser.add_argument("--wandb-entity", help="W&B account or team used during later synchronization")
     parser.add_argument("--tag", type=str, default="", help="Suffix appended to run dirs (e.g. rev2, 6871)")
     parser.add_argument(
         "--text-limits",
@@ -1711,6 +1720,8 @@ def main():
         config, selector = build_config(condition, args, reflection_lm_kwargs, run_dir=run_dir)
         trackers[condition] = ActionDiversityCallback(selector=selector)
         callbacks = [trackers[condition], RecoveryCallback(Path(run_dir))]
+        if args.wandb_project:
+            callbacks.append(HotpotqaWandb(Path(run_dir), run_contract, args.wandb_project, args.wandb_entity))
         seed = seed_candidate(args.program, args.seed_style, resolved_family)
         condition_label = _CONDITION_LABELS[condition]
         if args.merge:
@@ -1811,6 +1822,11 @@ def main():
             encoding="utf-8",
         )
         temporary_metrics_path.replace(final_metrics_path)
+        if args.wandb_project:
+            try:
+                report_completed(Path(run_dirs[name]), args.wandb_project, args.wandb_entity)
+            except Exception as exc:
+                print(f"W&B final reporting failed; saved results can be backfilled: {type(exc).__name__}: {exc}")
         print(f"[{name}]")
         print(f"  candidates explored:      {len(result.candidates)}")
         print(f"  best val score (EM):      {result.val_aggregate_scores[result.best_idx]:.4f}")

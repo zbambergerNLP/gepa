@@ -198,6 +198,7 @@ def build_react_v2_strategy(
     template_family: str,
     component_kinds: dict[str, str] | None = None,
     controller_selection: str = "verbalized",
+    editor_mode: str = "react",
     rng: random.Random | None = None,
     manifestor_traces_chars: int | None = None,
     manifestor_temperature: float = 0.0,
@@ -218,6 +219,7 @@ def build_react_v2_strategy(
         template_family: Explicit provider family or ``"auto"``.
         component_kinds: Optional message role for each optimized component.
         controller_selection: ``"verbalized"`` or ``"uniform_random"``.
+        editor_mode: Multi-turn ``react`` or one-response ``single_call`` editing.
         rng: Optional Controller RNG kept separate from GEPA's engine RNG.
         manifestor_traces_chars: Trace character cap, or ``None`` to rely on
             the configured model's context window.
@@ -237,7 +239,7 @@ def build_react_v2_strategy(
     proposer_kwargs = dict(lm_kwargs)
     if react_top_p is not None:
         proposer_kwargs["top_p"] = react_top_p
-    separate_controller = proposer_kwargs != controller_kwargs and level >= 1 and controller_selection == "verbalized"
+    separate_controller = (proposer_kwargs != controller_kwargs or editor_mode == "single_call") and level >= 1 and controller_selection == "verbalized"
     manifestor_kwargs = dict(lm_kwargs)
     manifestor_kwargs["temperature"] = manifestor_temperature
     if "response_journal_path" in lm_kwargs:
@@ -247,7 +249,7 @@ def build_react_v2_strategy(
     if PROVIDER_RETRY_KEY in lm_kwargs:
         for kwargs, role in (
             (controller_kwargs, "controller"),
-            (proposer_kwargs, "editor" if separate_controller else "controller_editor"),
+            (proposer_kwargs, "editor" if separate_controller or editor_mode == "single_call" else "controller_editor"),
             (manifestor_kwargs, "manifestor"),
         ):
             kwargs[PROVIDER_RETRY_KEY] = {**kwargs[PROVIDER_RETRY_KEY], "role": role}
@@ -258,6 +260,7 @@ def build_react_v2_strategy(
         component_kinds=component_kinds,
         template_family=resolved_family,
         controller_selection=controller_selection,
+        editor_mode=editor_mode,
         controller_lm=LM(reflection_model, **controller_kwargs) if separate_controller else None,
         manifestor_lm=LM(reflection_model, **manifestor_kwargs),
         proposer_model=proposer_model or reflection_model,

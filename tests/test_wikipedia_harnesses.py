@@ -1,4 +1,4 @@
-"""Tests for the Wikipedia-backed HotPotQA and HOVER runners."""
+"""Tests for the Wikipedia-backed HotPotQA runner."""
 
 import asyncio
 import fcntl
@@ -28,16 +28,8 @@ from examples.common.experiment_models import (
 from examples.common.wikipedia import WikipediaClient, WikipediaPassage
 from examples.hotpotqa import main as hotpot_main
 from examples.hotpotqa import utils as hotpot_utils
-from examples.hover import utils as hover_utils
-from examples.hover.main import make_evaluator as make_hover_evaluator
 
 REPO_ROOT = Path(__file__).parents[1]
-HOVER_COT_OUTPUTS = (
-    "[[ ## reasoning ## ]]\nsummary one reasoning\n\n[[ ## summary ## ]]\nsummary one\n\n[[ ## completed ## ]]",
-    "[[ ## reasoning ## ]]\nquery two reasoning\n\n[[ ## query ## ]]\nquery two\n\n[[ ## completed ## ]]",
-    "[[ ## reasoning ## ]]\nsummary two reasoning\n\n[[ ## summary ## ]]\nsummary two\n\n[[ ## completed ## ]]",
-    "[[ ## reasoning ## ]]\nquery three reasoning\n\n[[ ## query ## ]]\nquery three\n\n[[ ## completed ## ]]",
-)
 HOTPOT_COT_RESULTS = (
     ("summary one reasoning", "summary one"),
     ("bridge query reasoning", "bridge query"),
@@ -118,41 +110,6 @@ def test_hotpot_lm_uses_local_campaign_decoding(monkeypatch, model: str) -> None
 
 
 @pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL])
-def test_hover_lm_uses_local_decoding_and_thinking(monkeypatch, model: str) -> None:
-    """Send the selected model decoding and thinking controls for HoVer.
-
-    Args:
-        monkeypatch: Pytest fixture used to replace LiteLLM completion.
-        model: Existing HoVer experiment model under test.
-    """
-    calls = []
-
-    def completion(**kwargs):
-        """Capture one completion request and return fixed content.
-
-        Args:
-            **kwargs: LiteLLM completion arguments under test.
-
-        Returns:
-            Minimal response object containing ``answer``.
-        """
-        calls.append(kwargs)
-        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="answer"))])
-
-    monkeypatch.setattr(hover_utils.litellm, "completion", completion)
-
-    assert hover_utils._call_lm("", "question", model, None) == "answer"
-    assert calls[0]["messages"] == [{"role": "user", "content": "question"}]
-    assert {key: value for key, value in calls[0].items() if key not in {"model", "messages", "timeout"}} == {
-        "num_retries": EXPERIMENT_NUM_RETRIES,
-        **experiment_decoding(model),
-        **experiment_request_overrides(model),
-    }
-    assert "seed" not in calls[0]
-    assert calls[0].get("extra_body") == experiment_request_overrides(model).get("extra_body")
-
-
-@pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL])
 def test_litellm_preserves_local_thinking_and_effort_settings(model: str) -> None:
     """Keep both providers' explicit thinking controls in the outgoing vLLM request."""
     request_overrides = experiment_request_overrides(model, explicit_reasoning=True)
@@ -219,61 +176,6 @@ def test_wikipedia_client_orders_and_persists_results(tmp_path) -> None:
         transport=Mock(side_effect=AssertionError("cache miss")),
     )
     assert cached_client.search("multi hop", 2) == first
-
-
-def test_hover_chain_of_thought_matches_dspy_field_protocol(monkeypatch) -> None:
-    """Format and parse HoVer calls with the artifact's DSPy field protocol.
-
-    Args:
-        monkeypatch: Pytest fixture used to replace LiteLLM completion.
-    """
-    calls = []
-
-    def completion(**kwargs):
-        """Capture one completion request and return structured CoT fields.
-
-        Args:
-            **kwargs: LiteLLM completion arguments under test.
-
-        Returns:
-            Minimal response containing the first artifact-style completion.
-        """
-        calls.append(kwargs)
-        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=HOVER_COT_OUTPUTS[0]))])
-
-    monkeypatch.setattr(hover_utils.litellm, "completion", completion)
-
-    reasoning, summary = hover_utils._call_chain_of_thought(
-        "Summarize the evidence.",
-        {"claim": "claim", "passages": ["Page A | text", "Page B | other"]},
-        "summary",
-        QWEN3_8_27B_MODEL,
-        None,
-    )
-
-    assert (reasoning, summary) == ("summary one reasoning", "summary one")
-    assert calls[0]["max_tokens"] == 16_384
-    assert "seed" not in calls[0]
-    assert "extra_body" not in calls[0]
-    system, user = [message["content"] for message in calls[0]["messages"]]
-    assert "Your input fields are:\n1. `claim` (str): \n2. `passages` (str): " in system
-    assert "Your output fields are:\n1. `reasoning` (str): \n2. `summary` (str): " in system
-    assert "[[ ## reasoning ## ]]\n{reasoning}" in system
-    assert "In adhering to this structure, your objective is: \n        Summarize the evidence." in system
-    assert user.startswith(
-        "[[ ## claim ## ]]\nclaim\n\n[[ ## passages ## ]]\n[1] «Page A | text»\n[2] «Page B | other»"
-    )
-    assert user.endswith("then ending with the marker for `[[ ## completed ## ]]`.")
-
-    monkeypatch.setattr(hover_utils, "_call_lm", Mock(return_value="unstructured summary"))
-    with pytest.raises(ValueError, match="omitted required fields"):
-        hover_utils._call_chain_of_thought(
-            "Summarize the evidence.",
-            {"claim": "claim", "passages": ["Page A | text"]},
-            "summary",
-            QWEN3_8_27B_MODEL,
-            None,
-        )
 
 
 @pytest.mark.skipif(hotpot_utils.dspy is None, reason="HotPotQA's locked DSPy group is not installed")
@@ -971,293 +873,7 @@ def test_hotpot_f1_uses_ordinary_token_overlap_for_yes_no_answers() -> None:
     assert hotpot_utils.f1_score("no", "yes") == 0.0
 
 
-def test_hover_loader_reproduces_artifact_splits_and_seed_remixing(tmp_path, monkeypatch) -> None:
-    """Reproduce the artifact's exact pool split, sampling, and seed remix.
-
-    Args:
-        tmp_path: Pytest directory containing the synthetic official release.
-        monkeypatch: Pytest fixture used to redirect the pinned data source and
-            scale its eligible-record invariant to the synthetic release.
-    """
-    records = []
-    for index in range(1000):
-        records.append(
-            {
-                "uid": str(index),
-                "claim": f"Claim {index}",
-                "supporting_facts": [
-                    {"key": "Page A", "value": 0},
-                    {"key": "Page A", "value": 1},
-                    {"key": "Page B", "value": 0},
-                    {"key": "Page C", "value": 0},
-                ],
-                "label": "SUPPORTED",
-                "num_hops": 3,
-            }
-        )
-    records.append(
-        {
-            "uid": "excluded",
-            "claim": "Only two documents",
-            "supporting_facts": [["Page A", 0], ["Page B", 0]],
-            "label": "SUPPORTED",
-            "num_hops": 3,
-        }
-    )
-    path = tmp_path / hover_utils.HOVER_TRAIN_FILE
-    path.write_text(json.dumps(records), encoding="utf-8")
-    monkeypatch.setattr(hover_utils, "ensure_data_downloaded", Mock(return_value=path))
-    monkeypatch.setattr(hover_utils, "HOVER_ELIGIBLE_COUNT", 1000)
-
-    train, val, test = hover_utils.load_hover_dataset(data_dir=tmp_path)
-    shuffled_ids = [str(index) for index in range(1000)]
-    random.Random(0).shuffle(shuffled_ids)
-    first_boundary = int(0.4 * len(shuffled_ids))
-    second_boundary = int(0.8 * len(shuffled_ids))
-    expected_test = random.Random(1).sample(shuffled_ids[:first_boundary], 300)
-    expected_val = random.Random(1).sample(shuffled_ids[first_boundary:second_boundary], 300)
-    expected_train = random.Random(1).sample(shuffled_ids[second_boundary:], 150)
-
-    assert (len(train), len(val), len(test)) == (150, 300, 300)
-    assert [example["id"] for example in train] == expected_train
-    assert [example["id"] for example in val] == expected_val
-    assert [example["id"] for example in test] == expected_test
-    assert all(example["gold_titles"] == ["Page A", "Page B", "Page C"] for example in train + val + test)
-    assert all(example["id"] != "excluded" for example in train + val + test)
-
-    train_seeded, val_seeded, test_seeded = hover_utils.load_hover_dataset(seed=7, data_dir=tmp_path)
-    remixed_ids = expected_train + expected_val
-    random.Random(7).shuffle(remixed_ids)
-
-    assert [example["id"] for example in train_seeded] == remixed_ids[:150]
-    assert [example["id"] for example in val_seeded] == remixed_ids[150:]
-    assert [example["id"] for example in test_seeded] == expected_test
-
-
-def test_hover_release_identity_is_pinned_to_the_artifact_source() -> None:
-    """Lock the official release revision, byte identity, and eligible count."""
-    assert hover_utils.HOVER_HF_REVISION == "c0e43052759879b3461642ca6c0dd26658f47691"
-    assert hover_utils.HOVER_SOURCE_REVISION == "39b84697f196308f398a251a7aea9b82ae0f0562"
-    assert hover_utils.HOVER_SOURCE_REVISION in hover_utils.HOVER_TRAIN_URL
-    assert hover_utils.HOVER_TRAIN_SHA256 == "1f1cd57abd616fa00c70bdc575ce77c16fc6cf1a6cffd5ff87c208030a336bb6"
-    assert hover_utils.HOVER_TRAIN_SIZE == 9_205_582
-    assert hover_utils.HOVER_ELIGIBLE_COUNT == 6_084
-
-
-def test_hover_release_validation_rejects_corrupt_existing_and_downloaded_bytes(tmp_path, monkeypatch) -> None:
-    """Reject corrupt HoVer bytes before they can define an experiment split.
-
-    Args:
-        tmp_path: Pytest directory containing isolated existing and download
-            destinations.
-        monkeypatch: Pytest fixture used to replace the network downloader.
-    """
-    existing_dir = tmp_path / "existing"
-    existing_dir.mkdir()
-    (existing_dir / hover_utils.HOVER_TRAIN_FILE).write_bytes(b"corrupt")
-
-    with pytest.raises(RuntimeError, match="does not match the pinned v1.1 artifact"):
-        hover_utils.ensure_data_downloaded(existing_dir)
-
-    download_dir = tmp_path / "download"
-
-    def write_corrupt_download(_url, destination) -> None:
-        """Write invalid bytes in place of the remote HoVer artifact.
-
-        Args:
-            _url: Download URL retained for the ``urlretrieve`` signature.
-            destination: Partial-file path that receives invalid bytes.
-        """
-        Path(destination).write_bytes(b"corrupt")
-
-    monkeypatch.setattr(hover_utils.urllib.request, "urlretrieve", write_corrupt_download)
-    with pytest.raises(RuntimeError, match="Could not download the official HoVer v1.1 data"):
-        hover_utils.ensure_data_downloaded(download_dir)
-
-    assert not (download_dir / f"{hover_utils.HOVER_TRAIN_FILE}.part").exists()
-
-
-def test_hover_eligibility_counts_distinct_raw_titles_before_normalization() -> None:
-    """Mirror the artifact when distinct raw titles normalize to one title."""
-    record = {
-        "supporting_facts": [
-            ["The Page", 0],
-            ["Page", 0],
-            ["Other", 0],
-            ["The Page", 1],
-        ]
-    }
-
-    assert hover_utils._supporting_titles(record) == ["The Page", "Page", "Other"]
-
-
-def test_hover_program_scores_pages_retrieved_across_three_hops(monkeypatch) -> None:
-    """Accumulate pages from every HOVER retrieval hop before scoring.
-
-    Args:
-        monkeypatch: Pytest fixture used to provide deterministic LM outputs.
-    """
-    monkeypatch.setattr(
-        hover_utils,
-        "_call_lm",
-        Mock(side_effect=HOVER_COT_OUTPUTS),
-    )
-    retriever = FakeRetriever(
-        {
-            "claim": [WikipediaPassage("Page A", "a")],
-            "query two": [WikipediaPassage("Page B", "b")],
-            "query three": [WikipediaPassage("Page C", "c")],
-        }
-    )
-
-    queries, passages, trace = hover_utils.run_two_stage(
-        "summarize one",
-        "query two prompt",
-        "summarize two",
-        "query three prompt",
-        "claim",
-        retriever,
-    )
-    example = {"gold_titles": ["Page A", "Page B", "Page C"]}
-    score, feedback = hover_utils.hover_metric(passages, example)
-
-    assert json.loads(queries) == ["query two", "query three"]
-    assert retriever.calls == [("claim", 7), ("query two", 7), ("query three", 10)]
-    assert score == 1.0
-    assert hover_utils.hover_recall(passages, example) == 1.0
-    assert "Retrieved 3/3" in feedback
-    assert trace["hop1_documents"] == [WikipediaPassage("Page A", "a")]
-    assert trace["summary_1_reasoning"] == "summary one reasoning"
-    assert trace["hop2_documents"] == [WikipediaPassage("Page B", "b")]
-    assert trace["query_2_reasoning"] == "query two reasoning"
-    assert trace["hop3_documents"] == [WikipediaPassage("Page C", "c")]
-    assert trace["query_3_reasoning"] == "query three reasoning"
-    assert trace["retrieved_documents"] == passages
-
-    records = hover_utils.artifact_component_records({"claim": "claim", **example}, trace, score)
-    assert list(records) == ["summarize1", "create_query_hop2", "summarize2", "create_query_hop3"]
-    assert records["summarize1"]["Inputs"] == {"claim": "claim", "passages": ["Page A | a"]}
-    assert records["create_query_hop2"]["Generated Outputs"] == {
-        "reasoning": "query two reasoning",
-        "query": "query two",
-    }
-    assert records["summarize2"]["Inputs"]["context"] == "summary one"
-    assert records["create_query_hop3"]["Generated Outputs"] == {
-        "reasoning": "query three reasoning",
-        "query": "query three",
-    }
-    assert all("gold_titles" not in record["Inputs"] for record in records.values())
-
-
-def test_hover_component_feedback_attributes_each_retrieval_hop() -> None:
-    """Give each HoVer component only its artifact-equivalent diagnosis."""
-    trace = {
-        "hop1_documents": [WikipediaPassage("Page A", "a")],
-        "summary_1": "summary one",
-        "query_2": "query two",
-        "hop2_documents": [WikipediaPassage("Page B", "b")],
-        "summary_2": "summary two",
-        "query_3": "query three",
-        "hop3_documents": [WikipediaPassage("Page D", "d")],
-    }
-    records = hover_utils.artifact_component_records(
-        {"claim": "claim", "gold_titles": ["Page A", "Page B", "Page C"]},
-        trace,
-        0.0,
-    )
-
-    assert "page b" in records["summarize1"]["Feedback"]
-    assert "page b" in records["create_query_hop2"]["Feedback"]
-    assert "page c" in records["summarize2"]["Feedback"]
-    assert "page c" in records["create_query_hop3"]["Feedback"]
-    assert "page b" not in records["create_query_hop3"]["Feedback"]
-
-
-def test_hover_evaluator_exposes_only_four_component_specific_records(monkeypatch) -> None:
-    """Prevent global feedback from leaking into every optimized component.
-
-    Args:
-        monkeypatch: Pytest fixture used to provide deterministic LM outputs.
-    """
-    monkeypatch.setattr(
-        hover_utils,
-        "_call_lm",
-        Mock(side_effect=HOVER_COT_OUTPUTS),
-    )
-    retriever = FakeRetriever(
-        {
-            "claim": [WikipediaPassage("Page A", "a")],
-            "query two": [WikipediaPassage("Page B", "b")],
-            "query three": [WikipediaPassage("Page C", "c")],
-        }
-    )
-    evaluator = make_hover_evaluator(QWEN3_8_27B_MODEL, retriever)
-    candidate = {
-        "summarize1": "summarize one",
-        "create_query_hop2": "query two prompt",
-        "summarize2": "summarize two",
-        "create_query_hop3": "query three prompt",
-    }
-
-    score, side_info = evaluator(
-        candidate,
-        {"claim": "claim", "prompt": "claim", "gold_titles": ["Page A", "Page B", "Page C"]},
-    )
-
-    assert score == 1.0
-    assert set(side_info) == {
-        "summarize1_specific_info",
-        "create_query_hop2_specific_info",
-        "summarize2_specific_info",
-        "create_query_hop3_specific_info",
-    }
-    assert all(set(record) == {"Inputs", "Generated Outputs", "Feedback"} for record in side_info.values())
-
-
-def test_hover_passage_rendering_does_not_truncate_artifact_inputs() -> None:
-    """Render every retrieved abstract even when the combined text is large."""
-    passages = [
-        WikipediaPassage("First", "a" * 12_000),
-        WikipediaPassage("Second", "tail"),
-    ]
-
-    rendered = hover_utils._render_passages(passages)
-
-    assert rendered == [f"First | {'a' * 12_000}", "Second | tail"]
-
-
-def test_hover_smoke_mode_is_explicit_and_offline() -> None:
-    """Provide three offline HOVER examples only when smoke mode is explicit."""
-    train, val, test = hover_utils.load_hover_dataset(smoke=True)
-
-    assert (len(train), len(val), len(test)) == (1, 1, 1)
-    assert all(len(example["gold_titles"]) == 3 for example in train + val + test)
-
-
-def test_hover_sbatch_defaults_are_compatible_with_react_v2() -> None:
-    """Keep the HoVer launcher on the artifact substrate and paired defaults."""
-    script = (REPO_ROOT / "examples" / "hover" / "run_hover.sbatch").read_text()
-
-    assert 'CONDITION="${CONDITION:-both}"' in script
-    assert 'SEED_STYLE="${SEED_STYLE:-structured}"' in script
-    assert 'EXPERIMENT_SEED="${EXPERIMENT_SEED:-0}"' in script
-    assert 'MAX_WORKERS="${MAX_WORKERS:-32}"' in script
-    assert 'RETRIEVAL_K="${RETRIEVAL_K:-7}"' in script
-    assert 'FINAL_RETRIEVAL_K="${FINAL_RETRIEVAL_K:-10}"' in script
-    assert 'MODEL_PROFILE="${MODEL_PROFILE:-qwen3.8-27b}"' in script
-    assert 'MODEL="${MODEL:-Qwen3.8-27B}"' in script
-    assert 'SOLVER_MODEL="hosted_vllm/Qwen/Qwen3.8-27B"' in script
-    assert "#SBATCH --cpus-per-task=32" in script
-    assert "export JAX_PLATFORMS=cpu" in script
-    assert '--data-dir "${HOVER_DATA_DIR}"' in script
-    assert '--wiki17-dir "${WIKI17_DIR}"' in script
-    assert '--max-workers "${MAX_WORKERS}"' in script
-    assert '--seed "${EXPERIMENT_SEED}"' in script
-    assert "load_hover_dataset(seed=0" in script
-    assert "--wikipedia-endpoint" not in script
-
-
-@pytest.mark.parametrize("benchmark", ["hotpotqa", "hover"])
+@pytest.mark.parametrize("benchmark", ["hotpotqa"])
 def test_wikipedia_python_defaults_use_the_qwen_experiment_pair(benchmark: str) -> None:
     """Default both Python model roles to the Qwen3.8-27B condition.
 
@@ -1275,7 +891,7 @@ def test_wikipedia_python_defaults_use_the_qwen_experiment_pair(benchmark: str) 
     assert validator in source
 
 
-@pytest.mark.parametrize("benchmark", ["hotpotqa", "hover"])
+@pytest.mark.parametrize("benchmark", ["hotpotqa"])
 def test_wikipedia_sbatch_exposes_both_homogeneous_model_profiles(benchmark: str) -> None:
     """Run either experiment model in both roles without mixing providers.
 
@@ -1291,8 +907,6 @@ def test_wikipedia_sbatch_exposes_both_homogeneous_model_profiles(benchmark: str
     assert 'SOLVER_MODEL="hosted_vllm/Qwen/Qwen3.8-27B"' in script
     assert 'SOLVER_MODEL="hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash"' in script
     assert 'REFLECTION_MODEL="${SOLVER_MODEL}"' in script
-    if benchmark == "hover":
-        assert 'if [[ "${LOCAL_SOLVER}" == "1" ]]' in script
     assert 'SOLVER_API_ARG=(--solver-api-base "${SOLVER_API_BASE}")' in script
     assert 'REFLECTION_API_ARG=(--reflection-api-base "${REFLECTION_API_BASE}")' in script
     if benchmark == "hotpotqa":
@@ -1383,9 +997,7 @@ def test_hotpotqa_sbatch_limits_nested_cpu_threads_after_vllm_starts() -> None:
     [
         "scripts/della/submit_hotpotqa.sh",
         "scripts/della/fetch_hotpotqa_results.sh",
-        "scripts/della/submit_hover.sh",
         "examples/hotpotqa/run_hotpotqa.sbatch",
-        "examples/hover/run_hover.sbatch",
     ],
 )
 def test_wikipedia_della_launch_scripts_have_valid_bash_syntax(script_path: str) -> None:
@@ -1802,37 +1414,3 @@ def test_hotpotqa_execution_lock_rejects_a_duplicate_writer(tmp_path: Path) -> N
         )
 
     assert contender.returncode != 0
-
-
-def test_hover_della_submit_preserves_artifact_methodology() -> None:
-    """Export every HoVer artifact axis through the Della submission wrapper."""
-    submit = (REPO_ROOT / "scripts" / "della" / "submit_hover.sh").read_text()
-
-    assert 'MAX_METRIC_CALLS="${MAX_METRIC_CALLS:-7051}"' in submit
-    assert 'EXPERIMENT_SEED="${EXPERIMENT_SEED:-0}"' in submit
-    assert 'MAX_WORKERS="${MAX_WORKERS:-32}"' in submit
-    assert 'RETRIEVAL_K="${RETRIEVAL_K:-7}"' in submit
-    assert 'FINAL_RETRIEVAL_K="${FINAL_RETRIEVAL_K:-10}"' in submit
-    assert 'MODEL="${MODEL:-Qwen3.8-27B}"' in submit
-    assert 'SOLVER_MODEL="hosted_vllm/Qwen/Qwen3.8-27B"' in submit
-    assert 'SOLVER_MODEL="hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash"' in submit
-    assert 'REFLECTION_MODEL="${SOLVER_MODEL}"' in submit
-    assert "DEEPSEEK_API_KEY" not in submit
-    assert "examples.common.wiki17_bm25 verify" in submit
-    assert "load_hover_dataset(seed=0" in submit
-    assert "WIKI17_DIR=${WIKI17_DIR}" in submit
-    assert "HOVER_DATA_DIR=${HOVER_DATA_DIR}" in submit
-    for variable in (
-        "PROGRAM",
-        "SEED_STYLE",
-        "TAG",
-        "TRAIN_LIMIT",
-        "VAL_LIMIT",
-        "TEST_LIMIT",
-        "SMOKE",
-        "GEN_GMU",
-        "GEN_MAX_LEN",
-        "HEALTH_TIMEOUT",
-        "POSIT_DIR",
-    ):
-        assert f"{variable}=${{{variable}}}" in submit

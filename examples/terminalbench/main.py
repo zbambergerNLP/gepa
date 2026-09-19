@@ -51,6 +51,7 @@ from examples.terminalbench.pilot import (
 from examples.terminalbench.reflection import ComponentActionReflectionLM
 from examples.terminalbench.runtime import load_role_runtimes
 from examples.terminalbench.token_usage import TOKEN_USAGE_POLICY, observe_optimizer
+from examples.terminalbench.tracking import TerminalbenchWandb, add_tracking_arguments
 from gepa import optimize
 from gepa.adapters.terminal_bench_adapter import (
     TERMINUS_ADAPTER_CONTRACT,
@@ -178,6 +179,7 @@ def build_parser() -> argparse.ArgumentParser:
         Configured argument parser.
     """
     parser = argparse.ArgumentParser(description="GEPA on pinned Terminal-Bench 2.1 through Harbor")
+    add_tracking_arguments(parser)
     parser.add_argument(
         "--optimizer-pilot", action="store_true", help="One real optimizer cycle using three training tasks only"
     )
@@ -598,43 +600,59 @@ def main(argv: list[str] | None = None) -> None:
             text_limits=text_limits,
         )
     cycle = CycleEvidence(args.run_dir) if args.optimizer_pilot else None
-    optimize(
-        seed_candidate=candidate,
-        trainset=trainset,
-        valset=valset,
-        adapter=adapter,
-        reflection_lm=reflection_lm,
-        reflection_lm_kwargs=reflection_lm_kwargs,
-        reflection_strategy=reflection_strategy,
-        max_metric_calls=args.max_metric_calls,
-        stop_callbacks=(
-            cycle.completed_cycle
-            if cycle is not None
-            else MaxCandidateProposalsStopper(contract["optimization_budget"]["max_iterations"])
-        ),
-        callbacks=[RecoveryCallback(args.run_dir), *([cycle] if cycle else [])],
-        batch_sampler=IndependentEpochShuffledBatchSampler(args.reflection_minibatch_size, args.seed),
-        reflection_minibatch_size=None,
-        sampling_strategy=SingleMutationSampling(),
-        module_selector=contract["module_selector"],
-        cache_evaluation=contract["cache_evaluation"],
-        candidate_selection_strategy=contract["candidate_selection_strategy"],
-        frontier_type=contract["frontier_type"],
-        acceptance_criterion=contract["acceptance_criterion"],
-        skip_perfect_score=contract["skip_perfect_score"],
-        perfect_score=contract["perfect_score"],
-        val_evaluation_policy=contract["validation_evaluation"],
-        use_merge=False,
-        raise_on_exception=True,
-        run_dir=str(args.run_dir),
-        seed=args.seed,
-        reflection_level=contract["reflection_level"],
-        edit_tool_set=args.edit_tool_set,
-        component_kinds=scope.component_kinds,
-        template_family=resolved_family,
-        template_model=args.student_model,
-        text_limits=text_limits,
+    tracking = TerminalbenchWandb(
+        args.run_dir,
+        contract,
+        args.wandb_project,
+        args.wandb_entity,
+        args.wandb_group,
+        kind="optimizer-pilot" if args.optimizer_pilot else "optimization",
+        usage_roots=(args.run_dir, args.harbor_work_dir),
     )
+    try:
+        optimize(
+            seed_candidate=candidate,
+            trainset=trainset,
+            valset=valset,
+            adapter=adapter,
+            reflection_lm=reflection_lm,
+            reflection_lm_kwargs=reflection_lm_kwargs,
+            reflection_strategy=reflection_strategy,
+            max_metric_calls=args.max_metric_calls,
+            stop_callbacks=(
+                cycle.completed_cycle
+                if cycle is not None
+                else MaxCandidateProposalsStopper(contract["optimization_budget"]["max_iterations"])
+            ),
+            callbacks=[
+                RecoveryCallback(args.run_dir),
+                *([cycle] if cycle else []),
+                *([tracking] if tracking.run else []),
+            ],
+            batch_sampler=IndependentEpochShuffledBatchSampler(args.reflection_minibatch_size, args.seed),
+            reflection_minibatch_size=None,
+            sampling_strategy=SingleMutationSampling(),
+            module_selector=contract["module_selector"],
+            cache_evaluation=contract["cache_evaluation"],
+            candidate_selection_strategy=contract["candidate_selection_strategy"],
+            frontier_type=contract["frontier_type"],
+            acceptance_criterion=contract["acceptance_criterion"],
+            skip_perfect_score=contract["skip_perfect_score"],
+            perfect_score=contract["perfect_score"],
+            val_evaluation_policy=contract["validation_evaluation"],
+            use_merge=False,
+            raise_on_exception=True,
+            run_dir=str(args.run_dir),
+            seed=args.seed,
+            reflection_level=contract["reflection_level"],
+            edit_tool_set=args.edit_tool_set,
+            component_kinds=scope.component_kinds,
+            template_family=resolved_family,
+            template_model=args.student_model,
+            text_limits=text_limits,
+        )
+    finally:
+        tracking.finish()
 
     if cycle is not None:
         cycle.verify()
@@ -659,6 +677,9 @@ def main(argv: list[str] | None = None) -> None:
             "--docker-executable",
             args.docker_executable,
             *(["--runtime-record", str(args.runtime_record)] if args.runtime_record else []),
+            *(["--wandb-project", args.wandb_project] if args.wandb_project else []),
+            *(["--wandb-entity", args.wandb_entity] if args.wandb_entity else []),
+            *(["--wandb-group", args.wandb_group] if args.wandb_group else []),
         ]
     )
 

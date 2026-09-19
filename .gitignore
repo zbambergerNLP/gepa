@@ -222,5 +222,5 @@ archive/
 mlflow.db
 mlruns/
 
-# HoVer v1.1 data downloaded for local benchmark runs.
+# Preserve ignored data from retired HoVer runs.
 examples/hover/data/

@@ -23,6 +23,7 @@ from examples.terminalbench.main import (
 )
 from examples.terminalbench.pilot import validate_review
 from examples.terminalbench.runtime import load_runtime_record, validate_identity
+from examples.terminalbench.tracking import add_tracking_arguments, record_tracking_error, report_completed
 from gepa.adapters.terminal_bench_adapter import (
     HarborCLI,
     TerminalBenchManifest,
@@ -335,6 +336,7 @@ def evaluate_comparison(
 def main(argv: list[str] | None = None) -> None:
     """Evaluate completed local cells and extend their model's matched comparison."""
     parser = argparse.ArgumentParser(description="Three frozen Terminal-Bench Pass@1 test repetitions")
+    add_tracking_arguments(parser)
     parser.add_argument(
         "--run-dir",
         action="append",
@@ -391,6 +393,19 @@ def main(argv: list[str] | None = None) -> None:
         except BlockingIOError:
             parser.error("Another evaluation is already writing to this output directory")
         summary = evaluate_comparison(manifest, comparison, args.output_dir, harbor)
+        if args.wandb_project:
+            for label, directory in run_dirs.items():
+                try:
+                    report_completed(
+                        directory,
+                        args.output_dir,
+                        label,
+                        args.wandb_project,
+                        args.wandb_entity,
+                        args.wandb_group,
+                    )
+                except Exception as exc:
+                    record_tracking_error(directory, exc)
     for label, scores in summary["harnesses"].items():
         print(f"{label}: Pass@1 {scores['mean_pass_at_1']:.2%} +/- {scores['std_pass_at_1']:.2%}")
     print(f"Saved {args.output_dir / 'summary.json'}")

@@ -15,7 +15,7 @@ the merge. The existing branches are preserved; consolidation is local.
 | Area | Consolidated behavior |
 | --- | --- |
 | Models | Adopt Qwen3.8-27B and DeepSeek-V4.1-Flash, homogeneous across all roles, as explicitly approved during consolidation. Update both benchmarks and shared catalog consumers. |
-| Serving environment | Adopt Zach's separate hash-locked vLLM environments: 0.25.1 for Qwen, exact commit wheel e77daef89 for V4.1. Replace HotPotQA's POSIT provenance with serving-lock and realized-environment hashes. HoVer shared model references are updated; its separate deployment remains outside this campaign. |
+| Serving environment | Adopt Zach's separate hash-locked vLLM environments: 0.25.1 for Qwen, exact commit wheel e77daef89 for V4.1. Replace HotPotQA's POSIT provenance with serving-lock and realized-environment hashes. HoVer support is retired; preserve its historical outputs. |
 | Serving settings | Qwen TP1/DP1/one API/one sequence on 1 H200 (8 CPUs, 128G) and DeepSeek V4.1 TP4/EP4/DP1/one API/one sequence on 4 H200s (32 CPUs, 512G), with explicit Engram CPU offload, context 262,144, bfloat16 activations, checkpoint FP8/FP4 weights, FP8 KV/automatic block size, native V4.1 parsers, and no speculative decoding. |
 | Workers | Confirmed for the initial HotPotQA pilot: 12 Qwen / 4 DeepSeek. Check throughput and timeouts on training examples, then freeze the chosen concurrency across all seven cells per model. Calibration remains pending. |
 | Request timeout/retries | Adopt 3,600 seconds per HotPotQA logical request, shared by our maximum of three transient-error attempts. Keep nested SDK retries zero, 1/2-second backoff, and per-attempt logs. |
@@ -34,6 +34,11 @@ context is 262,144, as in Zach's runtime; the provider advertises 1M. Keep the
 approved smaller output caps. See the provider review for sources.
 
 ## Decisions preserved across benchmarks
+
+HoVer's maintained harness and Della launcher are retired. HotPotQA's immutable
+campaign sources and all historical outputs remain intact. Terminal-Bench's
+[offline W&B reporting](../examples/terminalbench/TRACKING.md) is optional and
+does not change its qualified runtime or authorize launching a campaign.
 
 - Within each benchmark, every ablation and model arm uses identical pinned
   data and exact ordered train/validation/test examples. Match content and

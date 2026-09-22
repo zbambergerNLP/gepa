@@ -3,9 +3,16 @@
 This revision gives the generative Controller complete ordered reflection
 records, including actual component inputs and outputs. All three roles receive
 the same guidance to infer a reusable, scoped lesson from training evidence.
-The Manifestor expresses an observation, hypothesis, general change, and scope.
-The Editor also receives the original selected action's description and
-instruction. The action catalog, sampling, no-op handling, single-response
+The Controller chooses the region and action and supplies the intended direction
+in that option's rationale. The sampled rationale reaches both downstream roles
+verbatim and is recorded with the decision. The Manifestor's observation,
+hypothesis, general change, and scope concretize that direction; they do not
+authorize it to choose a different improvement goal. The Editor receives that
+same Controller direction independently of the Manifestor, along with the
+original selected action's description and instruction. Conflicting advice or
+unsupported direction permits a no-op, not a substitute action. Random Controller
+selection supplies no invented model rationale. The action catalog, sampling,
+no-op handling, single-response
 editing, and atomic rollback behavior are unchanged. These are instructions to
 the models, not a semantic validator or a guarantee of generalization.
 

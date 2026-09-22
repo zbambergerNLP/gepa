@@ -22,11 +22,25 @@ action as permission to introduce a new behavioral requirement. If it cannot exp
 preserve a legitimate no-op rather than force an incompatible edit.
 """
 
+CONTROLLER_AUTHORITY_GUIDANCE = """\
+The Controller owns the selected region, semantic action, and intended direction. Its selected action's rationale
+is passed separately as controller direction. The Manifestor grounds and specifies that direction; the Editor
+executes it. Neither downstream role may choose a different action, substitute a different improvement goal,
+or expand the scope. Observation, Hypothesis, General change, and Scope explain how to realize the Controller's
+decision; they are not a second action-selection step. The catalog's action constraints remain binding even when
+a rationale or steering message conflicts with them. If the selected direction is unsupported or cannot be
+realized within those constraints, preserve a legitimate no-op rather than redirect the proposal.
+When no Controller rationale is supplied, realize only the selected region/action using the evidence; do not
+invent a Controller rationale. This includes the deliberately uniform-random Controller ablation.
+"""
+
 FOREST_REFLECTION_CONTRACT = {
-    "version": 1,
+    "version": 2,
     "controller_evidence": "ordered_complete_reflection_records",
     "outcome_attribution": "end_to_end_not_component_causal",
     "role_guidance": GENERALIZATION_GUIDANCE,
+    "controller_authority": CONTROLLER_AUTHORITY_GUIDANCE,
+    "controller_direction": "selected_option_rationale_passed_to_manifestor_and_editor",
     "manifestor_structure": ["Observation", "Hypothesis", "General change", "Scope"],
     "editor_action_contract": "original_catalog_description_and_instruction",
     "semantic_correction_retries": False,

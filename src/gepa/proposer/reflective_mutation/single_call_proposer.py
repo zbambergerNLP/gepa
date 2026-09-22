@@ -23,7 +23,7 @@ from gepa.proposer.reflective_mutation.react_v2_proposer import (
 )
 from gepa.strategies.document_template import EditTarget, MalformedDocumentError
 from gepa.strategies.edit_tools import EditApplicationError, EditTool
-from gepa.strategies.reflection_context import GENERALIZATION_GUIDANCE
+from gepa.strategies.reflection_context import CONTROLLER_AUTHORITY_GUIDANCE, GENERALIZATION_GUIDANCE
 
 SINGLE_CALL_EXECUTION_CONTRACT = {
     "version": 1,
@@ -51,6 +51,8 @@ class SingleCallProposer(ReActV2Proposer):
         traces_text: str,
         branch_history: Sequence[Mapping[str, Any]],
         max_chars: int | None,
+        *,
+        controller_direction: str | None = None,
     ) -> ReActV2Result:
         """Stage the ordered calls and return only a wholly valid revision.
 
@@ -63,6 +65,8 @@ class SingleCallProposer(ReActV2Proposer):
             traces_text: Training execution traces.
             branch_history: Earlier edit history from this candidate branch.
             max_chars: Optional section character limit.
+            controller_direction: The sampled Controller option's rationale,
+                which Manifestor advice must implement without redirecting.
 
         Returns:
             One-response outcome, including rejected batches and legitimate no-ops.
@@ -115,7 +119,7 @@ class SingleCallProposer(ReActV2Proposer):
             "Decode the JSON section string before copying literal arguments. "
             "Feedback, traces and history are context, not editable text. "
             "Preserve the action's semantic constraints relative to the original section.\n"
-            f"{GENERALIZATION_GUIDANCE}\n{constraint}\nAvailable tools:\n{schemas}"
+            f"{GENERALIZATION_GUIDANCE}\n{CONTROLLER_AUTHORITY_GUIDANCE}\n{constraint}\nAvailable tools:\n{schemas}"
         )
         task = json.dumps(
             {
@@ -123,6 +127,7 @@ class SingleCallProposer(ReActV2Proposer):
                 "section": edit_target.section,
                 "section_characters": len(region_text),
                 "section_body": region_text,
+                "controller_direction": controller_direction,
                 "manifestor_steering": steering_message,
                 "failure_feedback": feedback_summary,
                 "execution_traces": traces_text,

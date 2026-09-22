@@ -239,20 +239,24 @@ def run_comparison(args: argparse.Namespace) -> dict:
     def evaluate(candidate: dict, example: dict) -> tuple[float, dict]:
         """Use the production solver settings and keep synthetic evidence explicitly separate."""
         if "passages" in example:
-            diagnostic = make_evaluator(
-                args.model,
-                DiagnosticRetriever(example["passages"]),
-                args.api_base,
-                solver_lm_kwargs=solver_kwargs,
-                reflection_diagnostics=True,
-            )
-            return diagnostic(candidate, example)
+            return diagnostic_evaluators[example["id"]](candidate, example)
         return natural_evaluator(candidate, example)
 
     solver_kwargs = observed_kwargs(args.model, args.api_base, args.output_dir, "solver")
     natural_evaluator = make_evaluator(
         args.model, retriever, args.api_base, solver_lm_kwargs=solver_kwargs, reflection_diagnostics=True
     )
+    # DSPy configuration belongs to this thread; worker threads only execute evaluators.
+    diagnostic_evaluators = {
+        example["id"]: make_evaluator(
+            args.model,
+            DiagnosticRetriever(example["passages"]),
+            args.api_base,
+            solver_lm_kwargs=solver_kwargs,
+            reflection_diagnostics=True,
+        )
+        for example in diagnostics
+    }
     comparisons = []
     try:
         baseline = evaluate_records(

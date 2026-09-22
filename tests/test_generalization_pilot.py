@@ -3,6 +3,7 @@
 import json
 from argparse import Namespace
 from pathlib import Path
+from threading import get_ident
 
 import pytest
 
@@ -92,7 +93,7 @@ def test_complete_paired_protocol_scores_every_proposal_without_transfer_leakage
         reflection_model="teacher",
         reflection_api_base="teacher-api",
         wiki17_dir=tmp_path,
-        workers=1,
+        workers=4,
         output_dir=output,
         wandb_project=None,
         wandb_entity=None,
@@ -134,7 +135,23 @@ def test_complete_paired_protocol_scores_every_proposal_without_transfer_leakage
         }
         return score, feedback
 
-    monkeypatch.setattr(pilot, "make_evaluator", lambda *a, **kw: evaluator)
+    owner_thread = get_ident()
+    constructed = []
+
+    def make_evaluator(model, retriever, api_base, **kwargs):
+        assert get_ident() == owner_thread, "DSPy evaluators must be configured on the owning thread"
+        constructed.append(retriever)
+
+        def evaluate(candidate, example):
+            assert get_ident() != owner_thread
+            if "passages" in example:
+                assert isinstance(retriever, DiagnosticRetriever)
+                assert [(p.title, p.text) for p in retriever.passages] == [tuple(p) for p in example["passages"]]
+            return evaluator(candidate, example)
+
+        return evaluate
+
+    monkeypatch.setattr(pilot, "make_evaluator", make_evaluator)
     requests = []
 
     def worker(command, **kwargs):
@@ -155,6 +172,7 @@ def test_complete_paired_protocol_scores_every_proposal_without_transfer_leakage
 
     monkeypatch.setattr(pilot.subprocess, "run", worker)
     summary = pilot.run_comparison(args)
+    assert len(constructed) == 9
     assert len(requests) == len(summary["comparisons"]) == 8
     assert all(request["candidate"] == seed for request in requests)
     for request in requests:

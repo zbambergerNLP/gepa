@@ -47,6 +47,7 @@ from gepa.strategies.intervention import (
     summarize_feedback,
 )
 from gepa.strategies.reflection_context import (
+    CONTROLLER_AUTHORITY_GUIDANCE,
     FOREST_REFLECTION_CONTRACT,
     GENERALIZATION_GUIDANCE,
     REFLECTION_CONTEXT_CONTRACT,
@@ -244,6 +245,7 @@ def _controller_sampling_record(history: Mapping[str, Any]) -> dict[str, Any]:
         "probs": {str(name): float(probability) for name, probability in dict(probabilities).items()},
         "sampling_probs": {str(name): float(probability) for name, probability in dict(sampling_probabilities).items()},
         "sampled": [str(name) for name in sampled],
+        "sampled_reasonings": [str(reason) for reason in history.get("sampled_reasonings", [])],
         "sampled_probabilities": [float(value) for value in history.get("sampled_probabilities", [])],
         "fallback": bool(history.get("fallback", False)),
         "n_parsed_entries": int(history.get("n_parsed_entries", 0)),
@@ -679,7 +681,7 @@ class ThreeRoleReflectionLM:
                 "when constructing ThreeRoleReflectionLM with custom callables."
             )
         return {
-            "schema_version": 10,
+            "schema_version": 11,
             "strategy": "three_role_reflection",
             "reflection_level": self.level,
             "edit_tool_set": self.edit_tool_set,
@@ -1006,6 +1008,7 @@ class ThreeRoleReflectionLM:
                 rng=self.rng,
                 max_menu=self.max_menu,
             )
+            controller_direction = None
             if self.controller_selection == "uniform_random":
                 action = self.rng.choice(menu)
                 controller_sampling = _uniform_controller_sampling_record(menu, action, self.level)
@@ -1026,8 +1029,12 @@ class ThreeRoleReflectionLM:
                         candidate=controller_candidate,
                         feedback_summary=(
                             GENERALIZATION_GUIDANCE
-                            + "\nFor each action's reasoning, identify an observable mismatch, a reusable lesson, "
-                            "and why this action can express it. Score semantic fit as well as tool applicability.\n\n"
+                            + "\n" + CONTROLLER_AUTHORITY_GUIDANCE
+                            + "\nYou set the direction of the edit. For each action's reasoning, identify an observable "
+                            "mismatch, the intended reusable change and its scope, and why this action can express it. "
+                            "The sampled option's rationale will be passed verbatim to the Manifestor and Editor; "
+                            "make it specific enough for them to realize your direction without choosing a new goal. "
+                            "Score semantic fit as well as tool applicability.\n\n"
                             "## Structured training evidence\n"
                             + clip_text(traces, self.text_limits.controller_feedback_chars)
                         ),
@@ -1043,6 +1050,7 @@ class ThreeRoleReflectionLM:
                     controller_sampling = _joint_controller_sampling_record(controller.history[-1])
                 else:
                     controller_sampling = _controller_sampling_record(controller.history[-1])
+                controller_direction = controller.history[-1]["sampled_reasonings"][0] or None
             preferred_edit_tool = action.edit_tool.value if action.edit_tool is not None else None
             semantic_action = action.semantic_action.name if action.semantic_action else None
 
@@ -1063,6 +1071,7 @@ class ThreeRoleReflectionLM:
                         region_text,
                         feedback,
                         traces,
+                        controller_direction=controller_direction,
                     )
                 except ManifestationError as exc:
                     error = _bounded_history_text(exc, self.text_limits.history_text_chars)
@@ -1086,6 +1095,7 @@ class ThreeRoleReflectionLM:
                             "manifestor_delivery": "user_message",
                             "feedback": _bounded_history_text(feedback, self.text_limits.history_text_chars),
                             "controller_sampling": controller_sampling,
+                            "controller_direction": controller_direction,
                             "manifestor_error": error,
                             "executed_edit": [],
                             "chat_messages": [
@@ -1133,6 +1143,7 @@ class ThreeRoleReflectionLM:
                 traces,
                 history,
                 self.max_chars,
+                controller_direction=controller_direction,
             )
             proposer_record = {
                 "react_iterations": result.iterations,
@@ -1185,6 +1196,7 @@ class ThreeRoleReflectionLM:
                 "manifestor_delivery": "user_message",
                 "feedback": _bounded_history_text(feedback, self.text_limits.history_text_chars),
                 "controller_sampling": controller_sampling,
+                "controller_direction": controller_direction,
                 "manifestor_error": None,
                 "executed_edit": [
                     _bounded_history_text(value, self.text_limits.history_text_chars) or ""
@@ -1225,6 +1237,7 @@ class ThreeRoleReflectionLM:
                     "manifestor_delivery": primary["manifestor_delivery"],
                     "executed_edit": primary["executed_edit"],
                     "controller_sampling": primary["controller_sampling"],
+                    "controller_direction": primary["controller_direction"],
                     "branch_history_length": primary["branch_history_length"],
                     "three_role_actions": records,
                     "attempt_records": records,

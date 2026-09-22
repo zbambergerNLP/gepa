@@ -462,6 +462,10 @@ class VerbalizedActionSelector(Generic[SelectableItemT]):
                     menu_id: eligible_ids.count(menu_id) / len(eligible_ids) for menu_id in set(eligible_ids)
                 }
             sampling_policy = "tail"
+        sampled_reasonings = []
+        for selected in result:
+            reasons = [reason for action, _, reason in distribution.entries if action is selected]
+            sampled_reasonings.append(reasons[0] if len(reasons) == 1 else "")
         self.history.append(
             {
                 "probs": {
@@ -469,6 +473,7 @@ class VerbalizedActionSelector(Generic[SelectableItemT]):
                 },
                 "sampling_probs": sampled_probability_by_id,
                 "sampled": [cast(Any, action).menu_id for action in result],
+                "sampled_reasonings": sampled_reasonings,
                 "sampled_probabilities": [sampled_probability_by_id[cast(Any, action).menu_id] for action in result],
                 "fallback": distribution.is_fallback,
                 "n_parsed_entries": stats.n_parsed_entries,

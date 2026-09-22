@@ -94,9 +94,18 @@ I hope you didn't get confused.
                 """,
                 "Here are the instructions.",
             ),
+            (
+                "Use the literal marker <think>draft</think> in examples.",
+                "Use the literal marker <think>draft</think> in examples.",
+            ),
         ],
     )
     def test_extract_code_blocks(self, lm_output, expected_instruction):
-        """Test extraction of instructions from various code block formats."""
+        """Extract instructions from complete, partial, or absent code fences.
+
+        Args:
+            lm_output: Model reply containing the parameterized fence shape.
+            expected_instruction: Instruction text expected after extraction.
+        """
         result = InstructionProposalSignature.output_extractor(lm_output)
         assert result["new_instruction"] == expected_instruction

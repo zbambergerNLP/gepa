@@ -3,6 +3,16 @@
 
 """Tests for the ReflectionLM protocol and StatelessReflectionLM (#329 Phase 1)."""
 
+import random
+from copy import deepcopy
+from dataclasses import dataclass, field
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from gepa.lm import LM, LMProviderError
 from gepa.proposer.reflective_mutation.reflection_lm import (
     ReflectionLM,
     ReflectionProposal,
@@ -214,6 +224,477 @@ def test_reflect_only_strategy_used_per_task_in_batch_path():
     assert [r[0] for r in results] == [{"c": "new_c"}, {"c": "new_c"}]
 
 
+def test_reflect_only_batch_fallback_forwards_aligned_metadata() -> None:
+    """Keep each branch history aligned when only reflect() is available."""
+
+    @dataclass
+    class _MetadataReflectOnlyLM:
+        metadatas: list = field(default_factory=list)
+
+        def reflect(self, candidate, reflective_dataset, components_to_update, *, metadata=None):
+            """Record branch metadata and return a marked candidate.
+
+            Args:
+                candidate: Parent component mapping.
+                reflective_dataset: Unused reflective rows.
+                components_to_update: Unused selected components.
+                metadata: Parent-specific branch context.
+
+            Returns:
+                One marked proposal and this test reflector.
+            """
+            self.metadatas.append(metadata)
+            return ReflectionProposal(new_texts={"c": candidate["c"] + "!"}), self
+
+    strategy = _MetadataReflectOnlyLM()
+    proposer = _make_proposer(reflection_strategy=strategy)
+    jobs = [
+        ({"c": "left"}, {"c": [{"feedback": "f1"}]}, ["c"]),
+        ({"c": "right"}, {"c": [{"feedback": "f2"}]}, ["c"]),
+    ]
+    metadatas = [
+        {"branch_edit_history": [{"role": "user", "content": "left-only"}]},
+        {"branch_edit_history": [{"role": "user", "content": "right-only"}]},
+    ]
+    proposer._propose_texts_batch(jobs, metadatas)
+    assert strategy.metadatas == metadatas
+
+
+def test_batch_retry_reuses_the_random_intervention_sequence() -> None:
+    """Keep random semantic choices fixed when batch transport falls back."""
+
+    @dataclass
+    class _FailingBatchRandomLM:
+        rng: random.Random = field(default_factory=lambda: random.Random(7))
+        failed_choices: list[int] = field(default_factory=list)
+        retried_choices: list[int] = field(default_factory=list)
+
+        def reflect_many(self, jobs):
+            """Sample every batch choice, then simulate a transport failure.
+
+            Args:
+                jobs: Reflection jobs whose interventions are sampled.
+
+            Raises:
+                RuntimeError: Always, after recording the sampled choices.
+            """
+            self.failed_choices = [self.rng.randrange(10_000) for _job in jobs]
+            raise RuntimeError("batch transport failed")
+
+        def reflect(self, candidate, reflective_dataset, components_to_update, *, metadata=None):
+            """Record the fallback choice and return a valid proposal.
+
+            Args:
+                candidate: Parent component mapping.
+                reflective_dataset: Unused feedback rows.
+                components_to_update: Selected components.
+                metadata: Unused parent metadata.
+
+            Returns:
+                A proposal encoding the retried random choice and this object.
+            """
+            choice = self.rng.randrange(10_000)
+            self.retried_choices.append(choice)
+            proposal = ReflectionProposal(new_texts={components_to_update[0]: str(choice)})
+            return proposal, self
+
+    strategy = _FailingBatchRandomLM()
+    proposer = _make_proposer(reflection_strategy=strategy)
+    jobs = [
+        ({"c": "left"}, {"c": [{"feedback": "f1"}]}, ["c"]),
+        ({"c": "right"}, {"c": [{"feedback": "f2"}]}, ["c"]),
+    ]
+
+    results = proposer._propose_texts_batch_safe(jobs, [{}, {}])
+
+    assert all(result is not None for result in results)
+    assert strategy.retried_choices == strategy.failed_choices
+
+
+def test_action_conditioned_stateless_post_selection_failure_does_not_reselect() -> None:
+    """Abort when a whole-operation retry would change selected actions."""
+    strategy = StatelessReflectionLM(RecordingLM(), action_selector=MagicMock())
+    strategy.reflect_many = MagicMock(side_effect=RuntimeError("post-selection failure"))
+    strategy.reflect = MagicMock()
+    proposer = _make_proposer(reflection_strategy=strategy)
+    jobs = [
+        ({"c": "left"}, {"c": [{"feedback": "f1"}]}, ["c"]),
+        ({"c": "right"}, {"c": [{"feedback": "f2"}]}, ["c"]),
+    ]
+
+    with pytest.raises(RuntimeError, match="post-selection failure"):
+        proposer._propose_texts_batch_safe(jobs, [{}, {}])
+
+    strategy.reflect.assert_not_called()
+
+
+@pytest.mark.parametrize("job_count", [1, 2])
+def test_batch_safe_propagates_exhausted_provider_failures(job_count: int) -> None:
+    """Abort instead of turning a provider outage into missing proposals.
+
+    Args:
+        job_count: Number of reflection jobs sent through plain or batch paths.
+    """
+    strategy = StatelessReflectionLM(LM("test/reflection"))
+    proposer = _make_proposer(reflection_strategy=strategy)
+    jobs = [
+        ({"c": f"parent-{index}"}, {"c": [{"feedback": f"f{index}"}]}, ["c"])
+        for index in range(job_count)
+    ]
+
+    with (
+        patch("litellm.completion", side_effect=RuntimeError("provider unavailable")),
+        patch("litellm.batch_completion", side_effect=RuntimeError("provider unavailable")),
+        pytest.raises(LMProviderError, match="Completion provider failed"),
+    ):
+        proposer._propose_texts_batch_safe(jobs)
+
+
+def test_provider_failure_aborts_then_restart_replays_one_exact_multi_role_trajectory(tmp_path: Path) -> None:
+    """Abort on provider failure, then resume the exact multi-role trajectory.
+
+    Args:
+        tmp_path: Temporary response-journal directory supplied by pytest.
+    """
+    from gepa.lm import LM
+    from gepa.proposer.reflective_mutation.three_role import ThreeRoleReflectionLM
+    from gepa.response_journal import response_journal_scope
+
+    class JournaledThreeRoleHarness(ThreeRoleReflectionLM):
+        """Exercise production retry state with a minimal two-role trajectory."""
+
+        def __init__(self, base_lm: LM, manifestor_lm: LM):
+            """Configure journaled role clients.
+
+            Args:
+                base_lm: Journaled Controller/proposer model.
+                manifestor_lm: Journaled Manifestor model.
+            """
+            super().__init__(base_lm, level=2, manifestor_lm=manifestor_lm)
+
+        def _run_job(self, candidate, components_to_update, metadata):
+            """Run the two journaled role calls for one synthetic job.
+
+            Args:
+                candidate: Parent component mapping.
+                components_to_update: Single selected component.
+                metadata: Parent-specific branch history.
+
+            Returns:
+                Proposal containing both role outputs and supplied history.
+            """
+            controller = self.base_lm("controller request")
+            manifestation = self.manifestor_lm("manifestor request")
+            component = components_to_update[0]
+            return ReflectionProposal(
+                new_texts={component: f"{controller}|{manifestation}"},
+                metadata={
+                    "controller": controller,
+                    "manifestor": manifestation,
+                    "branch_edit_history": deepcopy((metadata or {}).get("branch_edit_history", [])),
+                },
+            )
+
+        def reflect_many(self, jobs, *, metadatas=None):
+            """Run all jobs through the batch path.
+
+            Args:
+                jobs: Synthetic reflection jobs.
+                metadatas: Optional aligned branch histories.
+
+            Returns:
+                Proposal/strategy pairs in job order.
+            """
+            metadata_rows = metadatas if metadatas is not None else [None] * len(jobs)
+            results = []
+            for (candidate, _dataset, components), metadata in zip(jobs, metadata_rows, strict=True):
+                proposal = self._run_job(candidate, components, metadata)
+                results.append((proposal, self))
+            return results
+
+        def reflect(self, candidate, reflective_dataset, components_to_update, *, metadata=None):
+            """Run one fallback job with the same logical role sequence.
+
+            Args:
+                candidate: Parent component mapping.
+                reflective_dataset: Unused synthetic feedback.
+                components_to_update: Single selected component.
+                metadata: Parent-specific branch history.
+
+            Returns:
+                Proposal and this strategy.
+            """
+            del reflective_dataset
+            proposal = self._run_job(candidate, components_to_update, metadata)
+            return proposal, self
+
+    journal_path = tmp_path / "responses.sqlite3"
+
+    def make_strategy() -> JournaledThreeRoleHarness:
+        """Build fresh role clients sharing the condition journal.
+
+        Returns:
+            Fresh retry-aware strategy.
+        """
+        base = LM(
+            "test/controller",
+            response_journal_path=str(journal_path),
+            response_journal_namespace="controller-proposer",
+        )
+        manifestor = LM(
+            "test/manifestor",
+            response_journal_path=str(journal_path),
+            response_journal_namespace="manifestor",
+        )
+        return JournaledThreeRoleHarness(base, manifestor)
+
+    def response(content: str, model: str) -> SimpleNamespace:
+        """Build one minimal LiteLLM-shaped response.
+
+        Args:
+            content: Assistant text.
+            model: Provider-returned model identity.
+
+        Returns:
+            Mock completion response.
+        """
+        message = SimpleNamespace(content=content, reasoning_content="", tool_calls=[])
+        choice = SimpleNamespace(message=message, finish_reason="stop")
+        return SimpleNamespace(
+            choices=[choice],
+            model=model,
+            system_fingerprint="fp-fixed",
+            usage=None,
+        )
+
+    controller_outputs = iter(["controller-first", "controller-second"])
+    manifestor_outputs = iter(["manifestor-first", "manifestor-second"])
+    manifestor_attempts = 0
+
+    def provider_call(**kwargs):
+        """Fail after the first committed Controller response, then recover.
+
+        Args:
+            **kwargs: Effective LiteLLM request.
+
+        Returns:
+            Scripted role response.
+
+        Raises:
+            RuntimeError: The first Manifestor call simulates interruption.
+        """
+        nonlocal manifestor_attempts
+        if kwargs["model"] == "test/controller":
+            return response(next(controller_outputs), "controller-runtime")
+        manifestor_attempts += 1
+        if manifestor_attempts == 1:
+            raise RuntimeError("manifestor transport failed")
+        return response(next(manifestor_outputs), "manifestor-runtime")
+
+    jobs = [
+        ({"c": "left"}, {"c": [{"feedback": "f1"}]}, ["c"]),
+        ({"c": "right"}, {"c": [{"feedback": "f2"}]}, ["c"]),
+    ]
+    metadatas = [
+        {"branch_edit_history": [{"role": "user", "content": "left"}]},
+        {"branch_edit_history": [{"role": "assistant", "content": "right"}]},
+    ]
+    initial = _make_proposer(reflection_strategy=make_strategy())
+    with (
+        patch("litellm.completion", side_effect=provider_call) as provider,
+        patch("litellm.completion_cost", return_value=0.0),
+        response_journal_scope("optimizer-iteration-11"),
+    ):
+        with pytest.raises(LMProviderError, match="Completion provider failed"):
+            initial._propose_texts_batch_safe(jobs, metadatas)
+
+    assert provider.call_count == 2
+    assert manifestor_attempts == 1
+
+    resumed = _make_proposer(reflection_strategy=make_strategy())
+    with (
+        patch("litellm.completion", side_effect=provider_call) as resumed_provider,
+        patch("litellm.completion_cost", return_value=0.0),
+        response_journal_scope("optimizer-iteration-11"),
+    ):
+        completed = resumed._propose_texts_batch_safe(jobs, metadatas)
+
+    assert all(result is not None for result in completed)
+    assert resumed_provider.call_count == 3
+    assert manifestor_attempts == 3
+
+    replayed_strategy = _make_proposer(reflection_strategy=make_strategy())
+    with (
+        patch("litellm.completion") as replay_provider,
+        response_journal_scope("optimizer-iteration-11"),
+    ):
+        replayed = replayed_strategy._propose_texts_batch_safe(jobs, metadatas)
+
+    assert replayed == completed
+    replay_provider.assert_not_called()
+
+
+def test_batch_safe_propagates_response_journal_mismatch(tmp_path: Path) -> None:
+    """Abort rather than convert a journal request mismatch into a dropped task.
+
+    Args:
+        tmp_path: Temporary response-journal directory supplied by pytest.
+    """
+    import pytest
+
+    from gepa.lm import LM
+    from gepa.response_journal import ResponseJournalError, response_journal_scope
+
+    journal_path = tmp_path / "responses.sqlite3"
+    seed_lm = LM(
+        "test/reflection",
+        response_journal_path=str(journal_path),
+        response_journal_namespace="reflection-proposer",
+    )
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content="recorded", reasoning_content="", tool_calls=[]),
+                finish_reason="stop",
+            )
+        ],
+        model="reflection-runtime",
+        system_fingerprint="fp-fixed",
+        usage=None,
+    )
+    with (
+        patch("litellm.completion", return_value=response),
+        patch("litellm.completion_cost", return_value=0.0),
+        response_journal_scope("optimizer-iteration-13"),
+    ):
+        seed_lm("different request")
+
+    resumed_lm = LM(
+        "test/reflection",
+        response_journal_path=str(journal_path),
+        response_journal_namespace="reflection-proposer",
+    )
+    proposer = _make_proposer(reflection_strategy=StatelessReflectionLM(resumed_lm))
+    jobs = [
+        ({"c": "left"}, _reflective_dataset(["c"]), ["c"]),
+        ({"c": "right"}, _reflective_dataset(["c"]), ["c"]),
+    ]
+    with patch("litellm.batch_completion") as provider:
+        with pytest.raises(ResponseJournalError, match="request mismatch"):
+            with response_journal_scope("optimizer-iteration-13"):
+                proposer._propose_texts_batch_safe(jobs)
+    provider.assert_not_called()
+
+
+def test_batch_safe_propagates_cached_provider_identity_drift(tmp_path: Path) -> None:
+    """Abort rather than drop tasks when a cached provider identity changes.
+
+    Args:
+        tmp_path: Temporary response-journal directory supplied by pytest.
+    """
+    import pytest
+
+    from gepa.lm import LM, ProviderIdentityMismatchError
+    from gepa.response_journal import response_journal_scope
+
+    journal_path = tmp_path / "responses.sqlite3"
+
+    def make_lm(fingerprint: str) -> LM:
+        """Build one journaled LM pinned to a provider fingerprint.
+
+        Args:
+            fingerprint: Expected provider system fingerprint.
+
+        Returns:
+            Configured reflection LM.
+        """
+        return LM(
+            "test/reflection",
+            expected_response_model="reflection-runtime",
+            expected_system_fingerprint=fingerprint,
+            response_journal_path=str(journal_path),
+            response_journal_namespace="reflection-proposer",
+        )
+
+    def response(text: str) -> SimpleNamespace:
+        """Build a parseable provider response with the original identity.
+
+        Args:
+            text: Proposed instruction body.
+
+        Returns:
+            LiteLLM-shaped completion response.
+        """
+        message = SimpleNamespace(content=f"```\n{text}\n```", reasoning_content="", tool_calls=[])
+        choice = SimpleNamespace(message=message, finish_reason="stop")
+        return SimpleNamespace(
+            choices=[choice],
+            model="reflection-runtime",
+            system_fingerprint="fp-original",
+            usage=None,
+        )
+
+    jobs = [
+        ({"c": "left"}, _reflective_dataset(["c"]), ["c"]),
+        ({"c": "right"}, _reflective_dataset(["c"]), ["c"]),
+    ]
+    first = _make_proposer(reflection_strategy=StatelessReflectionLM(make_lm("fp-original")))
+    with (
+        patch("litellm.batch_completion", return_value=[response("first"), response("second")]),
+        patch("litellm.completion_cost", return_value=0.0),
+        response_journal_scope("optimizer-iteration-14"),
+    ):
+        assert len(first._propose_texts_batch(jobs)) == 2
+
+    resumed = _make_proposer(reflection_strategy=StatelessReflectionLM(make_lm("fp-changed")))
+    with patch("litellm.batch_completion") as provider:
+        with pytest.raises(ProviderIdentityMismatchError, match="Cached provider response identity"):
+            with response_journal_scope("optimizer-iteration-14"):
+                resumed._propose_texts_batch_safe(jobs)
+    provider.assert_not_called()
+
+
+def test_reflection_strategy_receives_public_prompt_template():
+    """Strategies that opt in to template binding must see the public API
+    value, instead of silently falling back to their own generic default."""
+
+    class _TemplateBindingLM(_ReflectOnlyLM):
+        def __init__(self):
+            super().__init__()
+            self.template = None
+
+        def bind_reflection_prompt_template(self, template):
+            self.template = template
+
+    template = "PUBLIC TEMPLATE <curr_param> :: <side_info>"
+    strategy = _TemplateBindingLM()
+    _make_proposer(reflection_strategy=strategy, reflection_prompt_template=template)
+
+    assert strategy.template == template
+
+
+def test_single_job_batch_path_uses_reflect_not_reflect_many():
+    """A one-job iteration has no PxN parallelism to exploit. Calling
+    reflect_many([job]) can change a batch-capable strategy's LM transport."""
+
+    class _BatchCapableLM(_ReflectOnlyLM):
+        def __init__(self):
+            super().__init__()
+            self.reflect_many_calls = 0
+
+        def reflect_many(self, jobs):
+            self.reflect_many_calls += 1
+            raise AssertionError("single-job path must not call reflect_many")
+
+    strategy = _BatchCapableLM()
+    proposer = _make_proposer(reflection_strategy=strategy)
+    result = proposer._propose_texts_batch([({"c": "old"}, {"c": [{"feedback": "f"}]}, ["c"])])
+
+    assert result[0][0] == {"c": "new_c"}
+    assert strategy.calls == [["c"]]
+    assert strategy.reflect_many_calls == 0
+
+
 # ---------------------------------------------------------------------------
 # H1: empty reflection output must not produce a phantom child
 # ---------------------------------------------------------------------------
@@ -262,9 +743,7 @@ def _make_propose_harness(reflection_strategy):
 def _make_state():
     from gepa.core.state import GEPAState, ValsetEvaluation
 
-    base_eval = ValsetEvaluation(
-        outputs_by_val_id={0: "o"}, scores_by_val_id={0: 0.5}, objective_scores_by_val_id=None
-    )
+    base_eval = ValsetEvaluation(outputs_by_val_id={0: "o"}, scores_by_val_id={0: 0.5}, objective_scores_by_val_id=None)
     state = GEPAState({"c": "seed"}, base_eval, track_best_outputs=False)
     # Set by the engine's seed initialization in real runs (state.py:704).
     state.total_num_evals = 1
@@ -290,13 +769,76 @@ def test_nonempty_new_texts_still_produces_a_proposal():
     assert adapter.batch_evaluate.call_count == 2  # parent stage + child stage
 
 
+def test_length_capped_empty_proposal_still_fires_on_proposal_end() -> None:
+    """Test that a proposal emptied by the length cap still reaches on_proposal_end (#7).
+
+    No child is evaluated (empty new_texts), but the attempt is counted so an
+    action's acceptance rate is not silently inflated by vanished attempts.
+    """
+    events: list[dict] = []
+    recorder = MagicMock()
+    recorder.on_proposal_end.side_effect = events.append
+
+    class _CappedLM(_FixedProposalLM):
+        """ReflectionLM stub whose proposal is emptied by the length cap."""
+
+        def reflect(self, candidate, reflective_dataset, components_to_update):
+            """Return a deliberately empty, length-capped proposal.
+
+            Args:
+                candidate: Unused parent candidate.
+                reflective_dataset: Unused reflective rows.
+                components_to_update: Unused selected components.
+
+            Returns:
+                Empty proposal with action and dropped-attempt metadata.
+            """
+            return (
+                ReflectionProposal(
+                    new_texts={},
+                    metadata={
+                        "action": "contextualize",
+                        "length_capped_dropped": ["c"],
+                        "attempt_records": [
+                            {
+                                "component": "c",
+                                "assistant": "attempted edit",
+                                "action": "INSERT_TEXT",
+                                "observation": "length cap exceeded",
+                                "error": "no completed edit",
+                            }
+                        ],
+                    },
+                ),
+                self,
+            )
+
+    proposer, adapter = _make_propose_harness(_CappedLM({}))
+    proposer.callbacks = [recorder]
+
+    state = _make_state()
+    proposals = proposer.propose(state)
+
+    assert proposals == []  # nothing to evaluate
+    assert adapter.batch_evaluate.call_count == 1  # parent stage only
+    assert len(events) == 1
+    assert events[0]["new_instructions"] == {}
+    assert events[0]["metadata"]["action"] == "contextualize"
+    assert events[0]["metadata"]["length_capped_dropped"] == ["c"]
+    history = deepcopy(state.revision_history_by_candidate[0])
+    assert history[0] == {"role": "assistant", "content": "attempted edit"}
+    assert history[1] == {"role": "user", "content": "length cap exceeded"}
+    assert history[2]["role"] == "user"
+    assert "Optimizer result: dropped" in history[2]["content"]
+
+
 # ---------------------------------------------------------------------------
 # H2: optimize_anything exposes reflection_strategy via ReflectionConfig
 # ---------------------------------------------------------------------------
 
 
 def test_reflection_config_accepts_reflection_strategy():
-    from gepa.optimize_anything import ReflectionConfig
+    from gepa.gepa_launcher import ReflectionConfig
 
     stub = _ReflectOnlyLM()
     assert ReflectionConfig(reflection_strategy=stub).reflection_strategy is stub
@@ -383,15 +925,27 @@ def test_trace_records_every_task_not_just_the_first():
     class TwoTaskSampling:
         def sample_tasks(self, state, candidate_selector, batch_sampler, trainset):
             return [
-                ProposalTask(parent_idx=0, parent_candidate=dict(state.program_candidates[0]), minibatch_ids=[0], minibatch=[{"q": 0}]),
-                ProposalTask(parent_idx=0, parent_candidate=dict(state.program_candidates[0]), minibatch_ids=[1], minibatch=[{"q": 1}]),
+                ProposalTask(
+                    parent_idx=0,
+                    parent_candidate=dict(state.program_candidates[0]),
+                    minibatch_ids=[0],
+                    minibatch=[{"q": 0}],
+                ),
+                ProposalTask(
+                    parent_idx=0,
+                    parent_candidate=dict(state.program_candidates[0]),
+                    minibatch_ids=[1],
+                    minibatch=[{"q": 1}],
+                ),
             ]
 
     adapter = MagicMock()
     adapter.propose_new_texts = None
     adapter.batch_evaluate = MagicMock(
-        side_effect=lambda items: [
-            EvaluationBatch(outputs=["o"], scores=[0.4], trajectories=[{"step": 1}], objective_scores=None, num_metric_calls=1)
+        side_effect=lambda items, **kwargs: [
+            EvaluationBatch(
+                outputs=["o"], scores=[0.4], trajectories=[{"step": 1}], objective_scores=None, num_metric_calls=1
+            )
             for _ in items
         ]
     )
@@ -409,6 +963,7 @@ def test_trace_records_every_task_not_just_the_first():
     )
     state = _make_state()
     proposals = proposer.propose(state)
+    assert all(call.kwargs == {"capture_traces": True} for call in adapter.batch_evaluate.call_args_list)
     assert len(proposals) == 2
 
     entry = state.full_program_trace[-1]
@@ -461,8 +1016,12 @@ def test_reflect_many_wrong_length_raises():
     import pytest
 
     proposer = _make_proposer(reflection_strategy=_WrongLengthLM())
-    with pytest.raises(ValueError, match="reflect_many returned 0 results for 1 jobs"):
-        proposer._propose_texts_batch([({"c": "x"}, {"c": [{"f": 1}]}, ["c"])])
+    jobs = [
+        ({"c": "x"}, {"c": [{"f": 1}]}, ["c"]),
+        ({"c": "y"}, {"c": [{"f": 2}]}, ["c"]),
+    ]
+    with pytest.raises(ValueError, match="reflect_many returned 0 results for 2 jobs"):
+        proposer._propose_texts_batch(jobs)
 
 
 def test_reflection_metadata_reserved_prefixes_are_remapped():
@@ -495,6 +1054,7 @@ def test_legacy_tracker_metric_keys_still_emitted():
 
 
 def test_gepa_optimize_accepts_reflection_strategy_without_reflection_lm():
+    """Verify optimize accepts a strategy without a separate reflection LM."""
     import gepa
     from gepa.core.adapter import EvaluationBatch
 
@@ -513,7 +1073,21 @@ def test_gepa_optimize_accepts_reflection_strategy_without_reflection_lm():
         def make_reflective_dataset(self, candidate, eval_batch, components):
             return {c: [{"Feedback": "f"}] for c in components}
 
-    stub = _ReflectOnlyLM()
+    class ValidatingStrategy(_ReflectOnlyLM):
+        def __init__(self):
+            """Initialize the strategy validation counter."""
+            super().__init__()
+            self.validated = []
+
+        def validate_candidate(self, candidate):
+            """Record the seed validated by the strategy.
+
+            Args:
+                candidate: Candidate passed by the optimizer front door.
+            """
+            self.validated.append(candidate)
+
+    stub = ValidatingStrategy()
     result = gepa.optimize(
         seed_candidate={"c": "x"},
         trainset=[{"q": 1}] * 4,
@@ -525,6 +1099,7 @@ def test_gepa_optimize_accepts_reflection_strategy_without_reflection_lm():
         seed=0,
     )
     assert stub.calls, "reflection_strategy never invoked via gepa.optimize"
+    assert stub.validated == [{"c": "x"}]
     assert result is not None
 
 

@@ -1,18 +1,19 @@
 # Copyright (c) 2025 Lakshya A Agrawal and the GEPA contributors
 # https://github.com/gepa-ai/gepa
 
+import json
 import os
+import random
 import traceback
-from collections.abc import Sequence
-from typing import Any, Generic
+from collections.abc import Mapping, Sequence
+from typing import Any, Generic, cast
 
 from gepa.core.adapter import (
     DataInst,
-    EvaluationBatch,
     GEPAAdapter,
     RolloutOutput,
     Trajectory,
-    default_batch_evaluate,
+    invoke_batch_evaluate,
 )
 from gepa.core.callbacks import (
     BudgetUpdatedEvent,
@@ -33,7 +34,19 @@ from gepa.core.callbacks import (
     notify_callbacks,
 )
 from gepa.core.data_loader import DataId, DataLoader, ensure_loader
-from gepa.core.state import EvaluationCache, FrontierType, GEPAState, ValsetEvaluation, initialize_gepa_state
+from gepa.core.state import (
+    SEED_ITERATION_ID,
+    TRAINSET_CACHE_SPLIT,
+    VALSET_CACHE_SPLIT,
+    EvaluationCache,
+    FrontierType,
+    GEPAState,
+    ValsetEvaluation,
+    initialize_gepa_state,
+    new_iteration_id,
+)
+from gepa.evaluation_journal import EvaluationJournal
+from gepa.gepa_utils import json_default, try_json_serialize
 from gepa.logging.experiment_tracker import ExperimentTracker
 from gepa.logging.logger import LoggerProtocol
 from gepa.logging.utils import log_detailed_metrics_after_discovering_new_program
@@ -50,6 +63,32 @@ try:
     from tqdm import tqdm
 except ImportError:
     tqdm = None
+
+
+def _record_proposal_evals(trace_entry: dict, proposal: "CandidateProposal") -> None:
+    """Capture evaluation side_info from a proposal into the iteration trace.
+
+    This records the subsample evaluation data (scores, outputs, trajectories/
+    side_info) for both the parent and the child candidate so that agents
+    reading ``gepa_state.json`` have the feedback needed to propose better
+    candidates.
+    """
+    if proposal.eval_before is not None:
+        eb = proposal.eval_before
+        trace_entry["eval_before"] = {
+            "scores": eb.scores,
+            "outputs": try_json_serialize(eb.outputs),
+            "objective_scores": eb.objective_scores,
+            "trajectories": try_json_serialize(eb.trajectories),
+        }
+    if proposal.eval_after is not None:
+        ea = proposal.eval_after
+        trace_entry["eval_after"] = {
+            "scores": ea.scores,
+            "outputs": try_json_serialize(ea.outputs),
+            "objective_scores": ea.objective_scores,
+            "trajectories": try_json_serialize(ea.trajectories),
+        }
 
 
 class _MemoizedAcceptance:
@@ -74,7 +113,25 @@ class _MemoizedAcceptance:
 
 
 class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
-    """Orchestrates the optimization loop using pluggable candidate proposers."""
+    """Orchestrates the optimization loop using pluggable candidate proposers.
+
+    ``valset_cache_split`` is derived here and is the single authority for the evaluation-cache
+    namespace used on valset reads and writes. If this engine's valset loader is the same object
+    as the reflective proposer's ``trainset`` loader, minibatch and valset share
+    ``TRAINSET_CACHE_SPLIT``; otherwise valset uses ``VALSET_CACHE_SPLIT``. A ``MergeProposer``,
+    if present, is synced to the same value so it cannot silently re-run or mis-read valset
+    rollouts. Callers should pass the same loader instance they gave the proposer when the two
+    id spaces are genuinely the same; wrapping the same list twice produces two loaders and
+    isolates the cache (extra evals, never a wrongly shared one).
+
+    Each iteration of :meth:`run` saves the state, optionally attempts a merge
+    when one is due, asks the reflective proposer for a batch of mutations,
+    gates and full-evaluates them (see :meth:`_run_reflective_batch`), updates
+    the Pareto frontier and fires the corresponding callbacks. Acceptance events
+    carry both the pre- and post-proposal subsample scores so downstream
+    trackers (e.g. per-action score deltas) see the full outcome of every
+    accepted proposal, not only of rejected ones.
+    """
 
     def __init__(
         self,
@@ -99,6 +156,7 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
         display_progress_bar: bool = False,
         raise_on_exception: bool = True,
         use_cloudpickle: bool = False,
+        write_agent_state: bool = False,
         # Budget and Stop Condition
         stop_callback: StopperProtocol | None = None,
         val_evaluation_policy: EvaluationPolicy[DataId, DataInst] | None = None,
@@ -107,7 +165,36 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
         selection_strategy: SelectionStrategy | None = None,
         # Evaluation caching (stored in state, passed here for initialization)
         evaluation_cache: EvaluationCache[RolloutOutput, DataId] | None = None,
+        # Shared RNG used by every stochastic optimizer strategy.
+        rng: random.Random | None = None,
     ):
+        """Configure one resumable GEPA optimization engine.
+
+        Args:
+            adapter: Task-specific rollout and feedback adapter.
+            run_dir: Optional directory for durable optimizer state.
+            valset: Validation examples or their loader.
+            seed_candidate: Initial instruction for every optimized component.
+            perfect_score: Optional score at which a training item is skipped.
+            seed: Experiment seed used when no RNG is supplied.
+            reflective_proposer: Reflective candidate-mutation strategy.
+            merge_proposer: Optional candidate-merge strategy.
+            frontier_type: Pareto-frontier granularity.
+            logger: Optimization logger.
+            experiment_tracker: Metric and artifact tracker.
+            callbacks: Optional lifecycle callbacks.
+            track_best_outputs: Whether to retain outputs from the best candidate.
+            display_progress_bar: Whether to render interactive progress.
+            raise_on_exception: Whether rollout exceptions abort optimization.
+            use_cloudpickle: Whether durable state uses cloudpickle.
+            write_agent_state: Whether adapter agent state is persisted.
+            stop_callback: Optional external stopping condition.
+            val_evaluation_policy: Validation-evaluation strategy.
+            acceptance_criterion: Reflective-proposal acceptance policy.
+            selection_strategy: Reflective-proposal selection policy.
+            evaluation_cache: Optional shared rollout cache.
+            rng: Shared stochastic state restored across exact resume.
+        """
         self.logger = logger
         self.run_dir = run_dir
         self.callbacks = callbacks
@@ -131,25 +218,35 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
         self.evaluator = evaluator
 
         self.valset = ensure_loader(valset) if valset is not None else None
+        self.valset_cache_split = (
+            TRAINSET_CACHE_SPLIT
+            if self.valset is not None and self.valset is getattr(reflective_proposer, "trainset", None)
+            else VALSET_CACHE_SPLIT
+        )
         self.seed_candidate = seed_candidate
 
         self.perfect_score = perfect_score
         self.seed = seed
+        self.rng = rng if rng is not None else random.Random(seed)
         self.experiment_tracker = experiment_tracker
 
         self.reflective_proposer = reflective_proposer
+        if run_dir is not None:
+            self.reflective_proposer.evaluation_journal = EvaluationJournal(run_dir, use_cloudpickle=use_cloudpickle)
         self.merge_proposer = merge_proposer
         self.frontier_type: FrontierType = frontier_type
 
         # Merge scheduling flags (mirroring previous behavior)
         if self.merge_proposer is not None:
             self.merge_proposer.last_iter_found_new_program = False
+            self.merge_proposer.valset_cache_split = self.valset_cache_split
 
         self.acceptance_criterion: AcceptanceCriterion = acceptance_criterion or StrictImprovementAcceptance()
         self.selection_strategy: SelectionStrategy = selection_strategy or AllImprovements()
         self.track_best_outputs = track_best_outputs
         self.display_progress_bar = display_progress_bar
         self.use_cloudpickle = use_cloudpickle
+        self.write_agent_state = write_agent_state
 
         self.raise_on_exception = raise_on_exception
         self.val_evaluation_policy: EvaluationPolicy[DataId, DataInst] = (
@@ -175,6 +272,174 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
         if setter is not None:
             setter(state.adapter_state)
 
+    def _sync_callback_states_to_state(self, state: GEPAState) -> None:
+        """Snapshot explicitly stateful callbacks before a durable save.
+
+        Callback positions and concrete types form stable keys, allowing more
+        than one callback of the same type without merging their observations.
+        Stateless callbacks are ignored.
+
+        Args:
+            state: Optimizer state that receives callback snapshots.
+
+        Raises:
+            TypeError: A callback's ``get_state`` method does not return a
+                mapping.
+        """
+        callback_states: dict[str, Any] = {}
+        for index, callback in enumerate(self.callbacks or []):
+            getter = getattr(callback, "get_state", None)
+            if getter is None:
+                continue
+            callback_state = getter()
+            if not isinstance(callback_state, Mapping):
+                raise TypeError(f"{type(callback).__name__}.get_state() must return a mapping")
+            key = f"{index}:{type(callback).__module__}.{type(callback).__qualname__}"
+            callback_states[key] = dict(callback_state)
+        state.callback_states = callback_states
+
+    def _sync_state_to_callbacks(self, state: GEPAState) -> None:
+        """Restore persisted observations into matching stateful callbacks.
+
+        Args:
+            state: Loaded optimizer state containing callback snapshots.
+
+        Raises:
+            TypeError: Persisted callback state exists for a callback without a
+                matching ``set_state`` method.
+        """
+        for index, callback in enumerate(self.callbacks or []):
+            key = f"{index}:{type(callback).__module__}.{type(callback).__qualname__}"
+            if key not in state.callback_states:
+                continue
+            setter = getattr(callback, "set_state", None)
+            if setter is None:
+                raise TypeError(f"{type(callback).__name__} has persisted state but no set_state() method")
+            setter(state.callback_states[key])
+
+    def _sync_batch_sampler_to_state(self, state: GEPAState) -> None:
+        """Snapshot a stateful minibatch sampler before a durable save.
+
+        Args:
+            state: Optimizer state that receives the sampler snapshot.
+
+        Raises:
+            TypeError: The sampler's ``get_state`` method does not return a
+                mapping.
+        """
+        sampler = self.reflective_proposer.batch_sampler
+        getter = getattr(sampler, "get_state", None)
+        if getter is None:
+            state.batch_sampler_state = None
+            return
+        sampler_state = getter()
+        if not isinstance(sampler_state, Mapping):
+            raise TypeError(f"{type(sampler).__name__}.get_state() must return a mapping")
+        state.batch_sampler_state = dict(sampler_state)
+
+    def _sync_state_to_batch_sampler(self, state: GEPAState) -> None:
+        """Restore a persisted minibatch-sampler permutation and cursor.
+
+        Args:
+            state: Loaded optimizer state containing an optional sampler
+                snapshot.
+
+        Raises:
+            ValueError: A stateful sampler has no persisted snapshot.
+            TypeError: Persisted sampler state exists without a matching
+                ``set_state`` method.
+        """
+        sampler = self.reflective_proposer.batch_sampler
+        setter = getattr(sampler, "set_state", None)
+        if state.batch_sampler_state is None:
+            if setter is not None:
+                raise ValueError(
+                    "This persisted GEPA state has no minibatch-sampler checkpoint and cannot resume exactly."
+                )
+            return
+        if setter is None:
+            raise TypeError(f"{type(sampler).__name__} has persisted state but no set_state() method")
+        setter(state.batch_sampler_state)
+
+    def _sync_reflection_lm_to_state(self, state: GEPAState) -> None:
+        """Snapshot a reflection strategy with private runtime state.
+
+        Args:
+            state: Optimizer state that receives the reflection snapshot.
+
+        Raises:
+            TypeError: The strategy's ``get_state`` method does not return a
+                mapping.
+        """
+        reflection_lm = self.reflective_proposer._reflection_lm
+        getter = getattr(reflection_lm, "get_state", None)
+        if getter is None:
+            state.reflection_lm_state = None
+            return
+        reflection_state = getter()
+        if not isinstance(reflection_state, Mapping):
+            raise TypeError(f"{type(reflection_lm).__name__}.get_state() must return a mapping")
+        state.reflection_lm_state = dict(reflection_state)
+
+    def _sync_state_to_reflection_lm(self, state: GEPAState) -> None:
+        """Restore a reflection strategy's private runtime state.
+
+        Args:
+            state: Loaded optimizer state containing an optional reflection
+                snapshot.
+
+        Raises:
+            ValueError: A stateful reflection strategy has no persisted state.
+            TypeError: Persisted state exists without a matching ``set_state``
+                method.
+        """
+        reflection_lm = self.reflective_proposer._reflection_lm
+        setter = getattr(reflection_lm, "set_state", None)
+        if state.reflection_lm_state is None:
+            if setter is not None:
+                raise ValueError(
+                    "This persisted GEPA state has no reflection-strategy checkpoint and cannot resume exactly."
+                )
+            return
+        if setter is None:
+            raise TypeError(f"{type(reflection_lm).__name__} has persisted state but no set_state() method")
+        setter(state.reflection_lm_state)
+
+    def _write_agent_iteration_files(
+        self,
+        iteration_id: str,
+        valset_evaluation: ValsetEvaluation[RolloutOutput, DataId],
+    ) -> None:
+        """Write per-val_id outputs/trajectories for an iteration's full valset eval.
+
+        Called only when ``write_agent_state`` is enabled and ``run_dir`` is
+        set. Produces ``iterations/<iter_id>/outputs/<val_id>.json`` and, when
+        the valset evaluation captured them,
+        ``iterations/<iter_id>/trajectories/<val_id>.json``. The iteration id is
+        ``SEED_ITERATION_ID`` for the seed and the proposal's random
+        ``iteration_id`` for accepted loop proposals (the same anchor
+        ``GEPAState._save_agent_directory`` uses).
+        """
+        if not self.write_agent_state or self.run_dir is None:
+            return
+        base = os.path.join(self.run_dir, "iterations", iteration_id)
+        outputs = valset_evaluation.outputs_by_val_id or {}
+        if outputs:
+            out_dir = os.path.join(base, "outputs")
+            os.makedirs(out_dir, exist_ok=True)
+            for val_id, output in outputs.items():
+                path = os.path.join(out_dir, f"{val_id}.json")
+                with open(path, "w") as f:
+                    json.dump(try_json_serialize(output), f, indent=2, default=json_default)
+        trajectories = valset_evaluation.trajectories_by_val_id or {}
+        if trajectories:
+            traj_dir = os.path.join(base, "trajectories")
+            os.makedirs(traj_dir, exist_ok=True)
+            for val_id, traj in trajectories.items():
+                path = os.path.join(traj_dir, f"{val_id}.json")
+                with open(path, "w") as f:
+                    json.dump(try_json_serialize(traj), f, indent=2, default=json_default)
+
     def _evaluate_programs_on_valset(
         self,
         programs: list[dict[str, str]],
@@ -192,13 +457,45 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
         assert valset is not None
         cache = state.evaluation_cache
 
+        # When write_agent_state is on, bypass the cache so we can capture
+        # trajectories (which the cache does not store).
+        if self.write_agent_state:
+            traced_results: list[tuple[ValsetEvaluation[RolloutOutput, DataId], int]] = []
+            for program in programs:
+                val_ids = list(self.val_evaluation_policy.get_eval_batch(valset, state))
+                eval_result = self.adapter.evaluate(valset.fetch(val_ids), program, capture_traces=True)
+                outputs_by_val_idx = dict(zip(val_ids, eval_result.outputs, strict=False))
+                scores_by_val_idx = dict(zip(val_ids, eval_result.scores, strict=False))
+                objective_by_val_idx = (
+                    dict(zip(val_ids, eval_result.objective_scores, strict=False))
+                    if eval_result.objective_scores is not None
+                    else None
+                )
+                trajectories_by_val_idx = (
+                    dict(zip(val_ids, eval_result.trajectories, strict=False))
+                    if eval_result.trajectories is not None
+                    else None
+                )
+                traced_results.append(
+                    (
+                        ValsetEvaluation(
+                            outputs_by_val_id=outputs_by_val_idx,
+                            scores_by_val_id=scores_by_val_idx,
+                            objective_scores_by_val_id=objective_by_val_idx,
+                            trajectories_by_val_id=trajectories_by_val_idx,
+                        ),
+                        len(val_ids),
+                    )
+                )
+            return traced_results
+
         # 1) Per program: split the requested val examples into cached vs. to-evaluate.
         cached_per: list[dict[Any, Any]] = []
         todo_per: list[list[Any]] = []
         for program in programs:
             val_ids = list(self.val_evaluation_policy.get_eval_batch(valset, state))
             if cache is not None:
-                cached, uncached = cache.get_batch(program, val_ids)
+                cached, uncached = cache.get_batch(program, val_ids, split=self.valset_cache_split)
             else:
                 cached, uncached = {}, val_ids
             cached_per.append(cached)
@@ -207,7 +504,7 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
         # 2) One adapter call over every (program, cache-miss examples) pair.
         eval_idxs = [i for i, todo in enumerate(todo_per) if todo]
         items = [(programs[i], valset.fetch(todo_per[i])) for i in eval_idxs]
-        fresh = self._batch_evaluate(items) if items else []
+        fresh = invoke_batch_evaluate(self.adapter, items, capture_traces=False) if items else []
         fresh_by_idx = dict(zip(eval_idxs, fresh, strict=True))
 
         # 3) Merge cached + fresh per program, repopulating the cache.
@@ -234,7 +531,7 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
                         objective_by = objective_by or {}
                         objective_by[eid] = obj[j]
                 if cache is not None:
-                    cache.put_batch(program, uncached, eb.outputs, eb.scores, obj)
+                    cache.put_batch(program, uncached, eb.outputs, eb.scores, obj, split=self.valset_cache_split)
 
             results.append(
                 (
@@ -248,21 +545,36 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
             )
         return results
 
-    def _batch_evaluate(self, items: list[tuple[dict[str, str], list]]) -> list[EvaluationBatch]:
-        """Evaluate (candidate, batch) pairs via the adapter's batch_evaluate or fallback."""
-        batch_fn = getattr(self.adapter, "batch_evaluate", None)
-        if batch_fn is not None:
-            return batch_fn(items)
-        return default_batch_evaluate(self.adapter, items)
-
     def _run_full_eval_and_add(
         self,
         new_program: dict[str, str],
         state: GEPAState[RolloutOutput, DataId],
         parent_program_idx: list[int],
+        iteration_id: str | None = None,
+        proposal_metadata: Mapping[str, Any] | None = None,
     ) -> tuple[int, int]:
+        """Fully evaluate one candidate and add it to optimizer state.
+
+        Args:
+            new_program: Candidate component mapping to evaluate.
+            state: Live optimization state receiving the candidate.
+            parent_program_idx: Candidate indices from which this proposal arose.
+            iteration_id: Optional on-disk anchor for the proposal.
+            proposal_metadata: Reflection metadata and branch-history records.
+
+        Returns:
+            New candidate index and the best candidate index after insertion.
+        """
         valset_evaluation, num_actual_evals = self._evaluate_programs_on_valset([new_program], state)[0]
-        return self._add_evaluated_program(new_program, state, parent_program_idx, valset_evaluation, num_actual_evals)
+        return self._add_evaluated_program(
+            new_program,
+            state,
+            parent_program_idx,
+            valset_evaluation,
+            num_actual_evals,
+            iteration_id=iteration_id,
+            proposal_metadata=proposal_metadata,
+        )
 
     def _add_evaluated_program(
         self,
@@ -271,13 +583,35 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
         parent_program_idx: list[int],
         valset_evaluation: ValsetEvaluation[RolloutOutput, DataId],
         num_actual_evals: int,
+        iteration_id: str | None = None,
+        proposal_metadata: Mapping[str, Any] | None = None,
     ) -> tuple[int, int]:
         """Add an already-evaluated candidate to the pool. Must run sequentially.
 
         Snapshots the discovery budget before incrementing so candidates,
         processed in order, record the same ``num_metric_calls_by_discovery``
         as the serial path.
+
+        ``iteration_id`` is the on-disk anchor for the proposal being
+        processed — the random id stamped on its trace entry at slot
+        creation. Defaults to the current slot's id so merge and other
+        callers that don't thread it through still land in the right
+        iteration directory.
+
+        Args:
+            new_program: Candidate component mapping already evaluated.
+            state: Live optimization state receiving the candidate.
+            parent_program_idx: Parent candidate indices.
+            valset_evaluation: Existing validation outputs and scores.
+            num_actual_evals: Uncached metric calls consumed by that evaluation.
+            iteration_id: Optional proposal anchor; defaults to the current slot.
+            proposal_metadata: Reflection metadata and branch-history records.
+
+        Returns:
+            New candidate index and the best candidate index after insertion.
         """
+        if iteration_id is None:
+            iteration_id = state.current_iteration_id()
         num_metric_calls_by_discovery = state.total_num_evals
         state.increment_evals(num_actual_evals)
         state.num_full_ds_evals += 1
@@ -294,7 +628,13 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
             valset_evaluation=valset_evaluation,
             run_dir=self.run_dir,
             num_metric_calls_by_discovery_of_new_program=num_metric_calls_by_discovery,
+            iteration_id=iteration_id,
+            proposal_metadata=proposal_metadata,
         )
+
+        # ``iteration_id`` is the on-disk anchor (the same one
+        # ``GEPAState._save_agent_directory`` writes the proposal dir under).
+        self._write_agent_iteration_files(iteration_id, valset_evaluation)
 
         # Compute best program immediately after state update (before callbacks)
         # to ensure is_best_program reflects the updated Pareto front
@@ -399,6 +739,15 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
         criterion but was not picked by the selection strategy (e.g.
         BestImprovement/TopK) — the reason must say so rather than falsely
         claiming a score regression.
+
+        Args:
+            proposal: Evaluated proposal that will not enter the candidate pool.
+            iteration: One-based iteration reported to logs and callbacks.
+            state: Live state whose affected parent branches record the attempt.
+            dropped_by_selection: Whether acceptance passed before the selection
+                policy omitted this proposal.
+            reason_override: Explicit rejection explanation, when the caller has
+                a more precise reason than the acceptance policy.
         """
         old_sum = sum(proposal.subsample_scores_before or [])
         new_sum = sum(proposal.subsample_scores_after or [])
@@ -423,6 +772,15 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
         else:
             reject_msg = f"Iteration {iteration}: Candidate rejected by acceptance criterion (old_sum={old_sum}, new_sum={new_sum}), skipping"
             reject_reason = f"Candidate rejected by acceptance criterion (old_sum={old_sum}, new_sum={new_sum})"
+        for parent_idx in dict.fromkeys(proposal.parent_program_ids):
+            state.record_proposal_attempts(
+                parent_idx,
+                proposal.metadata,
+                outcome="rejected",
+                score_before=old_sum,
+                score_after=new_sum,
+                reason=reject_reason,
+            )
         self.logger.log(reject_msg)
         self._log_proposal_lm_calls(iteration, proposal, candidate_idx=-1)
         notify_callbacks(
@@ -433,6 +791,7 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
                 old_score=old_sum,
                 new_score=new_sum,
                 reason=reject_reason,
+                metadata=proposal.metadata or {},
             ),
         )
 
@@ -452,9 +811,31 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
         dropped by Best/TopK selection, which previously vanished without an
         event. Selected proposals are batch-evaluated on the valset (one
         :meth:`_evaluate_programs_on_valset` call) and added to the pool in
-        order. Returns True if any proposal was accepted.
+        order. Each ``on_candidate_accepted`` event carries the parent's
+        subsample score as ``old_score`` next to the new one.
+
+        Args:
+            proposals: The proposals the reflective proposer produced this
+                iteration, each already evaluated on its minibatch.
+            state: The live optimization state the accepted candidates join.
+
+        Returns:
+            True if at least one proposal was accepted into the pool.
         """
         iteration = state.i + 1
+
+        # The on-disk anchor was stamped on this trace entry when its iteration
+        # slot was created; fall back to the legacy sequence anchor for trace
+        # entries that predate it.
+        trace_entry = state.full_program_trace[-1]
+        iteration_id = trace_entry.get("iteration_id") or str(trace_entry.get("i", 0) + 1)
+
+        # Capture evaluation side_info into the trace for agent consumption.
+        # All of the batch's proposals share this iteration's trace entry; the
+        # first proposal keeps the single-proposal schema agents already read.
+        if self.write_agent_state and proposals:
+            _record_proposal_evals(trace_entry, proposals[0])
+            trace_entry["proposed_candidate"] = proposals[0].candidate
 
         # 1) Selection is authoritative; it sees every evaluated proposal and
         #    the acceptance criterion (no engine pre-filter). The criterion is
@@ -506,11 +887,11 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
                 )
                 continue
             passed_acceptance = criterion.should_accept(proposal, state)
-            self._report_rejected_proposal(
-                proposal, iteration, state, dropped_by_selection=passed_acceptance
-            )
+            self._report_rejected_proposal(proposal, iteration, state, dropped_by_selection=passed_acceptance)
 
         if not selected:
+            if self.write_agent_state:
+                trace_entry["proposal_accepted"] = False
             return False
 
         # 3) Full-valset eval of the selected candidates (one batched, read-only call).
@@ -518,18 +899,28 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
 
         # 4) Add each selected candidate to the pool, in order.
         any_accepted = False
-        for proposal, (valset_evaluation, num_actual_evals) in zip(selected, valset_evals, strict=True):
+        for k, (proposal, (valset_evaluation, num_actual_evals)) in enumerate(zip(selected, valset_evals, strict=True)):
             new_sum = sum(proposal.subsample_scores_after or [])
             self.logger.log(
                 f"Iteration {iteration}: Accepted candidate (subsample score "
                 f"{sum(proposal.subsample_scores_before or [])} -> {new_sum}); running full eval."
             )
+            # Each accepted candidate in a batch needs its own on-disk anchor.
+            # The first keeps the iteration's id (back-compat: agents still find
+            # the primary accepted candidate at ``iterations/<iteration_id>/``);
+            # the rest get suffixed ids so their ``outputs/`` and
+            # ``trajectories/`` no longer overwrite one another under the shared
+            # id. ``_save_iteration_dirs`` reads these back from
+            # ``iteration_ids_by_candidate_idx`` to emit one dir per candidate.
+            candidate_iteration_id = iteration_id if k == 0 else f"{iteration_id}-{k}"
             new_idx, _ = self._add_evaluated_program(
                 new_program=proposal.candidate,
                 state=state,
                 parent_program_idx=proposal.parent_program_ids,
                 valset_evaluation=valset_evaluation,
                 num_actual_evals=num_actual_evals,
+                iteration_id=candidate_iteration_id,
+                proposal_metadata=proposal.metadata,
             )
             self._log_proposal_lm_calls(iteration, proposal, candidate_idx=new_idx)
             notify_callbacks(
@@ -538,8 +929,10 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
                 CandidateAcceptedEvent(
                     iteration=iteration,
                     new_candidate_idx=new_idx,
+                    old_score=sum(proposal.subsample_scores_before or []),
                     new_score=new_sum,
                     parent_ids=proposal.parent_program_ids,
+                    metadata=proposal.metadata or {},
                 ),
             )
             any_accepted = True
@@ -548,6 +941,9 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
                 if self.merge_proposer.total_merges_tested < self.merge_proposer.max_merge_invocations:
                     self.merge_proposer.merges_due += 1
 
+        if self.write_agent_state:
+            trace_entry["proposal_accepted"] = any_accepted
+
         return any_accepted
 
     # ------------------------------------------------------------------
@@ -555,6 +951,22 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
     # ------------------------------------------------------------------
 
     def run(self) -> GEPAState[RolloutOutput, DataId]:
+        """Run the optimization loop until a stop condition fires.
+
+        Initializes (or resumes from ``run_dir``) the :class:`GEPAState`,
+        evaluates the seed on the valset, then iterates: save state, attempt a
+        merge if one is due, propose and gate a reflective batch, and notify the
+        iteration callbacks. Per-iteration exceptions are reported through
+        ``on_error`` and re-raised only when ``raise_on_exception`` is set.
+
+        Returns:
+            The final optimization state, after the closing save and the
+            ``on_optimization_end`` notification.
+
+        Raises:
+            ImportError: If the progress bar is enabled but ``tqdm`` is missing.
+            ValueError: If no valset was provided.
+        """
         # Check tqdm availability if progress bar is enabled
         progress_bar = None
         if self.display_progress_bar:
@@ -594,11 +1006,36 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
             program: dict[str, str],
             val_ids: list[Any],
         ) -> ValsetEvaluation[RolloutOutput, DataId]:
-            outputs, scores, objective_scores = self.evaluator(valset.fetch(val_ids), program)
-            outputs_dict = dict(zip(val_ids, outputs, strict=False))
-            scores_dict = dict(zip(val_ids, scores, strict=False))
+            # When write_agent_state is on, evaluate with traces so the seed's
+            # trajectories land under iterations/seed/trajectories/.
+            if self.write_agent_state:
+                eval_result = self.adapter.evaluate(valset.fetch(val_ids), program, capture_traces=True)
+                return ValsetEvaluation(
+                    outputs_by_val_id=dict(zip(val_ids, eval_result.outputs, strict=False)),
+                    scores_by_val_id=dict(zip(val_ids, eval_result.scores, strict=False)),
+                    objective_scores_by_val_id=(
+                        dict(zip(val_ids, eval_result.objective_scores, strict=False))
+                        if eval_result.objective_scores is not None
+                        else None
+                    ),
+                    trajectories_by_val_id=(
+                        dict(zip(val_ids, eval_result.trajectories, strict=False))
+                        if eval_result.trajectories is not None
+                        else None
+                    ),
+                )
+
+            (eval_result,) = invoke_batch_evaluate(
+                self.adapter,
+                [(program, valset.fetch(val_ids))],
+                capture_traces=False,
+            )
+            outputs_dict = dict(zip(val_ids, eval_result.outputs, strict=False))
+            scores_dict = dict(zip(val_ids, eval_result.scores, strict=False))
             objective_scores_dict = (
-                dict(zip(val_ids, objective_scores, strict=False)) if objective_scores is not None else None
+                dict(zip(val_ids, eval_result.objective_scores, strict=False))
+                if eval_result.objective_scores is not None
+                else None
             )
             return ValsetEvaluation(
                 outputs_by_val_id=outputs_dict,
@@ -622,14 +1059,16 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
             ),
         )
 
-        # Evaluate seed candidate on valset (after on_optimization_start callback).
-        # Policies may narrow the seed evaluation via the optional get_seed_eval_batch
-        # hook; the state does not exist yet, so get_eval_batch cannot be used here.
-        seed_batch_fn = getattr(self.val_evaluation_policy, "get_seed_eval_batch", None)
-        seed_val_ids = list(seed_batch_fn(valset)) if seed_batch_fn is not None else list(valset.all_ids())
-        seed_valset_evaluation = valset_evaluator(self.seed_candidate, seed_val_ids)
+        resumed = self.run_dir is not None and os.path.exists(os.path.join(self.run_dir, "gepa_state.bin"))
+        seed_valset_evaluation = None
+        if not resumed:
+            # Policies may narrow the seed evaluation via the optional
+            # get_seed_eval_batch hook. A resume uses its persisted scores and
+            # avoids repeating a potentially expensive full validation pass.
+            seed_batch_fn = getattr(self.val_evaluation_policy, "get_seed_eval_batch", None)
+            seed_val_ids = list(seed_batch_fn(valset)) if seed_batch_fn is not None else list(valset.all_ids())
+            seed_valset_evaluation = valset_evaluator(self.seed_candidate, seed_val_ids)
 
-        # Initialize state with pre-computed seed evaluation
         state = initialize_gepa_state(
             run_dir=self.run_dir,
             logger=self.logger,
@@ -639,6 +1078,44 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
             frontier_type=self.frontier_type,
             evaluation_cache=self._initial_evaluation_cache,
         )
+        if resumed:
+            if state.rng_state is None:
+                raise ValueError(
+                    "This persisted GEPA state predates exact RNG checkpoints and cannot be resumed reproducibly. "
+                    "Start a new run directory."
+                )
+            self.rng.setstate(cast(tuple[Any, ...], state.rng_state))
+            self._sync_state_to_batch_sampler(state)
+            self._sync_state_to_reflection_lm(state)
+            self._sync_state_to_callbacks(state)
+        else:
+            state.rng_state = self.rng.getstate()
+
+        # Fresh runs: record the seed valset eval in the cache. On resume the seed scores already
+        # live in state; writing the re-computed seed eval would desynchronize cache from
+        # prog_candidate_val_subscores.
+        if not resumed and state.evaluation_cache is not None:
+            assert seed_valset_evaluation is not None
+            seed_ids = list(seed_valset_evaluation.scores_by_val_id)
+            seed_obj = (
+                [seed_valset_evaluation.objective_scores_by_val_id[eid] for eid in seed_ids]
+                if seed_valset_evaluation.objective_scores_by_val_id is not None
+                else None
+            )
+            state.evaluation_cache.put_batch(
+                self.seed_candidate,
+                seed_ids,
+                [seed_valset_evaluation.outputs_by_val_id[eid] for eid in seed_ids],
+                [seed_valset_evaluation.scores_by_val_id[eid] for eid in seed_ids],
+                seed_obj,
+                split=self.valset_cache_split,
+            )
+
+        # Seed uses the reserved iteration id — outputs/trajectories go under
+        # iterations/seed/ alongside subsequent loop iterations.
+        if not resumed:
+            assert seed_valset_evaluation is not None
+            self._write_agent_iteration_files(SEED_ITERATION_ID, seed_valset_evaluation)
 
         # Restore adapter state from persisted state (only has effect on resume)
         self._sync_state_to_adapter(state)
@@ -737,9 +1214,18 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
             assert state.is_consistent()
             proposal_accepted = False
             iteration_started = False
+            evals_before_iteration = state.total_num_evals
             try:
                 self._sync_adapter_state_to_state(state)
-                state.save(self.run_dir, use_cloudpickle=self.use_cloudpickle)
+                self._sync_batch_sampler_to_state(state)
+                self._sync_reflection_lm_to_state(state)
+                self._sync_callback_states_to_state(state)
+                state.rng_state = self.rng.getstate()
+                state.save(
+                    self.run_dir,
+                    use_cloudpickle=self.use_cloudpickle,
+                    write_agent_state=self.write_agent_state,
+                )
                 notify_callbacks(
                     self.callbacks,
                     "on_state_saved",
@@ -750,7 +1236,7 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
                 )
 
                 state.i += 1
-                state.full_program_trace.append({"i": state.i})
+                state.full_program_trace.append({"i": state.i, "iteration_id": new_iteration_id()})
 
                 # Notify callbacks of iteration start
                 notify_callbacks(
@@ -794,10 +1280,21 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
                                     new_program=proposal.candidate,
                                     state=state,
                                     parent_program_idx=proposal.parent_program_ids,
+                                    proposal_metadata=proposal.metadata,
                                 )
                                 self.merge_proposer.merges_due -= 1
                                 self.merge_proposer.total_merges_tested += 1
                                 proposal_accepted = True
+
+                                # Stamp the trace entry so the agent-state
+                                # writer archives the merged candidate under
+                                # this iteration's dir. Unlike the reflective
+                                # path, the merge path never set this flag, so
+                                # ``_save_iteration_dirs`` saw ``accepted=None``
+                                # and skipped the merged candidate's components
+                                # and val_scores.
+                                if self.write_agent_state:
+                                    state.full_program_trace[-1]["proposal_accepted"] = True
 
                                 # Notify merge accepted
                                 notify_callbacks(
@@ -815,8 +1312,10 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
                                     CandidateAcceptedEvent(
                                         iteration=state.i + 1,
                                         new_candidate_idx=new_idx,
+                                        old_score=max(parent_sums),
                                         new_score=new_sum,
                                         parent_ids=proposal.parent_program_ids,
+                                        metadata=proposal.metadata or {},
                                     ),
                                 )
                                 continue  # skip reflective this iteration
@@ -853,6 +1352,7 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
             except Exception as e:
                 self.logger.log(f"Iteration {state.i + 1}: Exception during optimization: {e}")
                 self.logger.log(traceback.format_exc())
+                made_progress = state.total_num_evals > evals_before_iteration
                 # Notify error callback
                 notify_callbacks(
                     self.callbacks,
@@ -860,13 +1360,12 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
                     ErrorEvent(
                         iteration=state.i + 1,
                         exception=e,
-                        will_continue=not self.raise_on_exception,
+                        will_continue=not self.raise_on_exception and made_progress,
                     ),
                 )
-                if self.raise_on_exception:
-                    raise e
-                else:
-                    continue
+                if self.raise_on_exception or not made_progress:
+                    raise
+                continue
             finally:
                 # Notify iteration end only if the iteration actually started
                 # (i.e., on_iteration_start was called successfully)
@@ -886,7 +1385,15 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
             progress_bar.close()
 
         self._sync_adapter_state_to_state(state)
-        state.save(self.run_dir, use_cloudpickle=self.use_cloudpickle)
+        self._sync_batch_sampler_to_state(state)
+        self._sync_reflection_lm_to_state(state)
+        self._sync_callback_states_to_state(state)
+        state.rng_state = self.rng.getstate()
+        state.save(
+            self.run_dir,
+            use_cloudpickle=self.use_cloudpickle,
+            write_agent_state=self.write_agent_state,
+        )
 
         # Notify optimization end
         best_candidate_idx = self.val_evaluation_policy.get_best_program(state)
@@ -931,14 +1438,38 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
         ``"candidates"`` table in WandB / MLflow.
         """
         metadata = proposal.metadata or {}
-        components = {k.split(":", 1)[1] for k in metadata if k.startswith("prompt:") or k.startswith("raw_lm_output:")}
-        if not components:
-            return
-
         status = "accepted" if candidate_idx >= 0 else "rejected"
         subsample_before = sum(proposal.subsample_scores_before or [])
         subsample_after = sum(proposal.subsample_scores_after or [])
         parent_ids_str = str(proposal.parent_program_ids)
+        components = {k.split(":", 1)[1] for k in metadata if k.startswith("prompt:") or k.startswith("raw_lm_output:")}
+
+        # Strategy diagnostics are stored separately from the final LM prompt
+        # and output columns. This keeps ComBEE's map/reduce details queryable
+        # without duplicating them once per component in the proposals table.
+        reflection_metadata = {
+            key: value
+            for key, value in metadata.items()
+            if key != "proposal_id" and not key.startswith(("prompt:", "raw_lm_output:"))
+        }
+        if reflection_metadata:
+            self.experiment_tracker.log_table(
+                "proposal_reflection_metadata",
+                columns=["iteration", "status", "candidate_idx", "parent_ids", "proposal_id", "reflection_metadata"],
+                data=[
+                    [
+                        iteration,
+                        status,
+                        candidate_idx,
+                        parent_ids_str,
+                        metadata.get("proposal_id", ""),
+                        json.dumps(reflection_metadata, sort_keys=True, default=str),
+                    ]
+                ],
+            )
+
+        if not components:
+            return
 
         rows = []
         for comp in sorted(components):

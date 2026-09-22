@@ -10,6 +10,25 @@ on:
   workflow_dispatch:
 
 jobs:
+  terminalbench-runtime:
+    name: Terminal Bench document runtime
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Harbor requires newer LiteLLM than GEPA's optional extras allow.
+      - name: Install the isolated Harbor runtime
+        run: |
+          uv venv .harbor-venv --python 3.12
+          uv pip install --python .harbor-venv/bin/python harbor==0.22.0 pytest
+      - name: Verify prompt and skill use without model API calls
+        env:
+          PYTHONPATH: src
+        run: uv run --no-project --python .harbor-venv/bin/python python -m pytest -q tests/harbor/
+
   fix:
     name: Check Ruff Fix
     runs-on: ubuntu-latest
@@ -99,11 +118,9 @@ jobs:
           uv sync -p .venv --locked --extra dev
           uv pip list
       - name: Run lint with tests
-        uses: chartboost/ruff-action@v1
-        with:
-          args: check --fix-only
+        run: uv run -p .venv ruff check
       - name: Run tests with pytest
-        run: uv run -p .venv pytest -vv tests/
+        run: uv run -p .venv python -m pytest -vv tests/
       # - name: Install optional dependencies
       #   run: uv sync -p .venv --locked --extra dev --extra test_extras
       # - name: Run extra tests

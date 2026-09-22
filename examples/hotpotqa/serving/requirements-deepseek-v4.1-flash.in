@@ -1,0 +1,31 @@
+# DeepSeek-V4.1-Flash serving environment for examples/hotpotqa/run_hotpotqa.sbatch.
+#
+# Separate from the Qwen arm's requirements.in so the proven vLLM 0.25.1 stack stays
+# untouched. DeepseekV41ForCausalLM (with its deepseek_v41 tokenizer mode, reasoning
+# parser, and tool parser) exists only on vLLM main after commit e77daef89 (PR #56214,
+# 2026-09-11); no PyPI release carries it yet (0.29.0 predates it; the recipe targets
+# 0.30.0). vLLM publishes a wheel for every main commit, so the arm pins that exact
+# wheel by URL; the lock records its sha256. Regenerate the lock with
+#   MODEL_PROFILE=deepseek-v4.1-flash scripts/della/lock_serving_env.sh
+vllm @ https://wheels.vllm.ai/e77daef89e18e08321ae7b8b24827eedd5fe8673/vllm-0.1.1.dev5%2Bge77daef89-cp38-abi3-manylinux_2_28_x86_64.whl
+
+# The versions that commit's requirements/cuda.txt pins. PyPI's torch 2.13.0 wheel is
+# already the CUDA 13.0 build; jobs load the matching `cudatoolkit/13.0` module.
+torch==2.13.0
+transformers==5.13.0
+flashinfer-python==0.6.18.post1
+
+# Della's GPU nodes are offline. From vLLM 0.26 flashinfer no longer ships its GPU
+# kernels with vLLM and downloads missing ones at runtime, so install both prebuilt
+# artifact wheels from flashinfer.ai (they are no longer on PyPI): the cubins and the
+# ahead-of-time JIT kernel cache for CUDA 13.0. The sbatch sets FLASHINFER_NO_DOWNLOAD=1
+# so a missing kernel fails loudly instead of reaching for the network.
+flashinfer-cubin==0.6.18.post1
+flashinfer-jit-cache==0.6.18.post1+cu130
+
+# DeepGEMM (bundled in the vLLM wheel) and any remaining flashinfer kernels JIT-compile
+# on the GPU node; they need ninja in the venv and the system CUDA toolkit module.
+ninja==1.11.1.4
+
+# Used by the sbatch's inline version checks.
+packaging

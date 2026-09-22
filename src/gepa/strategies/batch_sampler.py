@@ -3,7 +3,8 @@
 
 import random
 from collections import Counter
-from typing import Protocol
+from collections.abc import Mapping
+from typing import Any, Protocol
 
 from gepa.core.adapter import DataInst
 from gepa.core.data_loader import DataId, DataLoader
@@ -43,6 +44,53 @@ class EpochShuffledBatchSampler(BatchSampler[DataId, DataInst]):
             self.rng = random.Random(0)
         else:
             self.rng = rng
+
+    def get_state(self) -> dict[str, Any]:
+        """Return the current epoch permutation and sampling cursor.
+
+        The RNG is intentionally excluded because the engine checkpoints the
+        single shared run RNG separately.
+
+        Returns:
+            Serializable sampler state needed to continue an epoch exactly.
+        """
+        state = {
+            "minibatch_size": self.minibatch_size,
+            "shuffled_ids": list(self.shuffled_ids),
+            "epoch": self.epoch,
+            "id_freqs": dict(self.id_freqs),
+            "last_trainset_size": self.last_trainset_size,
+            "current_iteration": self._current_iteration,
+            "calls_in_iteration": self._calls_in_iteration,
+        }
+        return state
+
+    def set_state(self, state: Mapping[str, Any]) -> None:
+        """Restore an epoch permutation and cursor from a durable checkpoint.
+
+        Args:
+            state: Snapshot previously returned by :meth:`get_state`.
+
+        Raises:
+            TypeError: A persisted collection has an incompatible type.
+            ValueError: The snapshot was created with a different minibatch
+                size.
+        """
+        if int(state.get("minibatch_size", -1)) != self.minibatch_size:
+            raise ValueError("Persisted batch sampler minibatch_size does not match the current run")
+        shuffled_ids = state.get("shuffled_ids", [])
+        id_freqs = state.get("id_freqs", {})
+        if not isinstance(shuffled_ids, list):
+            raise TypeError("Persisted shuffled_ids must be a list")
+        if not isinstance(id_freqs, Mapping):
+            raise TypeError("Persisted id_freqs must be a mapping")
+        self.shuffled_ids = list(shuffled_ids)
+        self.epoch = int(state.get("epoch", -1))
+        self.id_freqs = Counter(id_freqs)
+        self.last_trainset_size = int(state.get("last_trainset_size", 0))
+        current_iteration = state.get("current_iteration")
+        self._current_iteration = None if current_iteration is None else int(current_iteration)
+        self._calls_in_iteration = int(state.get("calls_in_iteration", 0))
 
     def _update_shuffled(self, loader: DataLoader[DataId, DataInst]):
         all_ids = list(loader.all_ids())
@@ -101,3 +149,46 @@ class EpochShuffledBatchSampler(BatchSampler[DataId, DataInst]):
         end_idx = base_idx + self.minibatch_size
         assert end_idx <= len(self.shuffled_ids)
         return self.shuffled_ids[base_idx:end_idx]
+
+
+class IndependentEpochShuffledBatchSampler(EpochShuffledBatchSampler[DataId, DataInst]):
+    """Keep training batches independent of parent selection and reflection randomness."""
+
+    def __init__(self, minibatch_size: int, seed: int) -> None:
+        """Own a seeded shuffle stream while retaining the epoch and padding rules.
+
+        Args:
+            minibatch_size: Number of examples in each training minibatch.
+            seed: Experiment seed shared by the methods being compared.
+        """
+        super().__init__(minibatch_size, rng=random.Random(seed))
+        self.seed = seed
+
+    def contract(self) -> dict[str, Any]:
+        """Describe the task-order policy recorded by benchmark run contracts."""
+        return {
+            "version": 1,
+            "algorithm": "epoch_shuffled",
+            "rng_stream": "independent_training_batches",
+            "seed": self.seed,
+            "minibatch_size": self.minibatch_size,
+            "checkpoint": "permutation_cursor_and_rng",
+        }
+
+    def get_state(self) -> dict[str, Any]:
+        """Save the private RNG alongside the epoch permutation and cursor."""
+        return {**super().get_state(), "sampling_contract": self.contract(), "rng_state": self.rng.getstate()}
+
+    def set_state(self, state: Mapping[str, Any]) -> None:
+        """Restore private randomness and reject incompatible sampling checkpoints.
+
+        Args:
+            state: Snapshot produced by this sampler's ``get_state`` method.
+
+        Raises:
+            ValueError: Sampling policy changed or the private RNG state is absent.
+        """
+        if state.get("sampling_contract") != self.contract() or state.get("rng_state") is None:
+            raise ValueError("Checkpoint does not match the independent training-batch sampling policy")
+        super().set_state(state)
+        self.rng.setstate(state["rng_state"])

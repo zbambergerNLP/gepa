@@ -18,6 +18,7 @@ Invariants:
   I7 determinism: identical config -> identical outcome
 """
 
+import json
 import re
 from collections import defaultdict
 from itertools import pairwise
@@ -71,9 +72,9 @@ class SyntheticAdapter:
 
 
 class BatchedSyntheticAdapter(SyntheticAdapter):
-    def batch_evaluate(self, items):
+    def batch_evaluate(self, items, *, capture_traces=True):
         self.grouped_calls.append(len(items))
-        return [self.evaluate(batch, candidate, capture_traces=True) for candidate, batch in items]
+        return [self.evaluate(batch, candidate, capture_traces=capture_traces) for candidate, batch in items]
 
 
 class SyntheticReflectionLM:
@@ -133,6 +134,16 @@ def state_trace_entries(run_dir):
 
 
 def _assert_invariants(result, adapter, by, run_dir, expect_tasks, topk):
+    """Assert cross-cutting budget, lineage, event, and persistence invariants.
+
+    Args:
+        result: Completed optimization result.
+        adapter: Test adapter exposing observed metric-call counts.
+        by: Callback events grouped by event name.
+        run_dir: Persisted run directory.
+        expect_tasks: Expected proposal-task count for each iteration.
+        topk: Expected upper bound on accepted proposals per iteration.
+    """
     # I1 — budget truth
     budget = by["on_budget_updated"]
     assert budget, "no budget events"
@@ -207,6 +218,13 @@ def _assert_invariants(result, adapter, by, run_dir, expect_tasks, topk):
     if isinstance(adapter, BatchedSyntheticAdapter) and expect_tasks > 1:
         assert any(n > 1 for n in adapter.grouped_calls)
 
+    # I7: proposal metadata is the order-independent correlation key used by
+    # ActionDiversityCallback.
+    for e in by["on_proposal_end"]:
+        assert "metadata" in e and "proposal_id" in e["metadata"]
+    for e in accepted + rejected:
+        assert "metadata" in e
+
 
 CONFIGS = [
     ("single-all-plain", SingleMutationSampling, AllImprovements, SyntheticAdapter, False, 1, None),
@@ -229,6 +247,62 @@ def test_multi_proposal_determinism(tmp_path):
     assert r1.best_candidate == r2.best_candidate
     assert r1.total_metric_calls == r2.total_metric_calls
     assert len(r1.candidates) == len(r2.candidates)
+
+
+def test_write_agent_state_multi_accept_one_dir_per_candidate(tmp_path):
+    """A multi-accept iteration must archive EVERY accepted candidate, not just
+    the last. Before the fix, all accepted candidates in one iteration shared a
+    single ``iterations/<id>/`` anchor, so their meta/components/val_scores and
+    outputs/trajectories overwrote one another and only the last survived.
+    """
+    run_dir = tmp_path / "multi_accept_agent_state"
+    adapter = SyntheticAdapter()
+    result = gepa.optimize(
+        seed_candidate={"system_prompt": "LEVEL=0"},
+        trainset=TRAIN,
+        valset=TRAIN,
+        adapter=adapter,
+        reflection_lm=SyntheticReflectionLM(),
+        max_metric_calls=400,
+        # SameParent(n=4) + AllImprovements → several accepts share one iteration.
+        sampling_strategy=SameParentSampling(n=4),
+        selection_strategy=AllImprovements(),
+        run_dir=str(run_dir),
+        write_agent_state=True,
+        seed=0,
+        display_progress_bar=False,
+    )
+
+    n_accepted = len(result.candidates) - 1  # excludes the seed
+    assert n_accepted >= 2, "test needs an iteration that accepts >1 candidate"
+
+    # Collect every accepted candidate dir (candidate_idx set, accepted True).
+    iters_dir = run_dir / "iterations"
+    accepted_idxs: list[int] = []
+    dirs_by_candidate: dict[int, list[str]] = defaultdict(list)
+    for meta_path in iters_dir.glob("*/meta.json"):
+        meta = json.loads(meta_path.read_text())
+        if meta.get("is_seed"):
+            continue
+        if meta.get("accepted") and meta.get("candidate_idx") is not None:
+            ci = meta["candidate_idx"]
+            accepted_idxs.append(ci)
+            dirs_by_candidate[ci].append(meta_path.parent.name)
+            # Accepted candidates archive their program + val scores.
+            assert (meta_path.parent / "components").is_dir()
+            assert (meta_path.parent / "val_scores.json").exists()
+
+    # One dir per accepted candidate: every accepted index present exactly once,
+    # each under a distinct anchor (no overwrite/collision).
+    assert sorted(accepted_idxs) == list(range(1, len(result.candidates)))
+    assert all(len(dirs) == 1 for dirs in dirs_by_candidate.values())
+    all_dir_names = [name for names in dirs_by_candidate.values() for name in names]
+    assert len(all_dir_names) == len(set(all_dir_names))
+
+    # Sanity: the state's per-candidate iteration ids match the on-disk dirs.
+    state = GEPAState.load(str(run_dir))
+    for ci in accepted_idxs:
+        assert (iters_dir / state.iteration_ids_by_candidate_idx[ci]).is_dir()
 
 
 class ConstantReflectionLM:

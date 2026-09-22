@@ -5,10 +5,10 @@ internal engine.  It handles:
 
 - **Evaluation**: calls the user's wrapped evaluator (single or parallel)
 - **Caching**: optional memory or disk cache for ``(candidate, example)`` pairs
-- **Refinement**: when :class:`~gepa.optimize_anything.RefinerConfig` is set,
+- **Refinement**: when :class:`~gepa.gepa_launcher.RefinerConfig` is set,
   iteratively improves candidates via an LLM after each evaluation
 - **Best-evals tracking**: maintains top-K evaluations per example for
-  warm-starting via :class:`~gepa.optimize_anything.OptimizationState`
+  warm-starting via :class:`~gepa.gepa_launcher.OptimizationState`
 - **Reflective dataset**: formats evaluation results for the reflection LLM
 """
 
@@ -23,13 +23,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-logger = logging.getLogger(__name__)
-
 from gepa.core.adapter import DataInst, EvaluationBatch, GEPAAdapter
 from gepa.proposer.reflective_mutation.base import LanguageModel
+from gepa.strategies.text_limits import clip_text, resolve_text_limits
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from gepa.optimize_anything import Candidate, OptimizationState, RefinerConfig, SideInfo
+    from gepa.gepa_launcher import Candidate, OptimizationState, RefinerConfig, SideInfo
 
 
 REFINER_PROMPT_TEMPLATE = """You are refining a candidate to improve its performance.
@@ -169,7 +170,7 @@ class BatchEvaluatorWrapper:
 class OptimizeAnythingAdapter(GEPAAdapter):
     """Adapter connecting the ``optimize_anything`` API to GEPA's engine.
 
-    Created automatically by :func:`~gepa.optimize_anything.optimize_anything` —
+    Created automatically by :func:`~gepa.gepa_launcher.optimize_anything` —
     users do not instantiate this directly.
     """
 
@@ -300,7 +301,7 @@ class OptimizeAnythingAdapter(GEPAAdapter):
 
     def _build_opt_state(self, example: Any) -> "OptimizationState":
         """Build an OptimizationState for the given example."""
-        from gepa.optimize_anything import OptimizationState
+        from gepa.gepa_launcher import OptimizationState
 
         return OptimizationState(best_example_evals=self._get_best_example_evals(example))
 
@@ -382,12 +383,12 @@ class OptimizeAnythingAdapter(GEPAAdapter):
                 # batch_evaluator is the preferred transport for any multi-pair
                 # evaluation (valset evals, merge evals, seed evals) — one
                 # external call for the whole batch, cache-aware.
-                return self._batch_evaluate_via_user_fn([(candidate, batch)])[0]
+                return self._batch_evaluate_via_user_fn([(candidate, batch)], capture_traces=capture_traces)[0]
             if self.parallel and len(batch) > 1:
                 raw_results = self._evaluate_parallel(batch, candidate)
             else:
                 raw_results = [self._call_evaluator(candidate, example) for example in batch]
-            return self._assemble_no_refiner_batch(candidate, batch, raw_results)
+            return self._assemble_no_refiner_batch(candidate, batch, raw_results, capture_traces=capture_traces)
 
         # Refiner path: evaluate with refinement. eval_output is a list of
         # (score, output, side_info) where output = (score, best_candidate, side_info).
@@ -411,7 +412,7 @@ class OptimizeAnythingAdapter(GEPAAdapter):
         return EvaluationBatch(
             outputs=outputs,
             scores=scores,
-            trajectories=side_infos,
+            trajectories=side_infos if capture_traces else None,
             objective_scores=objective_scores,
             num_metric_calls=num_metric_calls,
         )
@@ -419,6 +420,8 @@ class OptimizeAnythingAdapter(GEPAAdapter):
     def batch_evaluate(
         self,
         items: list[tuple["Candidate", list]],
+        *,
+        capture_traces: bool = True,
     ) -> list[EvaluationBatch]:
         """Evaluate multiple (candidate, batch) pairs.
 
@@ -427,21 +430,23 @@ class OptimizeAnythingAdapter(GEPAAdapter):
         into a single call to the user's batch function.
 
         Falls back to sequential ``evaluate()`` calls for the refiner path or a
-        single item. Always captures traces. With ``refiner_config`` set,
+        single item. With ``refiner_config`` set,
         evaluation is per-example by construction (each example runs its own
         evaluate->refine->re-evaluate loop), so grouped calls degrade to
         singleton batches through ``_resolve_pair`` — refinement is never
         silently skipped.
         """
         if self._batch_evaluator is not None and self.refiner_config is None:
-            return self._batch_evaluate_via_user_fn(items)
+            return self._batch_evaluate_via_user_fn(items, capture_traces=capture_traces)
         if self.parallel and self.refiner_config is None and len(items) > 1:
-            return self._batch_evaluate_parallel_fallback(items)
-        return [self.evaluate(batch, candidate, capture_traces=True) for candidate, batch in items]
+            return self._batch_evaluate_parallel_fallback(items, capture_traces=capture_traces)
+        return [self.evaluate(batch, candidate, capture_traces=capture_traces) for candidate, batch in items]
 
     def _batch_evaluate_via_user_fn(
         self,
         items: list[tuple["Candidate", list]],
+        *,
+        capture_traces: bool = True,
     ) -> list[EvaluationBatch]:
         """Flatten all (candidate, example) pairs, call batch_evaluator once, repackage.
 
@@ -522,7 +527,12 @@ class OptimizeAnythingAdapter(GEPAAdapter):
             raw_by_item.setdefault(item_idx, []).append((score, None, side_info))
 
         return [
-            self._assemble_no_refiner_batch(items[item_idx][0], items[item_idx][1], raw_by_item.get(item_idx, []))
+            self._assemble_no_refiner_batch(
+                items[item_idx][0],
+                items[item_idx][1],
+                raw_by_item.get(item_idx, []),
+                capture_traces=capture_traces,
+            )
             for item_idx in range(len(items))
         ]
 
@@ -553,13 +563,19 @@ class OptimizeAnythingAdapter(GEPAAdapter):
         refiner_prompt = candidate.get("refiner_prompt", "")
 
         # 1. Evaluate original candidate
-        original_score, original_output, original_side_info = self._call_evaluator(candidate, example)
+        original_score, _original_output, original_side_info = self._call_evaluator(candidate, example)
 
-        # Update best evals with original evaluation
-        self._update_best_example_evals(example, original_score, original_side_info)
+        # Update best evals with original evaluation. Skip synthetic
+        # whole-batch failures (raise_on_exception=False): with only a
+        # batch_evaluator, ``_resolve_pair`` routes this singleton through it,
+        # so a transient infra error surfaces here as a placeholder 0.0 that
+        # would otherwise poison the warm-start pool (mirror of
+        # ``_assemble_no_refiner_batch``).
+        if not (isinstance(original_side_info, dict) and original_side_info.get("_gepa_transient_failure")):
+            self._update_best_example_evals(example, original_score, original_side_info)
 
         # 2. Refine and evaluate
-        best_refined_score, best_refined_candidate, best_refined_side_info, all_attempts = self._refine_and_evaluate(
+        best_refined_score, best_refined_candidate, _best_refined_side_info, all_attempts = self._refine_and_evaluate(
             candidate, example, refiner_prompt, original_score, original_side_info
         )
 
@@ -644,6 +660,8 @@ class OptimizeAnythingAdapter(GEPAAdapter):
     def _batch_evaluate_parallel_fallback(
         self,
         items: list[tuple["Candidate", list]],
+        *,
+        capture_traces: bool = True,
     ) -> list[EvaluationBatch]:
         """Fan all ``(candidate, example)`` pairs out across one thread pool, regroup per item.
 
@@ -665,7 +683,7 @@ class OptimizeAnythingAdapter(GEPAAdapter):
             raw_per_item[pair_to_item_idx[pair_idx]].append(raw)
 
         return [
-            self._assemble_no_refiner_batch(candidate, batch, raw_per_item[item_idx])
+            self._assemble_no_refiner_batch(candidate, batch, raw_per_item[item_idx], capture_traces=capture_traces)
             for item_idx, (candidate, batch) in enumerate(items)
         ]
 
@@ -685,6 +703,8 @@ class OptimizeAnythingAdapter(GEPAAdapter):
         candidate: "Candidate",
         batch: list[DataInst],
         raw_results: list[tuple[float, Any, "SideInfo"]],
+        *,
+        capture_traces: bool = True,
     ) -> EvaluationBatch:
         """Package raw ``(score, _, side_info)`` evaluator results into an EvaluationBatch.
 
@@ -695,6 +715,13 @@ class OptimizeAnythingAdapter(GEPAAdapter):
         # Package outputs as (score, candidate, side_info) tuples.
         eval_output = [(score, (score, candidate, side_info), side_info) for score, _, side_info in raw_results]
         for example, (score, _, side_info) in zip(batch, eval_output, strict=True):
+            # Synthetic whole-batch failure results (raise_on_exception=False)
+            # carry a placeholder 0.0 score; feeding them into the best-evals
+            # history would poison the warm-start pool with fake zero-score
+            # entries. They are excluded from the eval cache for the same
+            # reason (see ``_resolve_pair_cached``).
+            if isinstance(side_info, dict) and side_info.get("_gepa_transient_failure"):
+                continue
             self._update_best_example_evals(example, score, side_info)
 
         scores = [score for score, _, _ in eval_output]
@@ -705,7 +732,7 @@ class OptimizeAnythingAdapter(GEPAAdapter):
         return EvaluationBatch(
             outputs=outputs,
             scores=scores,
-            trajectories=side_infos,
+            trajectories=side_infos if capture_traces else None,
             objective_scores=objective_scores,
             num_metric_calls=len(batch),
         )
@@ -764,6 +791,7 @@ class OptimizeAnythingAdapter(GEPAAdapter):
         )
 
         current_params = params_dict
+        text_limits = resolve_text_limits(getattr(self.refiner_config, "text_limits", None))
         for refinement_iter in range(self.refiner_config.max_refinements):
             # Format ALL attempts so far for the refiner (provides full history)
             current_feedback = self._format_all_attempts_feedback(all_attempts)
@@ -774,6 +802,7 @@ class OptimizeAnythingAdapter(GEPAAdapter):
                     candidate_to_improve=json.dumps(current_params, indent=2),
                     evaluation_feedback=current_feedback,
                 )
+                text_limits.check_prompt(prompt)
                 raw_output = refiner_lm(prompt).strip()
                 # Strip markdown code fences if present
                 if raw_output.startswith("```"):
@@ -791,7 +820,7 @@ class OptimizeAnythingAdapter(GEPAAdapter):
                         {
                             "iteration": refinement_iter + 1,
                             "error": f"JSON parse error: {parse_err}",
-                            "raw_output": raw_output[:2000],
+                            "raw_output": clip_text(raw_output, text_limits.history_text_chars),
                             "score": -1e9,
                         }
                     )
@@ -799,7 +828,8 @@ class OptimizeAnythingAdapter(GEPAAdapter):
 
                 # Reconstruct full candidate: refined params + original refiner_prompt
                 refined_candidate_dict = {**parsed_refined, "refiner_prompt": candidate.get("refiner_prompt", "")}
-                refined_score, refined_output, refined_eval_side_info = self._call_evaluator(
+                text_limits.check_candidate({name: str(value) for name, value in refined_candidate_dict.items()})
+                refined_score, _refined_output, refined_eval_side_info = self._call_evaluator(
                     refined_candidate_dict, example
                 )
 
@@ -865,7 +895,7 @@ class OptimizeAnythingAdapter(GEPAAdapter):
         ret: dict[str, list[dict[str, Any]]] = {}
         for component_name in components_to_update:
             ret[component_name] = []
-            for score, side_info in zip(scores, side_infos, strict=False):
+            for _score, side_info in zip(scores, side_infos, strict=False):
                 ret[component_name].append({})
                 for k, v in side_info.items():
                     if k == "scores":

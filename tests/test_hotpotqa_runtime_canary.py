@@ -1,0 +1,263 @@
+"""Tests for the fail-closed local HotPotQA runtime canary."""
+
+import json
+import sys
+import threading
+from pathlib import Path
+from unittest.mock import Mock, call
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).parents[1]))
+
+from examples.hotpotqa import runtime_canary
+from gepa.lm import LM, NativeToolCall, ToolCompletion
+from gepa.strategies.edit_tools import EDIT_TOOL_SETS, EditTool
+
+
+def test_canary_batches_independent_conversations_without_retry(monkeypatch):
+    """Exercise two simultaneous probes and retain exactly twenty independent attempts."""
+    barrier = threading.Barrier(2)
+    attempts = []
+    lock = threading.Lock()
+
+    def edit(lm, tool, attempt, result_log):
+        barrier.wait(timeout=5)
+        with lock:
+            attempts.append(attempt)
+        return 0
+
+    monkeypatch.setattr(runtime_canary, "resolve_hotpotqa_lm_kwargs", Mock(return_value={}))
+    monkeypatch.setattr(runtime_canary, "LM", Mock(side_effect=lambda *a, **kw: object()))
+    monkeypatch.setattr(runtime_canary, "_ordinary_completion_probe", Mock())
+    monkeypatch.setattr(runtime_canary, "_tool_continuation_probe", Mock())
+    monkeypatch.setattr(runtime_canary, "_edit_probe", edit)
+    result = runtime_canary.run_runtime_canary("fixture", "http://127.0.0.1:8000/v1", 20, workers=2)
+    assert result["workers"] == 2
+    assert sorted(attempts) == list(range(1, 21))
+
+
+@pytest.mark.parametrize("finish", ["<finish>Done.</finish>", "Done."])
+def test_edit_probe_requires_a_successful_edit_and_explicit_finish(finish: str) -> None:
+    """Exercise the real editor so the runtime gate follows its new protocol.
+
+    Args:
+        finish: Correct finish action or plain text requiring a correction turn.
+    """
+    lm = Mock(spec=LM)
+    lm.complete_with_tools.side_effect = [
+        ToolCompletion(
+            "",
+            (
+                NativeToolCall(
+                    "replace-1",
+                    "REPLACE_TEXT",
+                    json.dumps({"target": "Cite primary sources.", "text": "Cite primary sources inline."}),
+                ),
+            ),
+        ),
+        ToolCompletion(finish, ()),
+        ToolCompletion("<finish>Done.</finish>", ()),
+    ]
+    recovered = runtime_canary._edit_probe(lm, EditTool.REPLACE_TEXT, 1)
+    assert recovered == (0 if finish.startswith("<finish>") else 1)
+    assert lm.complete_with_tools.call_count == 2 + recovered
+
+
+def test_edit_probe_preserves_invalid_xml_and_native_recovery(tmp_path: Path) -> None:
+    """Replay the failed canary's first two actions and allow explicit finish."""
+    lm = Mock(spec=LM)
+    invalid = '<function_calls><invoke name="REPLACE_TEXT"/></function_calls>'
+    lm.complete_with_tools.side_effect = [
+        ToolCompletion(invalid, ()),
+        ToolCompletion(
+            "",
+            (
+                NativeToolCall(
+                    "replace-1",
+                    "REPLACE_TEXT",
+                    json.dumps({"target": "Cite primary sources.", "text": "Cite primary sources inline."}),
+                ),
+            ),
+        ),
+        ToolCompletion("<finish>Done.</finish>", ()),
+    ]
+    result_log = tmp_path / "edits.jsonl"
+    assert runtime_canary._edit_probe(lm, EditTool.REPLACE_TEXT, 15, result_log) == 1
+    record = json.loads(result_log.read_text())
+    result = record["result"]
+    assert [step["action"] for step in result["steps"]] == ["INVALID", "REPLACE_TEXT", "FINISH"]
+    assert result["steps"][0]["executed_edit"] == []
+    assert "Plain-text XML" in result["steps"][0]["observation"]
+    assert result["changed"] and result["tool_calls"] == 1
+    assert lm.complete_with_tools.call_count == 3
+    assert lm.complete_with_tools.call_args.kwargs["tool_choice"] == "none"
+
+
+def test_edit_probe_rejects_finish_without_edit(tmp_path: Path) -> None:
+    """Keep failed attempts recorded and require a real completed revision."""
+    lm = Mock(spec=LM)
+    lm.complete_with_tools.return_value = ToolCompletion("<finish>Done.</finish>", ())
+    result_log = tmp_path / "edits.jsonl"
+    with pytest.raises(runtime_canary.RuntimeCanaryError, match="did not complete"):
+        runtime_canary._edit_probe(lm, EditTool.REPLACE_TEXT, 1, result_log)
+    assert not json.loads(result_log.read_text())["result"]["changed"]
+    assert lm.complete_with_tools.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "api_base",
+    [
+        "http://localhost:8000/v1",
+        "http://127.0.0.1:8001/v1/",
+        "http://[::1]:8002/v1",
+    ],
+)
+def test_validate_loopback_api_base_accepts_explicit_local_v1_endpoints(api_base: str) -> None:
+    """Accept HTTP loopback endpoints with an explicit port and v1 path.
+
+    Args:
+        api_base: Valid local endpoint under test.
+    """
+    runtime_canary._validate_loopback_api_base(api_base)
+
+
+@pytest.mark.parametrize(
+    "api_base",
+    [
+        "https://127.0.0.1:8000/v1",
+        "http://127.0.0.1/v1",
+        "http://0.0.0.0:8000/v1",
+        "http://example.com:8000/v1",
+        "http://127.0.0.1:8000/chat/completions",
+        "http://127.0.0.1:8000/v1?token=secret",
+        "http://127.0.0.1:not-a-port/v1",
+    ],
+)
+def test_validate_loopback_api_base_rejects_nonlocal_or_ambiguous_endpoints(api_base: str) -> None:
+    """Reject endpoints that do not match the local scientific-runtime contract.
+
+    Args:
+        api_base: Invalid endpoint under test.
+    """
+    with pytest.raises(runtime_canary.RuntimeCanaryError, match="local HTTP loopback"):
+        runtime_canary._validate_loopback_api_base(api_base)
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("   ", "empty text"),
+        ("<think>private reasoning</think>answer", "leaked inline reasoning"),
+        ("!" * 32, "repeated-character degeneration"),
+        ("ab" * 32, "repeated-character degeneration"),
+    ],
+)
+def test_require_healthy_text_rejects_degenerate_output(text: str, message: str) -> None:
+    """Reject empty, leaked-reasoning, and low-diversity model output.
+
+    Args:
+        text: Unhealthy model text under test.
+        message: Expected failure description.
+    """
+    with pytest.raises(runtime_canary.RuntimeCanaryError, match=message):
+        runtime_canary._require_healthy_text(text, "Test probe")
+
+
+def test_run_runtime_canary_requires_twenty_attempts_before_model_setup(monkeypatch) -> None:
+    """Reject a weak canary before resolving or constructing its model client.
+
+    Args:
+        monkeypatch: Pytest fixture used to guard model setup calls.
+    """
+    resolve_kwargs = Mock()
+    lm_factory = Mock()
+    monkeypatch.setattr(runtime_canary, "resolve_hotpotqa_lm_kwargs", resolve_kwargs)
+    monkeypatch.setattr(runtime_canary, "LM", lm_factory)
+
+    with pytest.raises(runtime_canary.RuntimeCanaryError, match="at least 20 repetitions"):
+        runtime_canary.run_runtime_canary(
+            "hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash",
+            "http://127.0.0.1:8000/v1",
+            19,
+        )
+
+    resolve_kwargs.assert_not_called()
+    lm_factory.assert_not_called()
+
+
+def test_run_runtime_canary_cycles_all_four_tools_for_twenty_attempts(monkeypatch) -> None:
+    """Run every probe and distribute twenty edit attempts evenly across tools.
+
+    Args:
+        monkeypatch: Pytest fixture used to isolate the orchestration contract.
+    """
+    lm = object()
+    resolve_kwargs = Mock(return_value={"temperature": 1.0})
+    lm_factory = Mock(return_value=lm)
+    ordinary_probe = Mock()
+    continuation_probe = Mock()
+    edit_probe = Mock(return_value=0)
+    monkeypatch.setattr(runtime_canary, "resolve_hotpotqa_lm_kwargs", resolve_kwargs)
+    monkeypatch.setattr(runtime_canary, "LM", lm_factory)
+    monkeypatch.setattr(runtime_canary, "_ordinary_completion_probe", ordinary_probe)
+    monkeypatch.setattr(runtime_canary, "_tool_continuation_probe", continuation_probe)
+    monkeypatch.setattr(runtime_canary, "_edit_probe", edit_probe)
+
+    model = "hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash"
+    api_base = "http://127.0.0.1:8000/v1"
+    summary = runtime_canary.run_runtime_canary(model, api_base, 20)
+
+    resolve_kwargs.assert_called_once_with(model, api_base, role="optimizer")
+    assert lm_factory.call_args.args == (model,)
+    assert lm_factory.call_args.kwargs["temperature"] == 1.0
+    assert lm_factory.call_args.kwargs["timeout"] == 3600
+    assert lm_factory.call_args.kwargs["num_retries"] == lm_factory.call_args.kwargs["max_retries"] == 0
+    ordinary_probe.assert_called_once_with(lm)
+    continuation_probe.assert_called_once_with(lm)
+    tools = EDIT_TOOL_SETS["broad"]
+    assert edit_probe.call_args_list == [call(lm, tools[offset % len(tools)], offset + 1, None) for offset in range(20)]
+    assert summary == {
+        "provider_retry_policy": runtime_canary.PROVIDER_RETRY_POLICY,
+        "status": "passed",
+        "editor_mode": "react",
+        "model": model,
+        "api_base": api_base,
+        "attempts": 20,
+        "workers": 1,
+        "tool_attempts": {tool.value: 5 for tool in sorted(tools, key=lambda item: item.value)},
+        "ordinary_completion": "passed",
+        "tool_result_continuation": "passed",
+        "rejected_actions_recovered": 0,
+        "edit_probes_with_recovery": 0,
+    }
+
+
+def test_run_runtime_canary_propagates_probe_failure_and_stops(monkeypatch) -> None:
+    """Propagate a failed continuation probe without attempting any edits.
+
+    Args:
+        monkeypatch: Pytest fixture used to inject a runtime-probe failure.
+    """
+    lm = object()
+    failure = runtime_canary.RuntimeCanaryError("native tool continuation failed")
+    ordinary_probe = Mock()
+    continuation_probe = Mock(side_effect=failure)
+    edit_probe = Mock()
+    monkeypatch.setattr(runtime_canary, "resolve_hotpotqa_lm_kwargs", Mock(return_value={}))
+    monkeypatch.setattr(runtime_canary, "LM", Mock(return_value=lm))
+    monkeypatch.setattr(runtime_canary, "_ordinary_completion_probe", ordinary_probe)
+    monkeypatch.setattr(runtime_canary, "_tool_continuation_probe", continuation_probe)
+    monkeypatch.setattr(runtime_canary, "_edit_probe", edit_probe)
+
+    with pytest.raises(runtime_canary.RuntimeCanaryError) as exc_info:
+        runtime_canary.run_runtime_canary(
+            "hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash",
+            "http://127.0.0.1:8000/v1",
+            20,
+        )
+
+    assert exc_info.value is failure
+    ordinary_probe.assert_called_once_with(lm)
+    continuation_probe.assert_called_once_with(lm)
+    edit_probe.assert_not_called()

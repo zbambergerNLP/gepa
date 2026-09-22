@@ -12,12 +12,23 @@ become additional implementations in later phases.
 
 from __future__ import annotations
 
+import random
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 
+from gepa.lm import LMProviderError, ProviderIdentityMismatchError
 from gepa.proposer.reflective_mutation.base import LanguageModel
+from gepa.response_journal import ResponseJournalError
+from gepa.strategies.action_space import ActionSelector, VerbalizedActionSelector
+from gepa.strategies.document_template import MalformedDocumentError
 from gepa.strategies.instruction_proposal import InstructionProposalSignature
+from gepa.strategies.intervention import (
+    StatelessActionConstraint,
+    format_stateless_action_constraint,
+)
+from gepa.strategies.text_limits import TextLimitError, TextLimits, clip_text, resolve_text_limits
 
 # One reflection job = (candidate, reflective_dataset, components_to_update).
 ReflectionJob = tuple[dict[str, str], "Mapping[str, Sequence[Mapping[str, Any]]]", list[str]]
@@ -79,12 +90,43 @@ class BatchReflectionLM(ReflectionLM, Protocol):
     def reflect_many(self, jobs: list[ReflectionJob]) -> list[tuple[ReflectionProposal, ReflectionLM]]: ...
 
 
+@runtime_checkable
+class SeedableReflectionLM(ReflectionLM, Protocol):
+    """A :class:`ReflectionLM` whose internal randomness can be bound to GEPA's run seed.
+
+    When a reflection strategy defines ``bind_rng``, GEPA's front doors call it
+    at wiring time with the engine's seeded RNG. Implementations should treat
+    it as a default: a user-supplied explicit RNG must win over the bound one.
+    Sharing the stream preserves legacy strategies such as #307 ComBEE, whose
+    shuffles intentionally participate in subsequent engine sampling.
+    """
+
+    def bind_rng(self, rng: Any) -> None: ...
+
+
 class StatelessReflectionLM:
     """Default reflection LM: one stateless LM call per component (or one batched call covering all tasks/components when the underlying LM provides ``batch_complete``).
 
     For each component with feedback, render the instruction-proposal prompt
     (honoring a global or per-component template) and parse the new instruction.
     ``reflect`` returns ``self`` — there is no carried state.
+
+    Args:
+        lm: The reflection language model; a ``batch_complete`` method, if
+            present, is used to issue all prompts of a batch in one call.
+        reflection_prompt_template: A prompt template string applied to every
+            component, a component-name -> template mapping, or ``None`` for
+            the default template.
+        logger: Optional run logger with a ``log(message)`` method.
+        action_selector: Optional selector that picks one
+            :class:`StatelessActionConstraint` per job and appends the canonical
+            semantic action and region constraint to the prompt; ``None``
+            disables action-conditioned reflection.
+        rng: RNG passed to the action selector; ``random.Random(0)`` when
+            ``None``, rebound to the run RNG through :meth:`bind_rng`.
+        per_job_action_selection: Choose each job's action from its own context
+            (one selector call per job) instead of one selector call for the
+            whole batch; see :meth:`_select_actions_per_job`.
     """
 
     def __init__(
@@ -92,16 +134,140 @@ class StatelessReflectionLM:
         lm: LanguageModel,
         reflection_prompt_template: str | dict[str, str] | None = None,
         logger: Any | None = None,
+        action_selector: ActionSelector[StatelessActionConstraint] | None = None,
+        rng: random.Random | None = None,
+        per_job_action_selection: bool = False,
+        text_limits: TextLimits | None = None,
     ):
+        """Configure stateless reflection and optional action conditioning.
+
+        Args:
+            lm: Reflection model, optionally exposing ``batch_complete``.
+            reflection_prompt_template: Shared template, per-component template
+                mapping, or ``None`` for the default renderer.
+            logger: Optional run logger.
+            action_selector: Optional semantic action selector applied per job.
+            rng: Seeded selector RNG, or ``None`` for a deterministic default.
+            per_job_action_selection: Whether to condition and sample each job
+                separately instead of sharing one batch-level selector call.
+            text_limits: Optional feedback, prompt, and proposed-document limits.
+        """
         self.lm = lm
+        self.text_limits = resolve_text_limits(
+            text_limits if text_limits is not None else (
+                action_selector.text_limits if isinstance(action_selector, VerbalizedActionSelector) else None
+            )
+        )
+        if isinstance(action_selector, VerbalizedActionSelector):
+            action_selector.text_limits = self.text_limits
         self.reflection_prompt_template = reflection_prompt_template
         self.logger = logger
+        self.action_selector = action_selector
+        self.rng = rng if rng is not None else random.Random(0)
+        # Opt-in (#5): choose one action per job from that job's own context
+        # instead of one selector call for the whole batch. Costs one selector
+        # call per job but avoids conditioning every job's action on aggregated
+        # cross-job context; provided so the two can be compared empirically.
+        self.per_job_action_selection = per_job_action_selection
         # Components already warned about a missing per-component template (warn once).
         self._missing_template_warnings: set[str] = set()
+
+    def bind_rng(self, rng: random.Random) -> None:
+        """Bind GEPA's seeded run RNG (:class:`SeedableReflectionLM`).
+
+        The front doors call this at wiring time so action selection derives
+        from the run seed rather than this reflector's construction-time default
+        (``Random(0)``). ``reflect_many`` passes ``self.rng`` to the action
+        selector, so seeding here also seeds selection.
+
+        Args:
+            rng: The run RNG to use for action selection from now on.
+        """
+        self.rng = rng
+
+    def get_batch_retry_state(self) -> dict[str, Any]:
+        """Snapshot mutable selection and journal state before batch reflection.
+
+        Returns:
+            RNG state, any verbalized-selector history, and response-journal
+            cursors exposed by the reflection and selector language models.
+        """
+        state: dict[str, Any] = {
+            "rng_state": self.rng.getstate(),
+        }
+        lm_cursor = getattr(self.lm, "response_journal_cursor_state", None)
+        if callable(lm_cursor):
+            state["reflection_lm_cursor"] = lm_cursor()
+        selector = self.action_selector
+        if isinstance(selector, VerbalizedActionSelector):
+            state["selector_history"] = deepcopy(selector.history)
+            selector_cursor = getattr(selector.lm, "response_journal_cursor_state", None)
+            if callable(selector_cursor):
+                state["selector_lm_cursor"] = selector_cursor()
+        return state
+
+    def set_batch_retry_state(self, state: Mapping[str, Any]) -> None:
+        """Restore mutable selection and journal state before per-task fallback.
+
+        Args:
+            state: Snapshot returned by :meth:`get_batch_retry_state`.
+
+        Raises:
+            TypeError: The RNG or selector-history snapshot is malformed, or
+                an LM rejects its journal cursor snapshot.
+        """
+        rng_state = state.get("rng_state")
+        if not isinstance(rng_state, tuple):
+            raise TypeError("StatelessReflectionLM retry rng_state must be a tuple.")
+        self.rng.setstate(rng_state)
+        reflection_cursor = state.get("reflection_lm_cursor")
+        if reflection_cursor is not None:
+            restore = getattr(self.lm, "restore_response_journal_cursor_state", None)
+            if not callable(restore):
+                raise TypeError("Reflection LM cannot restore its response-journal cursor.")
+            restore(reflection_cursor)
+        selector = self.action_selector
+        if isinstance(selector, VerbalizedActionSelector):
+            selector_history = state.get("selector_history")
+            if not isinstance(selector_history, list):
+                raise TypeError("StatelessReflectionLM retry selector_history must be a list.")
+            selector.history = deepcopy(selector_history)
+            selector_cursor = state.get("selector_lm_cursor")
+            if selector_cursor is not None:
+                restore = getattr(selector.lm, "restore_response_journal_cursor_state", None)
+                if not callable(restore):
+                    raise TypeError("Action-selector LM cannot restore its response-journal cursor.")
+                restore(selector_cursor)
 
     def _log(self, message: str) -> None:
         if self.logger is not None:
             self.logger.log(message)
+
+    @staticmethod
+    def _summarize_feedback(
+        reflective_dataset: Mapping[str, Sequence[Mapping[str, Any]]],
+        max_chars: int | None = None,
+    ) -> str:
+        """Join feedback with no cutoff unless one is explicitly configured.
+
+        Args:
+            reflective_dataset: Per-component rows containing feedback or
+                execution-feedback fields.
+            max_chars: Source characters retained before a marker, or ``None``.
+
+        Returns:
+            Joined non-empty feedback, truncated to ``max_chars``, or an
+            explicit marker when no feedback is available.
+        """
+        parts: list[str] = []
+        for _name, entries in reflective_dataset.items():
+            for entry in entries:
+                fb = entry.get("Feedback") or entry.get("execution_feedback") or ""
+                if fb:
+                    parts.append(str(fb))
+        summary = "\n".join(parts)
+        summary = clip_text(summary, max_chars)
+        return summary or "(no feedback available)"
 
     def _resolve_template(self, name: str) -> str | None:
         if isinstance(self.reflection_prompt_template, dict):
@@ -112,8 +278,28 @@ class StatelessReflectionLM:
             return template
         return self.reflection_prompt_template
 
-    def _render(self, current_instruction_doc: str, dataset_with_feedback: Any, prompt_template: str | None):
-        """Render a reflection prompt and its chat-messages form."""
+    def _render(
+        self,
+        current_instruction_doc: str,
+        dataset_with_feedback: Any,
+        prompt_template: str | None,
+        action: StatelessActionConstraint | None = None,
+    ):
+        """Render a reflection prompt and its chat-messages form.
+
+        When *action* is provided, append the action constraint suffix to the
+        rendered prompt so the reflection LM is constrained to a single edit type.
+
+        Args:
+            current_instruction_doc: Current component text or selected section.
+            dataset_with_feedback: Reflective examples passed to the renderer.
+            prompt_template: Component-specific template override.
+            action: Optional semantic and region constraint appended to the
+                final user message.
+
+        Returns:
+            Rendered provider input and its normalized chat-message form.
+        """
         prompt = InstructionProposalSignature.prompt_renderer(
             {
                 "current_instruction_doc": current_instruction_doc,
@@ -121,26 +307,160 @@ class StatelessReflectionLM:
                 "prompt_template": prompt_template,
             }
         )
-        # Normalize to a chat-messages list (matches gepa.lm.LM.__call__).
+
+        if action is not None:
+            suffix = format_stateless_action_constraint(action, self.text_limits.selector_target_chars)
+            if isinstance(prompt, str):
+                prompt = prompt + suffix
+            else:
+                for msg in reversed(prompt):
+                    if msg.get("role") == "user":
+                        content = msg["content"]
+                        if isinstance(content, str):
+                            msg["content"] = content + suffix
+                        elif isinstance(content, list):
+                            content.append({"type": "text", "text": suffix})
+                        break
+
         messages = [{"role": "user", "content": prompt}] if isinstance(prompt, str) else prompt
         return prompt, messages
 
-    def _batch_complete(self, prompts: list[Any], messages_list: list[list[dict[str, Any]]]) -> list[str]:
+    def _batch_complete(
+        self,
+        prompts: list[Any],
+        messages_list: list[list[dict[str, Any]]],
+    ) -> list[str | None]:
         """Issue the reflection completions, batched when possible.
 
         A single prompt uses the plain completion path, so N=1 is byte-identical
         to the historical single reflection.  When the LM exposes
         ``batch_complete`` (``litellm.batch_completion``), all prompts go out as
-        one concurrent request; a custom callable without it runs sequentially.
+        one concurrent request. If that transport fails, the already-rendered
+        prompts run individually without selecting new semantic actions. A
+        recoverable individual failure leaves only its aligned proposal empty.
+
+        Args:
+            prompts: Provider inputs accepted by the reflection LM callable.
+            messages_list: Normalized message form of each prompt for a native
+                batch-completion interface.
+
+        Returns:
+            Job-aligned completion text, with ``None`` for a recoverable
+            individual failure.
+
+        Raises:
+            LMProviderError: The configured completion provider fails a batch
+                or individual request.
+            ProviderIdentityMismatchError: A live or replayed response changes
+                the provider identity pinned at launch.
+            ResponseJournalError: A replay slot is corrupt or belongs to a
+                different scientific request.
         """
+        for prompt in prompts:
+            self.text_limits.check_prompt(prompt)
         if not prompts:
             return []
         if len(prompts) == 1:
             return [self.lm(prompts[0])]
         batch_complete = getattr(self.lm, "batch_complete", None)
         if batch_complete is not None:
-            return list(batch_complete(messages_list))
-        return [self.lm(prompt) for prompt in prompts]
+            try:
+                return list(batch_complete(messages_list))
+            except (ProviderIdentityMismatchError, ResponseJournalError):
+                raise
+            except LMProviderError as exc:
+                self._log(
+                    f"Batched reflection completion failed ({exc}); retrying its selected actions individually."
+                )
+            except Exception as exc:
+                self._log(
+                    f"Batched reflection completion failed ({exc}); retrying its selected actions individually."
+                )
+        outputs: list[str | None] = []
+        for index, prompt in enumerate(prompts):
+            try:
+                outputs.append(self.lm(prompt))
+            except (LMProviderError, ProviderIdentityMismatchError, ResponseJournalError):
+                raise
+            except Exception as exc:
+                self._log(f"Individual reflection completion {index} failed: {exc}")
+                outputs.append(None)
+        return outputs
+
+    def _select_actions_batch(self, jobs: list[ReflectionJob]) -> list[StatelessActionConstraint | None]:
+        """Choose all jobs' actions in one selector call (default cost tradeoff).
+
+        Verbalized selectors receive context aggregated across the batch:
+        feedback from every job, and the first job's candidate text (with a note
+        when parents differ). Programmatic selectors ignore the context. This
+        uses one selector call, with every action conditioned on shared context.
+
+        Args:
+            jobs: The batch of ``(candidate, reflective_dataset, components)``
+                triples being reflected on.
+
+        Returns:
+            One selected action per job, in job order.
+        """
+        assert self.action_selector is not None
+        selector = self.action_selector
+        candidate_text = None
+        feedback_summary = None
+        if jobs:
+            candidate_text = "\n\n".join(jobs[0][0].values())
+            distinct_parents = any(job[0] != jobs[0][0] for job in jobs[1:])
+            if distinct_parents:
+                candidate_text += f"\n\n(1 of {len(jobs)} distinct parent candidates shown)"
+            feedback_summary = clip_text(
+                "\n---\n".join(self._summarize_feedback(job[1]) for job in jobs),
+                self.text_limits.stateless_feedback_chars,
+            )
+        if isinstance(selector, VerbalizedActionSelector):
+            verbalized_selector = cast(VerbalizedActionSelector[StatelessActionConstraint], selector)
+            return list(
+                verbalized_selector.select(
+                    len(jobs),
+                    self.rng,
+                    candidate=candidate_text,
+                    feedback_summary=feedback_summary,
+                )
+            )
+        return list(selector.select(len(jobs), self.rng))
+
+    def _select_actions_per_job(self, jobs: list[ReflectionJob]) -> list[StatelessActionConstraint | None]:
+        """Choose each job's action from its own context.
+
+        One selector call per job, each seeing only that job's candidate text and
+        feedback. Costs one selector call per job rather than one per batch, in
+        exchange for per-job conditioning; exists to compare against the batch
+        default. Shares ``self.rng`` across calls so selection stays seeded.
+
+        Args:
+            jobs: The batch of ``(candidate, reflective_dataset, components)``
+                triples being reflected on.
+
+        Returns:
+            One selected action per job, in job order.
+        """
+        assert self.action_selector is not None
+        selector = self.action_selector
+        actions: list[StatelessActionConstraint | None] = []
+        for candidate, reflective_dataset, _components in jobs:
+            if isinstance(selector, VerbalizedActionSelector):
+                verbalized_selector = cast(VerbalizedActionSelector[StatelessActionConstraint], selector)
+                actions.extend(
+                    verbalized_selector.select(
+                        1,
+                        self.rng,
+                        candidate="\n\n".join(candidate.values()),
+                        feedback_summary=self._summarize_feedback(
+                            reflective_dataset, self.text_limits.stateless_feedback_chars
+                        ),
+                    )
+                )
+            else:
+                actions.extend(selector.select(1, self.rng))
+        return actions
 
     def reflect(
         self,
@@ -148,31 +468,124 @@ class StatelessReflectionLM:
         reflective_dataset: Mapping[str, Sequence[Mapping[str, Any]]],
         components_to_update: list[str],
     ) -> tuple[ReflectionProposal, StatelessReflectionLM]:
-        # N=1 case of reflect_many — same code path, so behavior is identical.
+        """Reflect on one candidate through the shared batched implementation.
+
+        Args:
+            candidate: Parent component mapping.
+            reflective_dataset: Per-component feedback and traces.
+            components_to_update: Components selected for mutation.
+
+        Returns:
+            One proposal and this stateless reflector.
+
+        Raises:
+            ValueError: Action conditioning is enabled for a job that selects
+                more than one component.
+        """
         return self.reflect_many([(candidate, reflective_dataset, components_to_update)])[0]
 
     def reflect_many(self, jobs: list[ReflectionJob]) -> list[tuple[ReflectionProposal, StatelessReflectionLM]]:
-        # Flatten every (job, component) with feedback into one list of rendered
-        # prompts, issue them as a single batched completion, then scatter the
-        # parsed results back into one ReflectionProposal per job.
+        """Propose new texts for every job's components in one batched pass.
+
+        When an action selector is configured, one action is chosen per job
+        first (batched or per job, see ``per_job_action_selection``) and its
+        instruction suffix conditions that job's single selected component.
+        Only that section body is rendered and the returned body is spliced
+        into its unchanged parent. Without an action selector, the vanilla
+        multi-component behavior is unchanged. A component with no rows is
+        logged and skipped. All prompts are issued together through
+        :meth:`_batch_complete`, and the parsed instructions are scattered back
+        into one proposal per job.
+
+        Args:
+            jobs: ``(candidate, reflective_dataset, components_to_update)``
+                triples, one per proposal to make.
+
+        Returns:
+            One ``(proposal, self)`` pair per job, in job order; ``self`` is
+            returned as the next reflection LM because no state is carried.
+
+        Raises:
+            ValueError: Action conditioning is enabled for a job that selects
+                more than one component.
+        """
+        if self.action_selector is not None:
+            for _candidate, _reflective_dataset, components_to_update in jobs:
+                if len(components_to_update) != 1:
+                    raise ValueError("Action-conditioned stateless reflection requires exactly one component per job.")
+
+        actions: list[StatelessActionConstraint | None]
+        if self.action_selector is None:
+            actions = [None] * len(jobs)
+        elif self.per_job_action_selection:
+            actions = self._select_actions_per_job(jobs)
+        else:
+            actions = self._select_actions_batch(jobs)
+
         rendered: list[tuple[int, str, Any, list[dict[str, Any]]]] = []
         for job_idx, (candidate, reflective_dataset, components_to_update) in enumerate(jobs):
+            action = actions[job_idx] if job_idx < len(actions) else None
             for name in components_to_update:
-                # Gracefully handle a selected component with no data in the reflective dataset.
                 if name not in reflective_dataset or not reflective_dataset.get(name):
                     self._log(f"Component '{name}' is not in reflective dataset. Skipping.")
                     continue
-                prompt, messages = self._render(candidate[name], reflective_dataset[name], self._resolve_template(name))
+                current_instruction = candidate[name]
+                if action is not None:
+                    current_instruction = action.document_template.parse(current_instruction)[action.target_section]
+                prompt, messages = self._render(
+                    current_instruction, reflective_dataset[name], self._resolve_template(name), action=action
+                )
                 rendered.append((job_idx, name, prompt, messages))
 
         raw_outputs = self._batch_complete([r[2] for r in rendered], [r[3] for r in rendered])
 
         proposals = [ReflectionProposal(new_texts={}, prompts={}, raw_lm_outputs={}) for _ in jobs]
         for (job_idx, name, prompt, _messages), raw_output in zip(rendered, raw_outputs, strict=True):
+            if raw_output is None:
+                continue
             new_instruction = InstructionProposalSignature.output_extractor(raw_output.strip())["new_instruction"]
+            action = actions[job_idx]
+            if action is not None:
+                parent = jobs[job_idx][0][name]
+                try:
+                    new_instruction = action.document_template.replace_section_body(
+                        parent,
+                        action.target_section,
+                        new_instruction,
+                    )
+                except MalformedDocumentError as exc:
+                    self._log(
+                        f"Action-conditioned reflection for component '{name}' returned an invalid section body: {exc}"
+                    )
+                    continue
+            try:
+                self.text_limits.check_candidate({name: new_instruction})
+            except TextLimitError as exc:
+                self._log(str(exc))
+                proposals[job_idx].metadata.setdefault("length_capped_dropped", []).append(name)
+                continue
             proposals[job_idx].new_texts[name] = new_instruction
             proposals[job_idx].prompts[name] = prompt
             proposals[job_idx].raw_lm_outputs[name] = raw_output
 
-        # Stateless: the next LM is this same object (no carried context).
+        for job_idx, action in enumerate(actions):
+            if action is not None and job_idx < len(proposals):
+                proposals[job_idx].metadata.update(
+                    {
+                        "action": action.semantic_action.name,
+                        "semantic_action": action.semantic_action.name,
+                        "action_choice": action.menu_id,
+                        "action_operator": action.edit_tool.value,
+                        "action_target_section": action.target_section,
+                    }
+                )
+
+        for (candidate, _, _), proposal in zip(jobs, proposals, strict=True):
+            if self.text_limits.max_candidate_chars is not None:
+                try:
+                    self.text_limits.check_candidate({**candidate, **proposal.new_texts})
+                except TextLimitError as exc:
+                    self._log(str(exc))
+                    proposal.metadata.setdefault("length_capped_dropped", []).extend(proposal.new_texts)
+                    proposal.new_texts.clear()
         return [(proposal, self) for proposal in proposals]

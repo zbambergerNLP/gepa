@@ -216,3 +216,11 @@ __marimo__/
 runs/
 outputs/
 gepa_terminus/
+archive/
+
+# Local MLflow tracking artifacts (TrackingConfig(use_mlflow=True))
+mlflow.db
+mlruns/
+
+# Preserve ignored data from retired HoVer runs.
+examples/hover/data/

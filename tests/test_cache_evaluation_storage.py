@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from gepa.optimize_anything import (
+from gepa.gepa_launcher import (
     GEPAConfig,
     EngineConfig,
     ReflectionConfig,
@@ -46,6 +46,7 @@ def create_fitness_fn(call_counter: dict):
 class TestCacheEvaluationStorage:
     """Tests for cache_evaluation_storage parameter."""
 
+    @pytest.mark.usefixtures("openrouter_credentials")
     def test_memory_cache_prevents_duplicate_calls(self):
         """Memory cache should prevent re-evaluation of same candidate."""
         call_counter = {"count": 0}
@@ -75,6 +76,7 @@ class TestCacheEvaluationStorage:
         # because duplicate candidates are served from cache
         print(f"Metric calls: {result.total_metric_calls}, Actual fitness calls: {call_counter['count']}")
 
+    @pytest.mark.usefixtures("openrouter_credentials")
     def test_disk_cache_persists_across_runs(self):
         """Disk cache should persist and be loaded on subsequent runs."""
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -143,6 +145,7 @@ class TestCacheEvaluationStorage:
             # At minimum, the seed candidate should be cached
             assert second_run_calls <= first_run_calls, "Second run should benefit from cache"
 
+    @pytest.mark.usefixtures("openrouter_credentials")
     def test_cache_off_when_cache_evaluation_false(self):
         """When cache_evaluation=False, no caching should occur."""
         call_counter = {"count": 0}
@@ -170,6 +173,7 @@ class TestCacheEvaluationStorage:
         # Every metric call should result in a fitness_fn call (no caching)
         print(f"Metric calls: {result.total_metric_calls}, Actual fitness calls: {call_counter['count']}")
 
+    @pytest.mark.usefixtures("openrouter_credentials")
     def test_auto_mode_uses_disk_when_run_dir_provided(self):
         """Auto mode should use disk cache when run_dir is provided."""
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -199,6 +203,7 @@ class TestCacheEvaluationStorage:
             cache_dir = Path(tmp_dir) / "fitness_cache"
             assert cache_dir.exists(), "Auto mode with run_dir should use disk cache"
 
+    @pytest.mark.usefixtures("openrouter_credentials")
     def test_auto_mode_uses_memory_when_no_run_dir(self):
         """Auto mode should use memory cache when no run_dir is provided."""
         call_counter = {"count": 0}

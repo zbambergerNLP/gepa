@@ -41,6 +41,8 @@ class BatchEvaluateFn(Protocol):
     def __call__(
         self,
         items: list[tuple[Candidate, list]],
+        *,
+        capture_traces: bool = True,
     ) -> list["EvaluationBatch"]: ...
 
 
@@ -50,6 +52,8 @@ class ProposalFn(Protocol):
         candidate: dict[str, str],
         reflective_dataset: Mapping[str, Sequence[Mapping[str, Any]]],
         components_to_update: list[str],
+        *,
+        metadata: Mapping[str, Any] | None = None,
     ) -> dict[str, str]:
         """
         - Given the current `candidate`, a reflective dataset (as returned by
@@ -58,6 +62,17 @@ class ProposalFn(Protocol):
           to implement their own instruction proposal logic. For example, the user can use
           a different LLM, implement DSPy signatures, etc. Another example can be situations
           where 2 or more components need to be updated together (coupled updates).
+
+        - `metadata` is an open-ended dict of context hints supplied by the engine on
+          every call.           Custom proposers read only the keys they care about. Keys GEPA
+          currently populates are both on-disk anchors:
+            * `"iteration_id"`: str — this proposal's on-disk anchor; when
+              ``write_agent_state=True`` it owns the ``iterations/<iteration_id>/``
+              subdir. A random short id, unique even across parallel proposals.
+            * `"parent_iteration_id"`: str — on-disk iteration id of the
+              parent candidate (``"seed"`` for the seed).
+          Future keys may be added without changing this signature — existing proposers
+          simply ignore them.
 
         Returns
         - Dict[str, str] mapping component names to newly proposed component texts.
@@ -124,7 +139,7 @@ class GEPAAdapter(Protocol[DataInst, Trajectory, RolloutOutput]):
         with the failed example, including the error message, identifying the reason for the failure.
       - Reserve exceptions for unrecoverable, systemic failures (e.g., missing model,
         misconfigured program, schema mismatch).
-      - If an exception is raised, the engine will log the error and proceed to the next iteration.
+      - Systemic exceptions follow the `raise_on_exception` policy passed to `optimize()`.
     """
 
     def evaluate(
@@ -204,24 +219,38 @@ class GEPAAdapter(Protocol[DataInst, Trajectory, RolloutOutput]):
     propose_new_texts: ProposalFn | None = None
 
     # Optional: adapters can implement batch_evaluate to evaluate multiple
-    # (candidate, batch) pairs in a single call.  When not present, the
-    # proposer falls back to default_batch_evaluate() which calls evaluate()
-    # sequentially.  Unlike evaluate(), batch_evaluate always returns full
-    # results including trajectories.
+    # (candidate, batch) pairs in a single call. When not present, GEPA falls
+    # back to default_batch_evaluate() which calls evaluate() sequentially.
+    # ``capture_traces`` has the same meaning as on evaluate().
     #
     # def batch_evaluate(
     #     self, items: list[tuple[Candidate, list[DataInst]]],
+    #     *, capture_traces: bool = True,
     # ) -> list[EvaluationBatch[Trajectory, RolloutOutput]]: ...
 
 
 def default_batch_evaluate(
     adapter: GEPAAdapter,
     items: list[tuple[Candidate, list]],
+    *,
+    capture_traces: bool = True,
 ) -> list[EvaluationBatch]:
     """Default sequential batch_evaluate fallback.
 
-    Calls ``adapter.evaluate()`` once per (candidate, batch) pair with
-    ``capture_traces=True``.  Adapters can implement ``batch_evaluate``
-    directly for true batching or parallelism.
+    Calls ``adapter.evaluate()`` once per (candidate, batch) pair. Adapters can
+    implement ``batch_evaluate`` directly for true batching or parallelism.
     """
-    return [adapter.evaluate(batch, candidate, capture_traces=True) for candidate, batch in items]
+    return [adapter.evaluate(batch, candidate, capture_traces=capture_traces) for candidate, batch in items]
+
+
+def invoke_batch_evaluate(
+    adapter: GEPAAdapter,
+    items: list[tuple[Candidate, list]],
+    *,
+    capture_traces: bool = True,
+) -> list[EvaluationBatch]:
+    """Use an adapter's optional trace-aware batch evaluator."""
+    batch_fn = getattr(adapter, "batch_evaluate", None)
+    if batch_fn is not None:
+        return batch_fn(items, capture_traces=capture_traces)
+    return default_batch_evaluate(adapter, items, capture_traces=capture_traces)

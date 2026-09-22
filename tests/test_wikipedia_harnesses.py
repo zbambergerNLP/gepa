@@ -1,0 +1,1425 @@
+"""Tests for the Wikipedia-backed HotPotQA runner."""
+
+import asyncio
+import fcntl
+import json
+import random
+import subprocess
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, call
+
+import datasets
+import litellm
+import pytest
+from litellm.utils import get_optional_params
+
+sys.path.insert(0, str(Path(__file__).parents[1]))
+
+from examples.common import provider_retries
+from examples.common.experiment_models import (
+    DEEPSEEK_V4_1_FLASH_MODEL,
+    EXPERIMENT_NUM_RETRIES,
+    QWEN3_8_27B_MODEL,
+    experiment_decoding,
+    experiment_request_overrides,
+)
+from examples.common.wikipedia import WikipediaClient, WikipediaPassage
+from examples.hotpotqa import main as hotpot_main
+from examples.hotpotqa import utils as hotpot_utils
+
+REPO_ROOT = Path(__file__).parents[1]
+HOTPOT_COT_RESULTS = (
+    ("summary one reasoning", "summary one"),
+    ("bridge query reasoning", "bridge query"),
+    ("summary two reasoning", "summary two"),
+    ("answer reasoning", "exact answer"),
+)
+
+
+class FakeRetriever:
+    """Return deterministic pages while recording retrieval calls."""
+
+    def __init__(self, pages_by_query: dict[str, list[WikipediaPassage]]) -> None:
+        """Initialize fixed results and an empty call log.
+
+        Args:
+            pages_by_query: Passage lists keyed by exact retrieval query.
+        """
+        self.pages_by_query = pages_by_query
+        self.calls: list[tuple[str, int]] = []
+
+    def search(self, query: str, limit: int) -> list[WikipediaPassage]:
+        """Record and return a bounded deterministic result.
+
+        Args:
+            query: Exact lookup key.
+            limit: Maximum passages to return.
+
+        Returns:
+            Configured passage prefix, or an empty list for an unknown query.
+        """
+        self.calls.append((query, limit))
+        return self.pages_by_query.get(query, [])[:limit]
+
+
+@pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL])
+def test_hotpot_lm_uses_local_campaign_decoding(monkeypatch, model: str) -> None:
+    """Keep sparse messages and local campaign settings in HotPotQA calls.
+
+    Args:
+        monkeypatch: Pytest fixture used to replace LiteLLM completion.
+        model: Experiment model whose decoding arguments are inspected.
+    """
+    calls = []
+
+    def completion(**kwargs):
+        """Capture one completion request and return fixed content.
+
+        Args:
+            **kwargs: LiteLLM completion arguments under test.
+
+        Returns:
+            Minimal response object containing ``answer``.
+        """
+        calls.append(kwargs)
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="answer"))])
+
+    monkeypatch.setattr(hotpot_utils.litellm, "completion", completion)
+
+    assert hotpot_utils._call_lm("", "question", model, None) == "answer"
+    assert hotpot_utils._call_lm("", "question", model, None) == "answer"
+    assert len(calls) == 2
+    assert calls[0]["messages"] == [{"role": "user", "content": "question"}]
+    expected_request = {
+        "num_retries": EXPERIMENT_NUM_RETRIES,
+        **experiment_decoding(model, agentic=False),
+        **experiment_request_overrides(model, explicit_reasoning=True),
+        "max_tokens": 65_536,
+    }
+    expected_request["seed"] = hotpot_utils.HOTPOTQA_SCIENTIFIC_REQUEST_SEED
+    expected_request["extra_body"]["thinking_token_budget"] = 32_768
+    assert 3599 < calls[0]["timeout"] <= 3600
+    assert {key: value for key, value in calls[0].items() if key not in {"model", "messages", "timeout"}} == {
+        **expected_request,
+        "max_retries": 0,
+        "cache": {"no-cache": True, "no-store": True},
+    }
+    assert calls[0].get("extra_body") == expected_request.get("extra_body")
+
+
+@pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL])
+def test_litellm_preserves_local_thinking_and_effort_settings(model: str) -> None:
+    """Keep both providers' explicit thinking controls in the outgoing vLLM request."""
+    request_overrides = experiment_request_overrides(model, explicit_reasoning=True)
+
+    transformed = get_optional_params(
+        model=model.removeprefix("hosted_vllm/"),
+        custom_llm_provider="hosted_vllm",
+        drop_params=True,
+        **experiment_decoding(model),
+        **request_overrides,
+    )
+
+    assert transformed["extra_body"]["chat_template_kwargs"] == request_overrides["extra_body"]["chat_template_kwargs"]
+    if model == QWEN3_8_27B_MODEL:
+        assert transformed["extra_body"]["top_k"] == 20
+    assert transformed["temperature"] == 1.0
+    assert transformed["top_p"] == 0.95
+
+
+def test_wikipedia_client_orders_and_persists_results(tmp_path) -> None:
+    """Preserve MediaWiki rank and reuse results from the SQLite cache.
+
+    Args:
+        tmp_path: Pytest directory used for the isolated cache.
+    """
+    calls = []
+
+    def transport(endpoint, params, timeout, headers):
+        """Record request fields and return pages in reverse rank order.
+
+        Args:
+            endpoint: MediaWiki endpoint selected by the client.
+            params: Generated API query parameters.
+            timeout: Configured request timeout.
+            headers: Generated request headers.
+
+        Returns:
+            MediaWiki-shaped response with explicit rank indices.
+        """
+        calls.append((endpoint, params, timeout, headers))
+        return {
+            "query": {
+                "pages": [
+                    {"pageid": 2, "index": 2, "title": "Second", "extract": "second text"},
+                    {"pageid": 1, "index": 1, "title": "First", "extract": "first text"},
+                ]
+            }
+        }
+
+    cache_path = tmp_path / "wikipedia.sqlite3"
+    client = WikipediaClient(cache_path=cache_path, transport=transport)
+    first = client.search("  multi   hop  ", 2)
+    second = client.search("multi hop", 2)
+
+    assert [passage.title for passage in first] == ["First", "Second"]
+    assert second == first
+    assert len(calls) == 1
+    assert calls[0][1]["generator"] == "search"
+    assert calls[0][1]["prop"] == "extracts"
+    assert "User-Agent" in calls[0][3]
+
+    cached_client = WikipediaClient(
+        cache_path=cache_path,
+        transport=Mock(side_effect=AssertionError("cache miss")),
+    )
+    assert cached_client.search("multi hop", 2) == first
+
+
+@pytest.mark.skipif(hotpot_utils.dspy is None, reason="HotPotQA's locked DSPy group is not installed")
+def test_hotpot_chat_adapter_repairs_only_expected_malformed_field_headers() -> None:
+    """Accept Qwen's missing trailing hashes without weakening field checks."""
+    dspy_module = hotpot_utils.dspy
+    adapter_class = hotpot_utils._HotPotQAChatAdapter
+    assert dspy_module is not None
+    assert adapter_class is not None
+    signature = dspy_module.ensure_signature("question->reasoning,summary")
+    adapter = adapter_class()
+
+    parsed = adapter.parse(
+        signature,
+        "[[ ## reasoning ## ]]\nBecause evidence.\n\n[[ ## summary ]]\nFinal summary.\n\n[[ ## completed ]]",
+    )
+
+    assert parsed == {"reasoning": "Because evidence.", "summary": "Final summary."}
+    canonical = adapter.parse(
+        signature,
+        "[[ ## reasoning ## ]]\nBecause evidence.\n\n[[ ## summary ## ]]\nFinal summary.\n\n[[ ## completed ## ]]",
+    )
+    assert canonical == parsed
+    with pytest.raises(ValueError, match="Expected"):
+        adapter.parse(signature, "[[ ## reasoning ]]\nOnly reasoning.")
+    with pytest.raises(ValueError, match="Failed to parse response as per signature"):
+        adapter.parse(signature, None)
+
+
+def test_hotpot_evaluator_scores_only_dspy_task_parse_failures_as_zero(monkeypatch) -> None:
+    """Reject malformed candidate output without hiding systemic failures.
+
+    Args:
+        monkeypatch: Pytest fixture used to isolate task-program execution.
+    """
+    monkeypatch.setattr(hotpot_main, "build_hotpotqa_task_lm", Mock(return_value=object()))
+    evaluator = hotpot_main.make_evaluator(
+        QWEN3_8_27B_MODEL,
+        FakeRetriever({}),
+        program="2stage",
+    )
+    parse_error = ValueError(
+        "Failed to parse response as per signature from original completion with input and num present and expected"
+    )
+    monkeypatch.setattr(hotpot_main, "run_program", Mock(side_effect=parse_error))
+
+    score, side_info = evaluator(
+        {"summarize1": "candidate"},
+        {"question": "question", "answer": "answer"},
+    )
+
+    assert score == 0.0
+    assert side_info == {
+        "evaluation_error": {
+            "type": "task_output_parse_error",
+            "message": "Task-model output omitted DSPy's required structured fields; this example scored 0.",
+        }
+    }
+
+    for systemic_error in (ValueError("unrelated candidate bug"), RuntimeError("provider unavailable")):
+        monkeypatch.setattr(hotpot_main, "run_program", Mock(side_effect=systemic_error))
+        with pytest.raises(type(systemic_error), match=str(systemic_error)):
+            evaluator(
+                {"summarize1": "candidate"},
+                {"question": "question", "answer": "answer"},
+            )
+
+
+def test_hotpot_heldout_evaluation_checkpoints_and_reuses_predictions(monkeypatch, tmp_path) -> None:
+    """Persist each held-out result and resume without repeating model calls.
+
+    Args:
+        monkeypatch: Pytest fixture used to isolate task-program execution.
+        tmp_path: Pytest directory receiving held-out checkpoints.
+    """
+    task_lm = object()
+    candidate = {"summarize1": "candidate"}
+    dataset = [
+        {"id": "first", "question": "first question", "answer": "Alpha"},
+        {"id": "second", "question": "second question", "answer": "Beta delta"},
+    ]
+    run_program = Mock(
+        side_effect=[
+            ("query one", "Alpha", {}),
+            ("query two", "Beta gamma", {}),
+        ]
+    )
+    monkeypatch.setattr(hotpot_main, "build_hotpotqa_task_lm", Mock(return_value=task_lm))
+    monkeypatch.setattr(hotpot_main, "run_program", run_program)
+
+    first = hotpot_main.evaluate_on_set(
+        candidate,
+        dataset,
+        QWEN3_8_27B_MODEL,
+        FakeRetriever({}),
+        None,
+        max_workers=1,
+        checkpoint_dir=tmp_path,
+    )
+
+    assert first == pytest.approx((0.5, 0.75))
+    assert run_program.call_count == 2
+    checkpoint_roots = [path for path in tmp_path.iterdir() if path.is_dir()]
+    assert len(checkpoint_roots) == 1
+    checkpoint_root = checkpoint_roots[0]
+    records = sorted(checkpoint_root.glob("*.json"))
+    assert [path.name for path in records] == [
+        "0000-a7937b64b8ca.json",
+        "0001-16367aacb67a.json",
+        "summary.json",
+    ]
+    assert json.loads((checkpoint_root / "summary.json").read_text()) == {
+        "candidate_sha256": checkpoint_root.name,
+        "example_count": 2,
+        "exact_match": 0.5,
+        "f1": 0.75,
+        "schema_version": 1,
+    }
+
+    monkeypatch.setattr(hotpot_main, "run_program", Mock(side_effect=AssertionError("must resume")))
+    second = hotpot_main.evaluate_on_set(
+        candidate,
+        dataset,
+        QWEN3_8_27B_MODEL,
+        FakeRetriever({}),
+        None,
+        max_workers=2,
+        checkpoint_dir=tmp_path,
+    )
+
+    assert second == pytest.approx(first)
+
+
+def test_hotpot_heldout_evaluation_scores_only_task_parse_errors_as_zero(monkeypatch, tmp_path) -> None:
+    """Checkpoint expected DSPy parse failures without hiding other errors.
+
+    Args:
+        monkeypatch: Pytest fixture used to isolate task-program execution.
+        tmp_path: Pytest directory receiving held-out checkpoints.
+    """
+    parse_error = ValueError("Failed to parse response as per signature from malformed task output")
+    monkeypatch.setattr(hotpot_main, "build_hotpotqa_task_lm", Mock(return_value=object()))
+    monkeypatch.setattr(hotpot_main, "run_program", Mock(side_effect=parse_error))
+
+    scores = hotpot_main.evaluate_on_set(
+        {"summarize1": "candidate"},
+        [{"id": "broken", "question": "question", "answer": "answer"}],
+        QWEN3_8_27B_MODEL,
+        FakeRetriever({}),
+        None,
+        max_workers=1,
+        checkpoint_dir=tmp_path,
+    )
+
+    assert scores == (0.0, 0.0)
+    record_paths = [path for path in tmp_path.rglob("*.json") if path.name != "summary.json"]
+    assert len(record_paths) == 1
+    record = json.loads(record_paths[0].read_text())
+    assert record["prediction"] is None
+    assert record["task_output_parse_error"] is True
+
+    monkeypatch.setattr(hotpot_main, "run_program", Mock(side_effect=RuntimeError("provider unavailable")))
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        hotpot_main.evaluate_on_set(
+            {"summarize1": "different candidate"},
+            [{"id": "broken", "question": "question", "answer": "answer"}],
+            QWEN3_8_27B_MODEL,
+            FakeRetriever({}),
+            None,
+            max_workers=1,
+            checkpoint_dir=tmp_path,
+        )
+
+
+@pytest.mark.skipif(hotpot_utils.dspy is None, reason="HotPotQA's locked DSPy group is not installed")
+@pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL])
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_real_dspy_provider_requests_use_three_attempts(tmp_path, monkeypatch, model, asynchronous):
+    """Exercise the pinned DSPy transport with the same bounded retry policy."""
+    raw = litellm.ModelResponse(
+        model=model,
+        choices=[{"message": {"role": "assistant", "content": "done"}, "finish_reason": "stop"}],
+        usage={"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+    )
+    outcomes = [ConnectionError("temporary"), ConnectionError("temporary"), raw]
+    provider = AsyncMock(side_effect=outcomes) if asynchronous else Mock(side_effect=outcomes)
+    monkeypatch.setattr(litellm, "acompletion" if asynchronous else "completion", provider)
+    monkeypatch.setattr(provider_retries.time, "sleep", Mock())
+    monkeypatch.setattr(provider_retries.asyncio, "sleep", AsyncMock())
+    path = tmp_path / "provider-attempts.jsonl"
+    settings = hotpot_utils.resolve_hotpotqa_lm_kwargs(model, "http://localhost:8000/v1")
+    settings.update(provider_retries.provider_retry_kwargs(path, "solver"))
+    lm = hotpot_utils.build_hotpotqa_task_lm(model, None, settings)
+    result = asyncio.run(lm.aforward(prompt="test")) if asynchronous else lm.forward(prompt="test")
+    assert result.choices[0].message.content == "done"
+    assert provider.call_count == 3
+    assert all(call.kwargs["num_retries"] == call.kwargs["max_retries"] == 0 for call in provider.call_args_list)
+    assert all(call.kwargs["max_tokens"] == 65_536 for call in provider.call_args_list)
+    assert len(path.read_text().splitlines()) == 3
+
+
+@pytest.mark.skipif(hotpot_utils.dspy is None, reason="HotPotQA's locked DSPy group is not installed")
+@pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL])
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_repeated_hotpot_dspy_requests_are_fresh(tmp_path, monkeypatch, model, asynchronous):
+    """Bypass both DSPy caches and call the provider for identical new requests."""
+    responses = [
+        litellm.ModelResponse(
+            model=model,
+            choices=[{"message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
+            usage={"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+        )
+        for text in ("first result", "second result")
+    ]
+    provider = AsyncMock(side_effect=responses) if asynchronous else Mock(side_effect=responses)
+    monkeypatch.setattr(litellm, "acompletion" if asynchronous else "completion", provider)
+    monkeypatch.setattr(hotpot_utils.dspy.cache, "get", Mock(side_effect=AssertionError("cache read")))
+    monkeypatch.setattr(hotpot_utils.dspy.cache, "put", Mock(side_effect=AssertionError("cache write")))
+    path = tmp_path / "provider-attempts.jsonl"
+    settings = hotpot_utils.resolve_hotpotqa_lm_kwargs(model, "http://localhost:8000/v1")
+    settings.update(provider_retries.provider_retry_kwargs(path, "solver"))
+    settings.update(cache=True, cache_in_memory=True)
+    lm = hotpot_utils.build_hotpotqa_task_lm(model, None, settings)
+    assert lm.cache is False and lm.cache_in_memory is False
+    outputs = []
+    for _ in range(2):
+        response = asyncio.run(lm.aforward(prompt="same input")) if asynchronous else lm.forward(prompt="same input")
+        outputs.append(response.choices[0].message.content)
+    assert outputs == ["first result", "second result"]
+    assert provider.call_count == 2
+    assert all(call.kwargs["cache"] == {"no-cache": True, "no-store": True} for call in provider.call_args_list)
+    assert len(path.read_text().splitlines()) == 2
+
+
+@pytest.mark.skipif(hotpot_utils.dspy is None, reason="HotPotQA's locked DSPy group is not installed")
+def test_hotpot_chain_of_thought_uses_the_real_dspy_protocol() -> None:
+    """Execute the artifact signature through DSPy's real ChatAdapter.
+
+    This no-network integration test verifies that the optimized instruction
+    remains the signature objective, passages keep DSPy's list rendering, and
+    Chain-of-Thought returns both visible output fields.
+    """
+    dspy_module = hotpot_utils.dspy
+    assert dspy_module is not None
+    assert hotpot_utils.validate_hotpotqa_dspy_runtime() == (
+        hotpot_utils.HOTPOTQA_DSPY_VERSION,
+        hotpot_utils.HOTPOTQA_DSPY_COMMIT,
+    )
+    task_lm = dspy_module.utils.DummyLM([{"reasoning": "bridge reasoning", "summary": "bridge summary"}])
+
+    reasoning, summary = hotpot_utils._call_chain_of_thought(
+        "Summarize the evidence.",
+        "question,passages->summary",
+        {"question": "question", "passages": ["Page A | text", "Page B | other"]},
+        "summary",
+        task_lm,
+    )
+
+    assert (reasoning, summary) == ("bridge reasoning", "bridge summary")
+    messages = task_lm.history[0]["messages"]
+    system, user = [message["content"] for message in messages]
+    assert "Your output fields are:\n1. `reasoning` (str): \n2. `summary` (str):" in system
+    assert "In adhering to this structure, your objective is: \n        Summarize the evidence." in system
+    assert "[[ ## passages ## ]]\n[1] «Page A | text»\n[2] «Page B | other»" in user
+    assert user.endswith("then ending with the marker for `[[ ## completed ## ]]`.")
+
+
+@pytest.mark.skipif(hotpot_utils.dspy is None, reason="HotPotQA's locked DSPy group is not installed")
+def test_hotpot_four_component_program_runs_real_chain_of_thought_modules() -> None:
+    """Execute all four artifact predictors through DSPy without a network.
+
+    The real modules must preserve their distinct output schemas while only
+    terminal fields—not their reasoning—flow into the next predictor.
+    """
+    dspy_module = hotpot_utils.dspy
+    assert dspy_module is not None
+    task_lm = dspy_module.utils.DummyLM(
+        [
+            {"reasoning": "summary one reasoning", "summary": "summary one"},
+            {"reasoning": "bridge query reasoning", "query": "bridge query"},
+            {"reasoning": "summary two reasoning", "summary": "summary two"},
+            {"reasoning": "answer reasoning", "answer": "exact answer"},
+        ]
+    )
+    retriever = FakeRetriever(
+        {
+            "original question": [WikipediaPassage("First page", "first")],
+            "bridge query": [WikipediaPassage("Second page", "second")],
+        }
+    )
+
+    query, answer, trace = hotpot_utils.run_two_stage(
+        "summarize one",
+        "query two",
+        "summarize two",
+        "answer",
+        "original question",
+        retriever,
+        task_lm=task_lm,
+    )
+
+    assert (query, answer) == ("bridge query", "exact answer")
+    assert retriever.calls == [("original question", 7), ("bridge query", 7)]
+    assert trace["summary_1_reasoning"] == "summary one reasoning"
+    assert trace["query_reasoning"] == "bridge query reasoning"
+    assert trace["summary_2_reasoning"] == "summary two reasoning"
+    assert trace["answer_reasoning"] == "answer reasoning"
+    assert len(task_lm.history) == 4
+    expected_terminals = ("summary", "query", "summary", "answer")
+    for history, terminal in zip(task_lm.history, expected_terminals, strict=True):
+        system = history["messages"][0]["content"]
+        assert "1. `reasoning` (str)" in system
+        assert f"2. `{terminal}` (str)" in system
+
+
+def test_hotpot_task_lm_requires_the_locked_dspy_runtime(monkeypatch) -> None:
+    """Fail before an experiment when DSPy is missing or has drifted.
+
+    Args:
+        monkeypatch: Pytest fixture used to simulate missing and mismatched
+            task-program runtimes.
+    """
+    monkeypatch.setattr(hotpot_utils, "dspy", None)
+    with pytest.raises(RuntimeError, match="requires DSPy"):
+        hotpot_utils.build_hotpotqa_task_lm(QWEN3_8_27B_MODEL, None)
+
+    monkeypatch.setattr(hotpot_utils, "dspy", SimpleNamespace())
+    monkeypatch.setattr(hotpot_utils, "package_version", Mock(return_value="3.3.1"))
+    with pytest.raises(RuntimeError, match="requires dspy==2.6.23"):
+        hotpot_utils.build_hotpotqa_task_lm(QWEN3_8_27B_MODEL, None)
+
+    monkeypatch.setattr(
+        hotpot_utils,
+        "package_version",
+        Mock(return_value=hotpot_utils.HOTPOTQA_DSPY_VERSION),
+    )
+    monkeypatch.setattr(
+        hotpot_utils,
+        "package_distribution",
+        Mock(
+            return_value=SimpleNamespace(
+                read_text=Mock(
+                    return_value=json.dumps({"vcs_info": {"commit_id": "0000000000000000000000000000000000000000"}})
+                )
+            )
+        ),
+    )
+    with pytest.raises(RuntimeError, match="requires DSPy commit"):
+        hotpot_utils.build_hotpotqa_task_lm(QWEN3_8_27B_MODEL, None)
+
+
+@pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL])
+def test_hotpot_dspy_lm_uses_the_selected_experiment_profile(monkeypatch, model: str) -> None:
+    """Apply the selected solver's exact decoding settings to DSPy.
+
+    Args:
+        monkeypatch: Pytest fixture used to replace the DSPy LM constructor.
+        model: Homogeneous experiment profile under test.
+    """
+    task_lm = object()
+    lm_constructor = Mock(return_value=task_lm)
+    settings = SimpleNamespace(configure=Mock())
+    monkeypatch.setattr(hotpot_utils, "dspy", SimpleNamespace(LM=lm_constructor, settings=settings))
+    monkeypatch.setattr(
+        hotpot_utils,
+        "package_version",
+        Mock(return_value=hotpot_utils.HOTPOTQA_DSPY_VERSION),
+    )
+    monkeypatch.setattr(
+        hotpot_utils,
+        "package_distribution",
+        Mock(
+            return_value=SimpleNamespace(
+                read_text=Mock(return_value=json.dumps({"vcs_info": {"commit_id": hotpot_utils.HOTPOTQA_DSPY_COMMIT}}))
+            )
+        ),
+    )
+
+    result = hotpot_utils.build_hotpotqa_task_lm(model, "http://solver.example/v1")
+
+    assert result is task_lm
+    settings.configure.assert_called_once_with(disable_history=True)
+    expected_kwargs = {
+        "model": model,
+        "cache": False,
+        "cache_in_memory": False,
+        **hotpot_utils.resolve_hotpotqa_lm_kwargs(model, "http://solver.example/v1"),
+    }
+    lm_constructor.assert_called_once_with(**expected_kwargs)
+
+
+def test_hotpot_dspy_lm_uses_the_standard_local_deepseek_client(monkeypatch) -> None:
+    """Use DSPy's normal local OpenAI-compatible client for DeepSeek.
+
+    Args:
+        monkeypatch: Pytest fixture used to replace runtime validation and the
+            DSPy client constructor.
+    """
+    lm_constructor = Mock(return_value=object())
+    monkeypatch.setattr(
+        hotpot_utils,
+        "dspy",
+        SimpleNamespace(LM=lm_constructor, settings=SimpleNamespace(configure=Mock())),
+    )
+    monkeypatch.setattr(
+        hotpot_utils,
+        "validate_hotpotqa_dspy_runtime",
+        Mock(return_value=(hotpot_utils.HOTPOTQA_DSPY_VERSION, hotpot_utils.HOTPOTQA_DSPY_COMMIT)),
+    )
+
+    result = hotpot_utils.build_hotpotqa_task_lm(DEEPSEEK_V4_1_FLASH_MODEL, "http://127.0.0.1:8000/v1")
+
+    assert result is lm_constructor.return_value
+    lm_constructor.assert_called_once()
+    assert lm_constructor.call_args.kwargs["api_base"] == "http://127.0.0.1:8000/v1"
+    assert lm_constructor.call_args.kwargs["seed"] == hotpot_utils.HOTPOTQA_SCIENTIFIC_REQUEST_SEED
+
+
+def test_hotpot_smoke_conversion_retains_gold_context_for_feedback() -> None:
+    """Retain labeled context without retaining a solver-facing passage field."""
+    examples = hotpot_utils._jsonl_to_examples(
+        [
+            {
+                "id": "example",
+                "question": "Question?",
+                "answer": "Answer",
+                "context": {"title": ["Leaked"], "sentences": [["Do not expose"]]},
+                "supporting_facts": {"title": ["Leaked"], "sent_id": [0]},
+                "passages": [{"title": "Leaked", "text": "Do not expose"}],
+            }
+        ]
+    )
+
+    assert examples == [
+        {
+            "question": "Question?",
+            "answer": "Answer",
+            "id": "example",
+            "type": "",
+            "level": "",
+            "context": {"title": ["Leaked"], "sentences": [["Do not expose"]]},
+            "supporting_facts": {"title": ["Leaked"], "sent_id": [0]},
+        }
+    ]
+    assert "passages" not in examples[0]
+
+
+def test_hotpot_production_loader_uses_the_artifact_split_and_retains_labels(monkeypatch) -> None:
+    """Load fullwiki using the artifact's ordered pools and seed-one samples.
+
+    Args:
+        monkeypatch: Pytest fixture used to replace the Hugging Face loader.
+    """
+    calls = []
+    records = [
+        {
+            "id": str(index),
+            "question": f"Question {index}",
+            "answer": f"Answer {index}",
+            "context": {"title": [f"Gold {index}"], "sentences": [[f"Evidence {index}"]]},
+            "supporting_facts": {"title": ["Gold"], "sent_id": [0]},
+        }
+        for index in range(1000)
+    ]
+
+    def load_dataset(name, config, **kwargs):
+        """Capture dataset selection and return deterministic fullwiki splits.
+
+        Args:
+            name: Requested Hugging Face dataset name.
+            config: Requested dataset configuration.
+            **kwargs: Loader options supplied by the production path.
+
+        Returns:
+            Raw training and validation records.
+        """
+        calls.append((name, config, kwargs))
+        return {
+            "train": records,
+            "validation": [{"id": "must-not-be-used"}],
+        }
+
+    monkeypatch.setattr(datasets, "load_dataset", load_dataset)
+    train, val, test = hotpot_utils.load_hotpotqa_dataset()
+
+    assert calls == [
+        (
+            "hotpot_qa",
+            "fullwiki",
+            {"revision": hotpot_utils.HOTPOTQA_HF_REVISION},
+        )
+    ]
+    assert (len(train), len(val), len(test)) == (150, 300, 300)
+    assert [example["id"] for example in train] == [
+        str(index) for index in random.Random(1).sample(list(range(800, 1000)), 150)
+    ]
+    assert [example["id"] for example in val] == [
+        str(index) for index in random.Random(1).sample(list(range(400, 800)), 300)
+    ]
+    assert [example["id"] for example in test] == [
+        str(index) for index in random.Random(1).sample(list(range(400)), 300)
+    ]
+    assert all("context" in example and "supporting_facts" in example for example in train + val + test)
+    assert all(example["id"] != "must-not-be-used" for example in train + val + test)
+
+
+def test_hotpot_nonzero_seed_remixes_only_selected_train_and_validation(monkeypatch) -> None:
+    """Keep test fixed while applying artifact seed remixes to optimization data.
+
+    Args:
+        monkeypatch: Pytest fixture used to replace the Hugging Face loader.
+    """
+    records = [
+        {
+            "id": str(index),
+            "question": f"Question {index}",
+            "answer": f"Answer {index}",
+            "context": {"title": [], "sentences": []},
+            "supporting_facts": {"title": [], "sent_id": []},
+        }
+        for index in range(1000)
+    ]
+    monkeypatch.setattr(datasets, "load_dataset", lambda *_args, **_kwargs: {"train": records})
+
+    base_train, base_val, base_test = hotpot_utils.load_hotpotqa_dataset(seed=0)
+    mixed_train, mixed_val, mixed_test = hotpot_utils.load_hotpotqa_dataset(seed=7)
+    expected = base_train + base_val
+    random.Random(7).shuffle(expected)
+
+    assert mixed_train == expected[:150]
+    assert mixed_val == expected[150:]
+    assert mixed_test == base_test
+
+
+def test_hotpot_production_loader_never_falls_back_implicitly(monkeypatch) -> None:
+    """Require explicit smoke selection when fullwiki is unavailable.
+
+    Args:
+        monkeypatch: Pytest fixture used to force an offline loader failure.
+    """
+    monkeypatch.setattr(datasets, "load_dataset", Mock(side_effect=OSError("offline")))
+
+    with pytest.raises(RuntimeError, match="explicit smoke run"):
+        hotpot_utils.load_hotpotqa_dataset()
+
+
+def test_hotpot_program_executes_two_wikipedia_hops(monkeypatch) -> None:
+    """Use the generated bridge query for the second Wikipedia retrieval.
+
+    Args:
+        monkeypatch: Pytest fixture used to provide deterministic LM outputs.
+    """
+    chain_of_thought = Mock(side_effect=HOTPOT_COT_RESULTS)
+    monkeypatch.setattr(hotpot_utils, "_call_chain_of_thought", chain_of_thought)
+    task_lm = object()
+    retriever = FakeRetriever(
+        {
+            "original question": [WikipediaPassage("First page", "first")],
+            "bridge query": [WikipediaPassage("Second page", "second")],
+        }
+    )
+
+    query, answer, trace = hotpot_utils.run_two_stage(
+        "summarize one",
+        "query two",
+        "summarize two",
+        "answer",
+        "original question",
+        retriever,
+        retrieval_k=7,
+        task_lm=task_lm,
+    )
+
+    assert query == "bridge query"
+    assert answer == "exact answer"
+    assert retriever.calls == [("original question", 7), ("bridge query", 7)]
+    assert chain_of_thought.call_args_list == [
+        call(
+            "summarize one",
+            "question,passages->summary",
+            {"question": "original question", "passages": ["First page | first"]},
+            "summary",
+            task_lm,
+        ),
+        call(
+            "query two",
+            "question,summary_1->query",
+            {"question": "original question", "summary_1": "summary one"},
+            "query",
+            task_lm,
+        ),
+        call(
+            "summarize two",
+            "question,context,passages->summary",
+            {
+                "question": "original question",
+                "context": "summary one",
+                "passages": ["Second page | second"],
+            },
+            "summary",
+            task_lm,
+        ),
+        call(
+            "answer",
+            "question,summary_1,summary_2->answer",
+            {"question": "original question", "summary_1": "summary one", "summary_2": "summary two"},
+            "answer",
+            task_lm,
+        ),
+    ]
+    assert trace == {
+        "hop1_documents": [WikipediaPassage("First page", "first")],
+        "summary_1_reasoning": "summary one reasoning",
+        "summary_1": "summary one",
+        "query_reasoning": "bridge query reasoning",
+        "query": "bridge query",
+        "hop2_documents": [WikipediaPassage("Second page", "second")],
+        "summary_2_reasoning": "summary two reasoning",
+        "summary_2": "summary two",
+        "answer_reasoning": "answer reasoning",
+        "answer": "exact answer",
+    }
+
+
+def test_hotpot_component_feedback_uses_gold_only_after_execution() -> None:
+    """Give each component its own oracle feedback without gold-input leakage."""
+    example = {
+        "question": "Which bridge fact answers this?",
+        "answer": "target",
+        "context": {
+            "title": ["First page", "Missing page"],
+            "sentences": [["First supporting sentence."], ["Secret supporting sentence."]],
+        },
+        "supporting_facts": {"title": ["First page", "Missing page"], "sent_id": [0, 0]},
+    }
+    trace = {
+        "hop1_documents": [WikipediaPassage("First page", "retrieved first abstract")],
+        "summary_1_reasoning": "first reasoning",
+        "summary_1": "summary one",
+        "query_reasoning": "query reasoning",
+        "query": "bridge query",
+        "hop2_documents": [WikipediaPassage("Other page", "retrieved second abstract")],
+        "summary_2_reasoning": "second reasoning",
+        "summary_2": "summary two",
+        "answer_reasoning": "answer reasoning",
+        "answer": "wrong",
+    }
+
+    records = hotpot_utils.artifact_component_records(example, trace, 0.0)
+
+    assert set(records) == {"summarize1", "create_query_hop2", "summarize2", "final_answer"}
+    assert records["summarize1"]["Inputs"]["passages"] == ["First page | retrieved first abstract"]
+    assert "Secret supporting sentence." not in str(records["summarize1"]["Inputs"])
+    assert "Secret supporting sentence." in records["summarize1"]["Feedback"]
+    assert records["summarize1"]["Generated Outputs"] == {
+        "reasoning": "first reasoning",
+        "summary": "summary one",
+    }
+    assert records["create_query_hop2"]["Generated Outputs"] == {
+        "reasoning": "query reasoning",
+        "query": "bridge query",
+    }
+    assert records["summarize2"]["Generated Outputs"] == {
+        "reasoning": "second reasoning",
+        "summary": "summary two",
+    }
+    assert records["final_answer"]["Generated Outputs"] == {
+        "reasoning": "answer reasoning",
+        "answer": "wrong",
+    }
+    assert "correct answer is: target" in records["final_answer"]["Feedback"]
+
+    diagnosed = hotpot_utils.artifact_component_records(example, trace, 0.0, include_diagnostics=True)
+    for name, record in diagnosed.items():
+        assert {k: record[k] for k in records[name]} == records[name]
+        assert record["End-to-end Outcome"]["score"] == 0.0
+        assert "not a causal score" in record["End-to-end Outcome"]["attribution"]
+        assert "Component Context" not in records[name]
+        assert "Secret supporting sentence." not in str(record["Inputs"])
+    assert "without the retrieved passages" in diagnosed["summarize2"]["Component Context"]["downstream"]
+
+
+def test_hotpot_metric_uses_exact_match_as_primary_score() -> None:
+    """Keep token overlap in feedback without promoting it above exact match."""
+    score, feedback = hotpot_utils.hotpotqa_metric("Paris France", "Paris")
+
+    assert score == 0.0
+    assert "token-F1" in feedback
+    assert "EM=0" in feedback
+
+
+def test_hotpot_normalization_matches_the_artifact_unicode_behavior() -> None:
+    """Normalize canonically equivalent Unicode answers to identical NFD text."""
+    composed = hotpot_utils.normalize_answer("The Caf\u00e9")
+    decomposed = hotpot_utils.normalize_answer("cafe\u0301")
+
+    assert composed == decomposed
+    assert composed == "cafe\u0301"
+
+
+def test_hotpot_f1_uses_ordinary_token_overlap_for_yes_no_answers() -> None:
+    """Avoid adding the non-artifact yes/no exact-match guard to token F1."""
+    assert hotpot_utils.f1_score("yes perhaps", "yes") == pytest.approx(2 / 3)
+    assert hotpot_utils.f1_score("no", "yes") == 0.0
+
+
+@pytest.mark.parametrize("benchmark", ["hotpotqa"])
+def test_wikipedia_python_defaults_use_the_qwen_experiment_pair(benchmark: str) -> None:
+    """Default both Python model roles to the Qwen3.8-27B condition.
+
+    Args:
+        benchmark: Wikipedia benchmark whose Python entrypoint is inspected.
+    """
+    source = (REPO_ROOT / "examples" / benchmark / "main.py").read_text()
+
+    assert source.count("default=QWEN3_8_27B_MODEL") == 2
+    validator = (
+        "_validate_hotpotqa_model_pair(args.solver_model, args.reflection_model)"
+        if benchmark == "hotpotqa"
+        else "validate_experiment_model_pair(args.solver_model, args.reflection_model)"
+    )
+    assert validator in source
+
+
+@pytest.mark.parametrize("benchmark", ["hotpotqa"])
+def test_wikipedia_sbatch_exposes_both_homogeneous_model_profiles(benchmark: str) -> None:
+    """Run either experiment model in both roles without mixing providers.
+
+    Args:
+        benchmark: Wikipedia benchmark whose batch script is inspected.
+    """
+    script = (REPO_ROOT / "examples" / benchmark / f"run_{benchmark}.sbatch").read_text()
+    if benchmark == "hotpotqa":
+        assert "source scripts/della/remote/hotpotqa_workload.sh" in script
+        script += (REPO_ROOT / "scripts/della/remote/hotpotqa_workload.sh").read_text()
+
+    assert 'MODEL_PROFILE="${MODEL_PROFILE:-qwen3.8-27b}"' in script
+    assert 'SOLVER_MODEL="hosted_vllm/Qwen/Qwen3.8-27B"' in script
+    assert 'SOLVER_MODEL="hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash"' in script
+    assert 'REFLECTION_MODEL="${SOLVER_MODEL}"' in script
+    assert 'SOLVER_API_ARG=(--solver-api-base "${SOLVER_API_BASE}")' in script
+    assert 'REFLECTION_API_ARG=(--reflection-api-base "${REFLECTION_API_BASE}")' in script
+    if benchmark == "hotpotqa":
+        assert 'export OPENAI_API_KEY="EMPTY"' in script
+        assert "DEEPSEEK_API_KEY" not in script
+        assert 'SERVING_ENGINE="vllm"' in script
+    else:
+        assert 'export OPENAI_API_KEY="${OPENAI_API_KEY:-EMPTY}"' in script
+        assert "DEEPSEEK_API_KEY" not in script
+
+
+def test_hotpotqa_della_submit_scales_resources_by_model_profile() -> None:
+    """Request model-specific Della resources for the HotPotQA campaign."""
+    submit = (REPO_ROOT / "scripts" / "della" / "submit_hotpotqa.sh").read_text()
+
+    assert 'DELLA_GPUS="${DELLA_GPUS:-}"' in submit
+    assert 'DELLA_CPUS_PER_TASK="${DELLA_CPUS_PER_TASK:-}"' in submit
+    assert 'DELLA_MEMORY="${DELLA_MEMORY:-}"' in submit
+    assert 'DELLA_GPUS="${DELLA_GPUS:-1}"' in submit
+    assert 'DELLA_GPUS="${DELLA_GPUS:-4}"' in submit
+    assert 'DELLA_CPUS_PER_TASK="${DELLA_CPUS_PER_TASK:-8}"' in submit
+    assert 'DELLA_CPUS_PER_TASK="${DELLA_CPUS_PER_TASK:-32}"' in submit
+    assert 'DELLA_MEMORY="${DELLA_MEMORY:-128G}"' in submit
+    assert 'DELLA_MEMORY="${DELLA_MEMORY:-768G}"' in submit
+    assert 'JOB_PARTITION="${GPU_PARTITION}"' in submit
+    assert 'MAX_WORKERS="${MAX_WORKERS:-12}"' in submit
+    assert 'VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-${DELLA_GPUS}}"' in submit
+    assert 'VLLM_API_SERVER_COUNT="${VLLM_API_SERVER_COUNT:-${VLLM_DATA_PARALLEL_SIZE}}"' in submit
+    assert "DELLA_GPUS=0" not in submit
+    assert "deepseek-v4.1-flash)" in submit
+    assert 'VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-4}"' in submit
+    assert 'VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-1}"' in submit
+    assert 'VLLM_API_SERVER_COUNT="${VLLM_API_SERVER_COUNT:-1}"' in submit
+    assert 'MAX_WORKERS="${MAX_WORKERS:-4}"' in submit
+    assert '"--cpus-per-task=${DELLA_CPUS_PER_TASK}"' in submit
+    assert '"--mem=${DELLA_MEMORY}"' in submit
+    assert 'if [[ -n "${JOB_PARTITION}" ]]; then' in submit
+    assert 'SBATCH_RESOURCE_ARGS+=("--partition=${JOB_PARTITION}")' in submit
+    assert "if (( DELLA_GPUS > 0 )); then" in submit
+    assert 'SBATCH_RESOURCE_ARGS+=("--gres=gpu:h200:${DELLA_GPUS}")' in submit
+    assert r'"\${SBATCH_BIN}"${SBATCH_RESOURCE_COMMAND}' in submit
+
+
+def test_hotpotqa_sbatch_configures_within_run_vllm_throughput() -> None:
+    """Queue independent examples against the configured Qwen sequence limit."""
+    script = (REPO_ROOT / "examples" / "hotpotqa" / "run_hotpotqa.sbatch").read_text()
+
+    assert "#SBATCH --cpus-per-task=8" in script
+    assert "#SBATCH --mem=128G" in script
+    assert "#SBATCH --gres" not in script
+    assert 'VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-1}"' in script
+    assert 'VLLM_API_SERVER_COUNT="${VLLM_API_SERVER_COUNT:-${VLLM_DATA_PARALLEL_SIZE}}"' in script
+    assert 'VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-1}"' in script
+    assert 'VLLM_MAX_NUM_BATCHED_TOKENS="${VLLM_MAX_NUM_BATCHED_TOKENS:-16384}"' in script
+    assert "--tensor-parallel-size 1" in script
+    assert "--data-parallel-size 1" in script
+    assert "--api-server-count 1" in script
+    assert '--max-num-seqs "${VLLM_MAX_NUM_SEQS}"' in script
+    assert '--max-num-batched-tokens "${VLLM_MAX_NUM_BATCHED_TOKENS}"' in script
+    assert "--no-enable-prefix-caching" in script
+    assert "--language-model-only" in script
+
+
+def test_hotpotqa_sbatch_limits_nested_cpu_threads_after_vllm_starts() -> None:
+    """Apply CPU thread caps after the HotPotQA vLLM server starts."""
+    benchmark = "hotpotqa"
+    script = (REPO_ROOT / "examples" / benchmark / f"run_{benchmark}.sbatch").read_text()
+    assert "source scripts/della/remote/hotpotqa_workload.sh" in script
+    script += (REPO_ROOT / "scripts/della/remote/hotpotqa_workload.sh").read_text()
+    vllm_start = script.index('"${VLLM_BIN}" serve "${SOLVER_MODEL_PATH}"')
+    evaluator_start = script.index(f'"${{PY}}" -m examples.{benchmark}.main')
+
+    for variable, default in (
+        ("OMP_NUM_THREADS", "1"),
+        ("MKL_NUM_THREADS", "1"),
+        ("OPENBLAS_NUM_THREADS", "1"),
+        ("NUMEXPR_NUM_THREADS", "1"),
+        ("TOKENIZERS_PARALLELISM", "false"),
+    ):
+        export = f"export {variable}={default}"
+        assert f"-u {variable}" in script[vllm_start - 300 : vllm_start]
+        assert script.count(export) == 1
+        assert vllm_start < script.index(export) < evaluator_start
+
+
+@pytest.mark.parametrize(
+    "script_path",
+    [
+        "scripts/della/submit_hotpotqa.sh",
+        "scripts/della/fetch_hotpotqa_results.sh",
+        "examples/hotpotqa/run_hotpotqa.sbatch",
+    ],
+)
+def test_wikipedia_della_launch_scripts_have_valid_bash_syntax(script_path: str) -> None:
+    """Parse every Wikipedia Della launcher with Bash.
+
+    Args:
+        script_path: Repository-relative launcher path.
+    """
+    subprocess.run(
+        ["bash", "-n", str(REPO_ROOT / script_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
+    """Pin methodology while retaining only quality-neutral throughput knobs."""
+    submit = (REPO_ROOT / "scripts" / "della" / "submit_hotpotqa.sh").read_text()
+    sbatch = (REPO_ROOT / "examples" / "hotpotqa" / "run_hotpotqa.sbatch").read_text()
+    assert "source scripts/della/remote/hotpotqa_workload.sh" in sbatch
+    sbatch += (REPO_ROOT / "scripts/della/remote/hotpotqa_workload.sh").read_text()
+    build = (REPO_ROOT / "scripts" / "della" / "build_env.sh").read_text()
+    sync = (REPO_ROOT / "scripts" / "della" / "sync_to_della.sh").read_text()
+    fetch = (REPO_ROOT / "scripts" / "della" / "fetch_hotpotqa_results.sh").read_text()
+
+    assert "REFLECTION_MODEL" in submit
+    assert "REFLECTION_API_BASE" in submit
+    assert 'MODEL_PROFILE="${MODEL_PROFILE:-qwen3.8-27b}"' in submit
+    assert 'BUDGET_PROFILE="${BUDGET_PROFILE:-campaign}"' in submit
+    assert 'HOTPOTQA_CAMPAIGN_ID="${HOTPOTQA_CAMPAIGN_ID:-hotpotqa-final-v1}"' in submit
+    assert 'HOTPOTQA_CAMPAIGN_ID="${HOTPOTQA_CAMPAIGN_ID:-hotpotqa-final-v1}"' in fetch
+    campaign_pattern = r"^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$"
+    assert campaign_pattern in submit
+    assert campaign_pattern in fetch
+    assert campaign_pattern in sbatch
+    assert "MAX_METRIC_CALLS=6871" in submit
+    assert 'STANDARD_TIME="${STANDARD_TIME:-${TIME:-72:00:00}}"' in submit
+    assert "MAX_METRIC_CALLS=13742" in submit
+    assert 'EXPANDED_TIME="${EXPANDED_TIME:-${TIME:-144:00:00}}"' in submit
+    assert 'CONDITION="${CONDITION:-all}"' in submit
+    assert 'MAX_WORKERS="${MAX_WORKERS:-}"' in submit
+    assert 'MODEL="Qwen3.8-27B"' in submit
+    assert 'if [[ "${GPU_PARTITION}" != "ailab" ]]' in submit
+    assert "Qwen3.8-27B production runs require GPU_PARTITION=ailab" in submit
+    assert "scientific Qwen runs require one H200, TP1/DP1, and one API server" in submit
+    assert 'SOLVER_MODEL_PATH="${MODEL_STORAGE}/${MODEL}"' in submit
+    assert 'MODEL_SNAPSHOT_PROFILE="qwen3.8-27b"' in submit
+    assert 'MODEL_SNAPSHOT_PROFILE="deepseek-v4.1-flash"' in submit
+    assert 'MODEL_INTEGRITY_MANIFEST="${SOLVER_MODEL_PATH}/.gepa-model-integrity.json"' in submit
+    assert '[[ ! -d "${SOLVER_MODEL_PATH}" || ! -s "\\${MODEL_INTEGRITY_MANIFEST}" ]]' in submit
+    assert "checkpoint is not staged at ${SOLVER_MODEL_PATH}" in submit
+    assert "found staged local ${MODEL_SNAPSHOT_PROFILE} checkpoint" in submit
+    assert 'SOLVER_MODEL="hosted_vllm/Qwen/Qwen3.8-27B"' in submit
+    assert 'SOLVER_MODEL="hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash"' in submit
+    assert 'REFLECTION_MODEL="${SOLVER_MODEL}"' in submit
+    assert "DEEPSEEK_API_KEY" not in submit
+    assert r'"BUDGET_PROFILE=\${run_budget_profile}"' in submit
+    assert "HOTPOTQA_CAMPAIGN_ID=${HOTPOTQA_CAMPAIGN_ID}" in submit
+    assert 'SBATCH_BIN="\\$(command -v sbatch)"' in submit
+    assert 'SBATCH_HELP="\\$("\\${SBATCH_BIN}" --help 2>&1)"' in submit
+    assert '[[ "\\${SBATCH_HELP}" != *"--export-file"* ]]' in submit
+    assert "umask 077" in submit
+    for local_script in (submit, build, sync):
+        assert '[[ -L "${ENV_FILE}" || ! -O "${ENV_FILE}" ]]' in local_script
+        assert "(8#${ENV_MODE} & 8#077)" in local_script
+        assert "chmod 600 ${ENV_FILE}" in local_script
+    assert '[[ -L "${ENV_FILE}" || ! -O "${ENV_FILE}" ]]' in fetch
+    assert "(8#${ENV_MODE} & 8#077)" in fetch
+    assert "chmod 600 ${ENV_FILE}" in fetch
+    assert "sshpass" not in fetch
+    assert "REMOTE_PASSWORD" not in fetch
+    assert "--delete" not in fetch
+    assert "-o BatchMode=yes -o StrictHostKeyChecking=yes" in fetch
+    assert '"${REMOTE_USER}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$' in fetch
+    assert '"${REMOTE_HOST}" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$' in fetch
+    assert "${REMOTE_DIR%/}/sources/${HOTPOTQA_SOURCE_COMMIT}" in fetch
+    assert "${SCRATCH_BASE%/}/logs/hotpotqa/${HOTPOTQA_CAMPAIGN_ID}/${HOTPOTQA_SOURCE_COMMIT}" in fetch
+    assert 'FETCH_ROOT="$(mktemp -d ' in fetch
+    assert 'mv -- "${LOCAL_ROOT}" "${PREVIOUS_ROOT}"' in fetch
+    assert 'mv -- "${FETCH_ROOT}" "${LOCAL_ROOT}"' in fetch
+    assert "examples.hotpotqa.analyze_results" in fetch
+    assert '--campaign-id "${HOTPOTQA_CAMPAIGN_ID}"' in fetch
+    assert '--source-commit "${HOTPOTQA_SOURCE_COMMIT}"' in fetch
+    assert '--analysis-source-commit "${ANALYSIS_SOURCE_COMMIT}"' in fetch
+    assert "commit tracked worktree changes before publishing campaign analysis" in fetch
+    assert 'mv -- "${PREVIOUS_ROOT}" "${LOCAL_ROOT}"' in fetch
+    assert (
+        'HOTPOTQA_LOG_DIR="${SCRATCH_BASE}/logs/hotpotqa/${HOTPOTQA_CAMPAIGN_ID}/${HOTPOTQA_SOURCE_COMMIT}"' in submit
+    )
+    assert (
+        'LOG_DIR="${SCRATCH_BASE}/logs/hotpotqa/${HOTPOTQA_CAMPAIGN_ID}/${HOTPOTQA_SOURCE_COMMIT}'
+        '/${MODEL_PROFILE}/${SLURM_JOB_ID:-local}-${SLURM_STEP_ID:-batch}"' in sbatch
+    )
+    assert r'SBATCH_EXPORT_FILE="\${CONTINUATION_DIR}/\${CELL_NAME}.env"' in submit
+    assert "cleanup_export_file()" in submit
+    assert 'rm -f -- "\\${SBATCH_EXPORT_FILE}"' in submit
+    assert "printf '%s\\0'" in submit
+    assert "trap cleanup_export_file EXIT" in submit
+    assert "LANG=C.UTF-8" in submit
+    assert "LC_ALL=C.UTF-8" in submit
+    assert '"HOME=\\${HOME}"' in submit
+    assert '"PATH=\\${PATH}"' in submit
+    assert "--export=ALL" in submit
+    assert '--export-file="\\${SBATCH_EXPORT_FILE}"' in submit
+    assert "HOTPOTQA_PRODUCTION_LAUNCH=1" in submit
+    assert 'HOTPOTQA_SOURCE_COMMIT="$(git -C "${REPO_ROOT}" rev-parse HEAD)"' in submit
+    assert 'REMOTE_SOURCE_DIR="${REMOTE_DIR%/}/sources/${HOTPOTQA_SOURCE_COMMIT}"' in submit
+    assert 'GEPA_VENV_DIR="${REMOTE_DIR%/}/.venv"' in submit
+    assert '"${GEPA_VENV_DIR}/bin/python" -m examples.common.slurm_continuation add' in submit
+    assert '"${GEPA_VENV_DIR}/bin/python" -m examples.common.slurm_continuation start' in submit
+    assert 'SYNC_SOURCE_COMMIT="${HOTPOTQA_SOURCE_COMMIT}"' in submit
+    assert 'SYNC_REMOTE_DIR="${REMOTE_SOURCE_DIR}"' in submit
+    assert 'SYNC_MANIFEST_OUTPUT="${SOURCE_MANIFEST_OUTPUT}"' in submit
+    assert 'cd "${REMOTE_SOURCE_DIR}"' in submit
+    assert 'export PYTHONPATH="${REMOTE_SOURCE_DIR}/src:${REMOTE_SOURCE_DIR}"' in submit
+    assert 'HOTPOTQA_ENV_SPEC_SHA256="\\$(' in submit
+    assert "printf 'python=%s\\n' \"\\${HOTPOTQA_PYTHON_VERSION}\"" in submit
+    assert "printf 'uv=%s\\n' \"\\${HOTPOTQA_UV_VERSION}\"" in submit
+    assert 'export UV_PROJECT_ENVIRONMENT="${GEPA_VENV_DIR}"' in submit
+    assert "--frozen --check --no-install-project" in submit
+    assert '"${GEPA_VENV_DIR}/.gepa-env-spec.sha256"' in submit
+    assert '"${GEPA_VENV_DIR}/.gepa-python-version"' in submit
+    assert '"${GEPA_VENV_DIR}/.gepa-uv-version"' in submit
+    assert '"${GEPA_VENV_DIR}/.gepa-uv-sha256"' in submit
+    assert "HOTPOTQA_ENV_SPEC_SHA256=\\${HOTPOTQA_ENV_SPEC_SHA256}" in submit
+    assert "HOTPOTQA_GEPA_ENV_SHA256=\\${HOTPOTQA_GEPA_ENV_SHA256}" in submit
+    assert "HOTPOTQA_SERVING_ENV_SHA256=\\${HOTPOTQA_SERVING_ENV_SHA256}" in submit
+    assert 'examples.common.python_environment verify --path "\\${GEPA_ENV_MANIFEST}"' in submit
+    assert "load_hotpotqa_dataset(seed=0)" in submit
+    assert "SUBMIT_BUDGET_PROFILES=(standard standard standard standard standard expanded expanded)" in submit
+    assert "SUBMIT_CONDITIONS=(vanilla react_v2 react_v2_random action random vanilla react_v2)" in submit
+    assert "SUBMIT_CONDITIONS=(vanilla random" not in submit
+    assert "SUBMIT_BUDGET_PROFILES=(standard standard standard standard standard)" in submit
+    assert "SUBMIT_CONDITIONS=(vanilla react_v2 react_v2_random action random)" in submit
+    assert "SUBMIT_BUDGET_PROFILES=(expanded expanded)" in submit
+    assert "SUBMIT_CONDITIONS=(vanilla react_v2)" in submit
+    assert r'RUN_BUDGET_PROFILE="\${SUBMIT_BUDGET_PROFILES[\${CELL_INDEX}]}"' in submit
+    assert "RUN_MAX_METRIC_CALLS=6871" in submit
+    assert "RUN_MAX_METRIC_CALLS=13742" in submit
+    assert 'RUN_TIME="${STANDARD_TIME}"' in submit
+    assert 'RUN_TIME="${EXPANDED_TIME}"' in submit
+    assert r'--plan "\${PLAN_PATH}" --source-commit "${HOTPOTQA_SOURCE_COMMIT}"' in submit
+    assert "afterany:" not in submit
+    assert r'"CONDITION=\${run_condition}"' in submit
+    assert r'--job-name="gepa-hp-${MODEL_PROFILE}-${HOTPOTQA_JOB_KIND}-\${CELL_NAME}"' in submit
+    assert r'--time="\${RUN_TIME}"' in submit
+    assert 'sha256sum "\\${SERVING_ENV_MANIFEST}"' in submit
+    assert 'pip check --python "\\${VLLM_PY}"' in submit
+    assert ".gepa-source-commit" in submit
+    assert ".gepa-source-manifest.sha256sums" in submit
+    assert "HOTPOTQA_SOURCE_MANIFEST_SHA256=${HOTPOTQA_SOURCE_MANIFEST_SHA256}" in submit
+    assert 'if [[ "${MODEL_PROFILE}" == "deepseek-v4.1-flash" ]]' in submit
+    assert "commit the complete experiment source" in submit
+    assert '"${SCRIPT_DIR}/sync_to_della.sh"' in submit
+    assert "NO_SYNC" not in submit
+    assert "sshpass" not in submit
+    assert "REMOTE_PASSWORD" not in submit
+    assert "-o BatchMode=yes -o StrictHostKeyChecking=yes" in submit
+    for forbidden_export in (
+        "PROGRAM=",
+        "SEED_STYLE=",
+        "DATA_PATH=",
+        "TRAIN_LIMIT=",
+        "VAL_LIMIT=",
+        "TEST_LIMIT=",
+        "MERGE=",
+        "EXPERIMENT_SEED=",
+        "RETRIEVAL_K=",
+    ):
+        assert forbidden_export not in submit
+
+    assert "set -euo pipefail" in sbatch
+    assert 'if [[ "${HOTPOTQA_PRODUCTION_LAUNCH:-}" != "1" ]]' in sbatch
+    assert 'HOTPOTQA_CAMPAIGN_ID="${HOTPOTQA_CAMPAIGN_ID:-}"' in sbatch
+    assert "submit this production job through scripts/della/submit_hotpotqa.sh" in sbatch
+    assert "#SBATCH --cpus-per-task=8" in sbatch
+    assert 'BUDGET_PROFILE="${BUDGET_PROFILE:-standard}"' in sbatch
+    assert "EXPECTED_MAX_METRIC_CALLS=6871" in sbatch
+    assert "EXPECTED_MAX_METRIC_CALLS=13742" in sbatch
+    assert 'MODEL="Qwen3.8-27B"' in sbatch
+    assert 'SOLVER_MODEL_PATH="${MODEL_STORAGE}/${MODEL}"' in sbatch
+    assert 'QWEN_REVISION="1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"' in sbatch
+    assert 'DEEPSEEK_REVISION="dba1be0a40aa45a94ad051997016db3960a90277"' in sbatch
+    assert "sglang" not in sbatch
+    assert 'HOTPOTQA_MODEL_REVISION="${QWEN_REVISION}"' in sbatch
+    assert 'HOTPOTQA_MODEL_REVISION="${DEEPSEEK_REVISION}"' in sbatch
+    assert 'SOLVER_API_BASE="http://127.0.0.1:${GEN_PORT}/v1"' in sbatch
+    assert 'HOTPOTQA_MODEL_INTEGRITY_SHA256="$(sha256sum "${SOLVER_MODEL_PATH}/.gepa-model-integrity.json"' in sbatch
+    assert "examples.common.model_snapshot verify" in sbatch
+    assert '--model-profile "${MODEL_SNAPSHOT_PROFILE}"' in sbatch
+    assert 'examples.common.wiki17_bm25 verify --deep --root "${WIKI17_DIR}"' in sbatch
+    assert 'HOTPOTQA_VERIFIED_WIKI17_INTEGRITY_SHA256="${WIKI17_INTEGRITY_SHA256}"' in sbatch
+    assert "export HOTPOTQA_VERIFIED_WIKI17_INTEGRITY_SHA256" in sbatch
+    assert '--wiki17-dir "${WIKI17_DIR}"' in sbatch
+    assert '--max-workers "${MAX_WORKERS}"' in sbatch
+    assert 'CONDITION="${CONDITION:-}"' in sbatch
+    assert "the requested condition and budget are not an approved HotPotQA campaign cell" in sbatch
+    assert "standard:vanilla|standard:react_v2|standard:react_v2_random|standard:action" in sbatch
+    assert "expanded:vanilla|expanded:react_v2" in sbatch
+    for rejected_cell in (
+        "expanded:random",
+        "expanded:action",
+        "expanded:react_v2_random",
+    ):
+        assert rejected_cell not in sbatch
+    assert (
+        'RUN_LOCK_PATH="${RUN_LOCK_DIR}/${MODEL_PROFILE}-${BUDGET_PROFILE}-${CONDITION}-pilot${HOTPOTQA_PILOT_ONLY}.lock"'
+        in sbatch
+    )
+    assert 'if ! flock -n "${RUN_LOCK_FD}"' in sbatch
+    assert "another HotPotQA job is already writing" in sbatch
+    assert "proxy/default" not in sbatch
+    assert "GEN_MAX_LEN=262144" in sbatch
+    assert "max_model_len=${GEN_MAX_LEN}" in sbatch
+    assert "--dtype bfloat16" in sbatch
+    assert "--kv-cache-dtype auto" in sbatch
+    assert "--no-enable-prefix-caching" in sbatch
+    assert "--enable-prefix-caching" not in sbatch
+    assert "--seed 0" in sbatch
+    assert "unset VLLM_BATCH_INVARIANT" in sbatch
+    assert 'HOTPOTQA_VLLM_BATCH_INVARIANT="false"' in sbatch
+    assert 'HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS="true"' in sbatch
+    assert 'GEN_PORT="${GEN_PORT:-}"' in sbatch
+    assert 'listener.bind(("127.0.0.1", requested_port))' in sbatch
+    assert 'SOLVER_API_BASE="http://127.0.0.1:${GEN_PORT}/v1"' in sbatch
+    assert "generator_reports_expected_model()" in sbatch
+    assert "ids == [sys.argv[1]]" in sbatch
+    assert sbatch.index('if ! kill -0 "${GEN_PID}"') < sbatch.index("if generator_reports_expected_model")
+    assert "--reasoning-parser qwen3" in sbatch
+    assert "--enable-auto-tool-choice" in sbatch
+    assert "--tool-call-parser qwen3_coder" in sbatch
+    assert "validate_experiment_vllm_version(sys.argv[1], sys.argv[2])" in sbatch
+    assert '"${VLLM_BIN}" serve --help=all' in sbatch
+    assert '"${VLLM_BIN}" serve --help 2>&1' not in sbatch
+    assert 'echo "==> checking native tool-call compatibility"' in sbatch
+    assert "from examples.hotpotqa.utils import resolve_hotpotqa_lm_kwargs" in sbatch
+    assert 'tool_choice="auto"' in sbatch
+    assert 'export DSPY_CACHEDIR="${SCRATCH_BASE}/.cache/dspy/hotpotqa/${RUNTIME_CACHE_KEY}"' in sbatch
+    assert "export HOTPOTQA_MODEL_REVISION" in sbatch
+    assert "export HOTPOTQA_MODEL_INTEGRITY_SHA256" in sbatch
+    assert "export HOTPOTQA_VLLM_VERSION" in sbatch
+    assert "export HOTPOTQA_TORCH_VERSION" in sbatch
+    assert "export HOTPOTQA_CUDA_VERSION" in sbatch
+    assert "export HOTPOTQA_CUDA_MODULE" in sbatch
+    assert "export HOTPOTQA_TRANSFORMERS_VERSION" in sbatch
+    assert "export HOTPOTQA_SERVING_LOCK_SHA256" in sbatch
+    assert "export HOTPOTQA_SERVING_ENV_SHA256" in sbatch
+    assert "export HOTPOTQA_GPU_RUNTIME" in sbatch
+    assert "export HOTPOTQA_SOURCE_COMMIT" in sbatch
+    assert "export HOTPOTQA_SOURCE_MANIFEST_SHA256" in sbatch
+    assert "export HOTPOTQA_PYTHON_VERSION" in sbatch
+    assert "export HOTPOTQA_UV_VERSION" in sbatch
+    assert "export HOTPOTQA_UV_SHA256" in sbatch
+    assert "export HOTPOTQA_ENV_SPEC_SHA256" in sbatch
+    assert "export HOTPOTQA_GEPA_ENV_SHA256" in sbatch
+    assert 'CURRENT_ENV_SPEC_SHA256="$(' in sbatch
+    assert 'EXPECTED_HOTPOTQA_PYTHON_VERSION="3.11.13"' in sbatch
+    assert 'EXPECTED_HOTPOTQA_UV_VERSION="0.9.13"' in sbatch
+    assert 'export UV_PROJECT_ENVIRONMENT="${GEPA_VENV_DIR}"' in sbatch
+    assert "--frozen --check --no-install-project" in sbatch
+    assert 'if ! flock -s -n "${ARTIFACT_LOCK_FD}"' in sbatch
+    assert '"${GEPA_VENV_DIR}/.gepa-env-spec.sha256"' in sbatch
+    assert 'GEPA_VENV_DIR="${GEPA_VENV_DIR:-}"' in sbatch
+    assert 'PY="${GEPA_VENV_DIR}/bin/python"' in sbatch
+    assert 'export PYTHONPATH="${PWD}/src:${PWD}"' in sbatch
+    assert 'examples.common.python_environment verify --path "${GEPA_ENV_MANIFEST}"' in sbatch
+    assert ".gepa-source-commit" in sbatch
+    assert "export HOTPOTQA_LITELLM_VERSION" in sbatch
+    assert "export HOTPOTQA_WEIGHT_DTYPE" in sbatch
+    assert "export HOTPOTQA_KV_CACHE_DTYPE" in sbatch
+    assert "export HOTPOTQA_SERVE_ARGUMENTS" in sbatch
+    assert "export HOTPOTQA_VLLM_BATCH_INVARIANT" in sbatch
+    assert "export HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS" in sbatch
+    assert "batch_invariant=false" in sbatch
+    assert "single_sequence_replicas=${HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS}" in sbatch
+    assert "gpu_memory_utilization=${GEN_GMU}" in sbatch
+    assert "max_model_len=${GEN_MAX_LEN}" in sbatch
+    assert "rope_scaling=none" in sbatch
+    assert "--rope-scaling" not in sbatch
+    assert "max_num_seqs=${VLLM_MAX_NUM_SEQS}" in sbatch
+    assert "serving_env=${HOTPOTQA_SERVING_ENV_SHA256}" in sbatch
+    assert "gpu=${HOTPOTQA_GPU_RUNTIME}" in sbatch
+    assert 'examples.common.python_environment verify --path "${SERVING_ENV_MANIFEST}"' in sbatch
+    assert 'pip check --python "${VLLM_PY}"' in sbatch
+    assert '"H200" not in name.upper() or capability != "9.0"' in sbatch
+    assert '"nvidia-smi", "--id", gpu_ids, "--query-gpu=driver_version"' in sbatch
+    assert 'exec {MODEL_LOCK_FD}<"${SOLVER_MODEL_PATH}"' in sbatch
+    assert 'if ! flock -s -n "${MODEL_LOCK_FD}"' in sbatch
+    assert 'HOTPOTQA_VLLM_VERSION=""' in sbatch
+    assert 'HOTPOTQA_CUDA_MODULE=""' in sbatch
+    assert 'WIKI17_INTEGRITY_SHA256="$(sha256sum "${WIKI17_DIR}/integrity.json"' in sbatch
+    assert 'HOTPOTQA_CUDA_MODULE="cudatoolkit/${HOTPOTQA_CUDA_VERSION}"' in sbatch
+    assert 'module load "${HOTPOTQA_CUDA_MODULE}"' in sbatch
+    assert 'module is-loaded "${HOTPOTQA_CUDA_MODULE}"' in sbatch
+    assert "module load cudatoolkit/13.0" not in sbatch
+    assert "cuda_module=${HOTPOTQA_CUDA_MODULE}" in sbatch
+    assert "RUNTIME_IDENTITY_SHA256=" in sbatch
+    assert "CACHE_IDENTITY_SHA256=" in sbatch
+    assert sbatch.count("litellm=${HOTPOTQA_LITELLM_VERSION}") >= 2
+    assert "model_manifest=${HOTPOTQA_MODEL_INTEGRITY_SHA256}" in sbatch
+    assert "source_manifest=${HOTPOTQA_SOURCE_MANIFEST_SHA256}" in sbatch
+    assert "python=${HOTPOTQA_PYTHON_VERSION}" in sbatch
+    assert "uv=${HOTPOTQA_UV_VERSION}" in sbatch
+    assert "uv_sha=${HOTPOTQA_UV_SHA256}" in sbatch
+    assert "api_base=${SOLVER_API_BASE}" in sbatch
+    assert "engine=${HOTPOTQA_SERVING_ENGINE}" in sbatch
+    assert "env_spec=${HOTPOTQA_ENV_SPEC_SHA256}" in sbatch
+    assert "gepa_env=${HOTPOTQA_GEPA_ENV_SHA256}" in sbatch
+    assert "budget_profile=${BUDGET_PROFILE}" in sbatch
+    assert 'RUNTIME_CACHE_KEY="${MODEL_PROFILE}-${CACHE_IDENTITY_SHA256}"' in sbatch
+    assert 'CAMPAIGN_LOCK_DIR="${SCRATCH_BASE}/.cache/gepa/hotpotqa-campaign/${HOTPOTQA_CAMPAIGN_ID}"' in sbatch
+    assert 'CAMPAIGN_LOCK_PATH="${CAMPAIGN_LOCK_DIR}/${MODEL_PROFILE}.sha256"' in sbatch
+    assert 'DATA_CAMPAIGN_LOCK_PATH="${CAMPAIGN_LOCK_DIR}/data-and-source.sha256"' in sbatch
+    assert 'ln "${DATA_CAMPAIGN_LOCK_TEMP}" "${DATA_CAMPAIGN_LOCK_PATH}"' in sbatch
+    assert 'ln "${CAMPAIGN_LOCK_TEMP}" "${CAMPAIGN_LOCK_PATH}"' in sbatch
+    assert "noclobber" not in sbatch
+    assert "source, dependency lock, HotPotQA data, DSPy, or Wiki-2017 index differs" in sbatch
+    assert "source or quality-relevant runtime differs from the existing campaign lock" in sbatch
+    for scientific_argument in (
+        "--enforce-scientific-contract",
+        "--program 2stage",
+        "--seed-style structured",
+        "--seed 0",
+        "--retrieval-k 7",
+        "--reflection-level 2",
+        "--edit-tool-set broad",
+        "--template-family auto",
+    ):
+        assert scientific_argument in sbatch
+    assert "--merge" not in sbatch
+    assert "--data-path" not in sbatch
+    assert "--train-limit" not in sbatch
+    assert "--val-limit" not in sbatch
+    assert "--test-limit" not in sbatch
+
+    assert "validate_hotpotqa_dspy_runtime" in submit
+    assert "sshpass" not in build
+    assert "REMOTE_PASSWORD" not in build
+    assert "-o BatchMode=yes -o StrictHostKeyChecking=yes" in build
+    assert "sshpass" not in sync
+    assert "REMOTE_PASSWORD" not in sync
+    assert sync.count("-o BatchMode=yes -o StrictHostKeyChecking=yes") == 2
+    remote = REPO_ROOT / "scripts" / "della" / "remote"
+    setup = (remote / "setup_env.sh").read_text()
+    dataset = (remote / "download_dataset.sh").read_text()
+    model = (remote / "download_model.sh").read_text()
+    assert 'PYTHON_VERSION="3.11.13"' in setup
+    assert 'UV_VERSION="0.9.13"' in setup
+    assert "UV_UNMANAGED_INSTALL" in setup
+    assert "--frozen --no-install-project" in setup
+    assert "--check" in setup
+    assert 'flock -n "${ARTIFACT_LOCK_FD}"' in setup
+    assert 'flock -n "${ARTIFACT_LOCK_FD}"' in dataset
+    assert "validate_hotpotqa_dspy_runtime" in setup
+    assert "examples.common.python_environment prepare" in setup
+    assert "python-environments/gepa-${ENV_SPEC}.json" in setup
+    assert "serving-environments/${LOCK_SHA}.json" in setup
+    assert "pip check" in setup
+    assert "--require-hashes" in setup
+    for marker in (".gepa-env-spec.sha256", ".gepa-python-version", ".gepa-uv-version", ".gepa-uv-sha256"):
+        assert marker in setup
+    assert "examples.common.model_snapshot prepare" in model
+    assert "examples.common.model_snapshot verify" in model
+    assert 'qwen3.8-27b) MODEL_DIR="${MODEL_STORAGE}/Qwen3.8-27B"' in model
+    assert 'deepseek-v4.1-flash) MODEL_DIR="${MODEL_STORAGE}/DeepSeek-V4.1-Flash"' in model
+    assert 'exec {MODEL_LOCK_FD}<"${MODEL_DIR}"' in model
+    assert 'flock -n "${MODEL_LOCK_FD}"' in model
+    assert 'examples.common.wiki17_bm25 verify --deep --root "${WIKI17_DIR}"' in dataset
+    assert "load(seed=0)" in dataset
+    assert "nohup setsid" in build
+    for name in ("setup_env.sh", "download_dataset.sh", "download_model.sh"):
+        assert f"scripts/della/remote/{name}" in build
+    for pattern in (".serving-venv/", ".serving-venv-*/", ".tools/"):
+        assert f"--exclude '{pattern}'" in sync
+    assert "load_hover_dataset" not in build
+    assert "--exclude '.cache/'" in sync
+    assert "--exclude 'logs/'" in sync
+    assert "--exclude 'sources/'" in sync
+    assert 'git -C "${REPO_ROOT}" archive "${SYNC_SOURCE_COMMIT}"' in sync
+    assert 'if [[ -z "${SYNC_SOURCE_COMMIT}" ]]' in sync
+    assert '"${RSYNC_EXCLUDES[@]}"' in sync
+    assert "--exclude '/outputs/'" in sync
+    assert "--exclude '/gepa-hotpotqa-*.log'" in sync
+    assert ".gepa-source-manifest.sha256sums" in sync
+    assert 'SYNC_MANIFEST_OUTPUT="${SYNC_MANIFEST_OUTPUT:-}"' in sync
+    assert 'EXPECTED_REMOTE_SOURCE_DIR="${REMOTE_DIR%/}/sources/${SYNC_SOURCE_COMMIT}"' in sync
+    assert 'printf \'%s\\n\' "${SYNC_SOURCE_COMMIT}" > "${SOURCE_STAGE_DIR}/.gepa-source-commit"' in sync
+    assert '"mkdir -p -- ${REMOTE_SOURCE_DIR_QUOTED}"' in sync
+
+
+def test_hotpotqa_execution_lock_rejects_a_duplicate_writer(tmp_path: Path) -> None:
+    """Hold one run lock and verify a second non-blocking writer is rejected.
+
+    Args:
+        tmp_path: Isolated directory containing the simulated run lock.
+    """
+    lock_path = tmp_path / "campaign-qwen3.8-27b-standard-react_v2.lock"
+    with lock_path.open("w") as owner:
+        fcntl.flock(owner.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        contender = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import fcntl, pathlib, sys; "
+                    "handle = pathlib.Path(sys.argv[1]).open('w'); "
+                    "fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)"
+                ),
+                str(lock_path),
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+    assert contender.returncode != 0

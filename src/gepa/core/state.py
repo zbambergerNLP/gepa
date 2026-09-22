@@ -4,8 +4,11 @@
 import hashlib
 import json
 import os
+import re
+import uuid
 from collections import defaultdict
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Generic, Literal, TypeAlias
 
@@ -25,12 +28,37 @@ FrontierKey: TypeAlias = DataId | str | tuple[str, DataId] | tuple[str, DataId, 
 """Key type for frontier mappings depending on frontier_type."""
 
 CandidateHash: TypeAlias = str
-CacheKey: TypeAlias = tuple[CandidateHash, DataId]
+CacheKey: TypeAlias = tuple[CandidateHash, str, DataId]
+
+TRAINSET_CACHE_SPLIT = "train"
+VALSET_CACHE_SPLIT = "val"
+CACHE_SPLITS = frozenset({TRAINSET_CACHE_SPLIT, VALSET_CACHE_SPLIT})
 
 
 def _candidate_hash(candidate: dict[str, str]) -> CandidateHash:
     """Compute a deterministic hash of a candidate dictionary."""
     return hashlib.sha256(json.dumps(sorted(candidate.items())).encode()).hexdigest()
+
+
+_COMPONENT_NAME_SANITIZER = re.compile(r"[^A-Za-z0-9_.-]")
+
+
+def _sanitize_component_name(name: str) -> str:
+    """Collapse component names to filesystem-safe characters."""
+    return _COMPONENT_NAME_SANITIZER.sub("_", name)
+
+
+# Reserved on-disk iteration id for the seed candidate. Every other iteration
+# gets a fresh random id from :func:`new_iteration_id`, so the ``iterations/``
+# tree stays collision-free under concurrent/parallel proposal backends — where
+# a monotonic ``state.i`` counter is neither unique nor necessarily available
+# (e.g. agent-swarm engines that propose candidates without a shared clock).
+SEED_ITERATION_ID = "seed"
+
+
+def new_iteration_id() -> str:
+    """Return a fresh, unique on-disk iteration id (8 hex chars)."""
+    return uuid.uuid4().hex[:8]
 
 
 @dataclass
@@ -44,13 +72,51 @@ class CachedEvaluation(Generic[RolloutOutput]):
 
 @dataclass
 class EvaluationCache(Generic[RolloutOutput, DataId]):
-    """Cache for storing evaluation results of (candidate, example) pairs."""
+    """Cache for ``(candidate, split, example)`` evaluation results.
+
+    Data loaders identify examples by position, so a trainset and a separate valset both number
+    their examples from zero. Every lookup therefore takes a required keyword-only ``split`` of
+    :data:`TRAINSET_CACHE_SPLIT` or :data:`VALSET_CACHE_SPLIT`. A valset that is a distinct loader
+    from the trainset uses ``VALSET_CACHE_SPLIT``; when the two are the same loader the ids mean
+    the same thing and both sides share ``TRAINSET_CACHE_SPLIT`` so minibatch rollouts are reused
+    on valset evaluation.
+
+    Keys persisted before splits existed are ``(candidate_hash, example_id)``. Those cannot be
+    told apart from contaminated distinct-valset entries, so :meth:`GEPAState.load` drops them
+    rather than serving them. There is no default ``split``: omitting it is a ``TypeError``, not a
+    silent trainset hit.
+    """
 
     _cache: dict[CacheKey, CachedEvaluation[RolloutOutput]] = field(default_factory=dict)
 
-    def get(self, candidate: dict[str, str], example_id: DataId) -> CachedEvaluation[RolloutOutput] | None:
-        """Retrieve cached evaluation result if it exists."""
-        return self._cache.get((_candidate_hash(candidate), example_id))
+    @staticmethod
+    def _key(candidate_hash: CandidateHash, example_id: DataId, split: str) -> CacheKey:
+        if split not in CACHE_SPLITS:
+            raise ValueError(f"Unknown evaluation-cache split {split!r}; expected one of {sorted(CACHE_SPLITS)}")
+        return (candidate_hash, split, example_id)
+
+    @staticmethod
+    def _is_split_key(key: object) -> bool:
+        return isinstance(key, tuple) and len(key) == 3 and key[1] in CACHE_SPLITS
+
+    def drop_unsplit_entries(self) -> int:
+        """Discard entries written before splits existed. Returns the number dropped.
+
+        Those keys are ``(candidate_hash, example_id)`` with no namespace, so a valset rollout and
+        the trainset rollout at the same position were stored under the same key. They can no longer
+        be served (every lookup is namespaced now), and keeping them would grow the persisted state
+        on every resume, so ``GEPAState.load`` drops them.
+        """
+        stale = [k for k in self._cache if not self._is_split_key(k)]
+        for k in stale:
+            del self._cache[k]
+        return len(stale)
+
+    def get(
+        self, candidate: dict[str, str], example_id: DataId, *, split: str
+    ) -> CachedEvaluation[RolloutOutput] | None:
+        """Retrieve cached evaluation result if it exists. ``split`` is required."""
+        return self._cache.get(self._key(_candidate_hash(candidate), example_id, split))
 
     def put(
         self,
@@ -59,18 +125,21 @@ class EvaluationCache(Generic[RolloutOutput, DataId]):
         output: RolloutOutput,
         score: float,
         objective_scores: ObjectiveScores | None = None,
+        *,
+        split: str,
     ) -> None:
         """Store an evaluation result in the cache."""
-        self._cache[(_candidate_hash(candidate), example_id)] = CachedEvaluation(output, score, objective_scores)
+        key = self._key(_candidate_hash(candidate), example_id, split)
+        self._cache[key] = CachedEvaluation(output, score, objective_scores)
 
     def get_batch(
-        self, candidate: dict[str, str], example_ids: list[DataId]
+        self, candidate: dict[str, str], example_ids: list[DataId], *, split: str
     ) -> tuple[dict[DataId, CachedEvaluation[RolloutOutput]], list[DataId]]:
         """Look up cached results for a batch. Returns (cached_results, uncached_ids)."""
         h = _candidate_hash(candidate)
         cached, uncached = {}, []
         for eid in example_ids:
-            if entry := self._cache.get((h, eid)):
+            if entry := self._cache.get(self._key(h, eid, split)):
                 cached[eid] = entry
             else:
                 uncached.append(eid)
@@ -83,11 +152,13 @@ class EvaluationCache(Generic[RolloutOutput, DataId]):
         outputs: list[RolloutOutput],
         scores: list[float],
         objective_scores_list: Sequence[ObjectiveScores] | None = None,
+        *,
+        split: str,
     ) -> None:
         """Store evaluation results for a batch of examples."""
         h = _candidate_hash(candidate)
         for i, eid in enumerate(example_ids):
-            self._cache[(h, eid)] = CachedEvaluation(
+            self._cache[self._key(h, eid, split)] = CachedEvaluation(
                 outputs[i], scores[i], objective_scores_list[i] if objective_scores_list else None
             )
 
@@ -97,13 +168,15 @@ class EvaluationCache(Generic[RolloutOutput, DataId]):
         example_ids: list[DataId],
         fetcher: Callable[[list[DataId]], Any],
         evaluator: Callable[[Any, dict[str, str]], tuple[Any, list[float], Sequence[ObjectiveScores] | None]],
+        *,
+        split: str,
     ) -> tuple[dict[DataId, RolloutOutput], dict[DataId, float], dict[DataId, ObjectiveScores] | None, int]:
         """
         Evaluate using cache, returning full results.
 
         Returns (outputs_by_id, scores_by_id, objective_scores_by_id, num_actual_evals).
         """
-        cached, uncached_ids = self.get_batch(candidate, example_ids)
+        cached, uncached_ids = self.get_batch(candidate, example_ids, split=split)
 
         outputs_by_id: dict[DataId, RolloutOutput] = {eid: c.output for eid, c in cached.items()}
         scores_by_id: dict[DataId, float] = {eid: c.score for eid, c in cached.items()}
@@ -125,7 +198,7 @@ class EvaluationCache(Generic[RolloutOutput, DataId]):
                 if obj_scores is not None:
                     objective_by_id = objective_by_id or {}
                     objective_by_id[eid] = obj_scores[idx]
-            self.put_batch(candidate, uncached_ids, outputs, scores, obj_scores)
+            self.put_batch(candidate, uncached_ids, outputs, scores, obj_scores, split=split)
 
         return outputs_by_id, scores_by_id, objective_by_id, len(uncached_ids)
 
@@ -137,6 +210,9 @@ class ValsetEvaluation(Generic[RolloutOutput, DataId]):
     outputs_by_val_id: dict[DataId, RolloutOutput]
     scores_by_val_id: dict[DataId, float]
     objective_scores_by_val_id: dict[DataId, ObjectiveScores] | None = None
+    # Populated only when the engine is run with ``write_agent_state=True`` —
+    # full valset trajectories are expensive, so default eval paths skip them.
+    trajectories_by_val_id: dict[DataId, Any] | None = None
 
 
 class GEPAState(Generic[RolloutOutput, DataId]):
@@ -150,14 +226,23 @@ class GEPAState(Generic[RolloutOutput, DataId]):
     returned by :func:`~gepa.optimize_anything.optimize_anything`.
     """
 
-    _VALIDATION_SCHEMA_VERSION: ClassVar[int] = 5
+    _VALIDATION_SCHEMA_VERSION: ClassVar[int] = 9
     # Attributes that are runtime-only and should not be serialized (e.g., callback hooks, caches)
     _EXCLUDED_FROM_SERIALIZATION: ClassVar[frozenset[str]] = frozenset({"_budget_hooks"})
 
     program_candidates: list[dict[str, str]]
     parent_program_for_candidate: list[list[ProgramIdx | None]]
+    revision_history_by_candidate: list[list[dict[str, str]]]
     prog_candidate_val_subscores: list[dict[DataId, float]]
     prog_candidate_objective_scores: list[ObjectiveScores]
+    # On-disk iteration id for each candidate (indexed by candidate idx).
+    # Seed = ``SEED_ITERATION_ID``; accepted loop candidates inherit the random
+    # id stamped on the trace entry of the iteration that discovered them (see
+    # ``new_iteration_id``). Opaque short strings rather than a sequence number
+    # so they stay unique under concurrent/parallel proposal backends.
+    # Maintained in lockstep with ``program_candidates`` so lookups are O(1)
+    # instead of requiring a trace scan.
+    iteration_ids_by_candidate_idx: list[str]
 
     pareto_front_valset: dict[DataId, float]
     program_at_pareto_front_valset: dict[DataId, set[ProgramIdx]]
@@ -188,6 +273,18 @@ class GEPAState(Generic[RolloutOutput, DataId]):
     # Core GEPA never inspects this; adapters read/write via get_adapter_state()/set_adapter_state().
     adapter_state: dict[str, Any]
 
+    # Exact optimizer RNG state at the most recent durable iteration boundary.
+    rng_state: object | None
+
+    # Opaque snapshots for callbacks that explicitly support persistence.
+    callback_states: dict[str, Any]
+
+    # Opaque state for the configured training-minibatch sampler.
+    batch_sampler_state: dict[str, Any] | None
+
+    # Opaque state for a reflection strategy with a private RNG or session.
+    reflection_lm_state: dict[str, Any] | None
+
     def __init__(
         self,
         seed_candidate: dict[str, str],
@@ -196,13 +293,34 @@ class GEPAState(Generic[RolloutOutput, DataId]):
         frontier_type: FrontierType = "instance",
         evaluation_cache: "EvaluationCache[RolloutOutput, DataId] | None" = None,
     ):
+        """Initialize optimizer state from the evaluated seed candidate.
+
+        The seed starts every requested frontier, branch history, budget trace,
+        and optional best-output table at candidate index zero.
+
+        Args:
+            seed_candidate: Initial component mapping.
+            base_evaluation: Seed outputs, validation scores, and optional
+                per-example objective scores.
+            track_best_outputs: Whether to retain outputs tied on each
+                validation example's frontier.
+            frontier_type: Instance, objective, hybrid, or cartesian frontier.
+            evaluation_cache: Optional shared candidate/example evaluation cache.
+
+        Raises:
+            ValueError: An objective-dependent frontier is requested without
+                objective scores from the seed evaluation.
+        """
         self.program_candidates = [dict(seed_candidate)]
+        # Seed owns the reserved on-disk iteration id.
+        self.iteration_ids_by_candidate_idx = [SEED_ITERATION_ID]
         self.prog_candidate_val_subscores = [dict(base_evaluation.scores_by_val_id)]
 
         base_objective_aggregates = self._aggregate_objective_scores(base_evaluation.objective_scores_by_val_id)
         self.prog_candidate_objective_scores = [base_objective_aggregates]
 
         self.parent_program_for_candidate = [[None]]
+        self.revision_history_by_candidate = [[]]
 
         self.frontier_type: FrontierType = frontier_type
         self.pareto_front_valset = dict(base_evaluation.scores_by_val_id)
@@ -252,13 +370,34 @@ class GEPAState(Generic[RolloutOutput, DataId]):
         self.validation_schema_version = self._VALIDATION_SCHEMA_VERSION
         self.evaluation_cache = evaluation_cache
         self.adapter_state: dict[str, Any] = {}
+        self.rng_state = None
+        self.callback_states: dict[str, Any] = {}
+        self.batch_sampler_state = None
+        self.reflection_lm_state = None
 
     def is_consistent(self) -> bool:
+        """Validate parallel state collections and persisted branch histories.
+
+        Returns:
+            ``True`` after every structural invariant passes.
+
+        Raises:
+            AssertionError: Candidate-aligned collections or Pareto-front
+                mappings have inconsistent lengths, keys, or indices.
+            TypeError: Persisted branch history has invalid container or content
+                types.
+            ValueError: Persisted branch messages have extra fields or invalid
+                roles.
+        """
         assert len(self.program_candidates) == len(self.parent_program_for_candidate)
+        assert len(self.program_candidates) == len(self.revision_history_by_candidate)
         assert len(self.program_candidates) == len(self.named_predictor_id_to_update_next_for_program_candidate)
         assert len(self.program_candidates) == len(self.prog_candidate_val_subscores)
         assert len(self.program_candidates) == len(self.prog_candidate_objective_scores)
         assert len(self.program_candidates) == len(self.num_metric_calls_by_discovery)
+        assert len(self.program_candidates) == len(self.iteration_ids_by_candidate_idx)
+        for history in self.revision_history_by_candidate:
+            self._validated_chat_history(history, context="persisted branch history")
 
         assert len(self.pareto_front_valset) == len(self.program_at_pareto_front_valset)
         assert set(self.pareto_front_valset.keys()) == set(self.program_at_pareto_front_valset.keys())
@@ -296,14 +435,33 @@ class GEPAState(Generic[RolloutOutput, DataId]):
             for hook in hooks:
                 hook(self.total_num_evals, count)
 
-    def _atomic_write_json(self, run_dir: str, filename: str, data: Any) -> None:
-        target_path = os.path.join(run_dir, filename)
+    def _atomic_write_json(self, run_dir: str, rel_path: str, data: Any) -> None:
+        target_path = os.path.join(run_dir, rel_path)
+        parent = os.path.dirname(target_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         tmp_path = target_path + ".tmp"
         with open(tmp_path, "w") as f:
             json.dump(data, f, indent=2, default=json_default)
         os.replace(tmp_path, target_path)
 
-    def save(self, run_dir: str | None, *, use_cloudpickle: bool = False) -> None:
+    def _atomic_write_text(self, run_dir: str, rel_path: str, data: str) -> None:
+        target_path = os.path.join(run_dir, rel_path)
+        parent = os.path.dirname(target_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        tmp_path = target_path + ".tmp"
+        with open(tmp_path, "w") as f:
+            f.write(data)
+        os.replace(tmp_path, target_path)
+
+    def save(
+        self,
+        run_dir: str | None,
+        *,
+        use_cloudpickle: bool = False,
+        write_agent_state: bool = False,
+    ) -> None:
         if run_dir is None:
             return
         if use_cloudpickle:
@@ -345,8 +503,325 @@ class GEPAState(Generic[RolloutOutput, DataId]):
         if self.program_candidates:
             self._atomic_write_json(run_dir, "candidates.json", self.program_candidates)
 
+        # Opt-in directory layout for agent consumption
+        if write_agent_state:
+            self._save_agent_directory(run_dir)
+
+    def _save_agent_directory(self, run_dir: str) -> None:
+        """Write agent-readable state as a directory of small files.
+
+        Partitions the run's state into per-iteration subdirs so an agent
+        (e.g. Claude Code) can navigate a single timeline — both accepted
+        candidates *and* rejected proposals live under ``iterations/<id>/``.
+        ``iterations/seed/`` (``SEED_ITERATION_ID``) is always the seed
+        (``candidate_idx=0``); every other directory is keyed by the random
+        ``iteration_id`` stamped on the proposal's trace entry, so the layout
+        stays collision-free even when proposals are produced concurrently. The
+        pickled ``gepa_state.bin`` remains the source of truth for resume; this
+        tree is output-only.
+        """
+        cand_to_iter = self._candidate_idx_to_iteration_id()
+        self._save_iteration_dirs(run_dir, cand_to_iter)
+        self._save_pareto_dir(run_dir, cand_to_iter)
+        self._save_index(run_dir, cand_to_iter)
+
+    def iteration_id_for_candidate_idx(self, candidate_idx: int) -> str | None:
+        """On-disk iteration id for the accepted candidate at ``candidate_idx``.
+
+        O(1) lookup against :attr:`iteration_ids_by_candidate_idx`, which is
+        maintained in lockstep with :attr:`program_candidates` by
+        :meth:`update_state_with_new_program`. Returns ``None`` for
+        out-of-range indices.
+        """
+        if candidate_idx < 0 or candidate_idx >= len(self.iteration_ids_by_candidate_idx):
+            return None
+        return self.iteration_ids_by_candidate_idx[candidate_idx]
+
+    def _candidate_idx_to_iteration_id(self) -> dict[int, str]:
+        """Map candidate idx (internal) → on-disk iteration id.
+
+        Backed by :attr:`iteration_ids_by_candidate_idx`, so this is just a
+        zipped view — no trace scan needed.
+        """
+        return dict(enumerate(self.iteration_ids_by_candidate_idx))
+
+    def current_iteration_id(self) -> str:
+        """On-disk anchor (``iterations/<id>/``) for the iteration in flight.
+
+        The engine stamps a random ``iteration_id`` on every trace entry at
+        slot creation, so the most-recently-opened entry's id is the current
+        iteration's anchor. Callers that need a *specific* iteration's anchor
+        pass it explicitly; this is the fallback for the single-writer paths
+        (merge, seed-less proposals) that operate on the current slot.
+        """
+        return self.full_program_trace[-1]["iteration_id"]
+
+    def _save_iteration_dirs(self, run_dir: str, cand_to_iter: dict[int, str]) -> None:
+        """Write every ``iterations/<id>/`` dir: the seed (``SEED_ITERATION_ID``)
+        plus one per loop-trace entry (keyed by the random ``iteration_id``
+        stamped on the entry, covering both accepted and rejected proposals).
+
+        Each dir is immutable once its ``meta.json`` exists. Trace entries are
+        finalized in the body of iteration K-1 before the iteration-K save runs
+        (``state.save`` fires at the top of the loop, after the previous body
+        has fully populated its entry), so an existing dir is skipped *before*
+        its metadata is recomputed — keeping per-save cost O(1) in the number
+        of iterations instead of O(N).
+
+        Args:
+            run_dir: Root agent-state directory.
+            cand_to_iter: Candidate indices mapped to immutable iteration IDs.
+        """
+
+        def write(
+            base: str,
+            meta: dict[str, Any],
+            components: dict[str, str] | None,
+            val_subscores: dict[DataId, float] | None,
+        ) -> None:
+            self._atomic_write_json(run_dir, f"{base}/meta.json", meta)
+            if components is not None:
+                self._save_components_dir(run_dir, base, components)
+            if val_subscores is not None:
+                self._atomic_write_json(
+                    run_dir,
+                    f"{base}/val_scores.json",
+                    {str(k): v for k, v in val_subscores.items()},
+                )
+
+        # Seed candidate (candidate_idx 0).
+        seed_base = f"iterations/{SEED_ITERATION_ID}"
+        if not os.path.exists(os.path.join(run_dir, seed_base, "meta.json")):
+            avg_score, coverage = self.get_program_average_val_subset(0)
+            write(
+                seed_base,
+                {
+                    "iteration_id": SEED_ITERATION_ID,
+                    "is_seed": True,
+                    "accepted": True,
+                    "candidate_idx": 0,
+                    "parent_iteration_ids": [],
+                    "avg_val_score": avg_score,
+                    "num_val_scored": coverage,
+                    "metric_calls_so_far": self.num_metric_calls_by_discovery[0]
+                    if self.num_metric_calls_by_discovery
+                    else 0,
+                    "objective_scores": self.prog_candidate_objective_scores[0]
+                    if self.prog_candidate_objective_scores
+                    else {},
+                },
+                self.program_candidates[0],
+                self.prog_candidate_val_subscores[0],
+            )
+
+        # One dir per accepted candidate (plus one per rejected proposal). A
+        # single loop iteration can accept more than one candidate when a
+        # multi-proposal sampling strategy is in use; each accepted candidate
+        # gets its own anchor (see ``_run_reflective_batch``), so we archive one
+        # dir per candidate rather than only the last.
+        for entry in self.full_program_trace:
+            trace_i = entry.get("i")
+            if trace_i is None:
+                continue
+            accepted = entry.get("proposal_accepted")
+
+            # Resolve the accepted candidate indices for this entry. Prefer the
+            # per-candidate list; fall back to the singular field for entries
+            # written before it existed (or by the merge path).
+            candidate_indices: list[int] = []
+            if accepted:
+                indices = entry.get("new_program_indices")
+                if not indices:
+                    single = entry.get("new_program_idx")
+                    indices = [single] if single is not None else []
+                candidate_indices = [ci for ci in indices if ci is not None]
+
+            # Each (dir id, candidate_idx) target: one per accepted candidate,
+            # anchored at that candidate's own iteration id; a rejected entry
+            # yields a single dir at the entry's anchor with no candidate.
+            entry_iter_id = entry["iteration_id"]
+            if candidate_indices:
+                targets = [(cand_to_iter.get(ci, entry_iter_id), ci) for ci in candidate_indices]
+            else:
+                targets = [(entry_iter_id, None)]
+
+            parent_candidate_idx = entry.get("selected_program_candidate")
+            parent_iter_ids = (
+                [cand_to_iter[parent_candidate_idx]]
+                if parent_candidate_idx is not None and parent_candidate_idx in cand_to_iter
+                else []
+            )
+
+            for iter_id, candidate_idx in targets:
+                base = f"iterations/{iter_id}"
+                if os.path.exists(os.path.join(run_dir, base, "meta.json")):
+                    continue
+
+                # The candidate text to archive under components/: for accepted
+                # iterations this is the newly accepted program; for rejected
+                # iterations it's the proposed (now discarded) candidate.
+                components: dict[str, str] | None = None
+                if candidate_idx is not None and candidate_idx < len(self.program_candidates):
+                    components = self.program_candidates[candidate_idx]
+                elif "proposed_candidate" in entry and isinstance(entry["proposed_candidate"], dict):
+                    components = entry["proposed_candidate"]
+
+                meta: dict[str, Any] = {
+                    "iteration_id": iter_id,
+                    "trace_i": trace_i,
+                    "accepted": bool(accepted) if accepted is not None else None,
+                    "parent_iteration_ids": parent_iter_ids,
+                    "candidate_idx": candidate_idx,
+                    "subsample_ids": entry.get("subsample_ids"),
+                    "subsample_scores_before": entry.get("subsample_scores"),
+                    "subsample_scores_after": entry.get("new_subsample_scores"),
+                }
+                val_subscores: dict[DataId, float] | None = None
+                if candidate_idx is not None and candidate_idx < len(self.prog_candidate_val_subscores):
+                    avg_score, coverage = self.get_program_average_val_subset(candidate_idx)
+                    meta["avg_val_score"] = avg_score
+                    meta["num_val_scored"] = coverage
+                    obj_scores = self.prog_candidate_objective_scores[candidate_idx]
+                    if obj_scores:
+                        meta["objective_scores"] = obj_scores
+                    metric_calls = (
+                        self.num_metric_calls_by_discovery[candidate_idx]
+                        if candidate_idx < len(self.num_metric_calls_by_discovery)
+                        else None
+                    )
+                    if metric_calls is not None:
+                        meta["metric_calls_to_discover"] = metric_calls
+                    val_subscores = self.prog_candidate_val_subscores[candidate_idx]
+
+                write(base, meta, components, val_subscores)
+                if candidate_idx is not None and candidate_idx < len(self.revision_history_by_candidate):
+                    self._atomic_write_json(
+                        run_dir,
+                        f"{base}/revision_history.json",
+                        self.revision_history_by_candidate[candidate_idx],
+                    )
+
+    def _save_components_dir(self, run_dir: str, base: str, components: dict[str, str]) -> None:
+        """Write ``<base>/components/<stem>.txt`` plus ``_index.json``."""
+        index_map: dict[str, str] = {}
+        used: set[str] = set()
+        for i, (name, text) in enumerate(components.items()):
+            safe = _sanitize_component_name(name)
+            if not safe or safe in used:
+                safe = f"component_{i:02d}"
+            used.add(safe)
+            index_map[name] = f"{safe}.txt"
+            self._atomic_write_text(run_dir, f"{base}/components/{safe}.txt", text)
+        self._atomic_write_json(run_dir, f"{base}/components/_index.json", index_map)
+
+    def _save_pareto_dir(self, run_dir: str, cand_to_iter: dict[int, str]) -> None:
+        """Write Pareto frontier files keyed by iteration id (not candidate idx).
+
+        Keeping the on-disk representation iteration-id-keyed means the agent
+        never sees the internal candidate numbering; everything is anchored
+        on the ``iterations/`` timeline.
+        """
+
+        def _iter_ids(candidate_idxs: "set[int]") -> list[str]:
+            return sorted({cand_to_iter[c] for c in candidate_idxs if c in cand_to_iter})
+
+        if self.frontier_type in ("instance", "hybrid"):
+            instance_front: dict[str, Any] = {}
+            for val_id, best_score in self.pareto_front_valset.items():
+                instance_front[str(val_id)] = {
+                    "best_score": best_score,
+                    "best_iteration_ids": _iter_ids(self.program_at_pareto_front_valset.get(val_id, set())),
+                }
+            self._atomic_write_json(run_dir, "pareto/instance_front.json", instance_front)
+
+        if self.frontier_type in ("objective", "hybrid"):
+            obj_front: dict[str, Any] = {}
+            for obj_name, best_score in self.objective_pareto_front.items():
+                obj_front[obj_name] = {
+                    "best_score": best_score,
+                    "best_iteration_ids": _iter_ids(self.program_at_pareto_front_objectives.get(obj_name, set())),
+                }
+            self._atomic_write_json(run_dir, "pareto/objective_front.json", obj_front)
+
+        if self.frontier_type == "cartesian":
+            cartesian_front: dict[str, Any] = {}
+            for key, best_score in self.pareto_front_cartesian.items():
+                cartesian_front[str(key)] = {
+                    "best_score": best_score,
+                    "best_iteration_ids": _iter_ids(self.program_at_pareto_front_cartesian.get(key, set())),
+                }
+            self._atomic_write_json(run_dir, "pareto/cartesian_front.json", cartesian_front)
+
+    def _save_index(self, run_dir: str, cand_to_iter: dict[int, str]) -> None:
+        """Write the small top-level index that points at the rest of the tree."""
+        num_candidates = len(self.program_candidates)
+
+        hardest: list[dict[str, Any]] = []
+        if self.pareto_front_valset:
+            sorted_examples = sorted(self.pareto_front_valset.items(), key=lambda x: x[1])
+            for val_id, score in sorted_examples[:20]:
+                best_iters = sorted(
+                    {
+                        cand_to_iter[c]
+                        for c in self.program_at_pareto_front_valset.get(val_id, set())
+                        if c in cand_to_iter
+                    }
+                )
+                hardest.append(
+                    {
+                        "val_id": str(val_id),
+                        "best_score": score,
+                        "best_iteration_ids": best_iters,
+                    }
+                )
+
+        full_scores = self.program_full_scores_val_set
+        best_candidate_idx = int(max(range(num_candidates), key=lambda i: full_scores[i])) if num_candidates > 0 else 0
+        best_iter_id = cand_to_iter.get(best_candidate_idx)
+
+        front_candidate_idxs: set[int] = set()
+        for prog_set in self.get_pareto_front_mapping().values():
+            front_candidate_idxs.update(prog_set)
+        front_iter_ids = sorted({cand_to_iter[c] for c in front_candidate_idxs if c in cand_to_iter})
+
+        index: dict[str, Any] = {
+            "schema_version": 3,
+            "iteration": self.i,
+            "total_metric_calls": self.total_num_evals,
+            "num_full_val_evals": self.num_full_ds_evals,
+            "frontier_type": self.frontier_type,
+            "component_names": self.list_of_named_predictors,
+            "summary": {
+                "num_iterations": len(cand_to_iter),
+                "best_iteration_id": best_iter_id,
+                "best_avg_score": full_scores[best_candidate_idx] if num_candidates > 0 else None,
+                "pareto_front_iteration_ids": front_iter_ids,
+                "hardest_examples": hardest,
+            },
+            "layout": {
+                "iterations_dir": "iterations/",
+                "pareto_dir": "pareto/",
+            },
+        }
+
+        self._atomic_write_json(run_dir, "gepa_state.json", index)
+
     @staticmethod
     def load(run_dir: str) -> "GEPAState[RolloutOutput, DataId]":
+        """Load, migrate, and validate a persisted optimizer state.
+
+        Args:
+            run_dir: Directory containing ``gepa_state.bin``.
+
+        Returns:
+            State upgraded to the current validation schema.
+
+        Raises:
+            FileNotFoundError: The state file does not exist.
+            AssertionError: Migrated candidate-aligned collections or frontiers
+                are structurally inconsistent.
+            TypeError: Legacy branch history cannot be migrated safely.
+        """
         with open(os.path.join(run_dir, "gepa_state.bin"), "rb") as f:
             import pickle
 
@@ -360,6 +835,12 @@ class GEPAState(Generic[RolloutOutput, DataId]):
         if version is None or version < GEPAState._VALIDATION_SCHEMA_VERSION:
             GEPAState._upgrade_state_dict(data)
 
+        # Schema 7 (and every later load): drop unnamespaced cache keys. This runs even when
+        # upgrade was skipped, so a v7 pickle that somehow still holds 2-tuples cannot be served.
+        cache = data.get("evaluation_cache")
+        if cache is not None:
+            cache.drop_unsplit_entries()
+
         state = GEPAState.__new__(GEPAState)
         state.__dict__.update(data)
 
@@ -368,11 +849,17 @@ class GEPAState(Generic[RolloutOutput, DataId]):
         assert len(state.program_candidates) == len(state.prog_candidate_objective_scores)
         assert len(state.program_candidates) == len(state.num_metric_calls_by_discovery)
         assert len(state.program_candidates) == len(state.parent_program_for_candidate)
+        assert len(state.program_candidates) == len(state.revision_history_by_candidate)
         assert len(state.program_candidates) == len(state.named_predictor_id_to_update_next_for_program_candidate)
+        assert len(state.program_candidates) == len(state.iteration_ids_by_candidate_idx)
         assert len(state.pareto_front_valset) == len(state.program_at_pareto_front_valset)
         assert set(state.pareto_front_valset.keys()) == set(state.program_at_pareto_front_valset.keys())
         assert set(state.objective_pareto_front.keys()) == set(state.program_at_pareto_front_objectives.keys())
         assert isinstance(state.adapter_state, dict)
+        assert state.rng_state is None or isinstance(state.rng_state, tuple)
+        assert isinstance(state.callback_states, dict)
+        assert state.batch_sampler_state is None or isinstance(state.batch_sampler_state, dict)
+        assert state.reflection_lm_state is None or isinstance(state.reflection_lm_state, dict)
         return state
 
     @staticmethod
@@ -400,6 +887,20 @@ class GEPAState(Generic[RolloutOutput, DataId]):
 
     @staticmethod
     def _upgrade_state_dict(d: dict[str, Any]) -> None:
+        """Upgrade an unpickled state dictionary in place.
+
+        Missing fields receive schema-compatible defaults. Legacy structured
+        revision records become user/assistant chat history, and old candidate
+        iteration anchors are reconstructed from the trace.
+
+        Args:
+            d: Mutable unpickled state dictionary from an older schema.
+
+        Raises:
+            TypeError: A legacy branch-history entry is not a mapping and cannot
+                be converted to chat messages.
+        """
+        previous_version = int(d.get("validation_schema_version") or 0)
         num_candidates = len(d.get("program_candidates", []))
         if "prog_candidate_objective_scores" not in d:
             d["prog_candidate_objective_scores"] = [{} for _ in range(num_candidates)]
@@ -417,6 +918,75 @@ class GEPAState(Generic[RolloutOutput, DataId]):
             d["evaluation_cache"] = None
         if "adapter_state" not in d:
             d["adapter_state"] = {}
+        if "rng_state" not in d:
+            d["rng_state"] = None
+        if "callback_states" not in d:
+            d["callback_states"] = {}
+        if "batch_sampler_state" not in d:
+            d["batch_sampler_state"] = None
+        if "reflection_lm_state" not in d:
+            d["reflection_lm_state"] = None
+        if "revision_history_by_candidate" not in d:
+            d["revision_history_by_candidate"] = [[] for _ in range(num_candidates)]
+        elif previous_version < 8:
+            migrated_histories: list[list[dict[str, str]]] = []
+            for history in d["revision_history_by_candidate"]:
+                try:
+                    migrated_histories.append(
+                        GEPAState._validated_chat_history(history, context="persisted branch history")
+                    )
+                    continue
+                except (TypeError, ValueError):
+                    pass
+                messages: list[dict[str, str]] = []
+                for record in history:
+                    if not isinstance(record, Mapping):
+                        raise TypeError("legacy branch-history entries must be mappings")
+                    outcome = record.get("outcome", "accepted")
+                    if outcome not in {"accepted", "rejected", "dropped"}:
+                        outcome = "accepted"
+                    messages.extend(
+                        GEPAState._attempt_records_to_chat(
+                            [record],
+                            outcome,
+                            score_before=record.get("subsample_score_before"),
+                            score_after=record.get("subsample_score_after"),
+                            reason=record.get("outcome_reason"),
+                        )
+                    )
+                migrated_histories.append(messages)
+            d["revision_history_by_candidate"] = migrated_histories
+        if "iteration_ids_by_candidate_idx" not in d:
+            # Populate the field for states that predate it so the load-time
+            # length assertion passes: seed -> SEED_ITERATION_ID, accepted
+            # candidates -> their legacy (trace_i + 1) slot id.
+            mapping: dict[int, str] = {0: SEED_ITERATION_ID}
+            for entry in d.get("full_program_trace", []):
+                # Key off ``new_program_idx``, not ``proposal_accepted``:
+                # pre-schema-6 trace entries never wrote a ``proposal_accepted``
+                # flag, but every accepted iteration stamped ``new_program_idx``
+                # (rejected iterations left it unset). Gating on the missing
+                # flag skipped every legacy candidate, mapping them all to the
+                # sentinel ``"-1"`` on resume.
+                cand_idx = entry.get("new_program_idx")
+                trace_i = entry.get("i")
+                if cand_idx is None or trace_i is None:
+                    continue
+                mapping[cand_idx] = str(trace_i + 1)
+            d["iteration_ids_by_candidate_idx"] = [mapping.get(i, "-1") for i in range(num_candidates)]
+        # Trace entries created before the on-disk iteration layout (schema 6)
+        # carry no ``iteration_id``. Stamp the deterministic legacy anchor
+        # (``trace_i + 1``, matching the accepted-candidate mapping above) so
+        # consumers that rely on ``entry["iteration_id"]`` — the agent-state
+        # writer (``_save_iteration_dirs``) and ``current_iteration_id`` — keep
+        # working when an old run is resumed with ``write_agent_state=True``.
+        for entry in d.get("full_program_trace", []):
+            if "iteration_id" not in entry:
+                trace_i = entry.get("i")
+                entry["iteration_id"] = str(trace_i + 1) if trace_i is not None else SEED_ITERATION_ID
+        # Schema 7: evaluation-cache keys are (candidate_hash, split, example_id). Unnamespaced
+        # 2-tuples from earlier versions can mix train and val rollouts under the same positional
+        # id, so they are dropped in GEPAState.load rather than promoted to a split.
         d["validation_schema_version"] = GEPAState._VALIDATION_SCHEMA_VERSION
 
     @staticmethod
@@ -524,6 +1094,285 @@ class GEPAState(Generic[RolloutOutput, DataId]):
             front = self.program_at_pareto_front_cartesian.setdefault((val_id, objective), set())
             front.add(program_idx)
 
+    @staticmethod
+    def _shared_revision_prefix(histories: Sequence[Sequence[dict[str, str]]]) -> list[dict[str, str]]:
+        """Find the common chat history of one or more parent branches.
+
+        A single-parent mutation inherits the entire branch. A merge inherits
+        only the exact prefix shared by all parents, preventing either sibling's
+        private attempts from becoming global history.
+
+        Args:
+            histories: Parent histories.
+
+        Returns:
+            Deep-copied common prefix.
+        """
+        if not histories:
+            return []
+        prefix: list[dict[str, Any]] = []
+        for records_at_depth in zip(*histories, strict=False):
+            first = records_at_depth[0]
+            if any(record != first for record in records_at_depth[1:]):
+                break
+            prefix.append(deepcopy(first))
+        return prefix
+
+    @staticmethod
+    def _validated_chat_history(
+        history: Any,
+        *,
+        context: str,
+    ) -> list[dict[str, str]]:
+        """Validate and copy a user/assistant-only chat transcript.
+
+        Args:
+            history: Candidate sequence of role/content message mappings.
+            context: Field label included in validation errors.
+
+        Returns:
+            New dictionaries containing only validated ``role`` and ``content``
+            strings.
+
+        Raises:
+            TypeError: The transcript, a message, or message content has the
+                wrong type.
+            ValueError: A message has extra fields or a role other than user or
+                assistant.
+        """
+        if not isinstance(history, Sequence) or isinstance(history, str | bytes):
+            raise TypeError(f"{context} must be a sequence of chat messages")
+        messages: list[dict[str, str]] = []
+        for message in history:
+            if not isinstance(message, Mapping):
+                raise TypeError(f"each {context} entry must be a mapping")
+            if set(message) != {"role", "content"}:
+                raise ValueError(f"each {context} entry must contain only 'role' and 'content'")
+            role = message["role"]
+            content = message["content"]
+            if role not in {"user", "assistant"}:
+                raise ValueError(f"each {context} role must be 'user' or 'assistant'")
+            if not isinstance(content, str):
+                raise TypeError(f"each {context} content must be a string")
+            messages.append({"role": role, "content": content})
+        return messages
+
+    @staticmethod
+    def _proposal_attempt_records(metadata: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+        """Validate current attempt records carried by a proposal.
+
+        ``attempt_records`` is the current key. ``revision_records`` remains a
+        compatibility fallback for reflection strategies that only report
+        completed edits.
+
+        Args:
+            metadata: Candidate proposal metadata.
+
+        Returns:
+            Deep-copied attempt records, or an empty list.
+
+        Raises:
+            TypeError: The reserved metadata value is not a sequence of mappings.
+        """
+        if metadata is None:
+            return []
+        key = "attempt_records" if "attempt_records" in metadata else "revision_records"
+        value = metadata.get(key, [])
+        if not isinstance(value, Sequence) or isinstance(value, str | bytes):
+            raise TypeError(f"proposal metadata {key!r} must be a sequence of mappings")
+        records: list[dict[str, Any]] = []
+        for record in value:
+            if not isinstance(record, Mapping):
+                record_name = "attempt record" if key == "attempt_records" else "revision record"
+                raise TypeError(f"each proposal {record_name} must be a mapping")
+            records.append(deepcopy(dict(record)))
+        return records
+
+    @staticmethod
+    def _attempt_record_chat_messages(record: Mapping[str, Any]) -> list[dict[str, str]]:
+        """Extract actual assistant attempts and observations from one record.
+
+        A supplied canonical transcript takes precedence. Legacy ReAct steps
+        and single assistant/observation fields are converted when necessary.
+
+        Args:
+            record: One proposal-attempt record in current or legacy shape.
+
+        Returns:
+            User/assistant messages representing the attempted interaction.
+
+        Raises:
+            TypeError: Canonical chat data or a legacy ReAct step has the wrong
+                type.
+            ValueError: Canonical chat data has extra fields or a non-chat role.
+        """
+        supplied = record.get("chat_messages")
+        if supplied is not None:
+            return GEPAState._validated_chat_history(supplied, context="attempt chat_messages")
+
+        messages: list[dict[str, str]] = []
+        steps = record.get("react_steps")
+        if isinstance(steps, Sequence) and not isinstance(steps, str | bytes):
+            for step in steps:
+                if not isinstance(step, Mapping):
+                    raise TypeError("each react_steps entry must be a mapping")
+                assistant = step.get("assistant")
+                if assistant is not None and str(assistant):
+                    messages.append({"role": "assistant", "content": str(assistant)})
+                observation = step.get("observation")
+                if observation is None:
+                    observation = step.get("error")
+                if observation is not None and str(observation):
+                    messages.append({"role": "user", "content": str(observation)})
+        else:
+            assistant = record.get("assistant")
+            if assistant is not None and str(assistant):
+                messages.append({"role": "assistant", "content": str(assistant)})
+            observation = record.get("observation")
+            if observation is None:
+                observation = record.get("error")
+            if observation is not None and str(observation):
+                messages.append({"role": "user", "content": str(observation)})
+
+        manifestor_error = record.get("manifestor_error")
+        if manifestor_error and not messages:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": f"Manifestor error: {manifestor_error}",
+                }
+            )
+        return messages
+
+    @staticmethod
+    def _attempt_records_to_chat(
+        records: Sequence[Mapping[str, Any]],
+        outcome: Literal["accepted", "rejected", "dropped"],
+        *,
+        score_before: float | None = None,
+        score_after: float | None = None,
+        reason: str | None = None,
+    ) -> list[dict[str, str]]:
+        """Convert isolated attempt records into branch-local chat history.
+
+        Each attempt contributes its actual interaction followed by one user
+        message recording the optimizer outcome and available score context.
+
+        Args:
+            records: Attempt records belonging to one proposal.
+            outcome: Outer optimizer outcome for the proposal.
+            score_before: Parent score when available.
+            score_after: Evaluated proposal score when available.
+            reason: Optional outer rejection or drop explanation.
+
+        Returns:
+            Ordered user/assistant messages to append to the selected branch.
+        """
+        messages: list[dict[str, str]] = []
+        for source in records:
+            record = deepcopy(dict(source))
+            record_outcome = "dropped" if record.get("attempt_status") == "dropped" else outcome
+            messages.extend(GEPAState._attempt_record_chat_messages(record))
+            include_outer_result = record_outcome != "dropped" or outcome == "dropped"
+            outcome_feedback = {
+                "accepted": "Optimizer result: accepted; the branch now contains this edit.",
+                "rejected": "Optimizer result: rejected; the branch remains unchanged.",
+                "dropped": "Optimizer result: dropped; no candidate was produced.",
+            }
+            feedback = [outcome_feedback[record_outcome]]
+            component = record.get("component")
+            if component is not None:
+                feedback.append(f"Component: {component}.")
+            edit_target = record.get("edit_target")
+            if isinstance(edit_target, str) and edit_target:
+                feedback.append(f"Edit target: {edit_target}.")
+            if score_before is not None and include_outer_result:
+                feedback.append(f"Score before: {score_before}.")
+            if score_after is not None and include_outer_result:
+                feedback.append(f"Score after: {score_after}.")
+            outcome_reason = reason if include_outer_result else record.get("dropped_reason")
+            if outcome_reason:
+                feedback.append(f"Reason: {outcome_reason}")
+            messages.append(
+                {
+                    "role": "user",
+                    "content": " ".join(feedback),
+                }
+            )
+        return messages
+
+    def record_proposal_attempts(
+        self,
+        candidate_idx: ProgramIdx,
+        proposal_metadata: Mapping[str, Any] | None,
+        *,
+        outcome: Literal["rejected", "dropped"],
+        score_before: float | None = None,
+        score_after: float | None = None,
+        reason: str | None = None,
+    ) -> None:
+        """Append rejected or dropped attempts only to the selected branch.
+
+        Args:
+            candidate_idx: Parent branch that observed the failed attempt.
+            proposal_metadata: Metadata containing attempt or revision records.
+            outcome: Whether evaluation rejected the proposal or reflection
+                dropped it before producing a candidate.
+            score_before: Parent score when available.
+            score_after: Proposal score when evaluation occurred.
+            reason: Optional rejection or drop explanation.
+        """
+        records = self._proposal_attempt_records(proposal_metadata)
+        messages = self._attempt_records_to_chat(
+            records,
+            outcome,
+            score_before=score_before,
+            score_after=score_after,
+            reason=reason,
+        )
+        self.revision_history_by_candidate[candidate_idx].extend(messages)
+
+    def _proposal_parent_history(
+        self,
+        parent_idx: ProgramIdx,
+        proposal_metadata: Mapping[str, Any] | None,
+    ) -> Sequence[dict[str, str]]:
+        """Return the parent-history snapshot visible when a proposal was made.
+
+        Proposal metadata may pin a shorter prefix so sibling attempts recorded
+        later in the same batch cannot leak into this proposal's lineage.
+
+        Args:
+            parent_idx: Parent candidate whose branch history is requested.
+            proposal_metadata: Optional per-parent snapshot lengths captured at
+                proposal time.
+
+        Returns:
+            Full current history or its proposal-time prefix.
+
+        Raises:
+            TypeError: Snapshot metadata is not a mapping or a length is not a
+                non-negative integer.
+            ValueError: A snapshot length exceeds the branch's current history.
+        """
+        history = self.revision_history_by_candidate[parent_idx]
+        if proposal_metadata is None or "parent_branch_history_lengths" not in proposal_metadata:
+            return history
+        lengths = proposal_metadata["parent_branch_history_lengths"]
+        if not isinstance(lengths, Mapping):
+            raise TypeError("proposal metadata 'parent_branch_history_lengths' must be a mapping")
+        missing = object()
+        length = lengths.get(str(parent_idx), lengths.get(parent_idx, missing))
+        if length is missing:
+            return history
+        if not isinstance(length, int) or isinstance(length, bool) or length < 0:
+            raise TypeError("parent branch history snapshot lengths must be non-negative integers")
+        if length > len(history):
+            raise ValueError(
+                f"parent {parent_idx} history snapshot length {length} exceeds current length {len(history)}"
+            )
+        return history[:length]
+
     def update_state_with_new_program(
         self,
         parent_program_idx: list[ProgramIdx],
@@ -531,9 +1380,48 @@ class GEPAState(Generic[RolloutOutput, DataId]):
         valset_evaluation: ValsetEvaluation,
         run_dir: str | None,
         num_metric_calls_by_discovery_of_new_program: int,
+        iteration_id: str | None = None,
+        proposal_metadata: Mapping[str, Any] | None = None,
     ) -> ProgramIdx:
+        """Add an accepted candidate and persist its branch-local chat transcript.
+
+        Args:
+            parent_program_idx: Parent candidates.
+            new_program: Accepted component mapping.
+            valset_evaluation: Candidate validation results.
+            run_dir: Optional run directory.
+            num_metric_calls_by_discovery_of_new_program: Discovery budget snapshot.
+            iteration_id: On-disk proposal anchor.
+            proposal_metadata: Metadata containing current ``attempt_records``
+                (or legacy ``revision_records``) and an optional parent-history
+                snapshot length.
+
+        Returns:
+            New candidate index.
+
+        Raises:
+            TypeError: Proposal history metadata has invalid types.
+            ValueError: Proposal history metadata has invalid roles, fields, or
+                snapshot lengths.
+        """
+        # ``iteration_id`` is the on-disk iteration id for the proposal that
+        # produced this candidate — the random anchor stamped on its trace
+        # entry at slot creation. Falls back to the current slot's id when the
+        # caller hasn't plumbed it (e.g. the merge path).
+        if iteration_id is None:
+            iteration_id = self.current_iteration_id()
+        parent_histories = [
+            self._proposal_parent_history(parent_idx, proposal_metadata)
+            for parent_idx in parent_program_idx
+            if parent_idx is not None
+        ]
+        revision_history = self._shared_revision_prefix(parent_histories)
+        proposal_attempts = self._proposal_attempt_records(proposal_metadata)
+        revision_history.extend(self._attempt_records_to_chat(proposal_attempts, "accepted"))
         new_program_idx = len(self.program_candidates)
         self.program_candidates.append(dict(new_program))
+        self.revision_history_by_candidate.append(revision_history)
+        self.iteration_ids_by_candidate_idx.append(iteration_id)
         self.num_metric_calls_by_discovery.append(num_metric_calls_by_discovery_of_new_program)
 
         max_predictor_id = max(
@@ -610,9 +1498,13 @@ class GEPAState(Generic[RolloutOutput, DataId]):
         example_ids: list[DataId],
         fetcher: Callable[[list[DataId]], Any],
         evaluator: Callable[[Any, dict[str, str]], tuple[Any, list[float], Sequence[ObjectiveScores] | None]],
+        *,
+        split: str,
     ) -> tuple[list[float], int]:
-        """Evaluate with optional caching. Returns (scores, num_actual_evals)."""
-        _, scores_by_id, _, num_actual_evals = self.cached_evaluate_full(candidate, example_ids, fetcher, evaluator)
+        """Evaluate with optional caching. Returns (scores, num_actual_evals). ``split`` is required."""
+        _, scores_by_id, _, num_actual_evals = self.cached_evaluate_full(
+            candidate, example_ids, fetcher, evaluator, split=split
+        )
         return [scores_by_id[eid] for eid in example_ids], num_actual_evals
 
     def cached_evaluate_full(
@@ -621,10 +1513,14 @@ class GEPAState(Generic[RolloutOutput, DataId]):
         example_ids: list[DataId],
         fetcher: Callable[[list[DataId]], Any],
         evaluator: Callable[[Any, dict[str, str]], tuple[Any, list[float], Sequence[ObjectiveScores] | None]],
+        *,
+        split: str,
     ) -> tuple[dict[DataId, RolloutOutput], dict[DataId, float], dict[DataId, ObjectiveScores] | None, int]:
-        """Evaluate with optional caching, returning full results."""
+        """Evaluate with optional caching, returning full results. ``split`` is required."""
         if self.evaluation_cache is not None:
-            return self.evaluation_cache.evaluate_with_cache_full(candidate, example_ids, fetcher, evaluator)
+            return self.evaluation_cache.evaluate_with_cache_full(
+                candidate, example_ids, fetcher, evaluator, split=split
+            )
         batch = fetcher(example_ids)
         outputs, scores, objective_scores = evaluator(batch, candidate)
         outputs_by_id = dict(zip(example_ids, outputs, strict=False))
@@ -661,11 +1557,34 @@ def initialize_gepa_state(
     run_dir: str | None,
     logger: LoggerProtocol,
     seed_candidate: dict[str, str],
-    seed_valset_evaluation: ValsetEvaluation[RolloutOutput, DataId],
+    seed_valset_evaluation: ValsetEvaluation[RolloutOutput, DataId] | None,
     track_best_outputs: bool = False,
     frontier_type: FrontierType = "instance",
     evaluation_cache: "EvaluationCache[RolloutOutput, DataId] | None" = None,
 ) -> GEPAState[RolloutOutput, DataId]:
+    """Load a prior optimizer state or initialize one from a seed evaluation.
+
+    A resumed run never needs to evaluate its seed again: the durable state
+    already contains the seed scores needed by the optimizer. A fresh run must
+    provide the completed seed evaluation.
+
+    Args:
+        run_dir: Optional directory containing or receiving optimizer state.
+        logger: Logger used to report a resumed state load.
+        seed_candidate: Initial component mapping for a fresh run.
+        seed_valset_evaluation: Seed evaluation for a fresh run, or ``None``
+            when loading an existing state.
+        track_best_outputs: Whether a fresh state retains tied best outputs.
+        frontier_type: Frontier policy expected by either state path.
+        evaluation_cache: Cache requested for this invocation.
+
+    Returns:
+        Loaded or newly initialized optimizer state.
+
+    Raises:
+        ValueError: The persisted frontier differs from ``frontier_type`` or a
+            fresh run omits ``seed_valset_evaluation``.
+    """
     if run_dir is not None and os.path.exists(os.path.join(run_dir, "gepa_state.bin")):
         logger.log("Loading gepa state from run dir")
         gepa_state = GEPAState.load(run_dir)
@@ -686,6 +1605,8 @@ def initialize_gepa_state(
             gepa_state.evaluation_cache = evaluation_cache
         # else: keep the loaded cache (gepa_state.evaluation_cache is already set)
     else:
+        if seed_valset_evaluation is None:
+            raise ValueError("A fresh GEPA run requires a seed valset evaluation.")
         if run_dir is not None:
             write_eval_outputs_to_directory(
                 seed_valset_evaluation.outputs_by_val_id,

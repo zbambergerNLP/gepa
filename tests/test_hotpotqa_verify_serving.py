@@ -1,6 +1,7 @@
 """Tests for the standalone local HotPotQA serving verification."""
 
 import shlex
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import Mock, call
@@ -28,6 +29,29 @@ def test_diagnostic_package_inventory_python_executes(capsys) -> None:
     packages = capsys.readouterr().out.splitlines()
     assert packages == sorted(packages)
     assert any(package.startswith("pytest==") for package in packages)
+
+
+def test_optional_diagnostic_failures_do_not_abort_serving_checks(tmp_path) -> None:
+    """Continue past failed inventories while keeping shell error handling enabled."""
+    script = Path(__file__).parents[1] / "scripts/della/verify_deepseek_serving.sh"
+    source = script.read_text()
+    start = source.index('"${VLLM_PY}" -c \'import importlib.metadata')
+    block = source[start : source.index('\necho "==> checking', start)]
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'set -eu\nVLLM_PY=false\nRUN_DIR="$1"\nnvidia-smi() { return 1; }\n'
+            + block
+            + '\nprintf "mandatory checks reached\\n"\n',
+            "diagnostics",
+            str(tmp_path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "mandatory checks reached\n"
 
 
 @pytest.mark.parametrize(

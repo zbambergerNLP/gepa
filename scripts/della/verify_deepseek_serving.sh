@@ -139,9 +139,10 @@ if [[ -d "${SERVING_CUDA_ROOT}/include" ]]; then
     export LIBRARY_PATH="${SERVING_CUDA_ROOT}/lib${LIBRARY_PATH:+:${LIBRARY_PATH}}"
 fi
 echo "==> vLLM ${HOTPOTQA_VLLM_VERSION} from ${SERVING_VENV_DIR} (CUDA ${HOTPOTQA_CUDA_VERSION}); results in ${RUN_DIR}"
+# Optional inventories must not prevent the mandatory serving checks.
 "${VLLM_PY}" -c 'import importlib.metadata as m; print("\n".join(sorted("{}=={}".format(d.metadata["Name"], d.version) for d in m.distributions())))' \
-    > "${RUN_DIR}/serving-packages.txt"
-nvidia-smi > "${RUN_DIR}/gpus.txt"
+    > "${RUN_DIR}/serving-packages.txt" || true
+nvidia-smi > "${RUN_DIR}/gpus.txt" || true
 
 echo "==> checking that the frozen vLLM registers the checkpoint architecture"
 "${VLLM_PY}" - "${SOLVER_MODEL_PATH}" "${HOTPOTQA_VLLM_VERSION}" <<'PY'

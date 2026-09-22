@@ -7,14 +7,14 @@
 #
 # Usage:
 #   scripts/della/preflight_hotpotqa.sh
-# Uses the current clean consolidated branch tip. An optional
+# Uses the current clean main branch tip. An optional
 # HOTPOTQA_SOURCE_COMMIT additionally checks a specific expected revision.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 ENV_FILE="${SCRIPT_DIR}/.env"
-EXPECTED_BRANCH="codex/consolidated-della-experiments"
+EXPECTED_BRANCH="main"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -27,7 +27,7 @@ echo "ok"
 echo "== 2. source commit and worktree"
 CURRENT_BRANCH="$(git -C "${REPO_ROOT}" branch --show-current)"
 [[ "${CURRENT_BRANCH}" == "${EXPECTED_BRANCH}" ]] \
-    || fail "use the consolidated branch ${EXPECTED_BRANCH}; current branch is ${CURRENT_BRANCH:-detached HEAD}"
+    || fail "use the canonical branch ${EXPECTED_BRANCH}; current branch is ${CURRENT_BRANCH:-detached HEAD}"
 HEAD_COMMIT="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
 EXPECTED_COMMIT="${HOTPOTQA_SOURCE_COMMIT:-${HEAD_COMMIT}}"
 [[ "${HEAD_COMMIT}" == "${EXPECTED_COMMIT}" ]] \

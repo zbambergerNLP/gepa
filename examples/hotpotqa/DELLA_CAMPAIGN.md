@@ -1,6 +1,6 @@
 # HotPotQA on Della
 
-Use `codex/consolidated-della-experiments`, which combines the reviewed HotPotQA
+Use `main`, which combines the reviewed HotPotQA
 and Terminal-Bench work with [Zach's PR #62](https://github.com/zbambergerNLP/gepa/pull/62).
 The [integration record](../../docs/experiment-consolidation.md) identifies the
 input commits, conflict resolutions, and deferred decisions. The old `169ddda`
@@ -9,7 +9,21 @@ runbook commit predates these decisions and is not a launch target.
 These are instructions for future operations. Consolidation does not submit
 jobs. Start with HotPotQA; Terminal-Bench's Apptainer integration is paused.
 
-## DeepSeek teacher with Qwen task execution
+## Current qualification and production hold
+
+The September 22 decision stops the original seven-ablation campaign. Complete
+the Controller-direction technical and fixed train-only usefulness qualification,
+review the evidence, and obtain explicit design approval before production. The
+planned comparison is vanilla GEPA versus FOREST on one qualified source revision,
+with two-hour resumable `gpu-short` allocations and the same five-GPU split. Both
+methods retain the 6,871-evaluation whole-iteration threshold. A shorter allocation
+is not a smaller scientific budget or a guarantee of earlier scheduling.
+
+Preserve historical sources, checkpoints, exports and attempts. A qualification
+or checkpoint is never silently migrated when `main` advances. The historical
+seven-cell commands below do not authorize restarting that campaign.
+
+## Historical DeepSeek teacher with Qwen task execution
 
 The September 18 campaign uses `MODEL_PROFILE=deepseek-teacher-qwen-student`:
 Qwen runs every task-program call on one H200; DeepSeek runs the vanilla
@@ -67,7 +81,7 @@ git status --short --branch
 ```
 
 Preflight and submission automatically record the latest committed `HEAD`;
-no manual source hash is required. Preflight requires the consolidated branch
+no manual source hash is required. Preflight requires `main`
 and rejects uncommitted changes. An optional `HOTPOTQA_SOURCE_COMMIT` asserts
 a particular expected revision. Keep the recorded SHA fixed during a campaign.
 Source, checkpoint, runtime, or experiment
@@ -91,7 +105,7 @@ scripts/della/preflight_hotpotqa.sh
 
 The helper uses the existing SSH configuration: `ControlMaster auto`,
 `ControlPath ~/.ssh/cm/%r@%h:%p`, and `ControlPersist yes` for both configured
-hosts. Preflight is read-only and uses the current consolidated branch tip.
+hosts. Preflight is read-only and uses the current `main` branch tip.
 It checks source, permissions, SSH, CUDA, storage, and serving locks.
 
 ## Prepare the exact artifacts

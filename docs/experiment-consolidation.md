@@ -1,6 +1,6 @@
 # Consolidated experiment decisions
 
-Local branch: `codex/consolidated-della-experiments`.
+Canonical branch: `main`.
 Use this branch's latest clean commit for preflight and submission; both record
 the source revision automatically. A manually supplied source hash is optional.
 
@@ -8,7 +8,14 @@ This integration combines the complete reviewed HotPotQA/Terminal-Bench branch
 `af602f3d7a7949f199883ff5a6a34afbd1580fcf` (PR #60, including HotPotQA PR #59 at
 `8f7214fa9457fd853d607afe307ba236306581dc`) with Zach's PR #62 at
 `0f2ffa6ee7cb53680a2ea87506e848d7c5c01de5`. Both histories remain ancestors of
-the merge. The existing branches are preserved; consolidation is local.
+the merge. The historical branches are preserved; PR #63 consolidates the maintained
+implementation onto `main`, including PR #65 and the later diagnostic fix from
+PR #62. This does not migrate any recorded campaign source.
+
+On September 22 the user halted the seven-ablation campaign pending technical
+and usefulness qualification plus explicit design approval. The future comparison
+is only vanilla GEPA and FOREST, using two-hour resumable allocations and unchanged
+standard whole-iteration budgets. Earlier campaign decisions below are historical.
 
 ## Resolved differences
 

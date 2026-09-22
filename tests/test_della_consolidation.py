@@ -93,7 +93,7 @@ def test_preflight_uses_clean_consolidated_head_before_any_ssh(tmp_path, case):
         **os.environ,
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "TEST_COMMIT": "a" * 40,
-        "TEST_BRANCH": "other" if case == "other_branch" else "codex/consolidated-della-experiments",
+        "TEST_BRANCH": "other" if case == "other_branch" else "main",
         "TEST_DIRTY": " M file" if case == "dirty" else "",
         "SSH_CAPTURE": str(capture),
     }

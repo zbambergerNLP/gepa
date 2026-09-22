@@ -17,6 +17,7 @@ from typing import Any
 from gepa.proposer.reflective_mutation.base import LanguageModel
 from gepa.strategies.edit_tools import EditTool
 from gepa.strategies.intervention import ControllerChoice
+from gepa.strategies.reflection_context import CONTROLLER_AUTHORITY_GUIDANCE, GENERALIZATION_GUIDANCE
 from gepa.strategies.text_limits import TextLimits, clip_text, resolve_text_limits
 
 MAX_MANIFESTATION_ATTEMPTS = 2
@@ -30,6 +31,9 @@ Action:
 - Description: "{spec_desc}"
 - Instruction: "{instruction}"
 
+Controller direction (verbatim rationale as a JSON string, or null when unavailable):
+{controller_direction}
+
 Requirements:
 - The Controller has already selected this action and region. Keep that choice; do not substitute another action
   or region. If its required text is absent, say so instead of inventing an edit target.
@@ -41,8 +45,13 @@ Requirements:
   Apply the action's semantic constraints to the completed revision relative to the original selected region.
 - Ground every claim, failure, and quoted passage in the state.
 - Do not write the edit or emit an <edit> or <python> block.
-- Return only the steering text, with no header, label, quotation marks, role tag, or process commentary.
-- Use at most a few sentences.
+- Return only four short labeled parts: Observation (an input/output mismatch visible in the record),
+  Hypothesis (a possible cause, not an established fact), General change (a reusable change allowed by this action),
+  and Scope (when it applies and what already-correct behavior must remain intact).
+- If no supported change fits, explain that within this structure and direct the editor to finish without editing.
+
+{generalization_guidance}
+{controller_authority}
 
 State:
 {state}
@@ -108,6 +117,8 @@ class Manifestor:
         region_text: str,
         feedback_summary: str,
         traces: str,
+        *,
+        controller_direction: str | None = None,
     ) -> str | None:
         """Return steering guidance for ``action`` or ``None`` when it has no spec.
 
@@ -122,6 +133,8 @@ class Manifestor:
             feedback_summary: Summarized minibatch failure feedback. Shown whole.
             traces: Flattened execution traces (inputs, outputs, feedback) of
                 the minibatch; the only input this role bounds.
+            controller_direction: Rationale for the sampled Controller option,
+                passed independently of this role's interpretation.
 
         Returns:
             Steering text, or ``None`` without a semantic spec.
@@ -171,6 +184,9 @@ class Manifestor:
             spec_desc=spec.description,
             instruction=spec.instruction,
             tool_applicability=tool_applicability,
+            generalization_guidance=GENERALIZATION_GUIDANCE,
+            controller_authority=CONTROLLER_AUTHORITY_GUIDANCE,
+            controller_direction=json.dumps(controller_direction, ensure_ascii=False),
         )
         for attempt in range(MAX_MANIFESTATION_ATTEMPTS):
             self.text_limits.check_prompt(prompt)

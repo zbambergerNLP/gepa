@@ -46,7 +46,12 @@ from gepa.strategies.intervention import (
     build_controller_menu,
     summarize_feedback,
 )
-from gepa.strategies.reflection_context import REFLECTION_CONTEXT_CONTRACT
+from gepa.strategies.reflection_context import (
+    CONTROLLER_AUTHORITY_GUIDANCE,
+    FOREST_REFLECTION_CONTRACT,
+    GENERALIZATION_GUIDANCE,
+    REFLECTION_CONTEXT_CONTRACT,
+)
 from gepa.strategies.text_limits import TextLimitError, TextLimits, clip_text, resolve_text_limits
 
 MAX_HISTORY_STEPS = 16
@@ -240,6 +245,7 @@ def _controller_sampling_record(history: Mapping[str, Any]) -> dict[str, Any]:
         "probs": {str(name): float(probability) for name, probability in dict(probabilities).items()},
         "sampling_probs": {str(name): float(probability) for name, probability in dict(sampling_probabilities).items()},
         "sampled": [str(name) for name in sampled],
+        "sampled_reasonings": [str(reason) for reason in history.get("sampled_reasonings", [])],
         "sampled_probabilities": [float(value) for value in history.get("sampled_probabilities", [])],
         "fallback": bool(history.get("fallback", False)),
         "n_parsed_entries": int(history.get("n_parsed_entries", 0)),
@@ -315,20 +321,17 @@ def _uniform_controller_sampling_record(
 
 
 def _summarize_traces(entries: Sequence[Mapping[str, Any]]) -> str:
-    """Flatten reflective rows into the execution evidence shown to the roles.
+    """Preserve ordered reflection records and adapter diagnostics for every role.
 
     Args:
         entries: Reflective-dataset rows with inputs, outputs, and feedback.
 
     Returns:
-        One labeled block per example, or a no-traces marker.
+        One labeled JSON record per example, or a no-traces marker.
     """
     blocks: list[str] = []
     for index, entry in enumerate(entries):
-        inputs = entry.get("Inputs")
-        outputs = entry.get("Generated Outputs", entry.get("Generated Output"))
-        feedback = entry.get("Feedback") or entry.get("execution_feedback")
-        blocks.append(f"[example {index + 1}]\nInputs: {inputs}\nOutput: {outputs}\nFeedback: {feedback}")
+        blocks.append(f"[example {index + 1}]\n{json.dumps(dict(entry), ensure_ascii=False, default=str)}")
     return "\n\n".join(blocks) or "(no traces available)"
 
 
@@ -678,7 +681,7 @@ class ThreeRoleReflectionLM:
                 "when constructing ThreeRoleReflectionLM with custom callables."
             )
         return {
-            "schema_version": 9,
+            "schema_version": 11,
             "strategy": "three_role_reflection",
             "reflection_level": self.level,
             "edit_tool_set": self.edit_tool_set,
@@ -698,6 +701,7 @@ class ThreeRoleReflectionLM:
             "text_limits": self.text_limits.to_dict(),
             "manifestor_traces_chars": self.manifestor_traces_chars,
             "reflection_context": deepcopy(REFLECTION_CONTEXT_CONTRACT),
+            "generalization": deepcopy(FOREST_REFLECTION_CONTRACT),
             "manifestor_delivery": "user_message",
             "branch_history": {
                 "storage": "target_scoped_user_assistant_messages",
@@ -1004,6 +1008,7 @@ class ThreeRoleReflectionLM:
                 rng=self.rng,
                 max_menu=self.max_menu,
             )
+            controller_direction = None
             if self.controller_selection == "uniform_random":
                 action = self.rng.choice(menu)
                 controller_sampling = _uniform_controller_sampling_record(menu, action, self.level)
@@ -1022,7 +1027,17 @@ class ThreeRoleReflectionLM:
                         1,
                         self.rng,
                         candidate=controller_candidate,
-                        feedback_summary=feedback,
+                        feedback_summary=(
+                            GENERALIZATION_GUIDANCE
+                            + "\n" + CONTROLLER_AUTHORITY_GUIDANCE
+                            + "\nYou set the direction of the edit. For each action's reasoning, identify an observable "
+                            "mismatch, the intended reusable change and its scope, and why this action can express it. "
+                            "The sampled option's rationale will be passed verbatim to the Manifestor and Editor; "
+                            "make it specific enough for them to realize your direction without choosing a new goal. "
+                            "Score semantic fit as well as tool applicability.\n\n"
+                            "## Structured training evidence\n"
+                            + clip_text(traces, self.text_limits.controller_feedback_chars)
+                        ),
                     )[0]
                 except IncompleteActionDistributionError as exc:
                     error = _bounded_history_text(exc, self.text_limits.history_text_chars) or "Controller action distribution failed."
@@ -1035,6 +1050,7 @@ class ThreeRoleReflectionLM:
                     controller_sampling = _joint_controller_sampling_record(controller.history[-1])
                 else:
                     controller_sampling = _controller_sampling_record(controller.history[-1])
+                controller_direction = controller.history[-1]["sampled_reasonings"][0] or None
             preferred_edit_tool = action.edit_tool.value if action.edit_tool is not None else None
             semantic_action = action.semantic_action.name if action.semantic_action else None
 
@@ -1055,6 +1071,7 @@ class ThreeRoleReflectionLM:
                         region_text,
                         feedback,
                         traces,
+                        controller_direction=controller_direction,
                     )
                 except ManifestationError as exc:
                     error = _bounded_history_text(exc, self.text_limits.history_text_chars)
@@ -1078,6 +1095,7 @@ class ThreeRoleReflectionLM:
                             "manifestor_delivery": "user_message",
                             "feedback": _bounded_history_text(feedback, self.text_limits.history_text_chars),
                             "controller_sampling": controller_sampling,
+                            "controller_direction": controller_direction,
                             "manifestor_error": error,
                             "executed_edit": [],
                             "chat_messages": [
@@ -1108,15 +1126,24 @@ class ThreeRoleReflectionLM:
                 logger=self.logger,
                 text_limits=self.text_limits,
             )
+            editor_steering = steering_message
+            if action.semantic_action is not None:
+                spec = action.semantic_action
+                editor_steering = (
+                    f"Selected semantic action: {spec.name}\nDescription: {spec.description}\n"
+                    f"Binding action instruction: {spec.instruction or spec.fixed_text}\n\n"
+                    f"Manifestor steering:\n{steering_message or ''}"
+                )
             result = react.propose(
                 region_text,
                 action.edit_target,
                 action.edit_tool,
-                steering_message,
+                editor_steering,
                 feedback,
                 traces,
                 history,
                 self.max_chars,
+                controller_direction=controller_direction,
             )
             proposer_record = {
                 "react_iterations": result.iterations,
@@ -1169,6 +1196,7 @@ class ThreeRoleReflectionLM:
                 "manifestor_delivery": "user_message",
                 "feedback": _bounded_history_text(feedback, self.text_limits.history_text_chars),
                 "controller_sampling": controller_sampling,
+                "controller_direction": controller_direction,
                 "manifestor_error": None,
                 "executed_edit": [
                     _bounded_history_text(value, self.text_limits.history_text_chars) or ""
@@ -1209,6 +1237,7 @@ class ThreeRoleReflectionLM:
                     "manifestor_delivery": primary["manifestor_delivery"],
                     "executed_edit": primary["executed_edit"],
                     "controller_sampling": primary["controller_sampling"],
+                    "controller_direction": primary["controller_direction"],
                     "branch_history_length": primary["branch_history_length"],
                     "three_role_actions": records,
                     "attempt_records": records,

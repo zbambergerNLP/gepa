@@ -115,7 +115,7 @@ from gepa.strategies.intervention import (
 )
 from gepa.strategies.proposal_sampling import SingleMutationSampling
 from gepa.strategies.proposal_selection import AllImprovements
-from gepa.strategies.reflection_context import REFLECTION_CONTEXT_CONTRACT
+from gepa.strategies.reflection_context import FOREST_REFLECTION_CONTRACT, REFLECTION_CONTEXT_CONTRACT
 from gepa.strategies.text_limits import parse_text_limits, resolve_text_limits
 
 # GEPA artifact components: summarize1 -> create_query_hop2 -> summarize2 -> final_answer.
@@ -628,7 +628,7 @@ def build_run_contract(condition: str, args) -> dict:
         else:
             semantic_controller_policy = deepcopy(CONTROLLER_POLICY_CONTRACT)
     return {
-        "schema_version": 28,
+        "schema_version": 29,
         "baseline_protocol": dict(BASELINE_PROTOCOL),
         "provider_retry_policy": deepcopy(PROVIDER_RETRY_POLICY),
         "benchmark": "hotpotqa-fullwiki-wiki17",
@@ -674,6 +674,7 @@ def build_run_contract(condition: str, args) -> dict:
             "reflection_minibatch_size": 3,
             "component_selector": "round_robin",
             "reflection_context": deepcopy(REFLECTION_CONTEXT_CONTRACT),
+            "generalization": deepcopy(FOREST_REFLECTION_CONTRACT) if condition in _REACT_V2_CONDITIONS else None,
             "manifestor_traces_chars": text_limits.manifestor_trace_chars,
             "document_length": text_limits.document_contract(),
             "text_limits": text_limits.to_dict(),
@@ -926,6 +927,7 @@ def make_evaluator(
     program: str = "2stage",
     retrieval_k: int = 7,
     solver_lm_kwargs: dict[str, object] | None = None,
+    reflection_diagnostics: bool = False,
 ):
     """Create a HotPotQA evaluator closed over solver and retrieval settings.
 
@@ -936,6 +938,7 @@ def make_evaluator(
         program: Single-stage or two-stage execution path.
         retrieval_k: Passages requested for each retrieval hop.
         solver_lm_kwargs: Fully resolved solver request settings.
+        reflection_diagnostics: Expose outcome and component context to FOREST.
 
     Returns:
         Evaluator accepted by ``optimize_anything``.
@@ -990,7 +993,7 @@ def make_evaluator(
                 }
             }
         else:
-            records = artifact_component_records(example, trace, score)
+            records = artifact_component_records(example, trace, score, include_diagnostics=reflection_diagnostics)
             side_info = {f"{component}_specific_info": record for component, record in records.items()}
         return score, side_info
 
@@ -1713,6 +1716,7 @@ def main():
             api_base=solver_api_base,
             program=args.program,
             retrieval_k=args.retrieval_k,
+            reflection_diagnostics=condition in _REACT_V2_CONDITIONS,
             solver_lm_kwargs={
                 **solver_lm_kwargs,
                 **provider_retry_kwargs(Path(run_dir) / "provider-attempts.jsonl", "solver"),

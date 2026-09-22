@@ -848,6 +848,15 @@ def test_hotpot_component_feedback_uses_gold_only_after_execution() -> None:
     }
     assert "correct answer is: target" in records["final_answer"]["Feedback"]
 
+    diagnosed = hotpot_utils.artifact_component_records(example, trace, 0.0, include_diagnostics=True)
+    for name, record in diagnosed.items():
+        assert {k: record[k] for k in records[name]} == records[name]
+        assert record["End-to-end Outcome"]["score"] == 0.0
+        assert "not a causal score" in record["End-to-end Outcome"]["attribution"]
+        assert "Component Context" not in records[name]
+        assert "Secret supporting sentence." not in str(record["Inputs"])
+    assert "without the retrieved passages" in diagnosed["summarize2"]["Component Context"]["downstream"]
+
 
 def test_hotpot_metric_uses_exact_match_as_primary_score() -> None:
     """Keep token overlap in feedback without promoting it above exact match."""

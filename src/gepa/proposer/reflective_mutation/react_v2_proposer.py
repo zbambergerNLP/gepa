@@ -31,6 +31,7 @@ from gepa.strategies.edit_tools import (
     ReplaceTextArgs,
     apply_edit,
 )
+from gepa.strategies.reflection_context import CONTROLLER_AUTHORITY_GUIDANCE, GENERALIZATION_GUIDANCE
 from gepa.strategies.text_limits import TextLimits, resolve_text_limits
 
 
@@ -194,6 +195,9 @@ REACT_V2_TASK_PROMPT = """\
 ## Selected component and region
 Component: {component}
 Region: {region}
+
+## Controller direction (verbatim rationale as a JSON string, or null when unavailable)
+{controller_direction}
 
 ## Current selected section body ({region_chars} characters; JSON string)
 {region_json}
@@ -543,6 +547,7 @@ class ReActV2Proposer:
         branch_history: Sequence[Mapping[str, Any]],
         *,
         native_tools: bool,
+        controller_direction: str | None = None,
     ) -> list[dict[str, Any]]:
         """Build the conversation prefix with steering in the user task.
 
@@ -555,6 +560,7 @@ class ReActV2Proposer:
             traces_text: Flattened execution traces.
             branch_history: User/assistant transcript along this parent branch.
             native_tools: Whether the LM exposes provider-native tool completion.
+            controller_direction: Rationale for the sampled Controller option.
 
         Returns:
             Chat messages ready for the first ReAct turn.
@@ -619,9 +625,11 @@ class ReActV2Proposer:
             tool_schemas=tool_schemas,
             completion_rule=completion_rule,
         )
+        system += "\n" + GENERALIZATION_GUIDANCE + "\n" + CONTROLLER_AUTHORITY_GUIDANCE
         task = REACT_V2_TASK_PROMPT.format(
             component=edit_target.component_name,
             region=edit_target.section,
+            controller_direction=json.dumps(controller_direction, ensure_ascii=False),
             region_chars=len(region_text),
             region_json=json.dumps(region_text, ensure_ascii=False),
             feedback=feedback_summary,
@@ -745,6 +753,8 @@ class ReActV2Proposer:
         traces_text: str,
         branch_history: Sequence[Mapping[str, Any]],
         max_chars: int | None,
+        *,
+        controller_direction: str | None = None,
     ) -> ReActV2Result:
         """Run ReAct V2 until explicit finish succeeds or a configured limit ends it.
 
@@ -758,6 +768,8 @@ class ReActV2Proposer:
             traces_text: Execution traces grounding the revision.
             branch_history: User/assistant messages from this parent candidate's lineage only.
             max_chars: Maximum completed section-body length, or ``None`` for no limit.
+            controller_direction: Rationale for the sampled Controller option,
+                supplied independently of Manifestor steering.
 
         Returns:
             Completed proposal or an unchanged result with a drop reason.
@@ -802,6 +814,7 @@ class ReActV2Proposer:
             traces_text,
             branch_history,
             native_tools=use_native_tools,
+            controller_direction=controller_direction,
         )
         current = region_text
         missing_target = region_text == "" and preferred_tool in (

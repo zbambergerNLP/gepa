@@ -1,5 +1,6 @@
 """Keep repeated evidence intact in stateless and FOREST reflection prompts."""
 
+import json
 from copy import deepcopy
 
 import pytest
@@ -44,6 +45,8 @@ def test_long_evidence_and_every_repeated_line_survive(renderer: str) -> None:
     evidence = "\n".join(f"Step {index}: distinct command and result {index}" for index in range(500))
     repeated = "still waiting for the package download\n" * 500
     prompt = _render([{"Generated Outputs": repeated + "FINAL_ERROR\n" + evidence}], renderer)
+    if renderer == "forest":
+        prompt = json.loads(prompt.split("\n", 1)[1])["Generated Outputs"]
     assert repeated + "FINAL_ERROR\n" + evidence in prompt
     assert prompt.count("still waiting") == 500
     assert "additional times" not in prompt

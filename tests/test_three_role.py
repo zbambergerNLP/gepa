@@ -20,6 +20,7 @@ from gepa.proposer.reflective_mutation.three_role import ThreeRoleReflectionLM, 
 from gepa.strategies.document_template import TEMPLATE_FAMILIES, TEMPLATES, DocumentTemplate, MalformedDocumentError
 from gepa.strategies.edit_tools import EDIT_TOOL_SETS, EditTool
 from gepa.strategies.intervention import build_controller_menu
+from gepa.strategies.reflection_context import FOREST_REFLECTION_CONTRACT, GENERALIZATION_GUIDANCE
 from gepa.strategies.text_limits import TextLimits
 
 PROMPT = TEMPLATES["system_prompt"].render({"Role": "helper", "Rules": "- be nice\n- be brief"})
@@ -41,6 +42,60 @@ SYS_REFLECTIVE_DATASET = {
         }
     ]
 }
+
+
+@pytest.mark.parametrize("editor_mode", ["react", "single_call"])
+def test_every_role_sees_example_boundaries_outputs_and_unattributed_outcome(editor_mode: str) -> None:
+    """Route full diagnostic records without losing zero scores or duplicate evidence."""
+    entry = {
+        "Inputs": {"passages": ["A description without a name."]},
+        "Generated Outputs": {"summary": "An invented name."},
+        "Feedback": "Reference-only fact.",
+        "End-to-end Outcome": {"score": 0, "attribution": "whole program"},
+        "Component Context": {"downstream": "query and answer receive this summary"},
+        "adapter_diagnostic": {"unknown_extra_field": "retain me"},
+    }
+    dataset = {"sys": [entry, deepcopy(entry)]}
+    before = deepcopy(dataset)
+    reflection, lm = strategy(2, editor_mode=editor_mode, react_replies=["<finish>No supported edit.</finish>"])
+    proposal, _ = reflection.reflect({"sys": PROMPT}, dataset, ["sys"])
+    assert not proposal.new_texts
+    assert dataset == before
+    controller, manifestor = lm.string_calls
+    editor = lm.react_calls[0]
+    editor_task = editor[-1]["content"]
+    if editor_mode == "single_call":
+        editor_task = json.loads(editor_task)["execution_traces"]
+    for context in [controller, manifestor, editor_task]:
+        assert context.count('"unknown_extra_field": "retain me"') == 2
+        assert context.count('"score": 0') == 2
+        assert '"summary": "An invented name."' in context
+        assert "query and answer receive this summary" in context
+        assert "[example 1]" in context and "[example 2]" in context
+    for prompt in [controller, manifestor, editor[0]["content"]]:
+        assert GENERALIZATION_GUIDANCE in prompt
+    assert lm.roles == ["controller", "manifestor", "react_v2"]
+
+
+def test_editor_receives_catalog_constraints_independently_of_manifestor_advice() -> None:
+    """Keep a context-only action's binding instruction visible to the single-response editor."""
+    lm = ThreeRoleLM(["<finish>The advice does not fit this action.</finish>"], semantic_action="contextualize")
+    reflection, _ = strategy(2, lm=lm, editor_mode="single_call")
+    reflection.reflect({"sys": PROMPT}, SYS_REFLECTIVE_DATASET, ["sys"])
+    task = json.loads(lm.react_calls[0][-1]["content"])
+    assert "Selected semantic action: contextualize" in task["manifestor_steering"]
+    assert "Do not add an operative commitment" in task["manifestor_steering"]
+    assert "Manifestor steering:" in task["manifestor_steering"]
+    assert len(lm.react_calls) == 1
+
+
+def test_generalization_policy_is_part_of_resume_identity() -> None:
+    """Distinguish the revised reflection method even when seeds and models match."""
+    reflection, _ = strategy(2)
+    contract = reflection.run_contract({"sys": PROMPT})
+    assert contract["generalization"] == FOREST_REFLECTION_CONTRACT
+    contract["generalization"]["manifestor_structure"].clear()
+    assert reflection.run_contract({"sys": PROMPT})["generalization"]["manifestor_structure"]
 SKILL_REFLECTIVE_DATASET = {
     "skill": [
         {
@@ -416,7 +471,7 @@ def test_three_role_run_contract_blocks_catalog_or_policy_drift(tmp_path: Path) 
     """
     strat, _ = strategy(2)
     contract = strat.run_contract({"sys": PROMPT})
-    assert contract["schema_version"] == 9
+    assert contract["schema_version"] == 10
     assert contract["max_chars"] is None
     assert contract["document_length"] == {
         "version": 2,
@@ -862,7 +917,8 @@ def test_manifestor_steering_reaches_react_as_a_user_message(model: str) -> None
     assert record["manifestor_delivery"] == "user_message"
     first_messages = lm.react_calls[0]
     assert [message["role"] for message in first_messages] == ["system", "user"]
-    assert first_messages[-1]["content"].startswith(record["steering_message"])
+    assert first_messages[-1]["content"].startswith("Selected semantic action:")
+    assert record["steering_message"] in first_messages[-1]["content"]
 
 
 def test_tracking_wrapper_preserves_manifestor_user_delivery() -> None:
@@ -934,8 +990,7 @@ def test_manifestor_receives_only_selected_section_feedback_and_trace() -> None:
     assert "- be nice" in react_prompt
     assert "helper" not in react_prompt
     assert "the answer was too vague" in manifestor_prompt
-    assert "Generated Outputs" not in manifestor_prompt
-    assert "Output: vague answer" in manifestor_prompt
+    assert '"Generated Outputs": "vague answer"' in manifestor_prompt
 
 
 def test_long_context_roles_receive_late_evidence_and_full_feedback() -> None:

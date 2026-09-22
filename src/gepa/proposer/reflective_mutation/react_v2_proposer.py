@@ -31,6 +31,7 @@ from gepa.strategies.edit_tools import (
     ReplaceTextArgs,
     apply_edit,
 )
+from gepa.strategies.reflection_context import GENERALIZATION_GUIDANCE
 from gepa.strategies.text_limits import TextLimits, resolve_text_limits
 
 
@@ -619,6 +620,7 @@ class ReActV2Proposer:
             tool_schemas=tool_schemas,
             completion_rule=completion_rule,
         )
+        system += "\n" + GENERALIZATION_GUIDANCE
         task = REACT_V2_TASK_PROMPT.format(
             component=edit_target.component_name,
             region=edit_target.section,

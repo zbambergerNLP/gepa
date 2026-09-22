@@ -46,7 +46,11 @@ from gepa.strategies.intervention import (
     build_controller_menu,
     summarize_feedback,
 )
-from gepa.strategies.reflection_context import REFLECTION_CONTEXT_CONTRACT
+from gepa.strategies.reflection_context import (
+    FOREST_REFLECTION_CONTRACT,
+    GENERALIZATION_GUIDANCE,
+    REFLECTION_CONTEXT_CONTRACT,
+)
 from gepa.strategies.text_limits import TextLimitError, TextLimits, clip_text, resolve_text_limits
 
 MAX_HISTORY_STEPS = 16
@@ -315,20 +319,17 @@ def _uniform_controller_sampling_record(
 
 
 def _summarize_traces(entries: Sequence[Mapping[str, Any]]) -> str:
-    """Flatten reflective rows into the execution evidence shown to the roles.
+    """Preserve ordered reflection records and adapter diagnostics for every role.
 
     Args:
         entries: Reflective-dataset rows with inputs, outputs, and feedback.
 
     Returns:
-        One labeled block per example, or a no-traces marker.
+        One labeled JSON record per example, or a no-traces marker.
     """
     blocks: list[str] = []
     for index, entry in enumerate(entries):
-        inputs = entry.get("Inputs")
-        outputs = entry.get("Generated Outputs", entry.get("Generated Output"))
-        feedback = entry.get("Feedback") or entry.get("execution_feedback")
-        blocks.append(f"[example {index + 1}]\nInputs: {inputs}\nOutput: {outputs}\nFeedback: {feedback}")
+        blocks.append(f"[example {index + 1}]\n{json.dumps(dict(entry), ensure_ascii=False, default=str)}")
     return "\n\n".join(blocks) or "(no traces available)"
 
 
@@ -678,7 +679,7 @@ class ThreeRoleReflectionLM:
                 "when constructing ThreeRoleReflectionLM with custom callables."
             )
         return {
-            "schema_version": 9,
+            "schema_version": 10,
             "strategy": "three_role_reflection",
             "reflection_level": self.level,
             "edit_tool_set": self.edit_tool_set,
@@ -698,6 +699,7 @@ class ThreeRoleReflectionLM:
             "text_limits": self.text_limits.to_dict(),
             "manifestor_traces_chars": self.manifestor_traces_chars,
             "reflection_context": deepcopy(REFLECTION_CONTEXT_CONTRACT),
+            "generalization": deepcopy(FOREST_REFLECTION_CONTRACT),
             "manifestor_delivery": "user_message",
             "branch_history": {
                 "storage": "target_scoped_user_assistant_messages",
@@ -1022,7 +1024,13 @@ class ThreeRoleReflectionLM:
                         1,
                         self.rng,
                         candidate=controller_candidate,
-                        feedback_summary=feedback,
+                        feedback_summary=(
+                            GENERALIZATION_GUIDANCE
+                            + "\nFor each action's reasoning, identify an observable mismatch, a reusable lesson, "
+                            "and why this action can express it. Score semantic fit as well as tool applicability.\n\n"
+                            "## Structured training evidence\n"
+                            + clip_text(traces, self.text_limits.controller_feedback_chars)
+                        ),
                     )[0]
                 except IncompleteActionDistributionError as exc:
                     error = _bounded_history_text(exc, self.text_limits.history_text_chars) or "Controller action distribution failed."
@@ -1108,11 +1116,19 @@ class ThreeRoleReflectionLM:
                 logger=self.logger,
                 text_limits=self.text_limits,
             )
+            editor_steering = steering_message
+            if action.semantic_action is not None:
+                spec = action.semantic_action
+                editor_steering = (
+                    f"Selected semantic action: {spec.name}\nDescription: {spec.description}\n"
+                    f"Binding action instruction: {spec.instruction or spec.fixed_text}\n\n"
+                    f"Manifestor steering:\n{steering_message or ''}"
+                )
             result = react.propose(
                 region_text,
                 action.edit_target,
                 action.edit_tool,
-                steering_message,
+                editor_steering,
                 feedback,
                 traces,
                 history,

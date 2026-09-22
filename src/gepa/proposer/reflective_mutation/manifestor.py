@@ -17,6 +17,7 @@ from typing import Any
 from gepa.proposer.reflective_mutation.base import LanguageModel
 from gepa.strategies.edit_tools import EditTool
 from gepa.strategies.intervention import ControllerChoice
+from gepa.strategies.reflection_context import GENERALIZATION_GUIDANCE
 from gepa.strategies.text_limits import TextLimits, clip_text, resolve_text_limits
 
 MAX_MANIFESTATION_ATTEMPTS = 2
@@ -41,8 +42,12 @@ Requirements:
   Apply the action's semantic constraints to the completed revision relative to the original selected region.
 - Ground every claim, failure, and quoted passage in the state.
 - Do not write the edit or emit an <edit> or <python> block.
-- Return only the steering text, with no header, label, quotation marks, role tag, or process commentary.
-- Use at most a few sentences.
+- Return only four short labeled parts: Observation (an input/output mismatch visible in the record),
+  Hypothesis (a possible cause, not an established fact), General change (a reusable change allowed by this action),
+  and Scope (when it applies and what already-correct behavior must remain intact).
+- If no supported change fits, explain that within this structure and direct the editor to finish without editing.
+
+{generalization_guidance}
 
 State:
 {state}
@@ -171,6 +176,7 @@ class Manifestor:
             spec_desc=spec.description,
             instruction=spec.instruction,
             tool_applicability=tool_applicability,
+            generalization_guidance=GENERALIZATION_GUIDANCE,
         )
         for attempt in range(MAX_MANIFESTATION_ATTEMPTS):
             self.text_limits.check_prompt(prompt)

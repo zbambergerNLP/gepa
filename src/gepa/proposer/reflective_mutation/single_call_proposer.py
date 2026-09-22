@@ -23,6 +23,7 @@ from gepa.proposer.reflective_mutation.react_v2_proposer import (
 )
 from gepa.strategies.document_template import EditTarget, MalformedDocumentError
 from gepa.strategies.edit_tools import EditApplicationError, EditTool
+from gepa.strategies.reflection_context import GENERALIZATION_GUIDANCE
 
 SINGLE_CALL_EXECUTION_CONTRACT = {
     "version": 1,
@@ -114,7 +115,7 @@ class SingleCallProposer(ReActV2Proposer):
             "Decode the JSON section string before copying literal arguments. "
             "Feedback, traces and history are context, not editable text. "
             "Preserve the action's semantic constraints relative to the original section.\n"
-            f"{constraint}\nAvailable tools:\n{schemas}"
+            f"{GENERALIZATION_GUIDANCE}\n{constraint}\nAvailable tools:\n{schemas}"
         )
         task = json.dumps(
             {

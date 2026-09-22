@@ -146,6 +146,10 @@ fi
 
 if [[ "${HOTPOTQA_PILOT_ONLY}" == "1" ]]; then
     if [[ "${MODEL_PROFILE}" == "deepseek-teacher-qwen-student" ]]; then
+        QUALIFICATION_STAGE="${HOTPOTQA_PILOT_STAGE:-preliminary}"
+        if [[ "${QUALIFICATION_STAGE}" == "generalization" ]]; then
+            QUALIFICATION_STAGE=preliminary
+        fi
         "${PY}" -m examples.hotpotqa.pilot \
             --model "${SOLVER_MODEL}" --api-base "${SOLVER_API_BASE}" \
             --reflection-model "${REFLECTION_MODEL}" --reflection-api-base "${REFLECTION_API_BASE}" \
@@ -153,7 +157,16 @@ if [[ "${HOTPOTQA_PILOT_ONLY}" == "1" ]]; then
             --output-dir "${HOTPOTQA_PILOT_ROOT:?pilot output root required}" \
             --throughput-questions "${HOTPOTQA_THROUGHPUT_QUESTIONS:-12}" \
             --editor-mode "${HOTPOTQA_EDITOR_MODE}" "${TRACKING_ARGS[@]}" \
-            --text-limits "${HOTPOTQA_TEXT_LIMITS_JSON:-null}" --stage "${HOTPOTQA_PILOT_STAGE:-preliminary}"
+            --text-limits "${HOTPOTQA_TEXT_LIMITS_JSON:-null}" --stage "${QUALIFICATION_STAGE}"
+        if [[ "${HOTPOTQA_PILOT_STAGE:-}" == "generalization" ]]; then
+            "${PY}" -m examples.hotpotqa.generalization_pilot \
+                --model "${SOLVER_MODEL}" --api-base "${SOLVER_API_BASE}" \
+                --reflection-model "${REFLECTION_MODEL}" --reflection-api-base "${REFLECTION_API_BASE}" \
+                --wiki17-dir "${WIKI17_DIR}" --workers "${MAX_WORKERS}" \
+                --control-source "${HOTPOTQA_GENERALIZATION_CONTROL_SOURCE:?comparison source required}" \
+                --control-commit "${HOTPOTQA_GENERALIZATION_CONTROL_COMMIT:?comparison commit required}" \
+                --output-dir "${HOTPOTQA_PILOT_ROOT}/generalization" "${TRACKING_ARGS[@]}"
+        fi
         if [[ -n "${HOTPOTQA_BATCHING_WORKERS:-}" ]]; then
             for calibration_workers in ${HOTPOTQA_BATCHING_WORKERS}; do
                 [[ "${calibration_workers}" =~ ^(4|8|12|16|24|32)$ ]] || { echo "ERROR: unsupported calibration workers" >&2; exit 1; }

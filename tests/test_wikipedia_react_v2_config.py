@@ -1270,7 +1270,7 @@ def test_hotpot_contract_records_exact_model_pair() -> None:
     assert hotpot["models"]["solver_decoding"] == expected_hotpot_decoding
     assert hotpot["models"]["reflection_decoding"] == {**expected_hotpot_decoding, "max_tokens": 32_768}
 
-    assert hotpot["schema_version"] == 28
+    assert hotpot["schema_version"] == 29
     assert hotpot["baseline_protocol"]["test_repetitions"] == 1
     assert hotpot["optimizer"]["react_execution"]["completion"] == "explicit_finish"
     assert hotpot["optimizer"]["react_execution"]["max_iterations"] is None
@@ -1680,7 +1680,7 @@ def test_stateless_action_menu_contract_records_hotpotqa_schema() -> None:
     args = _hotpot_args(final_retrieval_k=10)
     expected = build_hotpotqa_run_contract("random", args)["optimizer"]["stateless_action_menu"]
 
-    for build_contract, schema_version in ((build_hotpotqa_run_contract, 28),):
+    for build_contract, schema_version in ((build_hotpotqa_run_contract, 29),):
         contract = build_contract("random", args)
         assert contract["schema_version"] == schema_version
         assert contract["optimizer"]["stateless_action_menu"] == expected

@@ -323,7 +323,12 @@ def main(argv: list[str] | None = None) -> None:
             if args.wandb_project:
                 callbacks.append(HotpotqaWandb(directory, contract["runtime"], args.wandb_project, args.wandb_entity, kind="qualification"))
             kwargs = observed_kwargs(args.model, args.api_base, directory, "solver")
-            evaluator = strict_evaluator(make_evaluator(args.model, retriever, args.api_base, solver_lm_kwargs=kwargs))
+            evaluator = strict_evaluator(
+                make_evaluator(
+                    args.model, retriever, args.api_base, solver_lm_kwargs=kwargs,
+                    reflection_diagnostics=method in ("react_v2", "react_v2_random"),
+                )
+            )
             config, _ = build_config(
                 method,
                 settings,

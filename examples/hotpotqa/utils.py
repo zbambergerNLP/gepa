@@ -526,6 +526,8 @@ def artifact_component_records(
     example: dict,
     trace: dict[str, object],
     exact_match: float,
+    *,
+    include_diagnostics: bool = False,
 ) -> dict[str, dict[str, object]]:
     """Build the paper artifact's predictor-specific reflection records.
 
@@ -538,6 +540,8 @@ def artifact_component_records(
             facts.
         trace: Complete two-hop execution trace from :func:`run_two_stage`.
         exact_match: Final-answer exact-match score shared by every component.
+        include_diagnostics: Include explicit outcome attribution and component
+            boundaries for FOREST's structured reflection evidence.
 
     Returns:
         Component names mapped to ``Inputs``, ``Generated Outputs``, and
@@ -651,7 +655,7 @@ Your summary must serve two purposes:
 
 **Tip:** When summarizing, don't just compress; synthesize—include both direct answers and clues required for the system's next steps."""
 
-    return {
+    records = {
         "summarize1": {
             "Inputs": {"question": question, "passages": hop1_passages},
             "Generated Outputs": {"reasoning": summary_1_reasoning, "summary": summary_1},
@@ -673,6 +677,37 @@ Your summary must serve two purposes:
             "Feedback": answer_feedback,
         },
     }
+    if include_diagnostics:
+        contexts = {
+            "summarize1": {
+                "role": "Summarize first-hop passages for the question.",
+                "downstream": "The summary feeds the second-hop query, second summary, and final answer; "
+                "these stages do not receive the original first-hop passages.",
+            },
+            "create_query_hop2": {
+                "role": "Generate the second retrieval query from the question and first summary.",
+                "downstream": "The query retrieves passages supplied to the second summarizer.",
+            },
+            "summarize2": {
+                "role": "Synthesize the first summary and second-hop passages for the question.",
+                "downstream": "The final answer receives both summaries, without the retrieved passages.",
+            },
+            "final_answer": {
+                "role": "Answer the question using the two summaries.",
+                "downstream": "The evaluator scores this answer against the reference.",
+            },
+        }
+        for component, record in records.items():
+            record["Example ID"] = example.get("id")
+            record["Component Context"] = contexts[component]
+            record["End-to-end Outcome"] = {
+                "metric": "exact_match",
+                "score": exact_match,
+                "prediction": prediction,
+                "reference_answer": answer,
+                "attribution": "Whole-program outcome; not a causal score for this component.",
+            }
+    return records
 
 
 def _gold_support(example: dict) -> tuple[list[str], list[str], dict[str, list[str]]]:

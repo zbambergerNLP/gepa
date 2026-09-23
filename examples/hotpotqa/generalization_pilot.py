@@ -277,7 +277,7 @@ def run_comparison(args: argparse.Namespace) -> dict:
                 if variant == "control":
                     records = [{k: row[k] for k in ("Inputs", "Generated Outputs", "Feedback")} for row in records]
                 request = {
-                    "settings": vars(settings),
+                    "settings": {**vars(settings), "text_limits": settings.text_limits.to_dict()},
                     "component": component,
                     "candidate": candidate,
                     "reflection_records": {component: records},

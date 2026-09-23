@@ -10,14 +10,15 @@ from pathlib import Path
 from huggingface_hub import HfApi, snapshot_download  # type: ignore[import-not-found]
 
 from examples.common.experiment_models import (
+    DEEPSEEK_V4_1_FLASH_PROFILE,
     DEEPSEEK_V4_1_FLASH_REPO,
     DEEPSEEK_V4_1_FLASH_REVISION,
+    QWEN3_8_27B_PROFILE,
     QWEN3_8_27B_REPO,
     QWEN3_8_27B_REVISION,
 )
 
-QWEN3_8_27B_PROFILE = "qwen3.8-27b"
-DEEPSEEK_V4_1_FLASH_PROFILE = "deepseek-v4.1-flash"
+HASH_CHUNK_BYTES = 8 * 1024 * 1024
 MODEL_SNAPSHOT_SPECS = {
     QWEN3_8_27B_PROFILE: (QWEN3_8_27B_REPO, QWEN3_8_27B_REVISION),
     DEEPSEEK_V4_1_FLASH_PROFILE: (DEEPSEEK_V4_1_FLASH_REPO, DEEPSEEK_V4_1_FLASH_REVISION),
@@ -40,7 +41,7 @@ def _file_sha256(path: Path) -> str:
     """
     digest = hashlib.sha256()
     with path.open("rb") as source:
-        while chunk := source.read(8 * 1024 * 1024):
+        while chunk := source.read(HASH_CHUNK_BYTES):
             digest.update(chunk)
     return digest.hexdigest()
 
@@ -58,7 +59,7 @@ def _git_blob_sha1(path: Path, size: int) -> str:
     digest = hashlib.sha1()
     digest.update(f"blob {size}\0".encode())
     with path.open("rb") as source:
-        while chunk := source.read(8 * 1024 * 1024):
+        while chunk := source.read(HASH_CHUNK_BYTES):
             digest.update(chunk)
     return digest.hexdigest()
 

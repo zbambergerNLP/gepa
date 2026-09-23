@@ -14,14 +14,21 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from examples.common.provider_retries import PROVIDER_RETRY_POLICY, provider_retry_kwargs
+from examples.hotpotqa.model_settings import HOTPOTQA_REQUEST_TIMEOUT_SECONDS
 from examples.hotpotqa.utils import resolve_hotpotqa_lm_kwargs
 from gepa.lm import LM, ToolCompletion
 from gepa.proposer.reflective_mutation.react_v2_proposer import ReActV2Proposer
 from gepa.proposer.reflective_mutation.single_call_proposer import SingleCallProposer
 from gepa.strategies.document_template import TEMPLATE_FAMILIES, EditTarget
 from gepa.strategies.edit_tools import EDIT_TOOL_SETS, EditTool
+from gepa.strategies.forest_constants import (
+    BROAD_EDIT_TOOL_SET,
+    OPTIMIZER_ROLE,
+    REACT_EDITOR_MODE,
+    SINGLE_CALL_EDITOR_MODE,
+)
 
-_CANARY_TIMEOUT_SECONDS = 3600
+_CANARY_TIMEOUT_SECONDS = HOTPOTQA_REQUEST_TIMEOUT_SECONDS
 _MINIMUM_ATTEMPTS = 20
 _EDIT_LOG_LOCK = Lock()
 _REPEATED_CHARACTER_RE = re.compile(r"(\S)\1{31,}")
@@ -239,7 +246,9 @@ def _validate_edit_result(tool: EditTool, edited_text: str) -> None:
             raise RuntimeCanaryError("MOVE_TEXT probe did not move the target before its anchor.")
 
 
-def _edit_probe(lm: LM, tool: EditTool, attempt: int, result_log: Path | None = None, editor_mode: str = "react") -> int:
+def _edit_probe(
+    lm: LM, tool: EditTool, attempt: int, result_log: Path | None = None, editor_mode: str = REACT_EDITOR_MODE
+) -> int:
     """Exercise one real ReAct V2 proposal with the complete four-tool menu.
 
     Args:
@@ -255,11 +264,11 @@ def _edit_probe(lm: LM, tool: EditTool, attempt: int, result_log: Path | None = 
         RuntimeCanaryError: ReAct V2 fails to complete the exact requested edit
             and explicit finish, or emits degenerate content.
     """
-    proposer_class = SingleCallProposer if editor_mode == "single_call" else ReActV2Proposer
+    proposer_class = SingleCallProposer if editor_mode == SINGLE_CALL_EDITOR_MODE else ReActV2Proposer
     proposer = proposer_class(
         lm,
         TEMPLATE_FAMILIES["generic"]["system_prompt"],
-        EDIT_TOOL_SETS["broad"],
+        EDIT_TOOL_SETS[BROAD_EDIT_TOOL_SET],
         # Match the production editor's correction loop. The allocation and
         # request deadlines still bound a model that never finishes.
         max_iterations=None,
@@ -296,9 +305,11 @@ def _edit_probe(lm: LM, tool: EditTool, attempt: int, result_log: Path | None = 
         )
     completed_steps = [step for step in result.steps if step.error is None]
     rejected_steps = [step for step in result.steps if step.error is not None]
-    expected_actions = [tool.value] if editor_mode == "single_call" else [tool.value, "FINISH"]
-    if (editor_mode == "single_call" and result.iterations != 1) or [step.action for step in completed_steps] != expected_actions or any(
-        step.action != "INVALID" or step.executed_edit for step in rejected_steps
+    expected_actions = [tool.value] if editor_mode == SINGLE_CALL_EDITOR_MODE else [tool.value, "FINISH"]
+    if (
+        (editor_mode == SINGLE_CALL_EDITOR_MODE and result.iterations != 1)
+        or [step.action for step in completed_steps] != expected_actions
+        or any(step.action != "INVALID" or step.executed_edit for step in rejected_steps)
     ):
         raise RuntimeCanaryError(
             f"ReAct V2 {tool.value} attempt {attempt} did not preserve the requested operation: {result.steps!r}"
@@ -311,7 +322,9 @@ def _edit_probe(lm: LM, tool: EditTool, attempt: int, result_log: Path | None = 
 
 def _ordered_batch_probe(lm: LM, result_log: Path | None) -> None:
     """Verify two dependent edits can execute in one native model response."""
-    proposer = SingleCallProposer(lm, TEMPLATE_FAMILIES["generic"]["system_prompt"], EDIT_TOOL_SETS["broad"])
+    proposer = SingleCallProposer(
+        lm, TEMPLATE_FAMILIES["generic"]["system_prompt"], EDIT_TOOL_SETS[BROAD_EDIT_TOOL_SET]
+    )
     result = proposer.propose(
         "Cite primary sources.", EditTarget("final_answer", "Task"), EditTool.REPLACE_TEXT,
         "Emit exactly two REPLACE_TEXT calls in this single response. First replace 'Cite primary sources.' "
@@ -333,7 +346,7 @@ def run_runtime_canary(
     attempt_log: Path | None = None,
     *,
     workers: int = 1,
-    editor_mode: str = "react",
+    editor_mode: str = REACT_EDITOR_MODE,
 ) -> dict[str, object]:
     """Run the complete local completion and ReAct V2 compatibility gate.
 
@@ -352,7 +365,7 @@ def run_runtime_canary(
             repetitions are requested, or any completion/tool probe fails.
         ValueError: The model identifier is outside the scientific catalog.
     """
-    if editor_mode not in ("react", "single_call"):
+    if editor_mode not in (REACT_EDITOR_MODE, SINGLE_CALL_EDITOR_MODE):
         raise ValueError("Unknown editor mode")
     _validate_loopback_api_base(api_base)
     if workers not in (1, 2, 4):
@@ -361,7 +374,7 @@ def run_runtime_canary(
         raise RuntimeCanaryError(
             f"The fail-closed runtime gate requires at least {_MINIMUM_ATTEMPTS} repetitions; received {attempts}."
         )
-    lm_kwargs: dict[str, Any] = dict(resolve_hotpotqa_lm_kwargs(model, api_base, role="optimizer"))
+    lm_kwargs: dict[str, Any] = dict(resolve_hotpotqa_lm_kwargs(model, api_base, role=OPTIMIZER_ROLE))
     lm_kwargs.update(provider_retry_kwargs(attempt_log, "runtime_canary"))
     lm_kwargs["timeout"] = _CANARY_TIMEOUT_SECONDS
     lm = LM(model, **lm_kwargs)
@@ -372,12 +385,12 @@ def run_runtime_canary(
     recovered_actions = 0
     probes_with_recovery = 0
     result_log = attempt_log.with_suffix(".edits.jsonl") if attempt_log is not None else None
-    tools = EDIT_TOOL_SETS["broad"]
+    tools = EDIT_TOOL_SETS[BROAD_EDIT_TOOL_SET]
 
     def probe(offset: int) -> tuple[EditTool, int]:
         """Give each independent edit its own client and sequential tool conversation."""
         tool = tools[offset % len(tools)]
-        kwargs = {"editor_mode": editor_mode} if editor_mode != "react" else {}
+        kwargs = {"editor_mode": editor_mode} if editor_mode != REACT_EDITOR_MODE else {}
         return tool, _edit_probe(LM(model, **lm_kwargs), tool, offset + 1, result_log, **kwargs)
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -389,12 +402,12 @@ def run_runtime_canary(
     missing_tools = [tool.value for tool in tools if tool_counts[tool.value] == 0]
     if missing_tools:
         raise RuntimeCanaryError(f"Runtime canary did not exercise every broad edit tool: {', '.join(missing_tools)}")
-    if editor_mode == "single_call":
+    if editor_mode == SINGLE_CALL_EDITOR_MODE:
         _ordered_batch_probe(LM(model, **lm_kwargs), result_log)
     return {
         "status": "passed",
         "editor_mode": editor_mode,
-        **({"ordered_single_response_batch": "passed"} if editor_mode == "single_call" else {}),
+        **({"ordered_single_response_batch": "passed"} if editor_mode == SINGLE_CALL_EDITOR_MODE else {}),
         "provider_retry_policy": PROVIDER_RETRY_POLICY,
         "model": model,
         "api_base": api_base,
@@ -416,7 +429,9 @@ def main() -> None:
     parser.add_argument("--model", required=True, help="Exact local LiteLLM model identifier")
     parser.add_argument("--api-base", required=True, help="Local OpenAI-compatible /v1 endpoint")
     parser.add_argument("--attempt-log", type=Path, help="JSONL destination for provider attempts")
-    parser.add_argument("--editor-mode", choices=("react", "single_call"), default="react")
+    parser.add_argument(
+        "--editor-mode", choices=(REACT_EDITOR_MODE, SINGLE_CALL_EDITOR_MODE), default=REACT_EDITOR_MODE
+    )
     parser.add_argument("--workers", type=int, default=1, choices=(1, 2, 4))
     parser.add_argument(
         "--attempts",

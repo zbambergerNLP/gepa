@@ -13,6 +13,15 @@ from examples.common.provider_retries import PROVIDER_RETRY_KEY
 from gepa.lm import LM
 from gepa.proposer.reflective_mutation.three_role import ThreeRoleReflectionLM
 from gepa.strategies.document_template import TEMPLATE_FAMILIES, infer_template_family
+from gepa.strategies.forest_constants import (
+    CONTROLLER_ROLE,
+    EDITOR_ROLE,
+    MANIFESTOR_ROLE,
+    PROPOSER_ROLE,
+    REACT_EDITOR_MODE,
+    SINGLE_CALL_EDITOR_MODE,
+    VERBALIZED_SELECTION,
+)
 from gepa.strategies.text_limits import TextLimits
 
 _TASK_SECTIONS = {
@@ -197,8 +206,8 @@ def build_react_v2_strategy(
     edit_tool_set: str,
     template_family: str,
     component_kinds: dict[str, str] | None = None,
-    controller_selection: str = "verbalized",
-    editor_mode: str = "react",
+    controller_selection: str = VERBALIZED_SELECTION,
+    editor_mode: str = REACT_EDITOR_MODE,
     rng: random.Random | None = None,
     manifestor_traces_chars: int | None = None,
     manifestor_temperature: float = 0.0,
@@ -239,18 +248,25 @@ def build_react_v2_strategy(
     proposer_kwargs = dict(lm_kwargs)
     if react_top_p is not None:
         proposer_kwargs["top_p"] = react_top_p
-    separate_controller = (proposer_kwargs != controller_kwargs or editor_mode == "single_call") and level >= 1 and controller_selection == "verbalized"
+    separate_controller = (
+        (proposer_kwargs != controller_kwargs or editor_mode == SINGLE_CALL_EDITOR_MODE)
+        and level >= 1
+        and controller_selection == VERBALIZED_SELECTION
+    )
     manifestor_kwargs = dict(lm_kwargs)
     manifestor_kwargs["temperature"] = manifestor_temperature
     if "response_journal_path" in lm_kwargs:
-        controller_kwargs["response_journal_namespace"] = "controller"
-        proposer_kwargs["response_journal_namespace"] = "proposer" if separate_controller else "controller-proposer"
-        manifestor_kwargs["response_journal_namespace"] = "manifestor"
+        controller_kwargs["response_journal_namespace"] = CONTROLLER_ROLE
+        proposer_kwargs["response_journal_namespace"] = PROPOSER_ROLE if separate_controller else "controller-proposer"
+        manifestor_kwargs["response_journal_namespace"] = MANIFESTOR_ROLE
     if PROVIDER_RETRY_KEY in lm_kwargs:
         for kwargs, role in (
-            (controller_kwargs, "controller"),
-            (proposer_kwargs, "editor" if separate_controller or editor_mode == "single_call" else "controller_editor"),
-            (manifestor_kwargs, "manifestor"),
+            (controller_kwargs, CONTROLLER_ROLE),
+            (
+                proposer_kwargs,
+                EDITOR_ROLE if separate_controller or editor_mode == SINGLE_CALL_EDITOR_MODE else "controller_editor",
+            ),
+            (manifestor_kwargs, MANIFESTOR_ROLE),
         ):
             kwargs[PROVIDER_RETRY_KEY] = {**kwargs[PROVIDER_RETRY_KEY], "role": role}
     strategy = ThreeRoleReflectionLM(

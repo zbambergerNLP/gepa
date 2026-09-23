@@ -11,12 +11,16 @@ from typing import Any
 from examples.terminalbench.runtime import validate_identity
 from gepa.adapters.terminal_bench_adapter import TerminalBenchManifest
 from gepa.adapters.terminal_bench_adapter.text_scope import TerminalBenchTextScope
+from gepa.lm_constants import TOKEN_USAGE_SUMMARY
 
 PILOT_SCHEMA_VERSION = 9
+SMOKE_TASK_COUNT = 3
+FULL_TASK_COUNT = 30
+
 PILOT_PROTOCOL = {
     "version": 1,
-    "smoke_tasks": 3,
-    "full_tasks": 30,
+    "smoke_tasks": SMOKE_TASK_COUNT,
+    "full_tasks": FULL_TASK_COUNT,
     "split": "train",
     "harness": "initial",
     "review_metrics": ["token_usage", "cutoffs", "timeouts", "throughput"],
@@ -40,7 +44,7 @@ RUNTIME_FIELDS = (
     "text_limits",
     "harbor_process_timeout_sec",
 )
-ARTIFACTS = ("canary-config.json", "task-results.json", "token-usage-summary.json", "pilot-summary.json")
+ARTIFACTS = ("canary-config.json", "task-results.json", TOKEN_USAGE_SUMMARY, "pilot-summary.json")
 
 
 def digest(value: Any) -> str:
@@ -85,7 +89,7 @@ def validate_snapshot(evidence: dict[str, Any], manifest: TerminalBenchManifest,
     complete = evidence.get("completion")
     if not isinstance(config, dict) or not isinstance(complete, dict):
         raise ValueError("Pilot configuration or completion evidence is missing")
-    expected_ids = manifest.splits["train"][:3] if stage == "smoke" else manifest.splits["train"]
+    expected_ids = manifest.splits["train"][:SMOKE_TASK_COUNT] if stage == "smoke" else manifest.splits["train"]
     if (
         config.get("schema_version") != PILOT_SCHEMA_VERSION
         or config.get("pilot_protocol") != PILOT_PROTOCOL
@@ -133,7 +137,7 @@ def complete_pilot(directory: Path, elapsed_seconds: float) -> None:
         "timed_out_task_ids": [output["task_id"] for output in outputs if output["errors"]],
         "mean_reward": sum(float(output["reward"]) for output in outputs) / len(outputs),
         "review_metrics": PILOT_PROTOCOL["review_metrics"],
-        "token_usage_summary": "token-usage-summary.json",
+        "token_usage_summary": TOKEN_USAGE_SUMMARY,
         "task_evidence": "task-results.json",
     }
     (directory / "pilot-summary.json").write_text(json.dumps(summary, indent=2, allow_nan=False) + "\n")

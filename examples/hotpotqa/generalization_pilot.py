@@ -21,6 +21,7 @@ from examples.common.pilot_checks import atomic_json, digest, require_contract
 from examples.common.react_v2 import benchmark_data_identity, resolve_template_family
 from examples.common.wiki17_bm25 import Wiki17BM25Retriever
 from examples.common.wikipedia import WikipediaPassage
+from examples.hotpotqa.benchmark_settings import DEFAULT_MAX_WORKERS
 from examples.hotpotqa.main import (
     _validate_scientific_data_identity,
     _verify_scientific_retriever_integrity,
@@ -33,13 +34,28 @@ from examples.hotpotqa.main import (
 from examples.hotpotqa.pilot import observed_kwargs
 from examples.hotpotqa.tracking import HotpotqaWandb, provider_usage
 from examples.hotpotqa.utils import HOTPOTQA_HF_REVISION, f1_score, load_hotpotqa_dataset
+from gepa.lm_constants import PROVIDER_ATTEMPT_LOG
+from gepa.strategies.forest_constants import (
+    DEFAULT_REFLECTION_MINIBATCH_SIZE,
+    OPTIMIZER_ROLE,
+    SINGLE_CALL_EDITOR_MODE,
+    SOLVER_ROLE,
+)
 
 COMPONENTS = ("summarize1", "create_query_hop2", "summarize2", "final_answer")
+PROPOSAL_BATCH_SIZE = DEFAULT_REFLECTION_MINIBATCH_SIZE
+PROPOSAL_TRAIN_SIZE = len(COMPONENTS) * PROPOSAL_BATCH_SIZE
+TRANSFER_SIZE = 24
+NATURAL_TRAIN_SIZE = PROPOSAL_TRAIN_SIZE + TRANSFER_SIZE
+CANDIDATE_NATURAL_SIZE = PROPOSAL_BATCH_SIZE + TRANSFER_SIZE
+
 PROTOCOL = {
     "version": 2,
     "request_runtime": "shared revised LM/provider dispatch and resolved model settings; pinned strategy per arm",
-    "proposal_train_indices": {name: list(range(i * 3, i * 3 + 3)) for i, name in enumerate(COMPONENTS)},
-    "transfer_train_indices": list(range(12, 36)),
+    "proposal_train_indices": {
+        name: list(range(i * PROPOSAL_BATCH_SIZE, (i + 1) * PROPOSAL_BATCH_SIZE)) for i, name in enumerate(COMPONENTS)
+    },
+    "transfer_train_indices": list(range(PROPOSAL_TRAIN_SIZE, NATURAL_TRAIN_SIZE)),
     "proposal_seed": 0,
     "proposals_per_component_per_revision": 1,
     "parent": "original_prompts_for_every_proposal",
@@ -54,7 +70,7 @@ PROTOCOL = {
 
 def partition_training(train: list[dict]) -> tuple[dict[str, list[dict]], list[dict]]:
     """Freeze disjoint proposal batches and transfer cases before any inference."""
-    if len(train) < 36 or len({row["id"] for row in train[:36]}) != 36:
+    if len(train) < NATURAL_TRAIN_SIZE or len({row["id"] for row in train[:NATURAL_TRAIN_SIZE]}) != NATURAL_TRAIN_SIZE:
         raise ValueError("Qualification requires 36 distinct ordered training examples")
     return (
         {name: [train[i] for i in indices] for name, indices in PROTOCOL["proposal_train_indices"].items()},
@@ -200,7 +216,7 @@ def run_comparison(args: argparse.Namespace) -> dict:
             "--text-limits",
             "null",
             "--editor-mode",
-            "single_call",
+            SINGLE_CALL_EDITOR_MODE,
         ]
     )
     train, validation, test = load_hotpotqa_dataset(seed=0)
@@ -256,7 +272,7 @@ def run_comparison(args: argparse.Namespace) -> dict:
             return diagnostic_evaluators[example["id"]](candidate, example)
         return natural_evaluator(candidate, example)
 
-    solver_kwargs = observed_kwargs(args.model, args.api_base, args.output_dir, "solver")
+    solver_kwargs = observed_kwargs(args.model, args.api_base, args.output_dir, SOLVER_ROLE)
     natural_evaluator = make_evaluator(
         args.model, retriever, args.api_base, solver_lm_kwargs=solver_kwargs, reflection_diagnostics=True
     )
@@ -274,7 +290,7 @@ def run_comparison(args: argparse.Namespace) -> dict:
     comparisons = []
     try:
         baseline = evaluate_records(
-            args.output_dir / "original", candidate, train[:36] + diagnostics, evaluate, args.workers
+            args.output_dir / "original", candidate, train[:NATURAL_TRAIN_SIZE] + diagnostics, evaluate, args.workers
         )
         original_by_id = {row["id"]: row for row in baseline}
         for index, component in enumerate(COMPONENTS):
@@ -298,7 +314,7 @@ def run_comparison(args: argparse.Namespace) -> dict:
                     "source": sources[variant],
                     "shared_request_runtime": shared_runtime,
                     "reflection_lm_kwargs": observed_kwargs(
-                        args.reflection_model, args.reflection_api_base, directory, "optimizer"
+                        args.reflection_model, args.reflection_api_base, directory, OPTIMIZER_ROLE
                     ),
                 }
                 require_contract(directory, request)
@@ -342,13 +358,24 @@ def run_comparison(args: argparse.Namespace) -> dict:
                     "component": component,
                     "changed": proposal["changed"],
                     "proposal_sha256": digest(proposal),
-                    "proposal_batch": paired_outcomes(original[:3], scored[:3]),
-                    "transfer": paired_outcomes(original[3:27], scored[3:27]),
-                    "synthetic": paired_outcomes(original[27:], scored[27:]),
+                    "proposal_batch": paired_outcomes(original[:PROPOSAL_BATCH_SIZE], scored[:PROPOSAL_BATCH_SIZE]),
+                    "transfer": paired_outcomes(
+                        original[PROPOSAL_BATCH_SIZE:CANDIDATE_NATURAL_SIZE],
+                        scored[PROPOSAL_BATCH_SIZE:CANDIDATE_NATURAL_SIZE],
+                    ),
+                    "synthetic": paired_outcomes(original[CANDIDATE_NATURAL_SIZE:], scored[CANDIDATE_NATURAL_SIZE:]),
                     "synthetic_categories": {
                         category: paired_outcomes(
-                            [a for a, e in zip(original[27:], diagnostics, strict=True) if e["category"] == category],
-                            [a for a, e in zip(scored[27:], diagnostics, strict=True) if e["category"] == category],
+                            [
+                                a
+                                for a, e in zip(original[CANDIDATE_NATURAL_SIZE:], diagnostics, strict=True)
+                                if e["category"] == category
+                            ],
+                            [
+                                a
+                                for a, e in zip(scored[CANDIDATE_NATURAL_SIZE:], diagnostics, strict=True)
+                                if e["category"] == category
+                            ],
                         )
                         for category in sorted({e["category"] for e in diagnostics})
                     },
@@ -360,7 +387,9 @@ def run_comparison(args: argparse.Namespace) -> dict:
                 atomic_json(directory / "comparison.json", row)
         grouped = {v: [r for r in comparisons if r["variant"] == v] for v in sources}
         means = {v: sum(r["transfer"]["candidate_mean"] for r in rows) / len(rows) for v, rows in grouped.items()}
-        baseline_mean = paired_outcomes(baseline[12:36], baseline[12:36])["original_mean"]
+        baseline_mean = paired_outcomes(
+            baseline[PROPOSAL_TRAIN_SIZE:NATURAL_TRAIN_SIZE], baseline[PROPOSAL_TRAIN_SIZE:NATURAL_TRAIN_SIZE]
+        )["original_mean"]
         losses = {v: sum(r["synthetic"]["losses"] for r in rows) for v, rows in grouped.items()}
         summary = {
             "protocol": PROTOCOL,
@@ -375,7 +404,7 @@ def run_comparison(args: argparse.Namespace) -> dict:
             "original_task_format_errors": sum(bool(r["feedback"].get("evaluation_error")) for r in baseline),
             "physical_provider_usage": {
                 str(p.relative_to(args.output_dir)): provider_usage(p)
-                for p in args.output_dir.rglob("provider-attempts.jsonl")
+                for p in args.output_dir.rglob(PROVIDER_ATTEMPT_LOG)
             },
             "heldout_complete": False,
             "completed_ablation": False,
@@ -415,7 +444,7 @@ def main() -> None:
     parser.add_argument("--reflection-model")
     parser.add_argument("--reflection-api-base")
     parser.add_argument("--wiki17-dir", type=Path)
-    parser.add_argument("--workers", type=int, default=32)
+    parser.add_argument("--workers", type=int, default=DEFAULT_MAX_WORKERS)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--wandb-project")
     parser.add_argument("--wandb-entity")

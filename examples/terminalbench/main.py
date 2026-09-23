@@ -76,9 +76,22 @@ from gepa.adapters.terminal_bench_adapter.text_scope import (
     TerminalBenchTextScope,
 )
 from gepa.lm import LM
+from gepa.lm_constants import PROVIDER_ATTEMPT_LOG, TOKEN_USAGE_LOG
 from gepa.proposer.reflective_mutation.react_v2_proposer import REACT_V2_EXECUTION_CONTRACT
 from gepa.strategies.action_space import stateless_selector_policy_contract
 from gepa.strategies.batch_sampler import IndependentEpochShuffledBatchSampler
+from gepa.strategies.forest_constants import (
+    BROAD_EDIT_TOOL_SET,
+    CONTROLLER_ROLE,
+    DEFAULT_REFLECTION_LEVEL,
+    DEFAULT_REFLECTION_MINIBATCH_SIZE,
+    MANIFESTOR_ROLE,
+    MINIMAL_EDIT_TOOL_SET,
+    OPTIMIZER_ROLE,
+    SEMANTIC_REFLECTION_LEVEL,
+    UNIFORM_RANDOM_SELECTION,
+    VERBALIZED_SELECTION,
+)
 from gepa.strategies.intervention import (
     CONTROLLER_POLICY_CONTRACT,
     SEMANTIC_ACTION_CATALOGS,
@@ -242,7 +255,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional early-stop cap on task evaluations, in addition to the selected epoch budget",
     )
-    parser.add_argument("--reflection-minibatch-size", type=int, default=3)
+    parser.add_argument("--reflection-minibatch-size", type=int, default=DEFAULT_REFLECTION_MINIBATCH_SIZE)
     parser.add_argument("--n-concurrent", type=int, default=1)
     parser.add_argument(
         "--reviewed-pilot",
@@ -254,15 +267,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--edit-tool-set",
-        choices=("minimal", "broad"),
-        default="broad",
+        choices=(MINIMAL_EDIT_TOOL_SET, BROAD_EDIT_TOOL_SET),
+        default=BROAD_EDIT_TOOL_SET,
         help="Edit tools used by ReAct V2",
     )
     parser.add_argument(
         "--reflection-level",
         type=int,
         choices=(1, 2),
-        default=2,
+        default=DEFAULT_REFLECTION_LEVEL,
         help="Reflection level: region only, or region plus an applied semantic action",
     )
     parser.add_argument(
@@ -332,9 +345,9 @@ def build_run_contract(
     operated = condition in FOREST_CONDITIONS
     reflection_level = args.reflection_level if operated else 0
     controller_selection = (
-        "uniform_random"
+        UNIFORM_RANDOM_SELECTION
         if condition == "react_v2_random"
-        else "verbalized"
+        else VERBALIZED_SELECTION
         if operated or condition == "action"
         else None
     )
@@ -349,11 +362,13 @@ def build_run_contract(
         reflection_role_decoding = {
             "controller": (
                 {"requested": dict(proposer_decoding), "provider_ignored_fields": []}
-                if controller_selection == "verbalized"
+                if controller_selection == VERBALIZED_SELECTION
                 else None
             ),
             "manifestor": (
-                {"requested": dict(proposer_decoding), "provider_ignored_fields": []} if reflection_level >= 2 else None
+                {"requested": dict(proposer_decoding), "provider_ignored_fields": []}
+                if reflection_level >= SEMANTIC_REFLECTION_LEVEL
+                else None
             ),
             "react_v2_proposer": {"requested": react_decoding, "provider_ignored_fields": []},
         }
@@ -435,12 +450,16 @@ def build_run_contract(
         "max_proposer_model_calls": None,
         "react_execution": deepcopy(REACT_V2_EXECUTION_CONTRACT) if operated else None,
         "semantic_action_space": (
-            deepcopy(SEMANTIC_ACTION_CATALOGS) if reflection_level == 2 or condition == "action" else None
+            deepcopy(SEMANTIC_ACTION_CATALOGS)
+            if reflection_level == SEMANTIC_REFLECTION_LEVEL or condition == "action"
+            else None
         ),
-        "semantic_controller_policy": deepcopy(controller_policy) if reflection_level == 2 else None,
+        "semantic_controller_policy": deepcopy(controller_policy)
+        if reflection_level == SEMANTIC_REFLECTION_LEVEL
+        else None,
         "stateless_selector_policy": (
             {
-                **stateless_selector_policy_contract("verbalized", text_limits=text_limits),
+                **stateless_selector_policy_contract(VERBALIZED_SELECTION, text_limits=text_limits),
                 "component_schedule": "per_component",
             }
             if condition == "action"
@@ -479,7 +498,11 @@ def main(argv: list[str] | None = None) -> None:
     if args.optimizer_pilot:
         if args.optimizer_pilot_calibration is None:
             parser.error("Optimizer checks require --optimizer-pilot-calibration with the completed full training pilot")
-        if args.budget != "standard" or args.reflection_minibatch_size != 3 or args.max_metric_calls is not None:
+        if (
+            args.budget != "standard"
+            or args.reflection_minibatch_size != DEFAULT_REFLECTION_MINIBATCH_SIZE
+            or args.max_metric_calls is not None
+        ):
             parser.error("Optimizer pilots use one cycle on three training tasks and no separate metric cap")
         if args.train_limit is not None or args.val_limit is not None or args.reviewed_pilot is not None:
             parser.error("Optimizer pilots use their fixed training-only selection without validation or review overrides")
@@ -551,14 +574,14 @@ def main(argv: list[str] | None = None) -> None:
 
     reflection_lm_kwargs: dict[str, Any] = {
         "num_retries": EXPERIMENT_NUM_RETRIES,
-        **provider_retry_kwargs(args.run_dir / "provider-attempts.jsonl", "optimizer"),
+        **provider_retry_kwargs(args.run_dir / PROVIDER_ATTEMPT_LOG, OPTIMIZER_ROLE),
         **terminalbench_decoding(args.proposer_model, agentic=False),
         **experiment_request_overrides(args.proposer_model, explicit_reasoning=True),
     }
     if args.proposer_api_base is not None:
         reflection_lm_kwargs["api_base"] = args.proposer_api_base
 
-    usage_path = args.run_dir / "token-usage.jsonl"
+    usage_path = args.run_dir / TOKEN_USAGE_LOG
     reflection_lm = observe_optimizer(
         LM(args.proposer_model, **reflection_lm_kwargs), usage_path, "stateless_proposer", contract["token_limits"]
     )
@@ -586,8 +609,8 @@ def main(argv: list[str] | None = None) -> None:
             contract["token_limits"],
         )
         if not shared_controller:
-            observe_optimizer(reflection_strategy.controller_lm, usage_path, "controller", contract["token_limits"])
-        observe_optimizer(reflection_strategy.manifestor_lm, usage_path, "manifestor", contract["token_limits"])
+            observe_optimizer(reflection_strategy.controller_lm, usage_path, CONTROLLER_ROLE, contract["token_limits"])
+        observe_optimizer(reflection_strategy.manifestor_lm, usage_path, MANIFESTOR_ROLE, contract["token_limits"])
     elif condition == "action":
         reflection_strategy = ComponentActionReflectionLM(
             lm=reflection_lm,

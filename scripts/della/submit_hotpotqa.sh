@@ -15,6 +15,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+source "${REPO_ROOT}/scripts/della/runtime_constants.sh"
 ENV_FILE="${SCRIPT_DIR}/.env"
 
 if [[ ! -f "${ENV_FILE}" ]]; then
@@ -57,7 +58,7 @@ cleanup_local_files() {
 trap cleanup_local_files EXIT
 
 # Tunable knobs (env overrides).
-MODEL_PROFILE="${MODEL_PROFILE:-qwen3.8-27b}"
+MODEL_PROFILE="${MODEL_PROFILE:-${FOREST_QWEN_PROFILE}}"
 HOTPOTQA_PREPARE_ONLY="${HOTPOTQA_PREPARE_ONLY:-0}"
 HOTPOTQA_STAGE_ONLY="${HOTPOTQA_STAGE_ONLY:-0}"
 if [[ "${HOTPOTQA_STAGE_ONLY}" != "0" && "${HOTPOTQA_STAGE_ONLY}" != "1" ]]; then
@@ -72,10 +73,10 @@ if [[ "${HOTPOTQA_PREPARE_ONLY}" != "0" && "${HOTPOTQA_PREPARE_ONLY}" != "1" ]];
     echo "ERROR: HOTPOTQA_PREPARE_ONLY must be 0 or 1" >&2
     exit 1
 fi
-HOTPOTQA_EDITOR_MODE="${HOTPOTQA_EDITOR_MODE:-react}"
+HOTPOTQA_EDITOR_MODE="${HOTPOTQA_EDITOR_MODE:-${FOREST_REACT_EDITOR_MODE}}"
 HOTPOTQA_WANDB_PROJECT="${HOTPOTQA_WANDB_PROJECT:-}"
 HOTPOTQA_WANDB_ENTITY="${HOTPOTQA_WANDB_ENTITY:-}"
-if [[ "${HOTPOTQA_EDITOR_MODE}" != "react" && "${HOTPOTQA_EDITOR_MODE}" != "single_call" ]]; then
+if [[ "${HOTPOTQA_EDITOR_MODE}" != "${FOREST_REACT_EDITOR_MODE}" && "${HOTPOTQA_EDITOR_MODE}" != "${FOREST_SINGLE_CALL_EDITOR_MODE}" ]]; then
     echo "ERROR: unsupported HOTPOTQA_EDITOR_MODE" >&2; exit 1
 fi
 for tracking_name in "${HOTPOTQA_WANDB_PROJECT}" "${HOTPOTQA_WANDB_ENTITY}"; do
@@ -106,14 +107,14 @@ HOTPOTQA_LOG_DIR="${SCRATCH_BASE}/logs/hotpotqa/${HOTPOTQA_CAMPAIGN_ID}/${HOTPOT
 HOTPOTQA_PILOT_ROOT="${REMOTE_SOURCE_DIR}/outputs/hotpotqa-pilots/${HOTPOTQA_CAMPAIGN_ID}/${MODEL_PROFILE}"
 MAX_WORKERS="${MAX_WORKERS:-}"
 WIKI17_DIR="${WIKI17_DIR:-${SCRATCH_BASE}/.cache/gepa/wiki17}"
-GEN_GMU=0.92
-GEN_MAX_LEN=262144
+GEN_GMU="${FOREST_GPU_MEMORY_UTILIZATION}"
+GEN_MAX_LEN="${FOREST_CONTEXT_TOKENS}"
 VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-}"
 VLLM_API_SERVER_COUNT="${VLLM_API_SERVER_COUNT:-}"
 VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-}"
 VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-}"
-VLLM_MAX_NUM_BATCHED_TOKENS="${VLLM_MAX_NUM_BATCHED_TOKENS:-16384}"
-HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-1800}"
+VLLM_MAX_NUM_BATCHED_TOKENS="${VLLM_MAX_NUM_BATCHED_TOKENS:-${FOREST_MAX_BATCHED_TOKENS}}"
+HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-${FOREST_HEALTH_TIMEOUT_SECONDS}}"
 SERVING_VENV_DIR="${REMOTE_DIR%/}/.serving-venv"
 SERVING_LOCK_RELATIVE="examples/hotpotqa/serving/requirements-x86_64-linux-py312.txt"
 DELLA_GPUS="${DELLA_GPUS:-}"
@@ -132,14 +133,14 @@ fi
 
 case "${BUDGET_PROFILE}" in
     campaign)
-        CAMPAIGN_BUDGET_LABEL="6871+13742"
+        CAMPAIGN_BUDGET_LABEL="${HOTPOTQA_STANDARD_METRIC_CALLS}+${HOTPOTQA_EXPANDED_METRIC_CALLS}"
         if [[ "${CONDITION}" != "all" ]]; then
             echo "ERROR: BUDGET_PROFILE=campaign requires CONDITION=all" >&2
             exit 1
         fi
         ;;
     standard)
-        CAMPAIGN_BUDGET_LABEL="6871"
+        CAMPAIGN_BUDGET_LABEL="${HOTPOTQA_STANDARD_METRIC_CALLS}"
         case "${CONDITION}" in
             vanilla|react_v2|react_v2_random|action|random|all) ;;
             *)
@@ -149,7 +150,7 @@ case "${BUDGET_PROFILE}" in
         esac
         ;;
     expanded)
-        CAMPAIGN_BUDGET_LABEL="13742"
+        CAMPAIGN_BUDGET_LABEL="${HOTPOTQA_EXPANDED_METRIC_CALLS}"
         case "${CONDITION}" in
             vanilla|react_v2|all) ;;
             *)
@@ -165,7 +166,7 @@ case "${BUDGET_PROFILE}" in
 esac
 
 case "${MODEL_PROFILE}" in
-    qwen3.8-27b)
+    "${FOREST_QWEN_PROFILE}")
         if [[ "${GPU_PARTITION}" != "ailab" ]]; then
             echo "ERROR: Qwen3.8-27B production runs require GPU_PARTITION=ailab" >&2
             exit 1
@@ -192,9 +193,9 @@ case "${MODEL_PROFILE}" in
         fi
         MODEL="Qwen3.8-27B"
         SOLVER_MODEL_PATH="${MODEL_STORAGE}/${MODEL}"
-        MODEL_SNAPSHOT_PROFILE="qwen3.8-27b"
-        SOLVER_SERVED_NAME="Qwen/Qwen3.8-27B"
-        SOLVER_MODEL="hosted_vllm/Qwen/Qwen3.8-27B"
+        MODEL_SNAPSHOT_PROFILE="${FOREST_QWEN_PROFILE}"
+        SOLVER_SERVED_NAME="${FOREST_QWEN_REPO}"
+        SOLVER_MODEL="${FOREST_QWEN_MODEL}"
         SOLVER_API_BASE=""
         REFLECTION_API_BASE=""
         STANDARD_TIME="${STANDARD_TIME:-${TIME:-72:00:00}}"
@@ -218,8 +219,8 @@ case "${MODEL_PROFILE}" in
         MODEL="Qwen3.8-27B"
         SOLVER_MODEL_PATH="${MODEL_STORAGE}/${MODEL}"
         MODEL_SNAPSHOT_PROFILE=qwen3.8-27b
-        SOLVER_SERVED_NAME="Qwen/Qwen3.8-27B"
-        SOLVER_MODEL="hosted_vllm/Qwen/Qwen3.8-27B"
+        SOLVER_SERVED_NAME="${FOREST_QWEN_REPO}"
+        SOLVER_MODEL="${FOREST_QWEN_MODEL}"
         SOLVER_API_BASE=""
         if [[ "${DELLA_GPUS}" != 5 || "${DELLA_CPUS_PER_TASK}" != 40 \
             || "${VLLM_TENSOR_PARALLEL_SIZE}" != 1 || "${VLLM_DATA_PARALLEL_SIZE}" != 1 || "${VLLM_API_SERVER_COUNT}" != 1 \
@@ -231,7 +232,7 @@ case "${MODEL_PROFILE}" in
         STANDARD_TIME="${STANDARD_TIME:-${TIME:-09:00:00}}"
         EXPANDED_TIME="${EXPANDED_TIME:-${TIME:-09:00:00}}"
         ;;
-    deepseek-v4.1-flash)
+    "${FOREST_DEEPSEEK_PROFILE}")
         SERVING_VENV_DIR="${REMOTE_DIR%/}/.serving-venv-deepseek-v4.1-flash"
         SERVING_LOCK_RELATIVE="examples/hotpotqa/serving/requirements-deepseek-v4.1-flash-x86_64-linux-py312.txt"
         if [[ "${GPU_PARTITION}" != "ailab" ]]; then
@@ -247,12 +248,12 @@ case "${MODEL_PROFILE}" in
         VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-1}"
         VLLM_API_SERVER_COUNT="${VLLM_API_SERVER_COUNT:-1}"
         VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-1}"
-        GEN_MAX_LEN=262144
+        GEN_MAX_LEN="${FOREST_CONTEXT_TOKENS}"
         MODEL="DeepSeek-V4.1-Flash"
         SOLVER_MODEL_PATH="${MODEL_STORAGE}/${MODEL}"
-        MODEL_SNAPSHOT_PROFILE="deepseek-v4.1-flash"
-        SOLVER_SERVED_NAME="deepseek-ai/DeepSeek-V4.1-Flash"
-        SOLVER_MODEL="hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash"
+        MODEL_SNAPSHOT_PROFILE="${FOREST_DEEPSEEK_PROFILE}"
+        SOLVER_SERVED_NAME="${FOREST_DEEPSEEK_REPO}"
+        SOLVER_MODEL="${FOREST_DEEPSEEK_MODEL}"
         SOLVER_API_BASE=""
         REFLECTION_API_BASE=""
         if [[ "${DELLA_GPUS}" != "4" \
@@ -273,7 +274,7 @@ case "${MODEL_PROFILE}" in
 esac
 REFLECTION_MODEL="${SOLVER_MODEL}"
 if [[ "${MODEL_PROFILE}" == "deepseek-teacher-qwen-student" ]]; then
-    REFLECTION_MODEL="hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash"
+    REFLECTION_MODEL="${FOREST_DEEPSEEK_MODEL}"
 fi
 REFLECTION_API_BASE="${SOLVER_API_BASE}"
 
@@ -336,7 +337,7 @@ if (( DELLA_CPUS_PER_TASK > DELLA_GPUS * 8 )); then
     echo "ERROR: Della permits at most 8 CPU cores per AI Lab H200" >&2
     exit 1
 fi
-if [[ "${MODEL_PROFILE}" == "qwen3.8-27b" ]]; then
+if [[ "${MODEL_PROFILE}" == "${FOREST_QWEN_PROFILE}" ]]; then
     if (( VLLM_DATA_PARALLEL_SIZE > DELLA_GPUS )); then
         echo "ERROR: VLLM_DATA_PARALLEL_SIZE cannot exceed DELLA_GPUS" >&2
         exit 1
@@ -385,7 +386,7 @@ fi
 echo "==> scientific contract: budget_profile=${BUDGET_PROFILE} budget=${CAMPAIGN_BUDGET_LABEL} condition=${CONDITION} merge=off"
 echo "==> method: frozen Wiki-2017/BM25 k=7 seed=0 workers=${MAX_WORKERS} two-stage structured prompts"
 echo "==> Della resources: partition=${JOB_PARTITION:-cluster-default} gpus=${DELLA_GPUS} cpus=${DELLA_CPUS_PER_TASK} memory=${DELLA_MEMORY}"
-if [[ "${MODEL_PROFILE}" == "qwen3.8-27b" ]]; then
+if [[ "${MODEL_PROFILE}" == "${FOREST_QWEN_PROFILE}" ]]; then
     echo "==> Qwen vLLM: tp=1 dp=1 api_servers=1 max_num_seqs=${VLLM_MAX_NUM_SEQS} max_batched_tokens=${VLLM_MAX_NUM_BATCHED_TOKENS}"
 else
     echo "==> DeepSeek vLLM: tp=4 ep=4 dp=1 max_num_seqs=${VLLM_MAX_NUM_SEQS} FP8-KV Engram-CPU-offload deepseek_v41 parsers no-speculation"
@@ -638,13 +639,13 @@ if [[ "${HOTPOTQA_PREPARE_ONLY}" == "1" ]]; then
     CELL_NAME=interactive
     RECOVERY_REGISTRY="\${CONTINUATION_DIR}/interactive-registry.json"
     RECOVERY_ERROR_FILE="\${CONTINUATION_DIR}/interactive-error.json"
-    write_sbatch_export_file standard 6871 vanilla 0
+    write_sbatch_export_file standard ${HOTPOTQA_STANDARD_METRIC_CALLS} vanilla 0
     echo "INTERACTIVE_EXPORT_FILE=\${SBATCH_EXPORT_FILE}"
     SBATCH_EXPORT_FILE=""
     exit 0
 fi
 for _ in "\${SUBMIT_CONDITIONS[@]}"; do CANARY_FLAGS+=(0); done
-if [[ "${MODEL_PROFILE}" == "deepseek-v4.1-flash" ]]; then
+if [[ "${MODEL_PROFILE}" == "${FOREST_DEEPSEEK_PROFILE}" ]]; then
     SUBMIT_BUDGET_PROFILES=(standard "\${SUBMIT_BUDGET_PROFILES[@]}")
     SUBMIT_CONDITIONS=(react_v2 "\${SUBMIT_CONDITIONS[@]}")
     CANARY_FLAGS=(1 "\${CANARY_FLAGS[@]}")
@@ -654,10 +655,10 @@ for CELL_INDEX in "\${!SUBMIT_CONDITIONS[@]}"; do
     RUN_CONDITION="\${SUBMIT_CONDITIONS[\${CELL_INDEX}]}"
     CANARY_ONLY="\${CANARY_FLAGS[\${CELL_INDEX}]}"
     if [[ "\${RUN_BUDGET_PROFILE}" == "expanded" ]]; then
-        RUN_MAX_METRIC_CALLS=13742
+        RUN_MAX_METRIC_CALLS=${HOTPOTQA_EXPANDED_METRIC_CALLS}
         RUN_TIME="${EXPANDED_TIME}"
     else
-        RUN_MAX_METRIC_CALLS=6871
+        RUN_MAX_METRIC_CALLS=${HOTPOTQA_STANDARD_METRIC_CALLS}
         RUN_TIME="${STANDARD_TIME}"
     fi
     CELL_NAME="\${RUN_BUDGET_PROFILE}-\${RUN_CONDITION}"

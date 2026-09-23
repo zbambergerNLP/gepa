@@ -10,6 +10,7 @@ import uuid
 from pathlib import Path
 
 from examples.common.recovery import file_digest
+from gepa.lm_constants import PROVIDER_ATTEMPT_LOG
 
 
 def _digest(value: object) -> str:
@@ -158,7 +159,7 @@ class HotpotqaWandb:
         if self.run is not None:
             try:
                 self.run.summary["provider_usage_by_allocation"] = provider_usage(
-                    self.directory / "provider-attempts.jsonl"
+                    self.directory / PROVIDER_ATTEMPT_LOG
                 )
             except Exception as exc:
                 self._error(exc)
@@ -244,7 +245,7 @@ def report_completed(directory: Path, project: str, entity: str | None = None) -
                 "heldout/f1": final["test_f1"],
                 "heldout/exact_match_gain": final["test_exact_match_gain"],
                 "baseline/exact_match": final["baseline"]["test_exact_match"],
-                "provider_usage_by_allocation": provider_usage(directory / "provider-attempts.jsonl"),
+                "provider_usage_by_allocation": provider_usage(directory / PROVIDER_ATTEMPT_LOG),
             }
         )
         action_path = directory / "action_summary.json"

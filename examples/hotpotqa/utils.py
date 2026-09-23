@@ -14,13 +14,24 @@ from importlib.metadata import version as package_version
 
 import litellm  # type: ignore[import-not-found]
 
+from examples.hotpotqa.benchmark_settings import (
+    DATASET_SAMPLE_SEED,
+    DATASET_SIZE,
+    RETRIEVAL_K,
+    TEST_SIZE,
+    TRAIN_SIZE,
+    TRAIN_VALIDATION_SIZE,
+    VALIDATION_SIZE,
+)
+from gepa.strategies.forest_constants import OPTIMIZER_ROLE, SOLVER_ROLE
+
 try:
     import dspy  # type: ignore[import-not-found]
 except ImportError:
     dspy = None  # type: ignore[assignment]
 
 from examples.common.experiment_models import (
-    DEEPSEEK_V4_1_FLASH_MODEL,
+    EXPERIMENT_MODELS,
     EXPERIMENT_NUM_RETRIES,
     QWEN3_8_27B_MODEL,
     experiment_decoding,
@@ -28,6 +39,14 @@ from examples.common.experiment_models import (
 )
 from examples.common.provider_retries import provider_retry_kwargs
 from examples.common.wikipedia import WikipediaPassage, WikipediaRetriever
+from examples.hotpotqa.model_settings import (
+    HOTPOTQA_OPTIMIZER_MAX_TOKENS,
+    HOTPOTQA_OPTIMIZER_THINKING_TOKENS,
+    HOTPOTQA_REQUEST_TIMEOUT_SECONDS,
+    HOTPOTQA_SCIENTIFIC_REQUEST_SEED,
+    HOTPOTQA_SOLVER_MAX_TOKENS,
+    HOTPOTQA_SOLVER_THINKING_TOKENS,
+)
 
 DEFAULT_DATA_PATH = os.path.join(
     os.path.dirname(__file__),
@@ -44,8 +63,6 @@ HOTPOTQA_SCIENTIFIC_SPLIT_SHA256 = {
     "val": "c6d794b172724eb87e8087d671b74e94725040b79c9a63980cb45dcb53146408",
     "test": "55cd1c7a999476ea4c7ec67f964ad4fa0ae662a2b9f7ade59c64108e659add31",
 }
-HOTPOTQA_SCIENTIFIC_REQUEST_SEED = 0
-HOTPOTQA_REQUEST_TIMEOUT_SECONDS = 3600
 
 
 if dspy is not None:
@@ -156,7 +173,7 @@ def resolve_hotpotqa_lm_kwargs(
     model: str,
     api_base: str | None,
     *,
-    role: str = "solver",
+    role: str = SOLVER_ROLE,
 ) -> dict[str, object]:
     """Resolve the fixed HotPotQA scientific request settings.
 
@@ -168,7 +185,7 @@ def resolve_hotpotqa_lm_kwargs(
     Returns:
         Independent LM keyword arguments for the requested local runtime.
     """
-    if role not in {"solver", "optimizer"}:
+    if role not in {SOLVER_ROLE, OPTIMIZER_ROLE}:
         raise ValueError(f"Unknown HotPotQA model role: {role!r}")
     kwargs: dict[str, object] = {
         "num_retries": EXPERIMENT_NUM_RETRIES,
@@ -177,17 +194,18 @@ def resolve_hotpotqa_lm_kwargs(
         **experiment_decoding(model, agentic=False),
         **experiment_request_overrides(model, explicit_reasoning=True),
     }
-    if model == DEEPSEEK_V4_1_FLASH_MODEL:
-        kwargs["max_tokens"] = 131_072 if role == "optimizer" else 65_536
-    elif model == QWEN3_8_27B_MODEL:
-        kwargs["max_tokens"] = 32_768 if role == "optimizer" else 65_536
-    if model in {QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL}:
+    if model in EXPERIMENT_MODELS:
+        kwargs["max_tokens"] = (
+            HOTPOTQA_SOLVER_MAX_TOKENS if role == SOLVER_ROLE else HOTPOTQA_OPTIMIZER_MAX_TOKENS[model]
+        )
         kwargs["seed"] = HOTPOTQA_SCIENTIFIC_REQUEST_SEED
         extra_body = kwargs["extra_body"]
         assert isinstance(extra_body, dict)
         # Native reasoning termination reserves final-answer space within the
         # existing output ceiling, including on a runaway reasoning attempt.
-        thinking_budget = 32_768 if role == "solver" else (98_304 if model == DEEPSEEK_V4_1_FLASH_MODEL else 24_576)
+        thinking_budget = (
+            HOTPOTQA_SOLVER_THINKING_TOKENS if role == SOLVER_ROLE else HOTPOTQA_OPTIMIZER_THINKING_TOKENS[model]
+        )
         kwargs["extra_body"] = {**extra_body, "thinking_token_budget": thinking_budget}
     if api_base is not None:
         kwargs["api_base"] = api_base
@@ -385,7 +403,7 @@ def run_single_stage(
     retriever: WikipediaRetriever,
     model: str = QWEN3_8_27B_MODEL,
     api_base: str | None = None,
-    retrieval_k: int = 7,
+    retrieval_k: int = RETRIEVAL_K,
     lm_kwargs: dict[str, object] | None = None,
 ) -> str:
     """Retrieve once and answer with one optimized prompt.
@@ -417,7 +435,7 @@ def run_two_stage(
     retriever: WikipediaRetriever,
     model: str = QWEN3_8_27B_MODEL,
     api_base: str | None = None,
-    retrieval_k: int = 7,
+    retrieval_k: int = RETRIEVAL_K,
     task_lm: object | None = None,
     lm_kwargs: dict[str, object] | None = None,
 ) -> tuple[str, str, dict[str, object]]:
@@ -861,12 +879,12 @@ def load_hotpotqa_dataset(
             )
         records = _load_from_jsonl(data_path)
         examples = _jsonl_to_examples(records)
-        if len(examples) >= 750:
+        if len(examples) >= DATASET_SIZE:
             rng = random.Random(seed)
             rng.shuffle(examples)
-            trainset = examples[:150]
-            valset = examples[150:450]
-            testset = examples[450:750]
+            trainset = examples[:TRAIN_SIZE]
+            valset = examples[TRAIN_SIZE:TRAIN_VALIDATION_SIZE]
+            testset = examples[TRAIN_VALIDATION_SIZE:DATASET_SIZE]
         elif len(examples) >= 20:
             trainset = examples[:14]
             remainder = examples[14:]
@@ -906,17 +924,17 @@ def load_hotpotqa_dataset(
         test_pool = examples[:first_boundary]
         val_pool = examples[first_boundary:second_boundary]
         train_pool = examples[second_boundary:]
-        if len(train_pool) < 150 or len(val_pool) < 300 or len(test_pool) < 300:
+        if len(train_pool) < TRAIN_SIZE or len(val_pool) < VALIDATION_SIZE or len(test_pool) < TEST_SIZE:
             raise ValueError("HotPotQA fullwiki did not contain enough records for the artifact's 150/300/300 split")
 
-        trainset = random.Random(1).sample(train_pool, 150)
-        valset = random.Random(1).sample(val_pool, 300)
-        testset = random.Random(1).sample(test_pool, 300)
+        trainset = random.Random(DATASET_SAMPLE_SEED).sample(train_pool, TRAIN_SIZE)
+        valset = random.Random(DATASET_SAMPLE_SEED).sample(val_pool, VALIDATION_SIZE)
+        testset = random.Random(DATASET_SAMPLE_SEED).sample(test_pool, TEST_SIZE)
         if seed != 0:
             combined_train_val = trainset + valset
             random.Random(seed).shuffle(combined_train_val)
-            trainset = combined_train_val[:150]
-            valset = combined_train_val[150:]
+            trainset = combined_train_val[:TRAIN_SIZE]
+            valset = combined_train_val[TRAIN_SIZE:]
 
         if train_limit is not None:
             trainset = trainset[:train_limit]

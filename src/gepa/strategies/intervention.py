@@ -23,6 +23,7 @@ from gepa.strategies.action_space import (
 )
 from gepa.strategies.document_template import DocumentTemplate, EditTarget
 from gepa.strategies.edit_tools import EditTool
+from gepa.strategies.forest_constants import SEMANTIC_REFLECTION_LEVEL, UNIFORM_RANDOM_SELECTION
 from gepa.strategies.text_limits import clip_text, validate_char_limit
 
 logger = logging.getLogger(__name__)
@@ -122,7 +123,7 @@ UNIFORM_RANDOM_CONTROLLER_POLICY_CONTRACT: dict[str, Any] = {
     "version": 1,
     "factorization": "P(region, action)",
     "candidates": "all cataloged region/action pairs",
-    "selection": "uniform_random",
+    "selection": UNIFORM_RANDOM_SELECTION,
     "sampling": "uniform over all candidates",
     "context": "none",
     "distribution_failure": None,
@@ -460,18 +461,18 @@ def build_controller_menu(
     targets = [EditTarget(component_name, section) for section in template.sections]
     if not targets:
         raise ValueError(f"Document template {template.kind!r} has no named sections to edit.")
-    if level >= 2:
+    if level >= SEMANTIC_REFLECTION_LEVEL:
         specs = SEMANTIC_ACTIONS if template.kind in _SEMANTIC_ACTION_KINDS else ()
         menu = [ControllerChoice(target, spec) for target in targets for spec in specs]
     else:
         menu = [ControllerChoice(target, None) for target in targets]
 
-    if not menu and level >= 2:
+    if not menu and level >= SEMANTIC_REFLECTION_LEVEL:
         raise ValueError(
             f"Document kind {template.kind!r} has no semantic actions; level 2 supports only cataloged kinds."
         )
     if max_menu is not None and len(menu) > max_menu:
-        if level >= 2:
+        if level >= SEMANTIC_REFLECTION_LEVEL:
             raise ValueError(
                 f"max_menu={max_menu} would remove semantic Controller choices; level 2 requires all "
                 f"{len(menu)} region/action pairs."

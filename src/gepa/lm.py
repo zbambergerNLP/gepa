@@ -27,6 +27,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, cast
 
+from gepa.lm_constants import DEFAULT_LM_NUM_RETRIES, LENGTH_FINISH_REASON
 from gepa.response_journal import (
     ACTIVE_RESPONSE_JOURNAL_SCOPE,
     ResumeResponseJournal,
@@ -391,7 +392,7 @@ class LM:
         model: str,
         temperature: float | None = None,
         max_tokens: int | None = None,
-        num_retries: int = 3,
+        num_retries: int = DEFAULT_LM_NUM_RETRIES,
         expected_response_model: str | None = None,
         expected_system_fingerprint: str | None = None,
         response_journal_path: str | None = None,
@@ -498,7 +499,7 @@ class LM:
         self.last_response_identity = identity
 
     def _check_truncation(self, choices: list[Any]) -> None:
-        if any(getattr(c, "finish_reason", None) == "length" for c in choices):
+        if any(getattr(c, "finish_reason", None) == LENGTH_FINISH_REASON for c in choices):
             max_tok = self.completion_kwargs.get("max_tokens") or self.completion_kwargs.get("max_completion_tokens")
             logger.warning(
                 f"LM response was truncated (finish_reason='length', max_tokens={max_tok}). "

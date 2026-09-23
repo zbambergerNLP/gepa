@@ -20,6 +20,8 @@ from gepa.logging.logger import LoggerProtocol
 from gepa.proposer.base import CandidateProposal, ProposeNewCandidate
 from gepa.strategies.text_limits import TextLimitError, TextLimits, resolve_text_limits
 
+DEFAULT_MERGE_ATTEMPTS = 10
+
 AncestorLog = tuple[int, int, int]
 MergeDescription = tuple[int, int, tuple[int, ...]]
 MergeAttempt = tuple[Candidate, ProgramIdx, ProgramIdx, ProgramIdx] | None
@@ -74,7 +76,7 @@ def find_common_ancestor_pair(
     merges_performed: tuple[list[AncestorLog], list[MergeDescription]],
     agg_scores: Sequence[float],
     program_candidates: Sequence[Candidate],
-    max_attempts: int = 10,
+    max_attempts: int = DEFAULT_MERGE_ATTEMPTS,
 ) -> tuple[int, int, int] | None:
     def get_ancestors(node: int, ancestors_found: set[int]) -> list[int]:
         parents = parent_list[node]
@@ -124,7 +126,7 @@ def sample_and_attempt_merge_programs_by_common_predictors(
     program_candidates: Sequence[Candidate],
     parent_program_for_candidate: Sequence[Sequence[int | None]],
     has_val_support_overlap: Callable[[ProgramIdx, ProgramIdx], bool] | None = None,
-    max_attempts: int = 10,
+    max_attempts: int = DEFAULT_MERGE_ATTEMPTS,
 ) -> MergeAttempt:
     if len(merge_candidates) < 2:
         return None

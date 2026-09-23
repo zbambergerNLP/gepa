@@ -562,7 +562,7 @@ def test_three_role_run_contract_blocks_catalog_or_policy_drift(tmp_path: Path) 
         "max_tool_calls": None,
     }
     assert contract["component_kinds"] == {"sys": "system_prompt"}
-    assert contract["controller"]["version"] == 4
+    assert contract["controller"]["version"] == 5
     assert contract["controller"]["factorization"] == "P(region, action)"
     assert len(contract["semantic_action_spaces"]["system_prompt"]["actions"]) == 10
     assert contract["semantic_action_spaces"]["system_prompt"]["kind"] == "prompt"
@@ -745,7 +745,7 @@ def test_level2_selects_semantic_action_manifests_edits_and_finishes() -> None:
     assert len(sampling["probs"]) == 70
     assert sampling["probs"]["reexpress@Rules/REPLACE_TEXT"] == pytest.approx(0.99)
     assert sampling["fallback"] is False
-    assert sampling["policy"] == "joint_region_action_v4"
+    assert sampling["policy"] == "joint_region_action_v5"
     assert sampling["sampling_policy"] == "positive_support_uniform_mixture"
     assert sampling["exploration_epsilon"] == pytest.approx(0.1)
     assert sampling["joint_sampling_probability"] == pytest.approx(sampling["sampled_probabilities"][0])
@@ -899,7 +899,7 @@ def test_uniform_random_controller_policy_is_part_of_the_resume_contract(tmp_pat
         "distribution_failure": None,
         "max_menu": 999,
     }
-    assert verbalized_contract["controller"]["version"] == 4
+    assert verbalized_contract["controller"]["version"] == 5
     ensure_reflection_run_contract(str(tmp_path), uniform_contract)
     with pytest.raises(ValueError, match="different reflection strategy contract"):
         ensure_reflection_run_contract(str(tmp_path), verbalized_contract)

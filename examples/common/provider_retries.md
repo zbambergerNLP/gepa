@@ -1,45 +1,49 @@
 # Provider request retries
 
-HotPotQA and Terminal-Bench use the same policy for every model role: at most
-**three attempts per provider request**, with one-second and two-second backoff
-before the second and third attempts. A successful response ends the request.
+HotPotQA and Terminal-Bench use one shared policy for model requests: an initial
+attempt plus **three retries**, at most four physical attempts total. Sync, async,
+batch, solver, Controller, Manifestor, Editor, proposer, and summarization calls
+use this boundary. Raw HotPotQA serving/boundary probes use the same policy.
+Unmarked library calls retain their caller's policy.
 
-Only connection errors, transport timeouts, and HTTP 408, 429, 500, 502, 503, or
-504 qualify. Authentication, invalid requests, other permanent errors, and
-local programming errors stop immediately. Cancellation propagates. An explicit
-numeric request timeout covers all attempts and backoff together; the existing
-benchmark task deadline also continues to apply.
+Retry connection errors, transport timeouts, HTTP 408/429/500/502/503/504, missing
+choices, empty final output without native tool calls, and `finish_reason=length`.
+Native tool calls with no prose are valid. A cutoff is rejected before partial
+tool calls can execute. Refusals, valid no-ops, wrong task answers, rejected
+candidates, and invalid semantic edit batches are not rerolled for a better score.
+Authentication, invalid requests, other permanent errors, and programming errors
+stop immediately; retrying cannot repair them. Cancellation propagates.
 
-The shared wrapper owns the retry count. Both LiteLLM `num_retries` and the
-underlying SDK `max_retries` are zero to prevent multiplication. Their zero
-values in run contracts describe the disabled inner layers, not the experiment's
-three-attempt policy. Harbor's two additional retry decorators are bypassed.
-Exhausted requests also stop Harbor's summarization and context recovery rather
-than silently continuing through another model call. Bad-request parameter
-fallback cannot silently change request fields and try again.
+Transport and output failures share the four-attempt limit and the original
+request deadline. Full-jitter backoff draws independently from [0,1], [0,2], and
+[0,4] seconds without consuming optimizer RNG. Transport retries keep the seed.
+After incomplete output, an explicit integer generation seed advances by one
+(modulo 2**32) to avoid replaying the same deterministic failure. Prompts, decoding
+parameters, model identities, and token caps otherwise stay fixed.
 
-This policy covers solver, proposer/editor, Controller, Manifestor, task-agent,
-and summarization requests. Successful members of a batch remain completed;
-only a failed request repeats. It does not retry tasks or low-scoring answers.
-FOREST's unlimited tool-error correction and the existing context/output repair
-protocols are separate. Changes to prompts during those protocols constitute
-new model requests; the transport policy does not select answers or candidates.
+Both LiteLLM `num_retries` and the SDK `max_retries` are zero. The shared wrapper
+owns retries; upper reflection/batch fallback cannot restart an exhausted budget.
+Harbor's nested retry decorators are also bypassed. Successful batch members and
+response-journal entries remain completed. Journal replay makes no provider call.
+Existing explicit format/context protocols are separate logical requests, not an
+excuse to rerun a failed provider request or select favorable candidates.
 
-Each run writes `provider-attempts.jsonl`; Harbor uses a separate file in each
-trial's agent directory. Records contain a request ID, attempt number, model,
-role, timing, error type/status, retry decision, and available token/cost counts.
-Missing counts stay null. Prompts, response text, exception messages, headers,
-and credentials are excluded. Direct diagnostic calls without a file destination
-emit the same records to the process log.
+Each physical attempt is appended to `provider-attempts.jsonl`. Records separate
+transport success from usable-output success and include request ID, attempt,
+role, model, effective seed, retry decision, finish reason, elapsed time, and
+available usage/cost. Unknown usage remains null. Incomplete response artifacts
+preserve the request, reasoning, final output and native calls with permissions
+0600 and without credentials. A later success does not erase earlier paid work.
+The ledger itself omits prompts, responses, exception messages, and credentials.
 
-TB also writes these attempts to its existing `token-usage.jsonl` files, so
-the existing usage report includes failed attempts as well as successful calls.
-These files describe the same requests and must not be added together. Journal
-replay issues no provider request and adds no physical-attempt record. Costs
-reported only in provider-attempt artifacts remain separate from scored metric
-calls and cannot be inferred as zero when unavailable.
+Some workflows duplicate the same attempts in `token-usage.jsonl`; never add the
+two files together. Logical metric evaluations and all physical attempts must be
+reported separately. Run contracts include the complete versioned retry policy;
+changed policies require fresh reviewed identities, not relabeled checkpoints.
 
-The policy is recorded in HotPotQA run contract version 22, TB run contract
-version 23, and TB training-pilot configuration version 5. Missing or changed
-policies cannot resume or enter the final TB comparison. Existing runs require
-fresh directories rather than relabeling their request policy.
+For the generalization qualification, both source-pinned strategy arms use the
+revised `gepa.lm` and provider dispatch modules and identical resolved model
+kwargs. A dedicated bootstrap imports only these two modules from the reviewed
+runtime, verifies their hashes, and records that mixed identity explicitly. All
+Controller/Manifestor/Editor strategy code still comes from the declared arm.
+Historical source directories remain untouched.

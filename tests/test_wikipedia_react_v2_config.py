@@ -335,17 +335,18 @@ def test_hotpot_provider_sampling_reaches_every_model_role(model: str, budget: i
     assert contract["models"]["solver_decoding"]["temperature"] == expected
     assert config.reflection.reflection_lm_kwargs["temperature"] == expected
     expected_output_cap = 131_072 if model == DEEPSEEK_V4_1_FLASH_MODEL else 32_768
+    optimizer_body = {**request_overrides["extra_body"], "thinking_token_budget": 98_304 if model == DEEPSEEK_V4_1_FLASH_MODEL else 24_576}
     assert contract["models"]["solver_decoding"]["max_tokens"] == 65_536
     assert contract["models"]["reflection_decoding"]["max_tokens"] == expected_output_cap
     assert config.reflection.reflection_lm_kwargs["max_tokens"] == expected_output_cap
     assert contract["models"]["solver_decoding"]["top_p"] == general["top_p"]
     assert config.reflection.reflection_lm_kwargs["top_p"] == general["top_p"]
-    assert config.reflection.reflection_lm_kwargs["extra_body"] == request_overrides["extra_body"]
+    assert config.reflection.reflection_lm_kwargs["extra_body"] == optimizer_body
     assert contract["models"]["solver_request_overrides"] == {
         **request_overrides,
         "extra_body": {**request_overrides["extra_body"], "thinking_token_budget": 32_768},
     }
-    assert contract["models"]["reflection_request_overrides"] == request_overrides
+    assert contract["models"]["reflection_request_overrides"] == {**request_overrides, "extra_body": optimizer_body}
     if condition == "random":
         assert isinstance(selector, RandomActionSelector)
         assert not hasattr(selector, "lm")
@@ -353,7 +354,7 @@ def test_hotpot_provider_sampling_reaches_every_model_role(model: str, budget: i
         assert selector.lm.completion_kwargs["max_tokens"] == expected_output_cap
         assert selector.lm.completion_kwargs["temperature"] == expected
         assert selector.lm.completion_kwargs["top_p"] == general["top_p"]
-        assert selector.lm.completion_kwargs["extra_body"] == request_overrides["extra_body"]
+        assert selector.lm.completion_kwargs["extra_body"] == optimizer_body
     strategy = config.reflection.reflection_strategy
     if strategy is not None:
         assert strategy.base_lm.completion_kwargs["max_tokens"] == expected_output_cap
@@ -362,15 +363,15 @@ def test_hotpot_provider_sampling_reaches_every_model_role(model: str, budget: i
         assert strategy.manifestor_lm.completion_kwargs["temperature"] == expected
         assert strategy.base_lm.completion_kwargs["top_p"] == agentic["top_p"]
         assert strategy.manifestor_lm.completion_kwargs["top_p"] == general["top_p"]
-        assert strategy.base_lm.completion_kwargs["extra_body"] == request_overrides["extra_body"]
-        assert strategy.manifestor_lm.completion_kwargs["extra_body"] == request_overrides["extra_body"]
+        assert strategy.base_lm.completion_kwargs["extra_body"] == optimizer_body
+        assert strategy.manifestor_lm.completion_kwargs["extra_body"] == optimizer_body
         roles = contract["models"]["reflection_role_decoding"]
         assert roles["manifestor"]["requested"] == {**optimizer_general, "seed": 0}
         assert roles["react_v2_proposer"]["requested"] == {**optimizer_agentic, "seed": 0}
         if condition == "react_v2":
             assert strategy.controller_lm.completion_kwargs["max_tokens"] == expected_output_cap
             assert strategy.controller_lm.completion_kwargs["top_p"] == general["top_p"]
-            assert strategy.controller_lm.completion_kwargs["extra_body"] == request_overrides["extra_body"]
+            assert strategy.controller_lm.completion_kwargs["extra_body"] == optimizer_body
             assert roles["controller"]["requested"] == {**optimizer_general, "seed": 0}
         else:
             assert roles["controller"] is None
@@ -1388,7 +1389,10 @@ def test_deepseek_contract_uses_the_deepseek_pair_and_local_request_settings() -
                 "provider_ignored_fields": [],
             },
         },
-        "reflection_request_overrides": deepseek_request_overrides,
+        "reflection_request_overrides": {
+            **deepseek_request_overrides,
+            "extra_body": {**deepseek_request_overrides["extra_body"], "thinking_token_budget": 98_304},
+        },
         "reflection_num_retries": 0,
         "reflection_request_timeout_seconds": 3600,
     }
@@ -1592,7 +1596,7 @@ def test_run_contract_rejects_drift_and_legacy_state(tmp_path: Path) -> None:
     assert ensure_wikipedia_run_contract(run_dir, contract) == path
     with pytest.raises(ValueError, match="different Wikipedia benchmark configuration"):
         ensure_wikipedia_run_contract(run_dir, {**contract, "tag": "drift"})
-    assert contract["provider_retry_policy"]["max_attempts"] == 3
+    assert contract["provider_retry_policy"]["max_attempts"] == 4
     for missing in (True, False):
         changed = deepcopy(contract)
         if missing:

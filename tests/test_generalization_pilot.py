@@ -8,6 +8,7 @@ from threading import get_ident
 import pytest
 
 from examples.hotpotqa import generalization_pilot as pilot
+from examples.hotpotqa import proposal_runtime
 from examples.hotpotqa.generalization_pilot import (
     COMPONENTS,
     DiagnosticRetriever,
@@ -16,6 +17,21 @@ from examples.hotpotqa.generalization_pilot import (
     partition_training,
 )
 from gepa.strategies.text_limits import TextLimits
+
+
+def test_request_runtime_cannot_override_strategy_or_load_changed_files(tmp_path, monkeypatch):
+    """Keep strategy source pinned and fail before inference on runtime identity drift."""
+    root = Path(proposal_runtime.__file__).resolve().parents[2]
+    finder = proposal_runtime.SharedRequestRuntime(root)
+    assert finder.find_spec("gepa.strategies.action_space") is None
+    assert finder.find_spec("gepa.lm").origin == str(root / "src/gepa/lm.py")
+    request = tmp_path / "request.json"
+    runtime = proposal_runtime.runtime_identity(root)
+    runtime["files"]["gepa.lm"] = "changed"
+    request.write_text(json.dumps({"shared_request_runtime": runtime}))
+    monkeypatch.setattr(proposal_runtime.sys, "argv", ["worker", "--proposal-request", str(request)])
+    with pytest.raises(ValueError, match="reviewed shared files"):
+        proposal_runtime.main()
 
 
 def test_transfer_membership_is_fixed_and_never_enters_proposal_batches() -> None:
@@ -165,6 +181,7 @@ def test_complete_paired_protocol_scores_every_proposal_without_transfer_leakage
                 "candidate": candidate,
                 "changed": changed,
                 "imported_source": str((control if variant == "control" else root) / "src/gepa/__init__.py"),
+                "shared_request_runtime": request["shared_request_runtime"],
             },
         )
 
@@ -172,6 +189,7 @@ def test_complete_paired_protocol_scores_every_proposal_without_transfer_leakage
     summary = pilot.run_comparison(args)
     assert len(constructed) == 9
     assert len(requests) == len(summary["comparisons"]) == 8
+    assert all(request["shared_request_runtime"] == requests[0]["shared_request_runtime"] for request in requests)
     assert all(request["candidate"] == seed for request in requests)
     for request in requests:
         records = request["reflection_records"][request["component"]]

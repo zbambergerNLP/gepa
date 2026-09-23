@@ -107,3 +107,15 @@ def test_usage_keeps_allocations_and_missing_token_counts_separate(tmp_path):
     assert totals["new/solver/Qwen"]["transport_errors"] == 0
     assert totals["old/solver/Qwen"]["prompt_tokens_unreported_calls"] == 1
     assert totals["new/solver/Qwen"]["completion_tokens"] == 10
+
+
+def test_output_failure_is_not_labeled_as_transport_failure(tmp_path):
+    path = tmp_path / "provider-attempts.jsonl"
+    path.write_text(json.dumps({
+        "allocation_job_id": "new", "role": "controller", "requested_model": "DeepSeek",
+        "outcome": "error", "transport_outcome": "success", "response_error": "output_length",
+        "empty_completion": True, "completion_tokens": 131072,
+    }) + "\n")
+    totals = provider_usage(path)["new/controller/DeepSeek"]
+    assert totals["calls"] == totals["response_errors"] == totals["empty_completions"] == 1
+    assert totals["transport_errors"] == 0 and totals["completion_tokens"] == 131072

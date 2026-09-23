@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 DOCUMENT_LENGTH_CONTRACT: dict[str, Any] = TextLimits().document_contract()
 FULL_SUPPORT_EXPLORATION_EPSILON = 0.1
 DEFAULT_VERBALIZED_ACTION_K = 5
-STATELESS_SELECTOR_POLICY_VERSION = 3
+STATELESS_SELECTOR_POLICY_VERSION = 4
 
 
 def stateless_selector_policy_contract(
@@ -80,6 +80,7 @@ def stateless_selector_policy_contract(
         "selection_granularity": selection_granularity,
         "context": "per_job" if per_job_action_selection else "first_parent_and_aggregated_feedback",
         "sampling": "positive_support_uniform_mixture" if require_full_support else "tail",
+        "scoring": "relative_weights_normalized_by_harness",
         "k": k,
         "tau": resolved_tau,
         "require_full_support": require_full_support,
@@ -195,7 +196,9 @@ Current component length: {prompt_chars} characters.
 {action_menu}
 
 Score {k} candidate actions by how likely each is to improve the document given \
-the feedback. Probabilities must sum to 1.0.
+the feedback. In each <probability> field, give a finite nonnegative relative weight. \
+The harness normalizes these weights; they do not need to sum to 1. \
+Do not calculate or repeatedly adjust their sum. At least one weight must be positive.
 {support_rule}
 
 Consider less obvious actions when the feedback supports them. Preserve useful \
@@ -543,7 +546,8 @@ class VerbalizedActionSelector(Generic[SelectableItemT]):
             retry_prompt = (
                 f"{prompt}\n\n"
                 "Your previous response was incomplete or malformed. Return one complete <response> now, "
-                "with every available action exactly once and probabilities summing to 1.0."
+                "with every available action exactly once and finite nonnegative relative weights. "
+                "At least one weight must be positive. The harness normalizes them; do not calculate their sum."
             )
             self.text_limits.check_prompt(retry_prompt)
             retry_output = self.lm(retry_prompt)
@@ -626,6 +630,10 @@ class VerbalizedActionSelector(Generic[SelectableItemT]):
             is_fallback = True
             total = 1.0
 
+        if not math.isfinite(total):
+            scale = max(probability for _, probability, _ in entries)
+            entries = [(a, p / scale, r) for a, p, r in entries]
+            total = sum(p for _, p, _ in entries)
         entries = [(a, p / total, r) for a, p, r in entries]
 
         return ActionDistribution(entries=entries, is_fallback=is_fallback)

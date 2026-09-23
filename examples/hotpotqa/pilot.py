@@ -19,6 +19,7 @@ from examples.common.pilot_checks import (
     digest,
     load_cycle,
     require_contract,
+    unrecovered_provider_failures,
 )
 from examples.common.provider_retries import PROVIDER_RETRY_KEY, provider_retry_kwargs
 from examples.common.react_v2 import benchmark_data_identity, resolve_template_family
@@ -47,7 +48,7 @@ from examples.hotpotqa.utils import (
 from examples.terminalbench.token_usage import summarize_usage
 
 PILOT_PROTOCOL = {
-    "version": 2,
+    "version": 3,
     "split": "train",
     "smoke": 3,
     "throughput": 12,
@@ -76,6 +77,8 @@ def validate_calibration(directory: Path, count: int) -> dict:
     summary = json.loads((directory / "pilot-summary.json").read_text())
     contract = json.loads((directory / "pilot-contract.json").read_text())
     usage = json.loads((directory / "token-usage-summary.json").read_text())
+    attempt_path = directory / "provider-attempts.jsonl"
+    attempts = [json.loads(line) for line in attempt_path.read_text().splitlines()] if attempt_path.exists() else []
     records = {path.name: digest(json.loads(path.read_text())) for path in (directory / "records").glob("*.json")}
     if (
         marker.get("summary_sha256") != digest(summary)
@@ -86,6 +89,8 @@ def validate_calibration(directory: Path, count: int) -> dict:
         or summary.get("completed_questions") != count
         or len(records) != count
         or not summary.get("qualified")
+        or summary.get("provider_attempts_sha256") != digest(attempts)
+        or unrecovered_provider_failures(attempts)
     ):
         raise ValueError(f"Incomplete or changed calibration evidence: {directory}")
     return summary
@@ -171,6 +176,11 @@ def run_calibration(
         for roles in usage["models"].values()
         for role in roles.values()
     )
+    attempt_path = directory / "provider-attempts.jsonl"
+    attempts = [json.loads(line) for line in attempt_path.read_text().splitlines()] if attempt_path.exists() else []
+    unresolved = unrecovered_provider_failures(attempts)
+    recorded_cutoffs = sum(bool(row.get("length_finish")) + bool(row.get("output_cap_reached")) for row in attempts)
+    qualified = not unresolved and cutoffs == recorded_cutoffs
     windows = [json.loads(path.read_text()) for path in (directory / "allocations").glob("*.json")]
     elapsed = sum(row["ended_at"] - row["started_at"] for row in windows if row["ended_at"] is not None)
     summary = {
@@ -183,14 +193,16 @@ def run_calibration(
         "questions_per_hour": len(records) * 3600 / max(elapsed, 1e-9),
         "unfinished_allocation_windows": sum(row["ended_at"] is None for row in windows),
         "cutoff_review_required": bool(cutoffs),
-        "qualified": not cutoffs,
+        "unrecovered_provider_failures": len(unresolved),
+        "provider_attempts_sha256": digest(attempts),
+        "qualified": qualified,
         "record_hashes": {path.name: digest(json.loads(path.read_text())) for path in records_dir.glob("*.json")},
         "usage_sha256": digest(usage),
         "completed_at": datetime.now(timezone.utc).isoformat(),
     }
     atomic_json(directory / "pilot-summary.json", summary)
-    if cutoffs:
-        raise RuntimeError("Training pilot completed with output cutoffs; review them before continuing")
+    if not qualified:
+        raise RuntimeError("Training pilot has unrecovered provider failures or unverified output cutoffs")
     atomic_json(
         directory / "pilot-complete.json",
         {

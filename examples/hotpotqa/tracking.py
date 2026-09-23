@@ -28,9 +28,10 @@ def provider_usage(path: Path) -> dict:
         for line in stream:
             row = json.loads(line)
             key = f"{row.get('allocation_job_id')}/{row['role']}/{row.get('requested_model')}"
-            group = totals.setdefault(key, {"calls": 0, "transport_errors": 0, "empty_completions": 0})
+            group = totals.setdefault(key, {"calls": 0, "transport_errors": 0, "response_errors": 0, "empty_completions": 0})
             group["calls"] += 1
-            group["transport_errors"] += row.get("outcome") != "success"
+            group["transport_errors"] += row.get("transport_outcome", row.get("outcome")) != "success"
+            group["response_errors"] += bool(row.get("response_error"))
             group["empty_completions"] += row.get("empty_completion") is True
             for field in ("prompt_tokens", "completion_tokens", "reasoning_tokens"):
                 value = row.get(field)

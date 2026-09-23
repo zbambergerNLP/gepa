@@ -51,6 +51,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Literal
 
+from gepa.strategies.forest_constants import BROAD_EDIT_TOOL_SET, MINIMAL_EDIT_TOOL_SET
+
 
 class EditApplicationError(ValueError):
     """Raised when an :class:`EditTool` cannot be applied to a region.
@@ -79,8 +81,8 @@ class EditTool(str, Enum):
 
 # The EditTool ablation axis: minimal 2-op basis vs. broad 4-op set.
 EDIT_TOOL_SETS: dict[str, list[EditTool]] = {
-    "minimal": [EditTool.INSERT_TEXT, EditTool.DELETE_TEXT],
-    "broad": [EditTool.INSERT_TEXT, EditTool.DELETE_TEXT, EditTool.REPLACE_TEXT, EditTool.MOVE_TEXT],
+    MINIMAL_EDIT_TOOL_SET: [EditTool.INSERT_TEXT, EditTool.DELETE_TEXT],
+    BROAD_EDIT_TOOL_SET: [EditTool.INSERT_TEXT, EditTool.DELETE_TEXT, EditTool.REPLACE_TEXT, EditTool.MOVE_TEXT],
 }
 
 

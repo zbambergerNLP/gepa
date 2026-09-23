@@ -19,7 +19,9 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from examples.common.provider_retries import complete_with_retries
+from examples.hotpotqa.model_settings import HOTPOTQA_REQUEST_TIMEOUT_SECONDS
 from examples.hotpotqa.utils import resolve_hotpotqa_lm_kwargs
+from gepa.lm_constants import PROVIDER_ATTEMPT_LOG, PROVIDER_RETRY_KEY
 
 SMOKE_MESSAGES = [
     {"role": "system", "content": "You are a helpful assistant."},
@@ -34,7 +36,7 @@ _CLIENT_ONLY_FIELDS = {
     "extra_body",
     "model_info",
     "cache",
-    "_gepa_provider_retry",
+    PROVIDER_RETRY_KEY,
 }
 
 
@@ -202,11 +204,13 @@ def main() -> None:
     parser.add_argument("--served-name", required=True, help="Model name reported by /v1/models")
     parser.add_argument("--api-base", required=True, help="Local OpenAI-compatible /v1 endpoint")
     parser.add_argument("--output-dir", type=Path, required=True, help="Directory for transcript.json/.md")
-    parser.add_argument("--timeout", type=float, default=3600, help="Per-call timeout in seconds")
+    parser.add_argument(
+        "--timeout", type=float, default=HOTPOTQA_REQUEST_TIMEOUT_SECONDS, help="Per-call timeout in seconds"
+    )
     args = parser.parse_args()
     transcript = run_smoke_exchange(
         args.model, args.served_name, args.api_base, args.timeout,
-        attempt_log=args.output_dir / "provider-attempts.jsonl",
+        attempt_log=args.output_dir / PROVIDER_ATTEMPT_LOG,
     )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     (args.output_dir / "transcript.json").write_text(json.dumps(transcript, indent=2) + "\n", encoding="utf-8")

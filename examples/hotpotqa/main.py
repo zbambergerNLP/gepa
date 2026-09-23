@@ -37,6 +37,7 @@ from urllib.parse import urlsplit
 
 from examples.common.experiment_models import (
     DEEPSEEK_V4_1_FLASH_MODEL,
+    EXPERIMENT_CONTEXT_TOKENS,
     EXPERIMENT_MODELS,
     EXPERIMENT_NUM_RETRIES,
     QWEN3_8_27B_MODEL,
@@ -67,6 +68,13 @@ from examples.hotpotqa.baseline import (
     build_baseline_contract,
     load_baseline_record,
 )
+from examples.hotpotqa.benchmark_settings import (
+    DEFAULT_MAX_WORKERS,
+    EXPANDED_METRIC_CALLS,
+    RETRIEVAL_K,
+    SPLIT_COUNTS,
+    STANDARD_METRIC_CALLS,
+)
 from examples.hotpotqa.source_compatibility import compatibility_contract
 from examples.hotpotqa.tracking import HotpotqaWandb, report_completed
 from examples.hotpotqa.utils import (
@@ -94,6 +102,7 @@ from gepa.gepa_launcher import (
     optimize_anything,
 )
 from gepa.lm import LM
+from gepa.lm_constants import PROVIDER_ATTEMPT_LOG
 from gepa.proposer.reflective_mutation.react_v2_proposer import REACT_V2_EXECUTION_CONTRACT
 from gepa.proposer.reflective_mutation.single_call_proposer import SINGLE_CALL_EXECUTION_CONTRACT
 from gepa.response_journal import RESPONSE_JOURNAL_SCHEMA_VERSION, RESPONSE_JOURNAL_SCOPE_POLICY
@@ -104,6 +113,19 @@ from gepa.strategies.action_space import (
 )
 from gepa.strategies.batch_sampler import IndependentEpochShuffledBatchSampler
 from gepa.strategies.document_template import TEMPLATE_FAMILIES
+from gepa.strategies.forest_constants import (
+    BROAD_EDIT_TOOL_SET,
+    DEFAULT_REFLECTION_LEVEL,
+    DEFAULT_REFLECTION_MINIBATCH_SIZE,
+    MINIMAL_EDIT_TOOL_SET,
+    OPTIMIZER_ROLE,
+    REACT_EDITOR_MODE,
+    SEMANTIC_REFLECTION_LEVEL,
+    SINGLE_CALL_EDITOR_MODE,
+    SOLVER_ROLE,
+    UNIFORM_RANDOM_SELECTION,
+    VERBALIZED_SELECTION,
+)
 from gepa.strategies.instruction_proposal import InstructionProposalSignature
 from gepa.strategies.intervention import (
     CONTROLLER_POLICY_CONTRACT,
@@ -155,13 +177,13 @@ _CONDITION_LABELS = {
 _PAPER_MAX_MERGE_INVOCATIONS = 5
 _PAPER_MERGE_VAL_OVERLAP_FLOOR = 5
 _SCIENTIFIC_CONDITIONS_BY_BUDGET = {
-    6_871: ("vanilla", "react_v2", "react_v2_random", "action", "random"),
-    13_742: ("vanilla", "react_v2"),
+    STANDARD_METRIC_CALLS: ("vanilla", "react_v2", "react_v2_random", "action", "random"),
+    EXPANDED_METRIC_CALLS: ("vanilla", "react_v2"),
 }
 _SCIENTIFIC_METRIC_CALL_BUDGETS = set(_SCIENTIFIC_CONDITIONS_BY_BUDGET)
 _SCIENTIFIC_PYTHON_VERSION = "3.11.13"
 _SCIENTIFIC_UV_VERSION = "0.9.13"
-_SCIENTIFIC_SPLIT_COUNTS = {"train": 150, "val": 300, "test": 300}
+_SCIENTIFIC_SPLIT_COUNTS = SPLIT_COUNTS
 _REACT_V2_CONDITIONS = {"react_v2", "react_v2_random"}
 _SEMANTIC_CONDITIONS = {"react_v2", "react_v2_random", "random", "action"}
 _HELDOUT_RECOVERY_LOCK = threading.Lock()
@@ -221,9 +243,9 @@ def _validate_scientific_contract(args, runtime_environment: dict | None = None)
             ("program", "2stage"),
             ("seed_style", "structured"),
             ("seed", 0),
-            ("retrieval_k", 7),
-            ("reflection_level", 2),
-            ("edit_tool_set", "broad"),
+            ("retrieval_k", RETRIEVAL_K),
+            ("reflection_level", DEFAULT_REFLECTION_LEVEL),
+            ("edit_tool_set", BROAD_EDIT_TOOL_SET),
             ("template_family", "auto"),
         )
         for name, expected in required_values:
@@ -236,7 +258,7 @@ def _validate_scientific_contract(args, runtime_environment: dict | None = None)
                 changed_axes.append(f"--{name.replace('_', '-')} must be omitted")
         if getattr(args, "merge", False):
             changed_axes.append("--merge must be omitted")
-        max_metric_calls = getattr(args, "max_metric_calls", 6_871)
+        max_metric_calls = getattr(args, "max_metric_calls", STANDARD_METRIC_CALLS)
         if max_metric_calls not in _SCIENTIFIC_METRIC_CALL_BUDGETS:
             changed_axes.append("--max-metric-calls must be 6871 or 13742")
         else:
@@ -280,7 +302,7 @@ def _validate_scientific_contract(args, runtime_environment: dict | None = None)
             changed_axes.append(f"HOTPOTQA_MODEL_REVISION must be {expected_model_version!r}")
         solver_api_base = args.solver_api_base if args.solver_api_base is not None else args.api_base
         reflection_api_base = args.reflection_api_base if args.reflection_api_base is not None else args.api_base
-        for role, api_base in (("solver", solver_api_base), ("reflection", reflection_api_base)):
+        for role, api_base in ((SOLVER_ROLE, solver_api_base), ("reflection", reflection_api_base)):
             parsed_api_base = urlsplit(api_base or "")
             try:
                 valid_loopback = (
@@ -374,7 +396,7 @@ def _validate_scientific_contract(args, runtime_environment: dict | None = None)
             required_serve_settings = (
                 "tp=1",
                 "gpu_memory_utilization=0.92",
-                "max_model_len=262144",
+                f"max_model_len={EXPERIMENT_CONTEXT_TOKENS}",
                 "rope_scaling=none",
                 sequence_setting,
                 "dtype=bfloat16",
@@ -405,7 +427,7 @@ def _validate_scientific_contract(args, runtime_environment: dict | None = None)
                 "dp=1",
                 "api_servers=1",
                 "gpu_memory_utilization=0.92",
-                "max_model_len=262144",
+                f"max_model_len={EXPERIMENT_CONTEXT_TOKENS}",
                 sequence_setting,
                 "dtype=bfloat16",
                 "weight_dtype=fp8",
@@ -549,7 +571,7 @@ def build_run_contract(condition: str, args) -> dict:
     reflection_api_identity = _contract_api_base(reflection_api_base, scientific_contract=scientific_contract)
     _validate_scientific_contract(args)
     solver_lm_kwargs = resolve_hotpotqa_lm_kwargs(args.solver_model, None)
-    reflection_lm_kwargs = resolve_hotpotqa_lm_kwargs(args.reflection_model, None, role="optimizer")
+    reflection_lm_kwargs = resolve_hotpotqa_lm_kwargs(args.reflection_model, None, role=OPTIMIZER_ROLE)
     solver_decoding_fields = list(experiment_decoding(args.solver_model, agentic=False))
     if "seed" in solver_lm_kwargs:
         solver_decoding_fields.append("seed")
@@ -582,7 +604,7 @@ def build_run_contract(condition: str, args) -> dict:
                     "requested": manifestor_decoding,
                     "provider_ignored_fields": [],
                 }
-                if reflection_level >= 2
+                if reflection_level >= SEMANTIC_REFLECTION_LEVEL
                 else None
             ),
             "react_v2_proposer": {
@@ -622,7 +644,7 @@ def build_run_contract(condition: str, args) -> dict:
             ],
         }
     semantic_controller_policy = None
-    if reflection_level == 2:
+    if reflection_level == SEMANTIC_REFLECTION_LEVEL:
         if condition == "react_v2_random":
             semantic_controller_policy = deepcopy(UNIFORM_RANDOM_CONTROLLER_POLICY_CONTRACT)
         else:
@@ -671,14 +693,20 @@ def build_run_contract(condition: str, args) -> dict:
             "raise_on_exception": True,
             "batch_sampler": "epoch_shuffled",
             "training_batch_order": IndependentEpochShuffledBatchSampler(3, args.seed).contract(),
-            "reflection_minibatch_size": 3,
+            "reflection_minibatch_size": DEFAULT_REFLECTION_MINIBATCH_SIZE,
             "component_selector": "round_robin",
             "reflection_context": deepcopy(REFLECTION_CONTEXT_CONTRACT),
             "generalization": deepcopy(FOREST_REFLECTION_CONTRACT) if condition in _REACT_V2_CONDITIONS else None,
             "manifestor_traces_chars": text_limits.manifestor_trace_chars,
             "document_length": text_limits.document_contract(),
             "text_limits": text_limits.to_dict(),
-            "react_execution": deepcopy(SINGLE_CALL_EXECUTION_CONTRACT if getattr(args, "editor_mode", "react") == "single_call" else REACT_V2_EXECUTION_CONTRACT) if condition in _REACT_V2_CONDITIONS else None,
+            "react_execution": deepcopy(
+                SINGLE_CALL_EXECUTION_CONTRACT
+                if getattr(args, "editor_mode", REACT_EDITOR_MODE) == SINGLE_CALL_EDITOR_MODE
+                else REACT_V2_EXECUTION_CONTRACT
+            )
+            if condition in _REACT_V2_CONDITIONS
+            else None,
             "skip_perfect_score": True,
             "perfect_score": 1.0,
             "merge": merge,
@@ -691,13 +719,15 @@ def build_run_contract(condition: str, args) -> dict:
             "reflection_level": reflection_level,
             "edit_tool_set": edit_tool_set,
             "semantic_action_space": (
-                deepcopy(SEMANTIC_ACTION_CATALOGS["prompt"]) if reflection_level == 2 or stateless_semantic else None
+                deepcopy(SEMANTIC_ACTION_CATALOGS["prompt"])
+                if reflection_level == SEMANTIC_REFLECTION_LEVEL or stateless_semantic
+                else None
             ),
             "semantic_controller_policy": semantic_controller_policy,
             "stateless_action_menu": stateless_action_menu,
             "stateless_selector_policy": (
                 stateless_selector_policy_contract(
-                    "random" if condition == "random" else "verbalized", text_limits=text_limits
+                    "random" if condition == "random" else VERBALIZED_SELECTION, text_limits=text_limits
                 )
                 if stateless_semantic
                 else None
@@ -716,7 +746,9 @@ def build_run_contract(condition: str, args) -> dict:
             "branch_history": (
                 {
                     "storage": "target_scoped_user_assistant_messages",
-                    "delivery": "quoted_user_context" if getattr(args, "editor_mode", "react") == "single_call" else "provider_chat_messages",
+                    "delivery": "quoted_user_context"
+                    if getattr(args, "editor_mode", REACT_EDITOR_MODE) == SINGLE_CALL_EDITOR_MODE
+                    else "provider_chat_messages",
                 }
                 if condition in _REACT_V2_CONDITIONS
                 else None
@@ -1193,7 +1225,7 @@ def evaluate_starting_baseline(
             retrieval_k=contract["program"]["retrieval_k"],
             solver_lm_kwargs={
                 **solver_lm_kwargs,
-                **provider_retry_kwargs(directory / "provider-attempts.jsonl", "baseline_solver"),
+                **provider_retry_kwargs(directory / PROVIDER_ATTEMPT_LOG, "baseline_solver"),
             },
             checkpoint_dir=directory / "heldout",
         )
@@ -1325,7 +1357,7 @@ def build_config(condition: str, args, reflection_lm_kwargs: dict, run_dir: str 
     observed_retry_settings = (reflection_lm_kwargs or {}).get(PROVIDER_RETRY_KEY, {})
     reflection_lm_kwargs = {
         **(reflection_lm_kwargs or {}),
-        **provider_retry_kwargs(Path(resolved_run_dir) / "provider-attempts.jsonl", "optimizer"),
+        **provider_retry_kwargs(Path(resolved_run_dir) / PROVIDER_ATTEMPT_LOG, OPTIMIZER_ROLE),
     }
     for field in ("token_usage_log", "token_limits"):
         if field in observed_retry_settings:
@@ -1362,10 +1394,10 @@ def build_config(condition: str, args, reflection_lm_kwargs: dict, run_dir: str 
             lm_kwargs=react_v2_kwargs,
             level=args.reflection_level,
             edit_tool_set=args.edit_tool_set,
-            editor_mode=getattr(args, "editor_mode", "react"),
+            editor_mode=getattr(args, "editor_mode", REACT_EDITOR_MODE),
             template_family=args.template_family,
             component_kinds=_component_kinds(args.program),
-            controller_selection="uniform_random" if condition == "react_v2_random" else "verbalized",
+            controller_selection=UNIFORM_RANDOM_SELECTION if condition == "react_v2_random" else VERBALIZED_SELECTION,
             rng=random.Random(args.seed),
             text_limits=text_limits,
             manifestor_temperature=float(experiment_decoding(args.reflection_model, agentic=False)["temperature"]),
@@ -1399,7 +1431,7 @@ def build_config(condition: str, args, reflection_lm_kwargs: dict, run_dir: str 
             skip_perfect_score=True,
             perfect_score=1.0,
             batch_sampler=IndependentEpochShuffledBatchSampler(3, args.seed),
-            reflection_minibatch_size=3,
+            reflection_minibatch_size=DEFAULT_REFLECTION_MINIBATCH_SIZE,
             module_selector="round_robin",
             reflection_lm=args.reflection_model,
             reflection_lm_kwargs=reflection_proposer_kwargs,
@@ -1500,7 +1532,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-metric-calls",
         type=int,
-        default=6871,
+        default=STANDARD_METRIC_CALLS,
         help="Budget per condition (paper: 6871, smoke: 200, two-times compute: 13742)",
     )
     parser.add_argument(
@@ -1540,9 +1572,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Prepared frozen Wiki-2017 corpus and BM25S index directory",
     )
     parser.add_argument(
-        "--retrieval-k", type=int, default=7, help="Wiki-2017 abstracts retrieved per hop (artifact: 7)"
+        "--retrieval-k", type=int, default=RETRIEVAL_K, help="Wiki-2017 abstracts retrieved per hop (artifact: 7)"
     )
-    parser.add_argument("--max-workers", type=int, default=32, help="Parallel evaluator workers (artifact: 32)")
+    parser.add_argument(
+        "--max-workers", type=int, default=DEFAULT_MAX_WORKERS, help="Parallel evaluator workers (artifact: 32)"
+    )
     parser.add_argument("--train-limit", type=int, default=None, help="Limit train-set size (paper: 150)")
     parser.add_argument("--val-limit", type=int, default=None, help="Limit val-set size (paper: 300)")
     parser.add_argument("--test-limit", type=int, default=None, help="Limit test-set size (paper: 300)")
@@ -1576,18 +1610,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--reflection-level",
         type=int,
-        default=2,
+        default=DEFAULT_REFLECTION_LEVEL,
         choices=[1, 2],
         help="Reflection level: 1 selects a section; 2 also selects and applies a semantic action",
     )
     parser.add_argument(
-        "--editor-mode", choices=["react", "single_call"], default="react",
+        "--editor-mode", choices=[REACT_EDITOR_MODE, SINGLE_CALL_EDITOR_MODE], default=REACT_EDITOR_MODE,
         help="FOREST editor: observation loop or one response with an atomic ordered edit batch",
     )
     parser.add_argument(
         "--edit-tool-set",
-        choices=["minimal", "broad"],
-        default="broad",
+        choices=[MINIMAL_EDIT_TOOL_SET, BROAD_EDIT_TOOL_SET],
+        default=BROAD_EDIT_TOOL_SET,
         help="Edit tools: insert/delete only, or insert/delete/replace/move",
     )
     parser.add_argument(
@@ -1684,7 +1718,7 @@ def main():
     reflection_lm_kwargs = resolve_hotpotqa_lm_kwargs(
         args.reflection_model,
         reflection_api_base,
-        role="optimizer",
+        role=OPTIMIZER_ROLE,
     )
     if args.condition == "all" and args.enforce_scientific_contract:
         conditions = list(_SCIENTIFIC_CONDITIONS_BY_BUDGET[args.max_metric_calls])
@@ -1719,7 +1753,7 @@ def main():
             reflection_diagnostics=condition in _REACT_V2_CONDITIONS,
             solver_lm_kwargs={
                 **solver_lm_kwargs,
-                **provider_retry_kwargs(Path(run_dir) / "provider-attempts.jsonl", "solver"),
+                **provider_retry_kwargs(Path(run_dir) / PROVIDER_ATTEMPT_LOG, SOLVER_ROLE),
             },
         )
         config, selector = build_config(condition, args, reflection_lm_kwargs, run_dir=run_dir)
@@ -1794,7 +1828,7 @@ def main():
             retrieval_k=args.retrieval_k,
             solver_lm_kwargs={
                 **solver_lm_kwargs,
-                **provider_retry_kwargs(Path(run_dirs[name]) / "provider-attempts.jsonl", "solver"),
+                **provider_retry_kwargs(Path(run_dirs[name]) / PROVIDER_ATTEMPT_LOG, SOLVER_ROLE),
             },
             checkpoint_dir=Path(run_dirs[name]) / "heldout",
         )

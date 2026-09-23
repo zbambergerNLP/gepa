@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from examples.common.provider_retries import PROVIDER_RETRY_KEY, provider_retry_kwargs
+from gepa.lm_constants import PROVIDER_ATTEMPT_LOG, TOKEN_USAGE_LOG
 
 TOKEN_USAGE_POLICY = {
     "schema_version": 2,
@@ -85,7 +86,7 @@ def observe_optimizer(lm: Any, path: Path, role: str, limits: dict[str, Any]) ->
     Returns:
         The same client with the approved retry and raw-usage policy.
     """
-    settings = provider_retry_kwargs(path.with_name("provider-attempts.jsonl"), role)
+    settings = provider_retry_kwargs(path.with_name(PROVIDER_ATTEMPT_LOG), role)
     settings[PROVIDER_RETRY_KEY].update(token_usage_log=str(path), token_limits=limits)
     lm.completion_kwargs.update(settings)
     return lm
@@ -99,7 +100,7 @@ def observe_harbor(llm: Any, path: Path, limits: dict[str, Any]) -> None:
         path: Trial-local usage log.
         limits: Effective model limits.
     """
-    settings = provider_retry_kwargs(path.with_name("provider-attempts.jsonl"), "task_agent")
+    settings = provider_retry_kwargs(path.with_name(PROVIDER_ATTEMPT_LOG), "task_agent")
     settings[PROVIDER_RETRY_KEY].update(token_usage_log=str(path), token_limits=limits)
     llm._llm_kwargs.update(settings)
 
@@ -114,7 +115,7 @@ def summarize_usage(paths: list[Path]) -> dict[str, Any]:
         Counts by model and role across observed physical calls, including failed jobs.
     """
     files = sorted(
-        {file.resolve() for path in paths for file in ([path] if path.is_file() else path.rglob("token-usage.jsonl"))}
+        {file.resolve() for path in paths for file in ([path] if path.is_file() else path.rglob(TOKEN_USAGE_LOG))}
     )
     models: dict[str, Any] = {}
     for file in files:

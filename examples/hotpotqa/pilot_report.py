@@ -11,6 +11,7 @@ from pathlib import Path
 from examples.common.pilot_checks import METHODS, atomic_json, digest, load_cycle
 from examples.hotpotqa.pilot import validate_calibration
 from examples.terminalbench.token_usage import summarize_usage
+from gepa.lm_constants import PROVIDER_ATTEMPT_LOG
 
 
 def request_intervals(path: Path) -> list[tuple[float, float]]:
@@ -85,14 +86,14 @@ def report(root: Path) -> dict:
             except (OSError, ValueError, KeyError) as exc:
                 evidence["issues"].append(f"{method}: {exc}")
         try:
-            logs = list(directory.rglob("provider-attempts.jsonl"))
+            logs = list(directory.rglob(PROVIDER_ATTEMPT_LOG))
             evidence["usage"] = summarize_usage(logs)
             for check in (
                 directory / "smoke",
                 directory / "full",
                 *(directory / "optimizer" / method for method in METHODS),
             ):
-                usage_file = check / "provider-attempts.jsonl"
+                usage_file = check / PROVIDER_ATTEMPT_LOG
                 if not usage_file.exists() or not usage_file.stat().st_size:
                     evidence["issues"].append(f"Missing provider usage: {usage_file}")
             evidence["allocation_job_ids"] = sorted(
@@ -103,7 +104,7 @@ def report(root: Path) -> dict:
                     if (row := json.loads(line)).get("allocation_job_id") is not None
                 }
             )
-            intervals.append(request_intervals(directory / "full" / "provider-attempts.jsonl"))
+            intervals.append(request_intervals(directory / "full" / PROVIDER_ATTEMPT_LOG))
         except (OSError, ValueError, KeyError) as exc:
             evidence["issues"].append(f"usage: {exc}")
             intervals.append([])

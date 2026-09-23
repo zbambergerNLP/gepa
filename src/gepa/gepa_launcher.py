@@ -160,6 +160,7 @@ from gepa.strategies.component_selector import (
 )
 from gepa.strategies.document_template import MalformedDocumentError, infer_template_family
 from gepa.strategies.eval_policy import EvaluationPolicy, FullEvaluationPolicy
+from gepa.strategies.forest_constants import BROAD_EDIT_TOOL_SET, DEFAULT_REFLECTION_MINIBATCH_SIZE
 from gepa.strategies.intervention import StatelessActionConstraint
 from gepa.strategies.proposal_sampling import SamplingStrategy
 from gepa.strategies.proposal_selection import SelectionStrategy
@@ -794,7 +795,7 @@ class ReflectionConfig:
     # 3-role reflection (Controller -> Manifestor -> ReAct V2). An explicit
     # reflection_strategy takes precedence over these convenience fields.
     reflection_level: Literal[0, 1, 2] = 0
-    edit_tool_set: Literal["minimal", "broad"] = "broad"
+    edit_tool_set: Literal["minimal", "broad"] = BROAD_EDIT_TOOL_SET
     component_kinds: dict[str, str] | None = None
     template_family: Literal["auto", "generic", "openai", "anthropic", "google", "alibaba"] = "auto"
     template_model: str | None = None
@@ -1348,7 +1349,7 @@ def optimize_anything(
 
     # Set reflection_minibatch_size default based on mode (if not explicitly set)
     if config.reflection.reflection_minibatch_size is None:
-        config.reflection.reflection_minibatch_size = 1 if single_instance_mode else 3
+        config.reflection.reflection_minibatch_size = 1 if single_instance_mode else DEFAULT_REFLECTION_MINIBATCH_SIZE
 
     # Handle single-instance mode: when both dataset=None and valset=None, create a
     # dataset with a single sentinel element. The evaluator will be called

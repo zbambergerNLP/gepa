@@ -920,9 +920,9 @@ def test_wikipedia_sbatch_exposes_both_homogeneous_model_profiles(benchmark: str
         assert "source scripts/della/remote/hotpotqa_workload.sh" in script
         script += (REPO_ROOT / "scripts/della/remote/hotpotqa_workload.sh").read_text()
 
-    assert 'MODEL_PROFILE="${MODEL_PROFILE:-qwen3.8-27b}"' in script
-    assert 'SOLVER_MODEL="hosted_vllm/Qwen/Qwen3.8-27B"' in script
-    assert 'SOLVER_MODEL="hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash"' in script
+    assert 'MODEL_PROFILE="${MODEL_PROFILE:-${FOREST_QWEN_PROFILE}}"' in script
+    assert 'SOLVER_MODEL="${FOREST_QWEN_MODEL}"' in script
+    assert 'SOLVER_MODEL="${FOREST_DEEPSEEK_MODEL}"' in script
     assert 'REFLECTION_MODEL="${SOLVER_MODEL}"' in script
     assert 'SOLVER_API_ARG=(--solver-api-base "${SOLVER_API_BASE}")' in script
     assert 'REFLECTION_API_ARG=(--reflection-api-base "${REFLECTION_API_BASE}")' in script
@@ -953,7 +953,7 @@ def test_hotpotqa_della_submit_scales_resources_by_model_profile() -> None:
     assert 'VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-${DELLA_GPUS}}"' in submit
     assert 'VLLM_API_SERVER_COUNT="${VLLM_API_SERVER_COUNT:-${VLLM_DATA_PARALLEL_SIZE}}"' in submit
     assert "DELLA_GPUS=0" not in submit
-    assert "deepseek-v4.1-flash)" in submit
+    assert '"${FOREST_DEEPSEEK_PROFILE}")' in submit
     assert 'VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-4}"' in submit
     assert 'VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-1}"' in submit
     assert 'VLLM_API_SERVER_COUNT="${VLLM_API_SERVER_COUNT:-1}"' in submit
@@ -977,7 +977,7 @@ def test_hotpotqa_sbatch_configures_within_run_vllm_throughput() -> None:
     assert 'VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-1}"' in script
     assert 'VLLM_API_SERVER_COUNT="${VLLM_API_SERVER_COUNT:-${VLLM_DATA_PARALLEL_SIZE}}"' in script
     assert 'VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-1}"' in script
-    assert 'VLLM_MAX_NUM_BATCHED_TOKENS="${VLLM_MAX_NUM_BATCHED_TOKENS:-16384}"' in script
+    assert 'VLLM_MAX_NUM_BATCHED_TOKENS="${VLLM_MAX_NUM_BATCHED_TOKENS:-${FOREST_MAX_BATCHED_TOKENS}}"' in script
     assert "--tensor-parallel-size 1" in script
     assert "--data-parallel-size 1" in script
     assert "--api-server-count 1" in script
@@ -1043,7 +1043,7 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
 
     assert "REFLECTION_MODEL" in submit
     assert "REFLECTION_API_BASE" in submit
-    assert 'MODEL_PROFILE="${MODEL_PROFILE:-qwen3.8-27b}"' in submit
+    assert 'MODEL_PROFILE="${MODEL_PROFILE:-${FOREST_QWEN_PROFILE}}"' in submit
     assert 'BUDGET_PROFILE="${BUDGET_PROFILE:-campaign}"' in submit
     assert 'HOTPOTQA_CAMPAIGN_ID="${HOTPOTQA_CAMPAIGN_ID:-hotpotqa-final-v1}"' in submit
     assert 'HOTPOTQA_CAMPAIGN_ID="${HOTPOTQA_CAMPAIGN_ID:-hotpotqa-final-v1}"' in fetch
@@ -1051,9 +1051,9 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert campaign_pattern in submit
     assert campaign_pattern in fetch
     assert campaign_pattern in sbatch
-    assert "MAX_METRIC_CALLS=6871" in submit
+    assert "MAX_METRIC_CALLS=${HOTPOTQA_STANDARD_METRIC_CALLS}" in submit
     assert 'STANDARD_TIME="${STANDARD_TIME:-${TIME:-72:00:00}}"' in submit
-    assert "MAX_METRIC_CALLS=13742" in submit
+    assert "MAX_METRIC_CALLS=${HOTPOTQA_EXPANDED_METRIC_CALLS}" in submit
     assert 'EXPANDED_TIME="${EXPANDED_TIME:-${TIME:-144:00:00}}"' in submit
     assert 'CONDITION="${CONDITION:-all}"' in submit
     assert 'MAX_WORKERS="${MAX_WORKERS:-}"' in submit
@@ -1062,14 +1062,14 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert "Qwen3.8-27B production runs require GPU_PARTITION=ailab" in submit
     assert "scientific Qwen runs require one H200, TP1/DP1, and one API server" in submit
     assert 'SOLVER_MODEL_PATH="${MODEL_STORAGE}/${MODEL}"' in submit
-    assert 'MODEL_SNAPSHOT_PROFILE="qwen3.8-27b"' in submit
-    assert 'MODEL_SNAPSHOT_PROFILE="deepseek-v4.1-flash"' in submit
+    assert 'MODEL_SNAPSHOT_PROFILE="${FOREST_QWEN_PROFILE}"' in submit
+    assert 'MODEL_SNAPSHOT_PROFILE="${FOREST_DEEPSEEK_PROFILE}"' in submit
     assert 'MODEL_INTEGRITY_MANIFEST="${SOLVER_MODEL_PATH}/.gepa-model-integrity.json"' in submit
     assert '[[ ! -d "${SOLVER_MODEL_PATH}" || ! -s "\\${MODEL_INTEGRITY_MANIFEST}" ]]' in submit
     assert "checkpoint is not staged at ${SOLVER_MODEL_PATH}" in submit
     assert "found staged local ${MODEL_SNAPSHOT_PROFILE} checkpoint" in submit
-    assert 'SOLVER_MODEL="hosted_vllm/Qwen/Qwen3.8-27B"' in submit
-    assert 'SOLVER_MODEL="hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash"' in submit
+    assert 'SOLVER_MODEL="${FOREST_QWEN_MODEL}"' in submit
+    assert 'SOLVER_MODEL="${FOREST_DEEPSEEK_MODEL}"' in submit
     assert 'REFLECTION_MODEL="${SOLVER_MODEL}"' in submit
     assert "DEEPSEEK_API_KEY" not in submit
     assert r'"BUDGET_PROFILE=\${run_budget_profile}"' in submit
@@ -1153,8 +1153,8 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert "SUBMIT_BUDGET_PROFILES=(expanded expanded)" in submit
     assert "SUBMIT_CONDITIONS=(vanilla react_v2)" in submit
     assert r'RUN_BUDGET_PROFILE="\${SUBMIT_BUDGET_PROFILES[\${CELL_INDEX}]}"' in submit
-    assert "RUN_MAX_METRIC_CALLS=6871" in submit
-    assert "RUN_MAX_METRIC_CALLS=13742" in submit
+    assert "RUN_MAX_METRIC_CALLS=${HOTPOTQA_STANDARD_METRIC_CALLS}" in submit
+    assert "RUN_MAX_METRIC_CALLS=${HOTPOTQA_EXPANDED_METRIC_CALLS}" in submit
     assert 'RUN_TIME="${STANDARD_TIME}"' in submit
     assert 'RUN_TIME="${EXPANDED_TIME}"' in submit
     assert r'--plan "\${PLAN_PATH}" --source-commit "${HOTPOTQA_SOURCE_COMMIT}"' in submit
@@ -1167,7 +1167,7 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert ".gepa-source-commit" in submit
     assert ".gepa-source-manifest.sha256sums" in submit
     assert "HOTPOTQA_SOURCE_MANIFEST_SHA256=${HOTPOTQA_SOURCE_MANIFEST_SHA256}" in submit
-    assert 'if [[ "${MODEL_PROFILE}" == "deepseek-v4.1-flash" ]]' in submit
+    assert 'if [[ "${MODEL_PROFILE}" == "${FOREST_DEEPSEEK_PROFILE}" ]]' in submit
     assert "commit the complete experiment source" in submit
     assert '"${SCRIPT_DIR}/sync_to_della.sh"' in submit
     assert "NO_SYNC" not in submit
@@ -1193,12 +1193,12 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert "submit this production job through scripts/della/submit_hotpotqa.sh" in sbatch
     assert "#SBATCH --cpus-per-task=8" in sbatch
     assert 'BUDGET_PROFILE="${BUDGET_PROFILE:-standard}"' in sbatch
-    assert "EXPECTED_MAX_METRIC_CALLS=6871" in sbatch
-    assert "EXPECTED_MAX_METRIC_CALLS=13742" in sbatch
+    assert "EXPECTED_MAX_METRIC_CALLS=${HOTPOTQA_STANDARD_METRIC_CALLS}" in sbatch
+    assert "EXPECTED_MAX_METRIC_CALLS=${HOTPOTQA_EXPANDED_METRIC_CALLS}" in sbatch
     assert 'MODEL="Qwen3.8-27B"' in sbatch
     assert 'SOLVER_MODEL_PATH="${MODEL_STORAGE}/${MODEL}"' in sbatch
-    assert 'QWEN_REVISION="1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"' in sbatch
-    assert 'DEEPSEEK_REVISION="dba1be0a40aa45a94ad051997016db3960a90277"' in sbatch
+    assert 'QWEN_REVISION="${FOREST_QWEN_REVISION}"' in sbatch
+    assert 'DEEPSEEK_REVISION="${FOREST_DEEPSEEK_REVISION}"' in sbatch
     assert "sglang" not in sbatch
     assert 'HOTPOTQA_MODEL_REVISION="${QWEN_REVISION}"' in sbatch
     assert 'HOTPOTQA_MODEL_REVISION="${DEEPSEEK_REVISION}"' in sbatch
@@ -1228,7 +1228,7 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert 'if ! flock -n "${RUN_LOCK_FD}"' in sbatch
     assert "another HotPotQA job is already writing" in sbatch
     assert "proxy/default" not in sbatch
-    assert "GEN_MAX_LEN=262144" in sbatch
+    assert 'GEN_MAX_LEN="${FOREST_CONTEXT_TOKENS}"' in sbatch
     assert "max_model_len=${GEN_MAX_LEN}" in sbatch
     assert "--dtype bfloat16" in sbatch
     assert "--kv-cache-dtype auto" in sbatch

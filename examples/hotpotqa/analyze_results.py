@@ -14,11 +14,14 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from examples.common.experiment_models import DEEPSEEK_V4_1_FLASH_MODEL, QWEN3_8_27B_MODEL
 from examples.common.react_v2 import WIKIPEDIA_RUN_CONTRACT_FILENAME
 from examples.hotpotqa.baseline import load_baseline_record
+from examples.hotpotqa.benchmark_settings import EXPANDED_METRIC_CALLS, STANDARD_METRIC_CALLS
 from examples.hotpotqa.source_compatibility import comparison_runtime
+from gepa.strategies.forest_constants import SOLVER_ROLE
 
-_BUDGET_LABELS = {6_871: "standard", 13_742: "expanded"}
+_BUDGET_LABELS = {STANDARD_METRIC_CALLS: "standard", EXPANDED_METRIC_CALLS: "expanded"}
 _CONDITION_ORDER = {
     "vanilla": 0,
     "react_v2": 1,
@@ -27,18 +30,18 @@ _CONDITION_ORDER = {
     "random": 4,
 }
 _MODEL_LABELS = {
-    "hosted_vllm/Qwen/Qwen3.8-27B": "Qwen3.8-27B",
-    "hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash": "DeepSeek-V4.1-Flash",
+    QWEN3_8_27B_MODEL: "Qwen3.8-27B",
+    DEEPSEEK_V4_1_FLASH_MODEL: "DeepSeek-V4.1-Flash",
 }
-_TEACHER_STUDENT_PAIR = ("hosted_vllm/Qwen/Qwen3.8-27B", "hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash")
+_TEACHER_STUDENT_PAIR = (QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL)
 _APPROVED_CELLS = {
-    (6_871, "vanilla"),
-    (6_871, "react_v2"),
-    (6_871, "react_v2_random"),
-    (6_871, "action"),
-    (6_871, "random"),
-    (13_742, "vanilla"),
-    (13_742, "react_v2"),
+    (STANDARD_METRIC_CALLS, "vanilla"),
+    (STANDARD_METRIC_CALLS, "react_v2"),
+    (STANDARD_METRIC_CALLS, "react_v2_random"),
+    (STANDARD_METRIC_CALLS, "action"),
+    (STANDARD_METRIC_CALLS, "random"),
+    (EXPANDED_METRIC_CALLS, "vanilla"),
+    (EXPANDED_METRIC_CALLS, "react_v2"),
 }
 
 
@@ -387,7 +390,7 @@ def analyze_run(run_dir: Path, fallback_tau: float) -> dict[str, Any]:
     max_metric_calls = int(optimizer.get("max_metric_calls", 0))
     if (max_metric_calls, condition) not in _APPROVED_CELLS:
         raise ValueError(f"Run {run_dir} is not one of the seven approved campaign cells.")
-    solver_model = str(models.get("solver", ""))
+    solver_model = str(models.get(SOLVER_ROLE, ""))
     reflection_model = str(models.get("reflection", ""))
     paired = (solver_model, reflection_model) == _TEACHER_STUDENT_PAIR
     if solver_model not in _MODEL_LABELS or (reflection_model != solver_model and not paired):

@@ -15,7 +15,7 @@ from collections.abc import Callable, Mapping
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 from urllib.error import HTTPError, URLError
 
 import httpx
@@ -23,22 +23,39 @@ import litellm
 from litellm.exceptions import APIConnectionError, AuthenticationError, BadRequestError, ContextWindowExceededError
 
 from gepa.lm import LMRequestExhaustedError
+from gepa.lm_constants import (
+    EMPTY_COMPLETION_ERROR,
+    LENGTH_FINISH_REASON,
+    MISSING_CHOICES_ERROR,
+    OUTPUT_LENGTH_ERROR,
+    PROVIDER_ATTEMPT_LOG,
+    PROVIDER_BACKOFF_SECONDS,
+    PROVIDER_FAILURE_DIRECTORY,
+    PROVIDER_MAX_ATTEMPTS,
+    PROVIDER_MAX_RETRIES,
+    PROVIDER_MIN_TIMEOUT_SECONDS,
+    PROVIDER_RETRY_KEY,
+    PROVIDER_RETRYABLE_HTTP_STATUSES,
+    PROVIDER_SDK_RETRIES,
+    PROVIDER_SEED_MODULUS,
+    PROVIDER_TIMEOUT_FIELDS,
+    PROVIDER_WRAPPER_ATTRIBUTE,
+)
 
-PROVIDER_RETRY_KEY = "_gepa_provider_retry"
 PROVIDER_RETRY_POLICY = {
     "version": 2,
-    "max_retries": 3,
-    "max_attempts": 4,
-    "backoff_seconds": [1.0, 2.0, 4.0],
+    "max_retries": PROVIDER_MAX_RETRIES,
+    "max_attempts": PROVIDER_MAX_ATTEMPTS,
+    "backoff_seconds": list(PROVIDER_BACKOFF_SECONDS),
     "backoff_jitter": "uniform_zero_to_backoff",
-    "retryable_http_statuses": [408, 429, 500, 502, 503, 504],
+    "retryable_http_statuses": list(PROVIDER_RETRYABLE_HTTP_STATUSES),
     "retryable_errors": "connection_or_transport_timeout",
-    "retryable_responses": ["output_length", "empty_completion", "missing_choices"],
+    "retryable_responses": [OUTPUT_LENGTH_ERROR, EMPTY_COMPLETION_ERROR, MISSING_CHOICES_ERROR],
     "incomplete_response_seed": "advance_explicit_seed_by_one_modulo_2**32",
     "semantic_retries": False,
-    "sdk_retries": 0,
+    "sdk_retries": PROVIDER_SDK_RETRIES,
     "timeout_scope": "all_attempts_share_explicit_request_timeout",
-    "attempt_log": "provider-attempts.jsonl",
+    "attempt_log": PROVIDER_ATTEMPT_LOG,
     "missing_usage": None,
 }
 _WRITE_LOCK = threading.Lock()
@@ -107,10 +124,10 @@ def _response_error(response: Any) -> IncompleteResponseError | None:
     """Reject cutoffs and missing visible output before downstream parsing or tools."""
     choices = _field(response, "choices", [])
     if not choices:
-        return IncompleteResponseError("missing_choices")
+        return IncompleteResponseError(MISSING_CHOICES_ERROR)
     for choice in choices:
-        if _field(choice, "finish_reason") == "length":
-            return IncompleteResponseError("output_length")
+        if _field(choice, "finish_reason") == LENGTH_FINISH_REASON:
+            return IncompleteResponseError(OUTPUT_LENGTH_ERROR)
         # A provider refusal is a completed decision, not an empty generation
         # that should be resampled to evade the refusal.
         message = _field(choice, "message")
@@ -118,7 +135,7 @@ def _response_error(response: Any) -> IncompleteResponseError | None:
             continue
         content = _field(message, "content")
         if not (isinstance(content, str) and content.strip()) and not _field(message, "tool_calls"):
-            return IncompleteResponseError("empty_completion")
+            return IncompleteResponseError(EMPTY_COMPLETION_ERROR)
     return None
 
 
@@ -241,7 +258,7 @@ def _record(
             if thinking_budget is not None and thinking_budget >= 0 and reasoning_tokens is not None
             else None
         ),
-        "length_finish": "length" in reasons if any(reason is not None for reason in reasons) else None,
+        "length_finish": LENGTH_FINISH_REASON in reasons if any(reason is not None for reason in reasons) else None,
         "output_cap_reached": (
             completion_tokens >= limits["max_output_tokens"]
             if limits is not None and completion_tokens is not None
@@ -258,9 +275,9 @@ def _record(
     if (
         path is not None
         and (error is None or isinstance(error, IncompleteResponseError))
-        and (empty_completion or "length" in reasons)
+        and (empty_completion or LENGTH_FINISH_REASON in reasons)
     ):
-        artifact = Path(path).parent / "provider-failures" / f"{request_id}-{attempt}.json"
+        artifact = Path(path).parent / PROVIDER_FAILURE_DIRECTORY / f"{request_id}-{attempt}.json"
         _save_incomplete_response(artifact, request, response, request_id, attempt)
         row["response_artifact"] = str(artifact)
     line = json.dumps(row, sort_keys=True, allow_nan=False)
@@ -280,13 +297,13 @@ def _record(
 
 def _request(request: dict[str, Any], deadline: float | None) -> dict[str, Any]:
     """Disable nested SDK retries and carry the remaining explicit timeout."""
-    result = {**request, "num_retries": 0, "max_retries": 0}
+    result = {**request, "num_retries": PROVIDER_SDK_RETRIES, "max_retries": PROVIDER_SDK_RETRIES}
     for field in ("messages", "tools", "extra_body"):
         if field in result:
             result[field] = deepcopy(result[field])
     if deadline is not None:
-        remaining = max(deadline - time.monotonic(), 0.001)
-        for field in ("timeout", "request_timeout"):
+        remaining = max(deadline - time.monotonic(), PROVIDER_MIN_TIMEOUT_SECONDS)
+        for field in PROVIDER_TIMEOUT_FIELDS:
             if field in result:
                 result[field] = remaining
     return result
@@ -294,7 +311,7 @@ def _request(request: dict[str, Any], deadline: float | None) -> dict[str, Any]:
 
 def _deadline(request: dict[str, Any]) -> float | None:
     """Share an explicit numeric timeout across attempts and backoff."""
-    values = [request.get(field) for field in ("timeout", "request_timeout")]
+    values = [request.get(field) for field in PROVIDER_TIMEOUT_FIELDS]
     seconds = [float(value) for value in values if isinstance(value, float | int) and not isinstance(value, bool)]
     return time.monotonic() + min(seconds) if seconds else None
 
@@ -313,7 +330,7 @@ def _advance_output_retry_seed(request: dict[str, Any], error: BaseException) ->
     """Avoid deterministic regeneration of an unusable completion, retaining transport seeds."""
     seed = request.get("seed")
     if isinstance(error, IncompleteResponseError) and isinstance(seed, int) and not isinstance(seed, bool):
-        request["seed"] = (seed + 1) % (2**32)
+        request["seed"] = (seed + 1) % PROVIDER_SEED_MODULUS
 
 
 def complete_with_retries(
@@ -342,7 +359,7 @@ def complete_with_retries(
             if delay is None:
                 if isinstance(error, ContextWindowExceededError):
                     raise
-                raise ProviderRequestError("Provider request failed; inspect provider-attempts.jsonl.") from error
+                raise ProviderRequestError(f"Provider request failed; inspect {PROVIDER_ATTEMPT_LOG}.") from error
             _advance_output_retry_seed(request, error)
             time.sleep(delay)
         else:
@@ -358,7 +375,7 @@ def install_provider_retries() -> None:
     completion functions. Installation is idempotent; importing this module
     alone does not modify LiteLLM.
     """
-    if getattr(litellm.completion, "_gepa_retry_wrapper", False) is not True:
+    if getattr(litellm.completion, PROVIDER_WRAPPER_ATTRIBUTE, False) is not True:
         original = litellm.completion
 
         @functools.wraps(original)
@@ -369,10 +386,10 @@ def install_provider_retries() -> None:
                 return original(*args, **kwargs)
             return complete_with_retries(functools.partial(original, *args), kwargs, settings)
 
-        cast(Any, completion)._gepa_retry_wrapper = True
+        setattr(completion, PROVIDER_WRAPPER_ATTRIBUTE, True)
         litellm.completion = completion
 
-    if getattr(litellm.acompletion, "_gepa_retry_wrapper", False) is not True:
+    if getattr(litellm.acompletion, PROVIDER_WRAPPER_ATTRIBUTE, False) is not True:
         original_async = litellm.acompletion
 
         @functools.wraps(original_async)
@@ -403,7 +420,7 @@ def install_provider_retries() -> None:
                         if isinstance(error, ContextWindowExceededError):
                             raise
                         raise ProviderRequestError(
-                            "Provider request failed; inspect provider-attempts.jsonl."
+                            f"Provider request failed; inspect {PROVIDER_ATTEMPT_LOG}."
                         ) from error
                     _advance_output_retry_seed(kwargs, error)
                     await asyncio.sleep(delay)
@@ -411,7 +428,7 @@ def install_provider_retries() -> None:
                     _record(settings, kwargs, request_id, attempt, started, response, None, False)
                     return response
 
-        cast(Any, acompletion)._gepa_retry_wrapper = True
+        setattr(acompletion, PROVIDER_WRAPPER_ATTRIBUTE, True)
         litellm.acompletion = acompletion
 
 
@@ -419,7 +436,7 @@ def provider_retry_kwargs(log_path: Path | None = None, role: str = "model") -> 
     """Enable the fixed policy and return serializable, local-only request metadata."""
     install_provider_retries()
     return {
-        "num_retries": 0,
-        "max_retries": 0,
+        "num_retries": PROVIDER_SDK_RETRIES,
+        "max_retries": PROVIDER_SDK_RETRIES,
         PROVIDER_RETRY_KEY: {"log_path": str(log_path) if log_path is not None else None, "role": role},
     }

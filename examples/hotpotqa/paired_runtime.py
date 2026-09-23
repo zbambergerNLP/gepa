@@ -10,8 +10,26 @@ import subprocess
 import time
 from pathlib import Path
 
+from examples.common.experiment_models import (
+    DEEPSEEK_V4_1_FLASH_MODEL,
+    DEEPSEEK_V4_1_FLASH_PROFILE,
+    QWEN3_8_27B_MODEL,
+    QWEN3_8_27B_PROFILE,
+)
 from examples.common.pilot_checks import atomic_json
 from examples.hotpotqa.main import TEACHER_RUNTIME_KEYS
+
+QWEN_GPU_COUNT = 1
+DEEPSEEK_GPU_COUNT = 4
+PAIRED_GPU_COUNT = QWEN_GPU_COUNT + DEEPSEEK_GPU_COUNT
+QWEN_CPU_COUNT = 8
+DEEPSEEK_CPU_COUNT = 32
+PAIRED_CPU_COUNT = QWEN_CPU_COUNT + DEEPSEEK_CPU_COUNT
+TEACHER_MAX_NUM_SEQS = 2
+PAIRED_HEALTH_TIMEOUT_SECONDS = 3600
+STARTUP_GRACE_SECONDS = 600
+POLL_INTERVAL_SECONDS = 2
+SHUTDOWN_TIMEOUT_SECONDS = 30
 
 PROFILE = "deepseek-teacher-qwen-student"
 READY_NAMES = {
@@ -34,9 +52,16 @@ READY_NAMES = {
 
 def split_devices(devices: list[str]) -> dict[str, list[str]]:
     """Assign exactly one Qwen GPU and four distinct DeepSeek GPUs."""
-    if len(devices) != 5 or len(set(devices)) != 5 or not all(x.startswith("GPU-") for x in devices):
+    if (
+        len(devices) != PAIRED_GPU_COUNT
+        or len(set(devices)) != PAIRED_GPU_COUNT
+        or not all(x.startswith("GPU-") for x in devices)
+    ):
         raise ValueError("The paired profile requires exactly five distinct allocated GPU UUIDs")
-    return {"qwen3.8-27b": devices[4:], "deepseek-v4.1-flash": devices[:4]}
+    return {
+        QWEN3_8_27B_PROFILE: devices[DEEPSEEK_GPU_COUNT:],
+        DEEPSEEK_V4_1_FLASH_PROFILE: devices[:DEEPSEEK_GPU_COUNT],
+    }
 
 
 def write_ready() -> None:
@@ -55,7 +80,7 @@ def write_ready() -> None:
 
 def combine_runtimes(qwen: dict, deepseek: dict, allocation: dict[str, list[str]], job_id: str) -> dict[str, str]:
     """Require both endpoints to belong to this allocation and source before routing roles."""
-    for ready, profile in ((qwen, "qwen3.8-27b"), (deepseek, "deepseek-v4.1-flash")):
+    for ready, profile in ((qwen, QWEN3_8_27B_PROFILE), (deepseek, DEEPSEEK_V4_1_FLASH_PROFILE)):
         if ready["job_id"] != job_id or ready["profile"] != profile or ready["gpu_uuids"] != allocation[profile]:
             raise ValueError("Serving readiness belongs to a different allocation or GPU assignment")
     qe, de = qwen["environment"], deepseek["environment"]
@@ -69,8 +94,8 @@ def combine_runtimes(qwen: dict, deepseek: dict, allocation: dict[str, list[str]
         if qe[key] != de[key]:
             raise ValueError(f"Teacher and student disagree on {key}")
     if (
-        qe["SOLVER_MODEL"] != "hosted_vllm/Qwen/Qwen3.8-27B"
-        or de["SOLVER_MODEL"] != "hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash"
+        qe["SOLVER_MODEL"] != QWEN3_8_27B_MODEL
+        or de["SOLVER_MODEL"] != DEEPSEEK_V4_1_FLASH_MODEL
     ):
         raise ValueError("Incorrect teacher/student model direction")
     if qe["SOLVER_API_BASE"] == de["SOLVER_API_BASE"]:
@@ -130,10 +155,15 @@ def main() -> None:
     allocation = split_devices(devices)
     # This runner executes on Linux; macOS type stubs omit the affinity API.
     cpus = sorted(os.sched_getaffinity(0))  # pyright: ignore[reportAttributeAccessIssue]
-    if len(cpus) < 40:
+    if len(cpus) < PAIRED_CPU_COUNT:
         raise ValueError("The paired profile requires at least forty allocated CPU cores")
     atomic_json(
-        exchange / "allocation.json", {"gpu_uuids": allocation, "qwen_cpus": cpus[:8], "deepseek_cpus": cpus[8:40]}
+        exchange / "allocation.json",
+        {
+            "gpu_uuids": allocation,
+            "qwen_cpus": cpus[:QWEN_CPU_COUNT],
+            "deepseek_cpus": cpus[QWEN_CPU_COUNT:PAIRED_CPU_COUNT],
+        },
     )
     children: list[subprocess.Popen] = []
     streams = []
@@ -146,7 +176,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, interrupted)
     try:
         for profile, gpu_uuids in allocation.items():
-            teacher = profile == "deepseek-v4.1-flash"
+            teacher = profile == DEEPSEEK_V4_1_FLASH_PROFILE
             venv = root / (".serving-venv-deepseek-v4.1-flash" if teacher else ".serving-venv")
             ready_file = exchange / f"{profile}.json"
             child_env = {
@@ -157,10 +187,10 @@ def main() -> None:
                 "HOTPOTQA_SERVING_ENV_SHA256": environment[
                     "HOTPOTQA_TEACHER_SERVING_ENV_SHA256" if teacher else "HOTPOTQA_SERVING_ENV_SHA256"
                 ],
-                "VLLM_TENSOR_PARALLEL_SIZE": "4" if teacher else "1",
+                "VLLM_TENSOR_PARALLEL_SIZE": str(DEEPSEEK_GPU_COUNT if teacher else QWEN_GPU_COUNT),
                 "VLLM_DATA_PARALLEL_SIZE": "1",
                 "VLLM_API_SERVER_COUNT": "1",
-                "VLLM_MAX_NUM_SEQS": environment.get("TEACHER_MAX_NUM_SEQS", "2")
+                "VLLM_MAX_NUM_SEQS": environment.get("TEACHER_MAX_NUM_SEQS", str(TEACHER_MAX_NUM_SEQS))
                 if teacher
                 else environment["VLLM_MAX_NUM_SEQS"],
                 "HOTPOTQA_SERVER_READY_FILE": str(ready_file),
@@ -169,7 +199,7 @@ def main() -> None:
             child_env.pop("GEN_PORT", None)
             stream = (exchange / f"{profile}.log").open("w")
             streams.append(stream)
-            role_cpus = cpus[8:40] if teacher else cpus[:8]
+            role_cpus = cpus[QWEN_CPU_COUNT:PAIRED_CPU_COUNT] if teacher else cpus[:QWEN_CPU_COUNT]
             children.append(
                 subprocess.Popen(
                     [
@@ -185,13 +215,17 @@ def main() -> None:
                     start_new_session=True,
                 )
             )
-        deadline = time.monotonic() + int(environment.get("HEALTH_TIMEOUT", "3600")) + 600
+        deadline = (
+            time.monotonic()
+            + int(environment.get("HEALTH_TIMEOUT", str(PAIRED_HEALTH_TIMEOUT_SECONDS)))
+            + STARTUP_GRACE_SECONDS
+        )
         while not all((exchange / f"{profile}.json").exists() for profile in allocation):
             if any(child.poll() is not None for child in children):
                 raise RuntimeError(f"A serving process failed during startup; inspect {exchange}")
             if time.monotonic() >= deadline:
                 raise TimeoutError(f"Paired serving startup exceeded its deadline; inspect {exchange}")
-            time.sleep(2)
+            time.sleep(POLL_INTERVAL_SECONDS)
         ready = [json.loads((exchange / f"{profile}.json").read_text()) for profile in allocation]
         runtime = combine_runtimes(ready[0], ready[1], allocation, environment["SLURM_JOB_ID"])
         # Preserve parent scientific intent; server child readiness must not select a pilot or cell.
@@ -207,7 +241,7 @@ def main() -> None:
         while workload.poll() is None:
             if any(child.poll() is not None for child in children[:-1]):
                 raise RuntimeError("A serving process exited while the paired workload was active")
-            time.sleep(2)
+            time.sleep(POLL_INTERVAL_SECONDS)
         if workload.returncode:
             raise SystemExit(workload.returncode)
     finally:
@@ -216,7 +250,7 @@ def main() -> None:
                 os.killpg(child.pid, signal.SIGTERM)
         for child in children:
             try:
-                child.wait(timeout=30)
+                child.wait(timeout=SHUTDOWN_TIMEOUT_SECONDS)
             except subprocess.TimeoutExpired:
                 os.killpg(child.pid, signal.SIGKILL)
         for stream in streams:

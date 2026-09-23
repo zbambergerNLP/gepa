@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
+from examples.common.experiment_models import EXPERIMENT_CONTEXT_TOKENS, EXPERIMENT_MAX_OUTPUT_TOKENS
 from examples.common.pilot_checks import (
     METHODS,
     OPTIMIZER_PILOT_PROTOCOL,
@@ -25,6 +26,7 @@ from examples.common.provider_retries import PROVIDER_RETRY_KEY, provider_retry_
 from examples.common.react_v2 import benchmark_data_identity, resolve_template_family
 from examples.common.recovery import RecoveryCallback, run_guarded, seal_progress
 from examples.common.wiki17_bm25 import Wiki17BM25Retriever
+from examples.hotpotqa.benchmark_settings import TRAIN_SIZE
 from examples.hotpotqa.main import (
     _validate_scientific_data_identity,
     _verify_scientific_retriever_integrity,
@@ -46,26 +48,37 @@ from examples.hotpotqa.utils import (
     resolve_hotpotqa_lm_kwargs,
 )
 from examples.terminalbench.token_usage import summarize_usage
+from gepa.lm_constants import PROVIDER_ATTEMPT_LOG, TOKEN_USAGE_LOG, TOKEN_USAGE_SUMMARY
+from gepa.strategies.forest_constants import (
+    DEFAULT_REFLECTION_MINIBATCH_SIZE,
+    OPTIMIZER_ROLE,
+    REACT_EDITOR_MODE,
+    SINGLE_CALL_EDITOR_MODE,
+    SOLVER_ROLE,
+)
+
+SMOKE_QUESTION_COUNT = 3
+THROUGHPUT_QUESTION_COUNT = 12
 
 PILOT_PROTOCOL = {
     "version": 3,
     "split": "train",
-    "smoke": 3,
-    "throughput": 12,
-    "full": 150,
+    "smoke": SMOKE_QUESTION_COUNT,
+    "throughput": THROUGHPUT_QUESTION_COUNT,
+    "full": TRAIN_SIZE,
     "optimizer": OPTIMIZER_PILOT_PROTOCOL,
 }
-LIMITS = {"max_output_tokens": 16384, "context_tokens": 262144}
+LIMITS = {"max_output_tokens": EXPERIMENT_MAX_OUTPUT_TOKENS, "context_tokens": EXPERIMENT_CONTEXT_TOKENS}
 
 
 def observed_kwargs(model: str, api_base: str, directory: Path, role: str) -> dict:
     """Apply the production decoding/retry policy and retain raw usage."""
-    kwargs = resolve_hotpotqa_lm_kwargs(model, api_base, role="solver" if role == "solver" else "optimizer")
-    kwargs.update(provider_retry_kwargs(directory / "provider-attempts.jsonl", role))
+    kwargs = resolve_hotpotqa_lm_kwargs(model, api_base, role=SOLVER_ROLE if role == SOLVER_ROLE else OPTIMIZER_ROLE)
+    kwargs.update(provider_retry_kwargs(directory / PROVIDER_ATTEMPT_LOG, role))
     retry_settings = kwargs[PROVIDER_RETRY_KEY]
     assert isinstance(retry_settings, dict)
     retry_settings.update(
-        token_usage_log=str(directory / "token-usage.jsonl"),
+        token_usage_log=str(directory / TOKEN_USAGE_LOG),
         token_limits={**LIMITS, "max_output_tokens": kwargs["max_tokens"]},
     )
     return kwargs
@@ -76,8 +89,8 @@ def validate_calibration(directory: Path, count: int) -> dict:
     marker = json.loads((directory / "pilot-complete.json").read_text())
     summary = json.loads((directory / "pilot-summary.json").read_text())
     contract = json.loads((directory / "pilot-contract.json").read_text())
-    usage = json.loads((directory / "token-usage-summary.json").read_text())
-    attempt_path = directory / "provider-attempts.jsonl"
+    usage = json.loads((directory / TOKEN_USAGE_SUMMARY).read_text())
+    attempt_path = directory / PROVIDER_ATTEMPT_LOG
     attempts = [json.loads(line) for line in attempt_path.read_text().splitlines()] if attempt_path.exists() else []
     records = {path.name: digest(json.loads(path.read_text())) for path in (directory / "records").glob("*.json")}
     if (
@@ -169,14 +182,14 @@ def run_calibration(
     finally:
         window["ended_at"] = time.time()
         atomic_json(window_path, window)
-        atomic_json(directory / "token-usage-summary.json", summarize_usage([directory]))
-    usage = json.loads((directory / "token-usage-summary.json").read_text())
+        atomic_json(directory / TOKEN_USAGE_SUMMARY, summarize_usage([directory]))
+    usage = json.loads((directory / TOKEN_USAGE_SUMMARY).read_text())
     cutoffs = sum(
         role.get("length_finish", 0) + role.get("output_cap_reached", 0)
         for roles in usage["models"].values()
         for role in roles.values()
     )
-    attempt_path = directory / "provider-attempts.jsonl"
+    attempt_path = directory / PROVIDER_ATTEMPT_LOG
     attempts = [json.loads(line) for line in attempt_path.read_text().splitlines()] if attempt_path.exists() else []
     unresolved = unrecovered_provider_failures(attempts)
     recorded_cutoffs = sum(bool(row.get("length_finish")) + bool(row.get("output_cap_reached")) for row in attempts)
@@ -220,7 +233,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--api-base", required=True)
     parser.add_argument("--reflection-model", help="Teacher model; defaults to the task model")
     parser.add_argument("--reflection-api-base", help="Teacher endpoint; defaults to the task endpoint")
-    parser.add_argument("--throughput-questions", type=int, default=12)
+    parser.add_argument("--throughput-questions", type=int, default=THROUGHPUT_QUESTION_COUNT)
     parser.add_argument("--wiki17-dir", type=Path, required=True)
     parser.add_argument("--workers", type=int, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -233,11 +246,13 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--text-limits", default="null")
     parser.add_argument("--wandb-project")
     parser.add_argument("--wandb-entity")
-    parser.add_argument("--editor-mode", choices=("react", "single_call"), default="react")
+    parser.add_argument(
+        "--editor-mode", choices=(REACT_EDITOR_MODE, SINGLE_CALL_EDITOR_MODE), default=REACT_EDITOR_MODE
+    )
     args = parser.parse_args(argv)
     if args.workers < 1:
         parser.error("--workers must be positive")
-    if not 12 <= args.throughput_questions <= 150:
+    if not THROUGHPUT_QUESTION_COUNT <= args.throughput_questions <= TRAIN_SIZE:
         parser.error("--throughput-questions must be between 12 and 150 training questions")
     reflection_model = args.reflection_model or args.model
     reflection_api_base = args.reflection_api_base or args.api_base
@@ -294,7 +309,7 @@ def main(argv: list[str] | None = None) -> None:
     def calibrate(stage: str, count: int) -> None:
         """Measure the unchanged seed on the same ordered training examples."""
         directory = args.output_dir / stage
-        kwargs = observed_kwargs(args.model, args.api_base, directory, "solver")
+        kwargs = observed_kwargs(args.model, args.api_base, directory, SOLVER_ROLE)
         lm = build_hotpotqa_task_lm(args.model, args.api_base, kwargs)
 
         def execute(seed: dict, example: dict, task_lm=lm, call_kwargs=kwargs) -> tuple[str, dict]:
@@ -314,7 +329,7 @@ def main(argv: list[str] | None = None) -> None:
         )
 
     if args.stage in ("all", "preliminary", "smoke", "throughput"):
-        calibrate("smoke", 3)
+        calibrate("smoke", SMOKE_QUESTION_COUNT)
     if args.stage in ("all", "preliminary", "optimizer"):
         validate_calibration(args.output_dir / "smoke", 3)
         for method in (args.method,) if args.method else METHODS:
@@ -322,7 +337,7 @@ def main(argv: list[str] | None = None) -> None:
             contract = {
                 "protocol": OPTIMIZER_PILOT_PROTOCOL,
                 "runtime": build_run_contract(method, settings),
-                "examples": train[:3],
+                "examples": train[:DEFAULT_REFLECTION_MINIBATCH_SIZE],
                 "candidate": candidate,
             }
             contract["runtime"]["optimizer"].update(max_metric_calls=None, max_candidate_proposals=None)
@@ -334,7 +349,7 @@ def main(argv: list[str] | None = None) -> None:
             callbacks = [RecoveryCallback(directory), evidence]
             if args.wandb_project:
                 callbacks.append(HotpotqaWandb(directory, contract["runtime"], args.wandb_project, args.wandb_entity, kind="qualification"))
-            kwargs = observed_kwargs(args.model, args.api_base, directory, "solver")
+            kwargs = observed_kwargs(args.model, args.api_base, directory, SOLVER_ROLE)
             evaluator = strict_evaluator(
                 make_evaluator(
                     args.model, retriever, args.api_base, solver_lm_kwargs=kwargs,
@@ -344,7 +359,7 @@ def main(argv: list[str] | None = None) -> None:
             config, _ = build_config(
                 method,
                 settings,
-                observed_kwargs(reflection_model, reflection_api_base, directory, "optimizer"),
+                observed_kwargs(reflection_model, reflection_api_base, directory, OPTIMIZER_ROLE),
                 str(directory),
             )
             config.engine.max_metric_calls = None
@@ -354,8 +369,8 @@ def main(argv: list[str] | None = None) -> None:
                 run_condition(
                     method,
                     candidate,
-                    train[:3],
-                    train[:3],
+                    train[:DEFAULT_REFLECTION_MINIBATCH_SIZE],
+                    train[:DEFAULT_REFLECTION_MINIBATCH_SIZE],
                     config,
                     evaluator,
                     callbacks=callbacks,
@@ -363,7 +378,7 @@ def main(argv: list[str] | None = None) -> None:
                 evidence.verify()
             finally:
                 atomic_json(
-                    directory / "token-usage-summary.json", summarize_usage([directory / "provider-attempts.jsonl"])
+                    directory / TOKEN_USAGE_SUMMARY, summarize_usage([directory / PROVIDER_ATTEMPT_LOG])
                 )
     if args.stage in ("all", "preliminary", "throughput"):
         validate_calibration(args.output_dir / "smoke", 3)
@@ -372,7 +387,7 @@ def main(argv: list[str] | None = None) -> None:
         validate_calibration(args.output_dir / "smoke", 3)
         for method in METHODS:
             load_cycle(args.output_dir / "optimizer" / method)
-        calibrate("full", 150)
+        calibrate("full", TRAIN_SIZE)
     print(f"Pilot evidence ready for review: {args.output_dir}")
 
 

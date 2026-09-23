@@ -87,6 +87,10 @@ class LMProviderError(RuntimeError):
     """Signal that the configured completion provider failed a request."""
 
 
+class LMRequestExhaustedError(LMProviderError):
+    """Signal that another layer must not restart an exhausted request budget."""
+
+
 def provider_response_identity(completion: Any) -> ProviderResponseIdentity:
     """Extract the provider model and system fingerprint from one response.
 
@@ -736,6 +740,8 @@ class LM:
             """
             try:
                 completion = litellm.completion(**request)
+            except LMRequestExhaustedError:
+                raise
             except Exception as exc:
                 raise LMProviderError(f"Completion provider failed for model {self.model!r}.") from exc
             usage = self._record_completion_usage(completion)
@@ -795,6 +801,8 @@ class LM:
             """
             try:
                 completion = cast(Any, litellm.completion(**request_kwargs))
+            except LMRequestExhaustedError:
+                raise
             except Exception as exc:
                 raise LMProviderError(f"Completion provider failed for model {self.model!r}.") from exc
             usage = self._record_completion_usage(completion)
@@ -858,6 +866,8 @@ class LM:
         """
         import litellm
 
+        if isinstance(response, LMRequestExhaustedError):
+            raise response
         if isinstance(response, Exception):
             raise LMProviderError(f"Batch completion provider failed for model {self.model!r}.") from response
         self._capture_and_validate_response_identity(response)
@@ -955,6 +965,8 @@ class LM:
         if journal is None or scope is None:
             try:
                 responses = litellm.batch_completion(**request)
+            except LMRequestExhaustedError:
+                raise
             except Exception as exc:
                 raise LMProviderError(f"Batch completion provider failed for model {self.model!r}.") from exc
             batch_results, _payloads, batch_cost, batch_tokens_in, batch_tokens_out = (
@@ -995,6 +1007,8 @@ class LM:
                 }
                 try:
                     responses = litellm.batch_completion(**missing_request)
+                except LMRequestExhaustedError:
+                    raise
                 except Exception as exc:
                     raise LMProviderError(f"Batch completion provider failed for model {self.model!r}.") from exc
                 if len(responses) != len(missing_indices):
@@ -1041,6 +1055,9 @@ class LM:
                     self._total_tokens_in += batch_tokens_in
                     self._total_tokens_out += batch_tokens_out
                 if provider_errors:
+                    for error in provider_errors:
+                        if isinstance(error, LMRequestExhaustedError):
+                            raise error
                     raise LMProviderError(
                         f"Batch completion provider failed for model {self.model!r}."
                     ) from provider_errors[0]

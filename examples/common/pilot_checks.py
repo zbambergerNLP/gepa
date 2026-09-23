@@ -13,7 +13,7 @@ from examples.common.recovery import seal_progress
 
 METHODS = ("vanilla", "react_v2", "react_v2_random", "action")
 OPTIMIZER_PILOT_PROTOCOL = {
-    "version": 2,
+    "version": 3,
     "split": "train",
     "minibatch_size": 3,
     "cycles": 1,
@@ -54,17 +54,42 @@ def require_contract(directory: Path, contract: dict) -> Path:
     return path
 
 
+def unrecovered_provider_failures(attempts: list[dict]) -> list[dict]:
+    """Accept failed attempts only when the same bounded request demonstrably recovered."""
+    def failed(row: dict) -> bool:
+        return bool(
+            row.get("length_finish") or row.get("output_cap_reached")
+            or "length" in (row.get("finish_reasons") or [])
+            or row.get("empty_completion") or row.get("response_error")
+            or row.get("outcome") in {"error", "cancelled"}
+        )
+
+    requests: dict[str, list[dict]] = {}
+    for row in attempts:
+        if row.get("request_id"):
+            requests.setdefault(row["request_id"], []).append(row)
+    recovered = {
+        request_id for request_id, rows in requests.items()
+        if 2 <= len(rows) <= 4
+        and [row.get("attempt") for row in rows] == list(range(1, len(rows) + 1))
+        and all(row.get("outcome") == "error" and row.get("will_retry") is True for row in rows[:-1])
+        and rows[-1].get("outcome") == "success" and rows[-1].get("will_retry") is False
+        and not failed(rows[-1])
+    }
+    return [
+        row for row in attempts
+        if (failed(row) or row.get("attempt", 1) > 1) and row.get("request_id") not in recovered
+    ]
+
+
 def _provider_attempts_digest(directory: Path) -> str | None:
-    """Reject truncated model output and bind coverage to its physical request history."""
+    """Reject unrecovered output and bind coverage to every physical attempt."""
     path = directory / "provider-attempts.jsonl"
     if not path.exists():
         return None
     attempts = [json.loads(line) for line in path.read_text().splitlines()]
-    if any(
-        row.get("length_finish") or row.get("output_cap_reached") or "length" in (row.get("finish_reasons") or [])
-        for row in attempts
-    ):
-        raise ValueError("Optimizer pilot recorded truncated model output; review token limits before qualification")
+    if unrecovered_provider_failures(attempts):
+        raise ValueError("Optimizer pilot recorded unrecovered provider failure or truncated model output")
     return digest(attempts)
 
 

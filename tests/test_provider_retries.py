@@ -16,7 +16,15 @@ from examples.common.provider_retries import (
     install_provider_retries,
     provider_retry_kwargs,
 )
-from gepa.lm import LM
+from gepa.lm import LM, LMRequestExhaustedError
+from gepa.proposer.reflective_mutation.reflection_lm import StatelessReflectionLM
+from gepa.response_journal import response_journal_scope
+
+
+@pytest.fixture(autouse=True)
+def fixed_jitter(monkeypatch):
+    """Make timing assertions reproducible without using the optimizer RNG."""
+    monkeypatch.setattr(provider_retries._JITTER, "uniform", lambda _start, end: end)
 
 
 def response() -> litellm.ModelResponse:
@@ -35,10 +43,11 @@ def rows(path: Path) -> list[dict]:
 
 @pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.parametrize("succeeds", [False, True])
-def test_exactly_three_attempts_with_backoff_and_usage(tmp_path, monkeypatch, asynchronous, succeeds):
+def test_initial_attempt_plus_three_retries_with_backoff_and_usage(tmp_path, monkeypatch, asynchronous, succeeds):
     """Bound consecutive connection failures and retain every attempt's evidence."""
     raw = response()
     outcomes = [
+        ConnectionError("private diagnostic"),
         ConnectionError("private diagnostic"),
         ConnectionError("private diagnostic"),
         raw if succeeds else ConnectionError("private diagnostic"),
@@ -65,15 +74,15 @@ def test_exactly_three_attempts_with_backoff_and_usage(tmp_path, monkeypatch, as
         with pytest.raises(ProviderRequestError) as caught:
             invoke()
         assert isinstance(caught.value.__cause__, ConnectionError)
-    assert provider.call_count == 3
-    assert [call.args[0] for call in sleep.call_args_list] == [1.0, 2.0]
+    assert provider.call_count == 4
+    assert [call.args[0] for call in sleep.call_args_list] == [1.0, 2.0, 4.0]
     for call in provider.call_args_list:
         assert call.kwargs["num_retries"] == call.kwargs["max_retries"] == 0
         assert PROVIDER_RETRY_KEY not in call.kwargs
     records = rows(path)
-    assert [record["attempt"] for record in records] == [1, 2, 3]
+    assert [record["attempt"] for record in records] == [1, 2, 3, 4]
     assert len({record["request_id"] for record in records}) == 1
-    assert [record["will_retry"] for record in records] == [True, True, False]
+    assert [record["will_retry"] for record in records] == [True, True, True, False]
     assert records[0]["prompt_tokens"] is records[0]["cost_usd"] is None
     assert records[-1]["completion_tokens"] == (2 if succeeds else None)
     assert "private" not in path.read_text()
@@ -91,7 +100,7 @@ def test_only_temporary_http_errors_retry(tmp_path, monkeypatch, status):
     settings = provider_retry_kwargs(path)
     with pytest.raises(ProviderRequestError):
         litellm.completion(model="hosted_vllm/test", **settings)
-    expected = 3 if status in {408, 429, 500, 502, 503, 504} else 1
+    expected = 4 if status in {408, 429, 500, 502, 503, 504} else 1
     assert provider.call_count == len(rows(path)) == expected
     assert all(record["status_code"] == status for record in rows(path))
 
@@ -195,10 +204,10 @@ def test_unmarked_requests_are_unchanged(monkeypatch):
 
 @pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.parametrize("finish_reason,content", [("length", None), ("stop", None), ("length", "unfinished")])
-def test_incomplete_model_output_is_preserved_without_semantic_retry(
+def test_incomplete_model_output_recovers_and_preserves_failed_attempt(
     tmp_path, monkeypatch, asynchronous, finish_reason, content
 ):
-    """Retain the two observed failure modes without changing their model results."""
+    """Recover from the observed cutoff while retaining its raw output and cost."""
     raw = litellm.ModelResponse(
         choices=[
             {
@@ -213,11 +222,15 @@ def test_incomplete_model_output_is_preserved_without_semantic_retry(
             "completion_tokens_details": {"reasoning_tokens": 65536},
         },
     )
-    provider = AsyncMock(return_value=raw) if asynchronous else Mock(return_value=raw)
+    good = response()
+    provider = AsyncMock(side_effect=[raw, good]) if asynchronous else Mock(side_effect=[raw, good])
     monkeypatch.setattr(litellm, "acompletion" if asynchronous else "completion", provider)
+    monkeypatch.setattr(provider_retries.time, "sleep", Mock())
+    monkeypatch.setattr(provider_retries.asyncio, "sleep", AsyncMock())
     path = tmp_path / "provider-attempts.jsonl"
     kwargs = {
         "model": "hosted_vllm/test",
+        "seed": 0,
         "api_key": "secret-key",
         "extra_headers": {"Authorization": "secret-header"},
         "messages": [{"role": "user", "content": "captured training input"}],
@@ -225,10 +238,15 @@ def test_incomplete_model_output_is_preserved_without_semantic_retry(
         **provider_retry_kwargs(path),
     }
     result = asyncio.run(litellm.acompletion(**kwargs)) if asynchronous else litellm.completion(**kwargs)
-    assert result is raw
-    provider.assert_called_once()
-    (row,) = rows(path)
-    assert row["will_retry"] is False
+    assert result is good
+    assert provider.call_count == 2
+    row, recovered = rows(path)
+    assert row["will_retry"] is True
+    assert row["outcome"] == "error" and row["transport_outcome"] == "success"
+    assert row["response_error"] == ("output_length" if finish_reason == "length" else "empty_completion")
+    assert [item["seed"] for item in (row, recovered)] == [0, 1]
+    assert [call.kwargs["seed"] for call in provider.call_args_list] == [0, 1]
+    assert kwargs["seed"] == 0
     assert row["empty_completion"] is (content is None)
     assert row["thinking_token_budget"] == 32768
     assert row["thinking_budget_reached"] is True
@@ -269,7 +287,7 @@ def test_native_tool_call_is_not_mistaken_for_empty_completion(tmp_path, monkeyp
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
-def test_real_sdk_makes_three_http_attempts_without_nested_retries(tmp_path, monkeypatch, asynchronous):
+def test_real_sdk_makes_four_http_attempts_without_nested_retries(tmp_path, monkeypatch, asynchronous):
     """Exercise real LiteLLM and SDK transports with offline HTTP responses."""
     sent = []
 
@@ -302,5 +320,125 @@ def test_real_sdk_makes_three_http_attempts_without_nested_retries(tmp_path, mon
             asyncio.run(litellm.acompletion(**request))
         else:
             litellm.completion(**request)
-    assert len(sent) == len(rows(path)) == 3
+    assert len(sent) == len(rows(path)) == 4
     assert all(PROVIDER_RETRY_KEY not in request.content.decode() for request in sent)
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_transport_and_incomplete_responses_share_one_retry_budget(tmp_path, monkeypatch, asynchronous):
+    """Keep retries bounded across mixed failure classes and vary only failed-output seeds."""
+    unfinished = litellm.ModelResponse(
+        choices=[{"message": {"role": "assistant", "content": None}, "finish_reason": "length"}],
+        usage={"prompt_tokens": 7430, "completion_tokens": 131072, "total_tokens": 138502},
+    )
+    outcomes = [ConnectionError("temporary"), unfinished, ConnectionError("temporary"), unfinished]
+    provider = AsyncMock(side_effect=outcomes) if asynchronous else Mock(side_effect=outcomes)
+    monkeypatch.setattr(litellm, "acompletion" if asynchronous else "completion", provider)
+    monkeypatch.setattr(provider_retries.time, "sleep", Mock())
+    monkeypatch.setattr(provider_retries.asyncio, "sleep", AsyncMock())
+    path = tmp_path / "attempts.jsonl"
+    kwargs = {"model": "hosted_vllm/test", "seed": 0, **provider_retry_kwargs(path, "controller")}
+    with pytest.raises(LMRequestExhaustedError):
+        if asynchronous:
+            asyncio.run(litellm.acompletion(**kwargs))
+        else:
+            litellm.completion(**kwargs)
+    records = rows(path)
+    assert provider.call_count == len(records) == 4
+    assert [record["seed"] for record in records] == [0, 0, 1, 1]
+    assert [record["empty_completion"] for record in records] == [False, True, False, True]
+    assert [record["will_retry"] for record in records] == [True, True, True, False]
+    assert sum(record["completion_tokens"] or 0 for record in records) == 262144
+    assert len(list((tmp_path / "provider-failures").glob("*.json"))) == 2
+
+
+@pytest.mark.parametrize("content", [None, "", "  \n "])
+def test_empty_output_exhausts_four_attempts(tmp_path, monkeypatch, content):
+    """Never pass empty successful HTTP responses onward as a task answer."""
+    raw = litellm.ModelResponse(
+        choices=[{"message": {"role": "assistant", "content": content}, "finish_reason": "stop"}]
+    )
+    provider = Mock(return_value=raw)
+    monkeypatch.setattr(litellm, "completion", provider)
+    monkeypatch.setattr(provider_retries.time, "sleep", Mock())
+    path = tmp_path / "attempts.jsonl"
+    settings = provider_retry_kwargs(path)
+    with pytest.raises(ProviderRequestError):
+        litellm.completion(model="hosted_vllm/test", seed=0, **settings)
+    assert [record["seed"] for record in rows(path)] == [0, 1, 2, 3]
+    assert provider.call_count == 4
+
+
+def test_missing_choices_is_retryable(tmp_path, monkeypatch):
+    """Reject an incomplete response envelope before indexing its first choice."""
+    provider = Mock(side_effect=[{"choices": []}, response()])
+    monkeypatch.setattr(litellm, "completion", provider)
+    monkeypatch.setattr(provider_retries.time, "sleep", Mock())
+    path = tmp_path / "attempts.jsonl"
+    settings = provider_retry_kwargs(path)
+    litellm.completion(model="hosted_vllm/test", **settings)
+    assert rows(path)[0]["response_error"] == "missing_choices"
+    assert provider.call_count == 2
+
+
+@pytest.mark.parametrize(
+    "finish,content,refusal",
+    [
+        ("stop", "<finish>No applicable edit.</finish>", None),
+        ("stop", "incorrect answer", None),
+        ("content_filter", None, None),
+        ("stop", None, "refused"),
+    ],
+)
+def test_valid_noops_answers_and_refusals_are_not_resampled(tmp_path, monkeypatch, finish, content, refusal):
+    """Keep scientific outcomes and provider refusals outside recovery sampling."""
+    raw = {"choices": [{"finish_reason": finish, "message": {"content": content, "refusal": refusal}}]}
+    provider = Mock(return_value=raw)
+    monkeypatch.setattr(litellm, "completion", provider)
+    settings = provider_retry_kwargs(tmp_path / "attempts.jsonl")
+    assert litellm.completion(model="hosted_vllm/test", **settings) is raw
+    provider.assert_called_once()
+
+
+@pytest.mark.parametrize("role", ["controller", "manifestor", "editor", "vanilla"])
+def test_every_optimizer_role_recovers_once_and_journals_only_usable_output(tmp_path, monkeypatch, role):
+    """Apply recovery before journaling while replaying the exact accepted response."""
+    bad = litellm.ModelResponse(
+        choices=[{"message": {"role": "assistant", "content": None}, "finish_reason": "length"}]
+    )
+    provider = Mock(side_effect=[bad, response()])
+    monkeypatch.setattr(litellm, "completion", provider)
+    monkeypatch.setattr(litellm, "completion_cost", Mock(return_value=0))
+    monkeypatch.setattr(provider_retries.time, "sleep", Mock())
+    path = tmp_path / "attempts.jsonl"
+    kwargs = {
+        "seed": 0,
+        "response_journal_path": str(tmp_path / "responses.sqlite"),
+        "response_journal_namespace": role,
+        **provider_retry_kwargs(path, role),
+    }
+    for _ in range(2):
+        lm = LM("hosted_vllm/test", **kwargs)
+        with response_journal_scope("iteration-1"):
+            if role == "editor":
+                assert lm.complete_with_tools([{"role": "user", "content": "edit"}], []).content == "done"
+            else:
+                assert lm("proposal") == "done"
+    assert provider.call_count == len(rows(path)) == 2
+    assert {record["role"] for record in rows(path)} == {role}
+
+
+def test_exhausted_batch_cannot_restart_at_the_reflection_layer(tmp_path, monkeypatch):
+    """Prevent four provider attempts from multiplying during batch fallback."""
+    provider = Mock(side_effect=ConnectionError("temporary"))
+    monkeypatch.setattr(litellm, "completion", provider)
+    monkeypatch.setattr(provider_retries.time, "sleep", Mock())
+    path = tmp_path / "attempts.jsonl"
+    strategy = StatelessReflectionLM(LM("hosted_vllm/test", **provider_retry_kwargs(path)))
+    jobs = [({"c": value}, {"c": [{"feedback": "failure"}]}, ["c"]) for value in ("one", "two")]
+    with pytest.raises(LMRequestExhaustedError):
+        list(strategy.reflect_many(jobs))
+    records = rows(path)
+    assert provider.call_count == len(records) == 8
+    assert len({record["request_id"] for record in records}) == 2
+    assert [record["attempt"] for record in records].count(4) == 2

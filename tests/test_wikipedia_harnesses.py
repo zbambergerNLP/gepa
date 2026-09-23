@@ -353,14 +353,21 @@ def test_hotpot_heldout_evaluation_scores_only_task_parse_errors_as_zero(monkeyp
 @pytest.mark.skipif(hotpot_utils.dspy is None, reason="HotPotQA's locked DSPy group is not installed")
 @pytest.mark.parametrize("model", [QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL])
 @pytest.mark.parametrize("asynchronous", [False, True])
-def test_real_dspy_provider_requests_use_three_attempts(tmp_path, monkeypatch, model, asynchronous):
+def test_real_dspy_provider_requests_share_three_retries_for_transport_and_output(
+    tmp_path, monkeypatch, model, asynchronous
+):
     """Exercise the pinned DSPy transport with the same bounded retry policy."""
     raw = litellm.ModelResponse(
         model=model,
         choices=[{"message": {"role": "assistant", "content": "done"}, "finish_reason": "stop"}],
         usage={"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
     )
-    outcomes = [ConnectionError("temporary"), ConnectionError("temporary"), raw]
+    unfinished = litellm.ModelResponse(
+        model=model,
+        choices=[{"message": {"role": "assistant", "content": None}, "finish_reason": "length"}],
+        usage={"prompt_tokens": 10, "completion_tokens": 65536, "total_tokens": 65546},
+    )
+    outcomes = [ConnectionError("temporary"), unfinished, ConnectionError("temporary"), raw]
     provider = AsyncMock(side_effect=outcomes) if asynchronous else Mock(side_effect=outcomes)
     monkeypatch.setattr(litellm, "acompletion" if asynchronous else "completion", provider)
     monkeypatch.setattr(provider_retries.time, "sleep", Mock())
@@ -371,10 +378,11 @@ def test_real_dspy_provider_requests_use_three_attempts(tmp_path, monkeypatch, m
     lm = hotpot_utils.build_hotpotqa_task_lm(model, None, settings)
     result = asyncio.run(lm.aforward(prompt="test")) if asynchronous else lm.forward(prompt="test")
     assert result.choices[0].message.content == "done"
-    assert provider.call_count == 3
+    assert provider.call_count == 4
     assert all(call.kwargs["num_retries"] == call.kwargs["max_retries"] == 0 for call in provider.call_args_list)
     assert all(call.kwargs["max_tokens"] == 65_536 for call in provider.call_args_list)
-    assert len(path.read_text().splitlines()) == 3
+    assert [call.kwargs["seed"] for call in provider.call_args_list] == [0, 0, 1, 1]
+    assert len(path.read_text().splitlines()) == 4
 
 
 @pytest.mark.skipif(hotpot_utils.dspy is None, reason="HotPotQA's locked DSPy group is not installed")

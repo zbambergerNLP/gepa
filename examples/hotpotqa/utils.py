@@ -183,10 +183,12 @@ def resolve_hotpotqa_lm_kwargs(
         kwargs["max_tokens"] = 32_768 if role == "optimizer" else 65_536
     if model in {QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL}:
         kwargs["seed"] = HOTPOTQA_SCIENTIFIC_REQUEST_SEED
-        if role == "solver":
-            extra_body = kwargs["extra_body"]
-            assert isinstance(extra_body, dict)
-            kwargs["extra_body"] = {**extra_body, "thinking_token_budget": 32_768}
+        extra_body = kwargs["extra_body"]
+        assert isinstance(extra_body, dict)
+        # Native reasoning termination reserves final-answer space within the
+        # existing output ceiling, including on a runaway reasoning attempt.
+        thinking_budget = 32_768 if role == "solver" else (98_304 if model == DEEPSEEK_V4_1_FLASH_MODEL else 24_576)
+        kwargs["extra_body"] = {**extra_body, "thinking_token_budget": thinking_budget}
     if api_base is not None:
         kwargs["api_base"] = api_base
     return kwargs

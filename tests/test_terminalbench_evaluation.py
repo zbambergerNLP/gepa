@@ -455,7 +455,7 @@ def test_provider_retry_drift_cannot_resume_or_enter_final_test(tmp_path: Path, 
     path = forest / RUN_CONTRACT_FILENAME
     original = json.loads(path.read_text())
     changed = json.loads(path.read_text())
-    assert original["provider_retry_policy"]["max_attempts"] == 3
+    assert original["provider_retry_policy"]["max_attempts"] == 4
     if missing:
         del changed["provider_retry_policy"]
     else:

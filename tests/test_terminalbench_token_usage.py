@@ -15,6 +15,7 @@ from examples.common.experiment_models import (
     experiment_model_info,
     experiment_request_overrides,
 )
+from examples.common import provider_retries
 from examples.terminalbench import canary
 from examples.terminalbench.model_settings import (
     terminalbench_decoding,
@@ -83,9 +84,11 @@ def test_optimizer_usage_records_live_responses_once_and_excludes_journal_replay
 ) -> None:
     """Exercise real GEPA clients, request ceilings, usage accounting, and replay."""
     model = EXPERIMENT_MODELS[0]
-    raw = response(model, 32_768, "length", 30_000)
-    provider = Mock(side_effect=[ConnectionError("temporary")] * failures + [raw])
+    cutoff = response(model, 32_768, "length", 30_000)
+    raw = response(model, 100, "stop", 50)
+    provider = Mock(side_effect=[ConnectionError("temporary")] * failures + [cutoff, raw])
     monkeypatch.setattr(litellm, "completion", provider)
+    monkeypatch.setattr(provider_retries.time, "sleep", lambda _: None)
     monkeypatch.setattr(litellm, "completion_cost", Mock(return_value=0.25))
     path = tmp_path / "token-usage.jsonl"
     for _ in range(2):
@@ -110,14 +113,18 @@ def test_optimizer_usage_records_live_responses_once_and_excludes_journal_replay
                 )
             else:
                 assert lm.batch_complete([[{"role": "user", "content": "input"}]]) == ["private model text"]
-        assert lm.total_tokens_out == 32_768
+        assert lm.total_tokens_out == 100
         assert lm.total_cost == 0.25
-    assert provider.call_count == failures + 1
+    assert provider.call_count == failures + 2
     assert provider.call_args.kwargs["max_tokens"] == 32_768
     records = [json.loads(line) for line in path.read_text().splitlines()]
-    assert len(records) == failures + 1
-    assert records[-1]["length_finish"] and records[-1]["reasoning_tokens"] == 30_000
-    assert all(record["completion_tokens"] is None for record in records[:-1])
+    assert len(records) == failures + 2
+    assert records[-2]["length_finish"] and records[-2]["reasoning_tokens"] == 30_000
+    assert records[-2]["response_error"] == "output_length"
+    assert not records[-1]["length_finish"] and records[-1]["reasoning_tokens"] == 50
+    assert all(record["completion_tokens"] is None for record in records[:failures])
+    totals = summarize_usage([path])["models"][model]["proposer"]
+    assert totals["completion_tokens"] == 32_868 and totals["errors"] == failures + 1
 
 
 @pytest.mark.parametrize("experiment", [None, "tb2.1"])

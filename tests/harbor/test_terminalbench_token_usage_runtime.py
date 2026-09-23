@@ -67,7 +67,7 @@ def response(model: str, content: str, finish: str = "stop") -> litellm.ModelRes
 
 
 @pytest.mark.parametrize("valid_prefix", [False, True])
-def test_truncated_usage_survives_json_repair(runtime: tuple, valid_prefix: bool) -> None:
+def test_truncated_usage_survives_shared_output_recovery(runtime: tuple, valid_prefix: bool) -> None:
     """Retain the first capped completion even when Harbor successfully recovers."""
     agent, provider, root, model = runtime
     valid = json.dumps({"analysis": "done", "plan": "finish", "commands": [], "task_complete": True})
@@ -91,7 +91,9 @@ def test_truncated_usage_survives_json_repair(runtime: tuple, valid_prefix: bool
     assert records[0]["requested_model"] == model
     assert records[1]["length_finish"] is False
     assert records[1]["completion_tokens"] == 20
-    assert "32768 tokens" in provider.call_args.kwargs["messages"][-1]["content"]
+    assert provider.call_args_list[0].kwargs["messages"] == provider.call_args_list[1].kwargs["messages"]
+    assert records[0]["response_error"] == "output_length"
+    assert records[0]["request_id"] == records[1]["request_id"]
 
 
 def test_summary_calls_use_the_same_cap_and_usage_log(runtime: tuple) -> None:
@@ -128,15 +130,15 @@ def test_main_agent_provider_retries_do_not_multiply(runtime: tuple, succeeds: b
     """Count real transport attempts across both formerly nested Harbor layers."""
     agent, provider, root, model = runtime
     error = litellm.ServiceUnavailableError(message="private error", model=model, llm_provider="hosted_vllm")
-    provider.side_effect = [error, error, response(model, "done") if succeeds else error]
+    provider.side_effect = [error, error, error, response(model, "done") if succeeds else error]
     if succeeds:
         assert asyncio.run(agent._query_llm(Chat(agent._llm), "input")).content == "done"
     else:
         with pytest.raises(ProviderRequestError):
             asyncio.run(agent._query_llm(Chat(agent._llm), "input"))
-    assert provider.call_count == 3
+    assert provider.call_count == 4
     records = [json.loads(line) for line in (root / "logs" / "token-usage.jsonl").read_text().splitlines()]
-    assert len(records) == 3
+    assert len(records) == 4
     assert records[0]["error_type"] == "ServiceUnavailableError"
     assert records[-1]["completion_tokens"] == (20 if succeeds else None)
     assert all(call.kwargs["num_retries"] == call.kwargs["max_retries"] == 0 for call in provider.call_args_list)
@@ -183,6 +185,7 @@ def test_summary_provider_failure_stops_without_fallback(runtime: tuple, during_
             error,
             error,
             error,
+            error,
         ]
         operation = agent._query_llm(chat, "input", "TASK_INPUT", session)
     else:
@@ -191,4 +194,4 @@ def test_summary_provider_failure_stops_without_fallback(runtime: tuple, during_
         operation = agent._check_proactive_summarization(chat, "TASK_INPUT", session)
     with pytest.raises(ProviderRequestError):
         asyncio.run(operation)
-    assert provider.call_count == (4 if during_context_recovery else 3)
+    assert provider.call_count == (5 if during_context_recovery else 4)

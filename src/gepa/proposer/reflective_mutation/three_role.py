@@ -271,7 +271,7 @@ def _joint_controller_sampling_record(history: Mapping[str, Any]) -> dict[str, A
     record = _controller_sampling_record(history)
     return {
         **record,
-        "policy": "joint_region_action_v4",
+        "policy": "joint_region_action_v5",
         "joint_sampling_probability": record["sampled_probabilities"][0],
     }
 

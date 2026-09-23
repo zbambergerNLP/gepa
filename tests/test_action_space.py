@@ -228,18 +228,19 @@ class TestRandomActionSelector:
     def test_stateless_selector_policy_contract_records_material_defaults(self):
         """Verify selector contracts record behavior-bearing defaults."""
         assert stateless_selector_policy_contract("random") == {
-            "version": 3,
+            "version": 4,
             "selector": "random",
             "selection_granularity": "batch_shared",
             "context": "none",
             "sampling": "uniform",
         }
         assert stateless_selector_policy_contract("verbalized") == {
-            "version": 3,
+            "version": 4,
             "selector": "verbalized",
             "selection_granularity": "batch_shared",
             "context": "first_parent_and_aggregated_feedback",
             "sampling": "tail",
+            "scoring": "relative_weights_normalized_by_harness",
             "k": 5,
             "tau": 0.2,
             "require_full_support": False,
@@ -825,6 +826,19 @@ class FakeLM:
 
 
 class TestVerbalizedActionSelector:
+    @pytest.mark.parametrize("weight", [20, 1e308])
+    def test_relative_weights_normalize_without_model_arithmetic(self, weight):
+        """Normalize arbitrary finite scores without overflow or reviving zero-weight actions."""
+        output = "<response>" + "".join(
+            f"<candidate><action>{action.menu_id}</action><probability>{score}</probability></candidate>"
+            for action, score in zip(TEST_ACTIONS[:3], [weight, weight, 0], strict=True)
+        ) + "</response>"
+        lm = FakeLM(output)
+        selector = VerbalizedActionSelector(TEST_ACTIONS[:3], lm=lm, require_full_support=True)
+        dist = selector._generate_distribution(random.Random(0), "parent", "feedback")
+        assert not dist.is_fallback
+        assert [p for _, p, _ in dist.entries] == [0.5, 0.5, 0.0]
+
     def test_parse_valid_distribution(self):
         """Verify the selector parses a complete valid distribution."""
         lm = FakeLM(VALID_LM_OUTPUT)

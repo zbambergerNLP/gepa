@@ -7,36 +7,55 @@ import functools
 import json
 import logging
 import os
+import random
 import threading
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
+from urllib.error import HTTPError, URLError
 
 import httpx
 import litellm
 from litellm.exceptions import APIConnectionError, AuthenticationError, BadRequestError, ContextWindowExceededError
 
+from gepa.lm import LMRequestExhaustedError
+
 PROVIDER_RETRY_KEY = "_gepa_provider_retry"
 PROVIDER_RETRY_POLICY = {
-    "version": 1,
-    "max_attempts": 3,
-    "backoff_seconds": [1.0, 2.0],
+    "version": 2,
+    "max_retries": 3,
+    "max_attempts": 4,
+    "backoff_seconds": [1.0, 2.0, 4.0],
+    "backoff_jitter": "uniform_zero_to_backoff",
     "retryable_http_statuses": [408, 429, 500, 502, 503, 504],
     "retryable_errors": "connection_or_transport_timeout",
+    "retryable_responses": ["output_length", "empty_completion", "missing_choices"],
+    "incomplete_response_seed": "advance_explicit_seed_by_one_modulo_2**32",
+    "semantic_retries": False,
     "sdk_retries": 0,
     "timeout_scope": "all_attempts_share_explicit_request_timeout",
     "attempt_log": "provider-attempts.jsonl",
     "missing_usage": None,
 }
 _WRITE_LOCK = threading.Lock()
+_JITTER = random.SystemRandom()
 
 
-class ProviderRequestError(RuntimeError):
+class ProviderRequestError(LMRequestExhaustedError):
     """Stop higher-level retries after a provider request fails its policy."""
+
+
+class IncompleteResponseError(RuntimeError):
+    """Reject a transport-successful response that cannot complete the request."""
+
+    def __init__(self, reason: str):
+        """Retain the machine-readable failure without embedding model output."""
+        super().__init__(reason)
+        self.reason = reason
 
 
 def _field(value: Any, name: str, default: Any = None) -> Any:
@@ -60,8 +79,14 @@ def is_provider_request_error(error: BaseException) -> bool:
 
 def _retryable(error: BaseException) -> bool:
     """Accept only temporary HTTP failures and connection/transport timeouts."""
+    if isinstance(error, IncompleteResponseError):
+        return True
     if isinstance(error, AuthenticationError | BadRequestError):
         return False
+    if isinstance(error, HTTPError):
+        return error.code in PROVIDER_RETRY_POLICY["retryable_http_statuses"]
+    if isinstance(error, URLError):
+        return isinstance(error.reason, ConnectionError | TimeoutError)
     status = _field(error, "status_code")
     if status is None:
         status = _field(_field(error, "response"), "status_code")
@@ -78,6 +103,25 @@ def _retryable(error: BaseException) -> bool:
     )
 
 
+def _response_error(response: Any) -> IncompleteResponseError | None:
+    """Reject cutoffs and missing visible output before downstream parsing or tools."""
+    choices = _field(response, "choices", [])
+    if not choices:
+        return IncompleteResponseError("missing_choices")
+    for choice in choices:
+        if _field(choice, "finish_reason") == "length":
+            return IncompleteResponseError("output_length")
+        # A provider refusal is a completed decision, not an empty generation
+        # that should be resampled to evade the refusal.
+        message = _field(choice, "message")
+        if _field(choice, "finish_reason") == "content_filter" or _field(message, "refusal"):
+            continue
+        content = _field(message, "content")
+        if not (isinstance(content, str) and content.strip()) and not _field(message, "tool_calls"):
+            return IncompleteResponseError("empty_completion")
+    return None
+
+
 def _save_incomplete_response(
     path: Path, request: dict[str, Any], response: Any, request_id: str, attempt: int
 ) -> None:
@@ -89,7 +133,8 @@ def _save_incomplete_response(
             {
                 "finish_reason": _field(choice, "finish_reason"),
                 "message": {
-                    name: _field(message, name) for name in ("role", "content", "reasoning_content", "reasoning")
+                    name: _field(message, name)
+                    for name in ("role", "content", "reasoning_content", "reasoning", "tool_calls")
                 },
             }
         )
@@ -103,7 +148,7 @@ def _save_incomplete_response(
         },
         "response": {"id": _field(response, "id"), "model": _field(response, "model"), "choices": choices},
     }
-    extra = request.get("extra_body") or {}
+    extra = {**request, **(request.get("extra_body") or {})}
     payload["request"]["extra_body"] = {
         key: extra[key] for key in ("thinking_token_budget", "top_k", "min_p") if key in extra
     }
@@ -114,7 +159,13 @@ def _save_incomplete_response(
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="utf-8") as stream:
-        json.dump(payload, stream, ensure_ascii=False, allow_nan=False)
+        json.dump(
+            payload,
+            stream,
+            ensure_ascii=False,
+            allow_nan=False,
+            default=lambda value: value.model_dump(),
+        )
         stream.flush()
         os.fsync(stream.fileno())
 
@@ -142,15 +193,19 @@ def _record(
     prompt_tokens = _field(usage, "prompt_tokens")
     completion_tokens = _field(usage, "completion_tokens")
     reasoning_tokens = _field(_field(usage, "completion_tokens_details"), "reasoning_tokens")
-    thinking_budget = (request.get("extra_body") or {}).get("thinking_token_budget")
+    thinking_budget = (request.get("extra_body") or {}).get("thinking_token_budget", request.get("thinking_token_budget"))
     choices = _field(response, "choices", [])
     reasons = [_field(choice, "finish_reason") for choice in choices]
-    empty_completion = error is None and any(
-        not _field(_field(choice, "message"), "content") and not _field(_field(choice, "message"), "tool_calls")
-        for choice in choices
+    empty_completion = (error is None or isinstance(error, IncompleteResponseError)) and (
+        not choices
+        or any(
+            not str(_field(_field(choice, "message"), "content") or "").strip()
+            and not _field(_field(choice, "message"), "tool_calls")
+            for choice in choices
+        )
     )
     row = {
-        "schema_version": 1,
+        "schema_version": 2,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "allocation_job_id": os.environ.get("SLURM_JOB_ID"),
         "request_id": request_id,
@@ -162,8 +217,17 @@ def _record(
         "response_id": _field(response, "id"),
         "elapsed_seconds": time.monotonic() - started,
         "outcome": "success" if error is None else "error" if isinstance(error, Exception) else "cancelled",
+        "transport_outcome": (
+            "success"
+            if error is None or isinstance(error, IncompleteResponseError)
+            else "error"
+            if isinstance(error, Exception)
+            else "cancelled"
+        ),
+        "response_error": error.reason if isinstance(error, IncompleteResponseError) else None,
+        "seed": request.get("seed"),
         "error_type": type(error).__name__ if error is not None else None,
-        "status_code": _field(error, "status_code", _field(response, "status_code")),
+        "status_code": _field(error, "status_code", _field(error, "code", _field(response, "status_code"))),
         "will_retry": will_retry,
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
@@ -191,7 +255,11 @@ def _record(
         "limits": limits,
     }
     path = settings.get("log_path")
-    if path is not None and error is None and (empty_completion or "length" in reasons):
+    if (
+        path is not None
+        and (error is None or isinstance(error, IncompleteResponseError))
+        and (empty_completion or "length" in reasons)
+    ):
         artifact = Path(path).parent / "provider-failures" / f"{request_id}-{attempt}.json"
         _save_incomplete_response(artifact, request, response, request_id, attempt)
         row["response_artifact"] = str(artifact)
@@ -233,12 +301,53 @@ def _deadline(request: dict[str, Any]) -> float | None:
 
 def _delay(error: BaseException, attempt: int, deadline: float | None) -> float | None:
     """Choose a permitted backoff only while another attempt fits the deadline."""
-    if attempt >= 3 or not _retryable(error):
+    if attempt >= PROVIDER_RETRY_POLICY["max_attempts"] or not _retryable(error):
         return None
-    delay = float(PROVIDER_RETRY_POLICY["backoff_seconds"][attempt - 1])
+    delay = _JITTER.uniform(0, PROVIDER_RETRY_POLICY["backoff_seconds"][attempt - 1])
     if deadline is not None and time.monotonic() + delay >= deadline:
         return None
     return delay
+
+
+def _advance_output_retry_seed(request: dict[str, Any], error: BaseException) -> None:
+    """Avoid deterministic regeneration of an unusable completion, retaining transport seeds."""
+    seed = request.get("seed")
+    if isinstance(error, IncompleteResponseError) and isinstance(seed, int) and not isinstance(seed, bool):
+        request["seed"] = (seed + 1) % (2**32)
+
+
+def complete_with_retries(
+    send: Callable[..., Any], request: dict[str, Any], settings: dict[str, Any]
+) -> Any:
+    """Apply the same bounded request policy to SDK calls and raw serving probes."""
+    request = dict(request)
+    request_id, deadline = str(uuid.uuid4()), _deadline(request)
+    last_error: Exception | None = None
+    for attempt in range(1, PROVIDER_RETRY_POLICY["max_attempts"] + 1):
+        if attempt > 1 and deadline is not None and time.monotonic() >= deadline:
+            raise ProviderRequestError("Provider request timeout exhausted during backoff.") from last_error
+        started = time.monotonic()
+        response = None
+        try:
+            response = send(**_request(request, deadline))
+            response_error = _response_error(response)
+            if response_error is not None:
+                raise response_error
+        except BaseException as error:
+            delay = _delay(error, attempt, deadline) if isinstance(error, Exception) else None
+            _record(settings, request, request_id, attempt, started, response, error, delay is not None)
+            if not isinstance(error, Exception):
+                raise
+            last_error = error
+            if delay is None:
+                if isinstance(error, ContextWindowExceededError):
+                    raise
+                raise ProviderRequestError("Provider request failed; inspect provider-attempts.jsonl.") from error
+            _advance_output_retry_seed(request, error)
+            time.sleep(delay)
+        else:
+            _record(settings, request, request_id, attempt, started, response, None, False)
+            return response
 
 
 def install_provider_retries() -> None:
@@ -258,30 +367,7 @@ def install_provider_retries() -> None:
             settings = kwargs.pop(PROVIDER_RETRY_KEY, None)
             if settings is None:
                 return original(*args, **kwargs)
-            request_id, deadline = str(uuid.uuid4()), _deadline(kwargs)
-            last_error: Exception | None = None
-            for attempt in range(1, 4):
-                if attempt > 1 and deadline is not None and time.monotonic() >= deadline:
-                    raise ProviderRequestError("Provider request timeout exhausted during backoff.") from last_error
-                started = time.monotonic()
-                try:
-                    response = original(*args, **_request(kwargs, deadline))
-                except BaseException as error:
-                    delay = _delay(error, attempt, deadline) if isinstance(error, Exception) else None
-                    _record(settings, kwargs, request_id, attempt, started, None, error, delay is not None)
-                    if not isinstance(error, Exception):
-                        raise
-                    last_error = error
-                    if delay is None:
-                        if isinstance(error, ContextWindowExceededError):
-                            raise
-                        raise ProviderRequestError(
-                            "Provider request failed; inspect provider-attempts.jsonl."
-                        ) from error
-                    time.sleep(delay)
-                else:
-                    _record(settings, kwargs, request_id, attempt, started, response, None, False)
-                    return response
+            return complete_with_retries(functools.partial(original, *args), kwargs, settings)
 
         cast(Any, completion)._gepa_retry_wrapper = True
         litellm.completion = completion
@@ -297,15 +383,19 @@ def install_provider_retries() -> None:
                 return await original_async(*args, **kwargs)
             request_id, deadline = str(uuid.uuid4()), _deadline(kwargs)
             last_error: Exception | None = None
-            for attempt in range(1, 4):
+            for attempt in range(1, PROVIDER_RETRY_POLICY["max_attempts"] + 1):
                 if attempt > 1 and deadline is not None and time.monotonic() >= deadline:
                     raise ProviderRequestError("Provider request timeout exhausted during backoff.") from last_error
                 started = time.monotonic()
+                response = None
                 try:
                     response = await original_async(*args, **_request(kwargs, deadline))
+                    response_error = _response_error(response)
+                    if response_error is not None:
+                        raise response_error
                 except BaseException as error:
                     delay = _delay(error, attempt, deadline) if isinstance(error, Exception) else None
-                    _record(settings, kwargs, request_id, attempt, started, None, error, delay is not None)
+                    _record(settings, kwargs, request_id, attempt, started, response, error, delay is not None)
                     if not isinstance(error, Exception):
                         raise
                     last_error = error
@@ -315,6 +405,7 @@ def install_provider_retries() -> None:
                         raise ProviderRequestError(
                             "Provider request failed; inspect provider-attempts.jsonl."
                         ) from error
+                    _advance_output_retry_seed(kwargs, error)
                     await asyncio.sleep(delay)
                 else:
                     _record(settings, kwargs, request_id, attempt, started, response, None, False)

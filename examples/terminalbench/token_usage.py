@@ -120,7 +120,7 @@ def summarize_usage(paths: list[Path]) -> dict[str, Any]:
     for file in files:
         for line in file.read_text().splitlines():
             record = json.loads(line)
-            if record["schema_version"] != 1:
+            if record["schema_version"] not in {1, 2}:
                 raise ValueError(f"Unsupported token-usage schema in {file}")
             roles = models.setdefault(record["requested_model"], {})
             totals = roles.setdefault(record["role"], {"calls": 0, "errors": 0})

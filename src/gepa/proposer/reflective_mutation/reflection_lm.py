@@ -18,7 +18,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Protocol, cast, runtime_checkable
 
-from gepa.lm import LMProviderError, ProviderIdentityMismatchError
+from gepa.lm import LMProviderError, LMRequestExhaustedError, ProviderIdentityMismatchError
 from gepa.proposer.reflective_mutation.base import LanguageModel
 from gepa.response_journal import ResponseJournalError
 from gepa.strategies.action_space import ActionSelector, VerbalizedActionSelector
@@ -366,7 +366,7 @@ class StatelessReflectionLM:
         if batch_complete is not None:
             try:
                 return list(batch_complete(messages_list))
-            except (ProviderIdentityMismatchError, ResponseJournalError):
+            except (LMRequestExhaustedError, ProviderIdentityMismatchError, ResponseJournalError):
                 raise
             except LMProviderError as exc:
                 self._log(

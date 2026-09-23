@@ -39,7 +39,10 @@ def verify_thinking_budget(model: str, api_base: str, output_dir: Path) -> dict[
         {"model": request["model"], "prompt": "</think>", "add_special_tokens": False},
         120,
     )["tokens"]
-    response = _post_json(f"{api_base.rstrip('/')}/chat/completions", request, 120)
+    response = _post_json(
+        f"{api_base.rstrip('/')}/chat/completions", request, 120,
+        attempt_log=output_dir / "provider-attempts.jsonl",
+    )
     response_path = output_dir / "response.json"
     response_path.write_text(json.dumps(response, indent=2) + "\n")
     response_path.chmod(0o600)

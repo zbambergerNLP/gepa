@@ -235,6 +235,37 @@ def test_completed_optimizer_binds_provider_evidence(tmp_path, remove):
         load_cycle(tmp_path)
 
 
+@pytest.mark.parametrize("broken", [None, "different_request", "missing_attempt", "missing_prefix", "too_many", "still_cutoff"])
+def test_optimizer_accepts_only_complete_bounded_recovery_history(tmp_path, broken):
+    """Recovered cutoffs remain charged; unrelated success cannot conceal a failed request."""
+    require_contract(tmp_path, {"method": "react_v2"})
+    cycle = CycleEvidence(tmp_path)
+    cycle.events = completed_cycle()
+    cycle._save()
+    failed = {"request_id": "a", "attempt": 1, "outcome": "error", "will_retry": True, "finish_reasons": ["length"]}
+    success = {"request_id": "a", "attempt": 2, "outcome": "success", "will_retry": False, "finish_reasons": ["stop"]}
+    rows = [failed, success]
+    if broken == "different_request":
+        success["request_id"] = "b"
+    elif broken == "missing_attempt":
+        success["attempt"] = 3
+    elif broken == "missing_prefix":
+        rows = [success]
+    elif broken == "too_many":
+        rows = [{**failed, "attempt": i} for i in range(1, 5)] + [{**success, "attempt": 5}]
+    elif broken == "still_cutoff":
+        success["finish_reasons"] = ["length"]
+    path = tmp_path / "provider-attempts.jsonl"
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    if broken:
+        with pytest.raises(ValueError, match="unrecovered"):
+            cycle.verify()
+    else:
+        cycle.verify()
+        assert load_cycle(tmp_path)["completed_cycles"] == 1
+        assert len(path.read_text().splitlines()) == 2
+
+
 def test_completed_cycle_cannot_be_reused_after_contract_change(tmp_path):
     """Bind coverage evidence to the actual data and optimizer configuration."""
     require_contract(tmp_path, {"method": "vanilla"})

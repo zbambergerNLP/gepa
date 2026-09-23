@@ -36,7 +36,8 @@ from examples.hotpotqa.utils import HOTPOTQA_HF_REVISION, f1_score, load_hotpotq
 
 COMPONENTS = ("summarize1", "create_query_hop2", "summarize2", "final_answer")
 PROTOCOL = {
-    "version": 1,
+    "version": 2,
+    "request_runtime": "shared revised LM/provider dispatch and resolved model settings; pinned strategy per arm",
     "proposal_train_indices": {name: list(range(i * 3, i * 3 + 3)) for i, name in enumerate(COMPONENTS)},
     "transfer_train_indices": list(range(12, 36)),
     "proposal_seed": 0,
@@ -136,7 +137,7 @@ def proposal_worker(request_file: Path) -> None:
     request = json.loads(request_file.read_text())
     directory = request_file.parent
     settings = argparse.Namespace(**request["settings"])
-    kwargs = observed_kwargs(settings.reflection_model, settings.reflection_api_base, directory, "optimizer")
+    kwargs = request["reflection_lm_kwargs"]
     config, _ = build_config("react_v2", settings, kwargs, str(directory))
     strategy = config.reflection.reflection_strategy
     if strategy is None:
@@ -154,6 +155,13 @@ def proposal_worker(request_file: Path) -> None:
             "raw_lm_outputs": proposal.raw_lm_outputs,
             "strategy_contract": strategy.run_contract(request["candidate"]),
             "imported_source": str(Path(sys.modules["gepa"].__file__).resolve()),
+            "shared_request_runtime": {
+                "directory": request["shared_request_runtime"]["directory"],
+                "files": {
+                    name: hashlib.sha256(Path(sys.modules[name].__file__).read_bytes()).hexdigest()
+                    for name in request["shared_request_runtime"]["files"]
+                },
+            },
         },
     )
 
@@ -162,6 +170,11 @@ def run_comparison(args: argparse.Namespace) -> dict:
     """Compare all fixed proposal pairs without tuning or migrating the current campaign."""
     root = Path(__file__).resolve().parents[2]
     sources = {"control": source_identity(args.control_source), "revised": source_identity(root)}
+    # The worker's isolated imports can select an older strategy. Its request
+    # runtime and decoding must still match the revised arm exactly.
+    from examples.hotpotqa.proposal_runtime import runtime_identity
+
+    shared_runtime = runtime_identity(root)
     if (
         sources["control"]["commit"] != args.control_commit
         or sources["control"]["commit"] == sources["revised"]["commit"]
@@ -217,6 +230,7 @@ def run_comparison(args: argparse.Namespace) -> dict:
     contract = {
         "protocol": PROTOCOL,
         "sources": sources,
+        "shared_request_runtime": shared_runtime,
         "runtime": runtime,
         "candidate": candidate,
         "proposal_batches": batches,
@@ -282,6 +296,10 @@ def run_comparison(args: argparse.Namespace) -> dict:
                     "candidate": candidate,
                     "reflection_records": {component: records},
                     "source": sources[variant],
+                    "shared_request_runtime": shared_runtime,
+                    "reflection_lm_kwargs": observed_kwargs(
+                        args.reflection_model, args.reflection_api_base, directory, "optimizer"
+                    ),
                 }
                 require_contract(directory, request)
                 request_file = directory / "request.json"
@@ -297,7 +315,7 @@ def run_comparison(args: argparse.Namespace) -> dict:
                         "--python",
                         sys.executable,
                         "python",
-                        str(Path(__file__).resolve()),
+                        str(root / "examples/hotpotqa/proposal_runtime.py"),
                         "--proposal-request",
                         str(request_file),
                     ]
@@ -308,6 +326,8 @@ def run_comparison(args: argparse.Namespace) -> dict:
                 proposal = json.loads(proposal_path.read_text())
                 if proposal["request_sha256"] != digest(request):
                     raise ValueError("Proposal does not belong to the fixed request")
+                if proposal["shared_request_runtime"] != shared_runtime:
+                    raise ValueError("Proposal worker imported a different request runtime")
                 if not Path(proposal["imported_source"]).is_relative_to(Path(sources[variant]["directory"])):
                     raise ValueError("Proposal worker imported the wrong source")
                 cases = batches[component] + transfer + diagnostics

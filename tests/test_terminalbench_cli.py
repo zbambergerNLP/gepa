@@ -448,7 +448,7 @@ def test_provider_settings_reach_all_runtime_roles(
     for client in unique_clients.values():
         assert client.completion_kwargs["max_tokens"] == 32_768
         raw = litellm.ModelResponse(
-            model=model, choices=[{"message": {"role": "assistant", "content": "done"}, "finish_reason": "length"}],
+            model=model, choices=[{"message": {"role": "assistant", "content": "done"}, "finish_reason": "stop"}],
             usage={"prompt_tokens": 10, "completion_tokens": 32_768, "total_tokens": 32_778},
         )
         monkeypatch.setattr(litellm, "completion", Mock(return_value=raw))
@@ -457,7 +457,7 @@ def test_provider_settings_reach_all_runtime_roles(
         assert client("offline input") == "done"
     records = [json.loads(line) for line in (tmp_path / "run" / "token-usage.jsonl").read_text().splitlines()]
     assert len(records) == len(unique_clients)
-    assert all(record["length_finish"] and record["output_cap_reached"] for record in records)
+    assert all(not record["length_finish"] and record["output_cap_reached"] for record in records)
     assert optimize_kwargs["stop_callbacks"].max_proposals == (8 if budget == "double" else 4)
     assert optimize_kwargs["max_metric_calls"] == 4
     sampler = optimize_kwargs["batch_sampler"]

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from examples.common.provider_retries import complete_with_retries
 from examples.hotpotqa.utils import resolve_hotpotqa_lm_kwargs
 
 SMOKE_MESSAGES = [
@@ -37,25 +38,40 @@ _CLIENT_ONLY_FIELDS = {
 }
 
 
-def _post_json(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+def _post_json(
+    url: str, payload: dict[str, Any], timeout: float, *, attempt_log: Path | None = None
+) -> dict[str, Any]:
     """POST one JSON payload and decode the JSON response.
 
     Args:
         url: Absolute endpoint URL on the local server.
         payload: Request body.
         timeout: Seconds to wait for the response.
+        attempt_log: Physical-attempt log for model-generating requests.
 
     Returns:
         Decoded JSON response body.
     """
-    request = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json", "Authorization": "Bearer EMPTY"},
-        method="POST",
-    )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        return json.loads(response.read())
+    def send(**kwargs: Any) -> dict[str, Any]:
+        """Send the raw protocol unchanged after removing client-only retry metadata."""
+        remaining = kwargs.pop("timeout", timeout)
+        kwargs.pop("num_retries", None)
+        kwargs.pop("max_retries", None)
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(kwargs).encode(),
+            headers={"Content-Type": "application/json", "Authorization": "Bearer EMPTY"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=remaining) as response:
+            return json.loads(response.read())
+
+    if url.rstrip("/").endswith("/chat/completions"):
+        return complete_with_retries(
+            send, {**payload, "timeout": timeout},
+            {"role": "serving_probe", "log_path": str(attempt_log) if attempt_log is not None else None},
+        )
+    return send(**payload)
 
 
 def _get_json(url: str, timeout: float) -> dict[str, Any]:
@@ -95,7 +111,9 @@ def build_chat_request(model: str, served_name: str, api_base: str) -> dict[str,
     return body
 
 
-def run_smoke_exchange(model: str, served_name: str, api_base: str, timeout: float) -> dict[str, Any]:
+def run_smoke_exchange(
+    model: str, served_name: str, api_base: str, timeout: float, *, attempt_log: Path | None = None
+) -> dict[str, Any]:
     """Render, send, and record one chat exchange.
 
     Args:
@@ -103,6 +121,7 @@ def run_smoke_exchange(model: str, served_name: str, api_base: str, timeout: flo
         served_name: Model name the local server reports on ``/v1/models``.
         api_base: Local OpenAI-compatible ``/v1`` endpoint.
         timeout: Seconds to wait for each server call.
+        attempt_log: Optional path for all model request attempts.
 
     Returns:
         Transcript with the request, the server-rendered prompt, and the response.
@@ -124,7 +143,7 @@ def run_smoke_exchange(model: str, served_name: str, api_base: str, timeout: flo
         timeout,
     )
     started = time.monotonic()
-    response = _post_json(f"{api_base.rstrip('/')}/chat/completions", chat_request, timeout)
+    response = _post_json(f"{api_base.rstrip('/')}/chat/completions", chat_request, timeout, attempt_log=attempt_log)
     elapsed = time.monotonic() - started
     message = response["choices"][0]["message"]
     try:
@@ -185,7 +204,10 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, required=True, help="Directory for transcript.json/.md")
     parser.add_argument("--timeout", type=float, default=3600, help="Per-call timeout in seconds")
     args = parser.parse_args()
-    transcript = run_smoke_exchange(args.model, args.served_name, args.api_base, args.timeout)
+    transcript = run_smoke_exchange(
+        args.model, args.served_name, args.api_base, args.timeout,
+        attempt_log=args.output_dir / "provider-attempts.jsonl",
+    )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     (args.output_dir / "transcript.json").write_text(json.dumps(transcript, indent=2) + "\n", encoding="utf-8")
     (args.output_dir / "transcript.md").write_text(render_markdown(transcript), encoding="utf-8")

@@ -15,6 +15,7 @@ from examples.hotpotqa.generalization_pilot import (
     paired_outcomes,
     partition_training,
 )
+from gepa.strategies.text_limits import TextLimits
 
 
 def test_transfer_membership_is_fixed_and_never_enters_proposal_batches() -> None:
@@ -88,9 +89,9 @@ def test_complete_paired_protocol_scores_every_proposal_without_transfer_leakage
     args = Namespace(
         control_source=control,
         control_commit="old",
-        model="solver",
+        model="hosted_vllm/Qwen/Qwen3.8-27B",
         api_base="solver-api",
-        reflection_model="teacher",
+        reflection_model="hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash",
         reflection_api_base="teacher-api",
         wiki17_dir=tmp_path,
         workers=4,
@@ -100,13 +101,6 @@ def test_complete_paired_protocol_scores_every_proposal_without_transfer_leakage
     )
     monkeypatch.setattr(
         pilot, "source_identity", lambda p: {"commit": "old" if p == control else "new", "directory": str(p)}
-    )
-    monkeypatch.setattr(
-        pilot,
-        "build_parser",
-        lambda: Namespace(
-            parse_args=lambda _: Namespace(reflection_model="teacher", reflection_api_base="teacher-api")
-        ),
     )
     train = [{"id": str(i), "question": f"Question {i}", "answer": "yes"} for i in range(150)]
     monkeypatch.setattr(pilot, "load_hotpotqa_dataset", lambda seed: (train, [], []))
@@ -157,6 +151,10 @@ def test_complete_paired_protocol_scores_every_proposal_without_transfer_leakage
     def worker(command, **kwargs):
         request_path = Path(command[-1])
         request = json.loads(request_path.read_text())
+        settings = Namespace(**request["settings"])
+        settings.enforce_scientific_contract = False
+        config, _ = pilot.build_config("react_v2", settings, {}, str(request_path.parent))
+        assert config.reflection.text_limits == TextLimits()
         requests.append(request)
         variant = request_path.parent.parent.name
         candidate = {**request["candidate"], request["component"]: variant} if changed else request["candidate"]

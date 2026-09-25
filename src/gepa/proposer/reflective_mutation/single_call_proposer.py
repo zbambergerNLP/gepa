@@ -23,7 +23,12 @@ from gepa.proposer.reflective_mutation.react_v2_proposer import (
 )
 from gepa.strategies.document_template import EditTarget, MalformedDocumentError
 from gepa.strategies.edit_tools import EditApplicationError, EditTool
-from gepa.strategies.reflection_context import CONTROLLER_AUTHORITY_GUIDANCE, GENERALIZATION_GUIDANCE
+from gepa.strategies.intervention import canonical_action_constraints
+from gepa.strategies.reflection_context import (
+    CONTROLLER_AUTHORITY_GUIDANCE,
+    GENERALIZATION_GUIDANCE,
+    REAL_EDIT_GUIDANCE,
+)
 
 SINGLE_CALL_EXECUTION_CONTRACT = {
     "version": 1,
@@ -53,6 +58,7 @@ class SingleCallProposer(ReActV2Proposer):
         max_chars: int | None,
         *,
         controller_direction: str | None = None,
+        require_edit: bool = False,
     ) -> ReActV2Result:
         """Stage the ordered calls and return only a wholly valid revision.
 
@@ -121,6 +127,15 @@ class SingleCallProposer(ReActV2Proposer):
             "Preserve the action's semantic constraints relative to the original section.\n"
             f"{GENERALIZATION_GUIDANCE}\n{CONTROLLER_AUTHORITY_GUIDANCE}\n{constraint}\nAvailable tools:\n{schemas}"
         )
+        if require_edit:
+            system = system.replace(GENERALIZATION_GUIDANCE, REAL_EDIT_GUIDANCE)
+            system = system.replace(CONTROLLER_AUTHORITY_GUIDANCE, canonical_action_constraints())
+            system = system.replace(
+                "If no edit applies, emit only <finish>the reason</finish> without any tool calls. "
+                "Legitimate no-ops are recorded and discarded; never invent a target to force an edit.",
+                "Emit at least one valid edit call. The complete batch must change the original section. "
+                "Finish-only and unchanged results are generation errors returned to the planner.",
+            )
         task = json.dumps(
             {
                 "component": edit_target.component_name,
@@ -164,6 +179,8 @@ class SingleCallProposer(ReActV2Proposer):
             if native and text_calls:
                 raise ReActV2ProtocolError("This model must emit native function calls, not text tool blocks.")
             if finishes:
+                if require_edit:
+                    raise ReActV2ProtocolError("Finish-only output is a generation error; a real edit is required.")
                 if len(finishes) != 1 or native_calls or text_calls:
                     raise ReActV2ProtocolError("A no-op finish must be the only action in the response.")
                 reason = f"Editor returned no edit: {finishes[0].strip()}"

@@ -521,3 +521,12 @@ def summarize_feedback(reflective_entries: Any, max_chars: int | None = None) ->
     summary = "\n".join(parts)
     summary = clip_text(summary, max_chars)
     return summary or "(no feedback available)"
+
+
+def canonical_action_constraints() -> str:
+    """Render the same complete semantic constraints for every proposal role."""
+    return "\n\n".join(
+        f"Action: {spec.name}\nDescription: {spec.description}\nDirect tool: {spec.edit_tool.value}\n"
+        f"Binding instruction: {spec.instruction or spec.fixed_text}"
+        for spec in SEMANTIC_ACTIONS
+    )

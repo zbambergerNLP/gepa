@@ -233,6 +233,9 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
         self.reflective_proposer = reflective_proposer
         if run_dir is not None:
             self.reflective_proposer.evaluation_journal = EvaluationJournal(run_dir, use_cloudpickle=use_cloudpickle)
+            planner = getattr(self.reflective_proposer._reflection_lm, "sibling_planner", None)
+            if planner is not None:
+                planner.bind_run_dir(run_dir)
         self.merge_proposer = merge_proposer
         self.frontier_type: FrontierType = frontier_type
 
@@ -612,6 +615,11 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
         """
         if iteration_id is None:
             iteration_id = state.current_iteration_id()
+        planner = getattr(self.reflective_proposer._reflection_lm, "sibling_planner", None)
+        sibling_proposal = None
+        if planner is not None and proposal_metadata and proposal_metadata.get("sibling_choice"):
+            sibling_proposal = CandidateProposal(new_program, parent_program_idx, metadata=dict(proposal_metadata))
+            planner.validate_children([sibling_proposal], state)
         num_metric_calls_by_discovery = state.total_num_evals
         state.increment_evals(num_actual_evals)
         state.num_full_ds_evals += 1
@@ -631,6 +639,9 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
             iteration_id=iteration_id,
             proposal_metadata=proposal_metadata,
         )
+
+        if planner is not None and sibling_proposal is not None:
+            planner.accept_child(sibling_proposal, new_program_idx, state)
 
         # ``iteration_id`` is the on-disk anchor (the same one
         # ``GEPAState._save_agent_directory`` writes the proposal dir under).
@@ -893,6 +904,10 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
             if self.write_agent_state:
                 trace_entry["proposal_accepted"] = False
             return False
+
+        planner = getattr(self.reflective_proposer._reflection_lm, "sibling_planner", None)
+        if planner is not None:
+            planner.validate_children(selected, state)
 
         # 3) Full-valset eval of the selected candidates (one batched, read-only call).
         valset_evals = self._evaluate_programs_on_valset([p.candidate for p in selected], state)

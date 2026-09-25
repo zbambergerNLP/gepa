@@ -16,8 +16,12 @@ from typing import Any
 
 from gepa.proposer.reflective_mutation.base import LanguageModel
 from gepa.strategies.edit_tools import EditTool
-from gepa.strategies.intervention import ControllerChoice
-from gepa.strategies.reflection_context import CONTROLLER_AUTHORITY_GUIDANCE, GENERALIZATION_GUIDANCE
+from gepa.strategies.intervention import ControllerChoice, canonical_action_constraints
+from gepa.strategies.reflection_context import (
+    CONTROLLER_AUTHORITY_GUIDANCE,
+    GENERALIZATION_GUIDANCE,
+    REAL_EDIT_GUIDANCE,
+)
 from gepa.strategies.text_limits import TextLimits, clip_text, resolve_text_limits
 
 MAX_MANIFESTATION_ATTEMPTS = 2
@@ -119,6 +123,7 @@ class Manifestor:
         traces: str,
         *,
         controller_direction: str | None = None,
+        require_edit: bool = False,
     ) -> str | None:
         """Return steering guidance for ``action`` or ``None`` when it has no spec.
 
@@ -188,6 +193,29 @@ class Manifestor:
             controller_authority=CONTROLLER_AUTHORITY_GUIDANCE,
             controller_direction=json.dumps(controller_direction, ensure_ascii=False),
         )
+        if require_edit:
+            prompt = (
+                f"Validate and manifest this selected action without changing its goal or section.\n"
+                f"Selected action: {spec.name}; section: {action.edit_target.section}; tool: {tool}\n"
+                f"Controller direction: {json.dumps(controller_direction)}\n"
+                f"{REAL_EDIT_GUIDANCE}\n{canonical_action_constraints()}\n{state}\n"
+                'Return only a JSON object. For executable guidance use {"status":"ready", '
+                '"observation":"...", "hypothesis":"...", "general_change":"...", "scope":"..."}. '
+                'If the direction conflicts with the action, lacks a real change or cannot execute, use '
+                '{"status":"incompatible", "reason":"..."}. Do not ask the Editor to finish without editing.'
+            )
+            self.text_limits.check_prompt(prompt)
+            raw = self.lm(prompt).strip()
+            try:
+                guidance = json.loads(raw)
+            except (ValueError, TypeError) as exc:
+                raise ManifestationError(f"Malformed manifestation: {raw}") from exc
+            fields = ("observation", "hypothesis", "general_change", "scope")
+            if not isinstance(guidance, dict) or guidance.get("status") != "ready" or any(
+                not isinstance(guidance.get(field), str) or not guidance[field].strip() for field in fields
+            ):
+                raise ManifestationError(f"Incompatible or incomplete manifestation: {raw}")
+            return "\n".join(f"{field}: {guidance[field]}" for field in fields)
         for attempt in range(MAX_MANIFESTATION_ATTEMPTS):
             self.text_limits.check_prompt(prompt)
             raw = self.lm(prompt).strip()

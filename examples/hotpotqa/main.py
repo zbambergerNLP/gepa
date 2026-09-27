@@ -113,6 +113,7 @@ from gepa.strategies.intervention import (
     UNIFORM_RANDOM_CONTROLLER_POLICY_CONTRACT,
     StatelessActionConstraint,
 )
+from gepa.strategies.jev_controller import JEV_CONTROLLER_POLICY_CONTRACT
 from gepa.strategies.proposal_sampling import SingleMutationSampling
 from gepa.strategies.proposal_selection import AllImprovements
 from gepa.strategies.reflection_context import FOREST_REFLECTION_CONTRACT, REFLECTION_CONTEXT_CONTRACT
@@ -217,6 +218,8 @@ def _validate_scientific_contract(args, runtime_environment: dict | None = None)
     environment = os.environ if runtime_environment is None else runtime_environment
     if getattr(args, "enforce_scientific_contract", False):
         changed_axes = []
+        if getattr(args, "controller_selection", "verbalized") == "jev":
+            changed_axes.append("Jev is a separate, unqualified Controller policy; it is not in the locked campaign")
         required_values = (
             ("program", "2stage"),
             ("seed_style", "structured"),
@@ -529,6 +532,16 @@ def _contract_api_base(api_base: str | None, *, scientific_contract: bool) -> st
     return f"local-loopback{endpoint_path}"
 
 
+def _controller_selection(condition: str, args) -> str:
+    """Resolve the requested Controller without changing existing ablation identities."""
+    requested = getattr(args, "controller_selection", "verbalized")
+    if requested not in {"verbalized", "jev"}:
+        raise ValueError("controller_selection must be verbalized or jev")
+    if requested == "jev" and (condition != "react_v2" or args.reflection_level != 2):
+        raise ValueError("Jev requires --condition react_v2 --reflection-level 2")
+    return "uniform_random" if condition == "react_v2_random" else requested
+
+
 def build_run_contract(condition: str, args) -> dict:
     """Build the complete persisted configuration for one condition.
 
@@ -540,6 +553,7 @@ def build_run_contract(condition: str, args) -> dict:
         JSON-serializable model, optimizer, retrieval, and data contract.
     """
     _validate_hotpotqa_model_pair(args.solver_model, args.reflection_model)
+    jev = _controller_selection(condition, args) == "jev"
     family = resolve_template_family(args.template_family, args.solver_model)
     text_limits = resolve_text_limits(getattr(args, "text_limits", None))
     solver_api_base = args.solver_api_base if args.solver_api_base is not None else args.api_base
@@ -574,7 +588,7 @@ def build_run_contract(condition: str, args) -> dict:
                     "requested": deepcopy(reflection_decoding),
                     "provider_ignored_fields": [],
                 }
-                if condition == "react_v2"
+                if condition == "react_v2" and not jev
                 else None
             ),
             "manifestor": (
@@ -623,7 +637,13 @@ def build_run_contract(condition: str, args) -> dict:
         }
     semantic_controller_policy = None
     if reflection_level == 2:
-        if condition == "react_v2_random":
+        if jev:
+            semantic_controller_policy = deepcopy(JEV_CONTROLLER_POLICY_CONTRACT)
+            reflection_role_decoding["controller"] = {
+                "provider": "typesafe", "policy": deepcopy(JEV_CONTROLLER_POLICY_CONTRACT),
+                "requested": {}, "provider_ignored_fields": [],
+            }
+        elif condition == "react_v2_random":
             semantic_controller_policy = deepcopy(UNIFORM_RANDOM_CONTROLLER_POLICY_CONTRACT)
         else:
             semantic_controller_policy = deepcopy(CONTROLLER_POLICY_CONTRACT)
@@ -674,7 +694,11 @@ def build_run_contract(condition: str, args) -> dict:
             "reflection_minibatch_size": 3,
             "component_selector": "round_robin",
             "reflection_context": deepcopy(REFLECTION_CONTEXT_CONTRACT),
-            "generalization": deepcopy(FOREST_REFLECTION_CONTRACT) if condition in _REACT_V2_CONDITIONS else None,
+            "generalization": ({
+                **deepcopy(FOREST_REFLECTION_CONTRACT),
+                **({"controller_direction": "Jev selects the pair; Manifestor derives the edit direction from evidence"}
+                   if jev else {}),
+            } if condition in _REACT_V2_CONDITIONS else None),
             "manifestor_traces_chars": text_limits.manifestor_trace_chars,
             "document_length": text_limits.document_contract(),
             "text_limits": text_limits.to_dict(),
@@ -1320,6 +1344,7 @@ def build_config(condition: str, args, reflection_lm_kwargs: dict, run_dir: str 
     """
     resolved_family = resolve_template_family(args.template_family, args.solver_model)
     _validate_scientific_contract(args)
+    controller_selection = _controller_selection(condition, args)
     text_limits = resolve_text_limits(getattr(args, "text_limits", None))
     resolved_run_dir = run_dir or condition_run_dir(condition, args.program, args.tag, _run_key(condition, args))
     observed_retry_settings = (reflection_lm_kwargs or {}).get(PROVIDER_RETRY_KEY, {})
@@ -1365,7 +1390,7 @@ def build_config(condition: str, args, reflection_lm_kwargs: dict, run_dir: str 
             editor_mode=getattr(args, "editor_mode", "react"),
             template_family=args.template_family,
             component_kinds=_component_kinds(args.program),
-            controller_selection="uniform_random" if condition == "react_v2_random" else "verbalized",
+            controller_selection=controller_selection,
             rng=random.Random(args.seed),
             text_limits=text_limits,
             manifestor_temperature=float(experiment_decoding(args.reflection_model, agentic=False)["temperature"]),
@@ -1496,6 +1521,10 @@ def build_parser() -> argparse.ArgumentParser:
     local task-program checks when the production contract is not enforced.
     """
     parser = argparse.ArgumentParser(description="HotpotQA evaluation for action-conditioned reflection")
+    parser.add_argument(
+        "--controller-selection", choices=["verbalized", "jev"], default="verbalized",
+        help="Jev replaces only the level-2 FOREST Controller; requires TYPESAFE_API_KEY and a new run directory",
+    )
     parser.add_argument("--data-path", type=str, default=None, help="Path to HotpotQA JSONL sample (smoke, 14/3/3)")
     parser.add_argument(
         "--max-metric-calls",

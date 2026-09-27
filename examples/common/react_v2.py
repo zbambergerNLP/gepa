@@ -13,6 +13,7 @@ from examples.common.provider_retries import PROVIDER_RETRY_KEY
 from gepa.lm import LM
 from gepa.proposer.reflective_mutation.three_role import ThreeRoleReflectionLM
 from gepa.strategies.document_template import TEMPLATE_FAMILIES, infer_template_family
+from gepa.strategies.jev_controller import JevController
 from gepa.strategies.text_limits import TextLimits
 
 _TASK_SECTIONS = {
@@ -218,7 +219,7 @@ def build_react_v2_strategy(
         edit_tool_set: Named edit-operator basis exposed to the proposer.
         template_family: Explicit provider family or ``"auto"``.
         component_kinds: Optional message role for each optimized component.
-        controller_selection: ``"verbalized"`` or ``"uniform_random"``.
+        controller_selection: ``"verbalized"``, ``"uniform_random"``, or ``"jev"``.
         editor_mode: Multi-turn ``react`` or one-response ``single_call`` editing.
         rng: Optional Controller RNG kept separate from GEPA's engine RNG.
         manifestor_traces_chars: Trace character cap, or ``None`` to rely on
@@ -240,16 +241,26 @@ def build_react_v2_strategy(
     if react_top_p is not None:
         proposer_kwargs["top_p"] = react_top_p
     separate_controller = (proposer_kwargs != controller_kwargs or editor_mode == "single_call") and level >= 1 and controller_selection == "verbalized"
+    jev_controller = None
+    if controller_selection == "jev":
+        journal_path = lm_kwargs.get("response_journal_path")
+        provider_log = lm_kwargs.get(PROVIDER_RETRY_KEY, {}).get("log_path")
+        jev_controller = JevController(
+            response_journal_path=journal_path,
+            attempt_log_path=Path(provider_log).with_name("jev-provider-attempts.jsonl") if provider_log else None,
+        )
     manifestor_kwargs = dict(lm_kwargs)
     manifestor_kwargs["temperature"] = manifestor_temperature
     if "response_journal_path" in lm_kwargs:
         controller_kwargs["response_journal_namespace"] = "controller"
-        proposer_kwargs["response_journal_namespace"] = "proposer" if separate_controller else "controller-proposer"
+        proposer_kwargs["response_journal_namespace"] = (
+            "proposer" if separate_controller or controller_selection == "jev" else "controller-proposer"
+        )
         manifestor_kwargs["response_journal_namespace"] = "manifestor"
     if PROVIDER_RETRY_KEY in lm_kwargs:
         for kwargs, role in (
             (controller_kwargs, "controller"),
-            (proposer_kwargs, "editor" if separate_controller or editor_mode == "single_call" else "controller_editor"),
+            (proposer_kwargs, "editor" if separate_controller or editor_mode == "single_call" or controller_selection == "jev" else "controller_editor"),
             (manifestor_kwargs, "manifestor"),
         ):
             kwargs[PROVIDER_RETRY_KEY] = {**kwargs[PROVIDER_RETRY_KEY], "role": role}
@@ -260,6 +271,7 @@ def build_react_v2_strategy(
         component_kinds=component_kinds,
         template_family=resolved_family,
         controller_selection=controller_selection,
+        jev_controller=jev_controller,
         editor_mode=editor_mode,
         controller_lm=LM(reflection_model, **controller_kwargs) if separate_controller else None,
         manifestor_lm=LM(reflection_model, **manifestor_kwargs),

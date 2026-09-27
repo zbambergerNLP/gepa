@@ -46,6 +46,7 @@ from gepa.strategies.intervention import (
     build_controller_menu,
     summarize_feedback,
 )
+from gepa.strategies.jev_controller import JevController
 from gepa.strategies.reflection_context import (
     CONTROLLER_AUTHORITY_GUIDANCE,
     FOREST_REFLECTION_CONTRACT,
@@ -57,7 +58,7 @@ from gepa.strategies.text_limits import TextLimitError, TextLimits, clip_text, r
 MAX_HISTORY_STEPS = 16
 MAX_HISTORY_EDIT_ENTRIES = 32
 REFLECTION_RUN_CONTRACT_FILENAME = "reflection-run-contract.json"
-_CONTROLLER_SELECTIONS = ("verbalized", "uniform_random")
+_CONTROLLER_SELECTIONS = ("verbalized", "uniform_random", "jev")
 _SENSITIVE_CONFIG_KEYS = {
     "access_token",
     "api_key",
@@ -451,6 +452,7 @@ class ThreeRoleReflectionLM:
         k: int = 5,
         tau: float | None = None,
         controller_selection: str = "verbalized",
+        jev_controller: JevController | None = None,
         rng: random.Random | None = None,
         logger: Any | None = None,
         reflection_prompt_template: str | dict[str, str] | None = None,
@@ -485,7 +487,8 @@ class ThreeRoleReflectionLM:
             tau: Optional verbalized-sampling tail-mass threshold.
             controller_selection: Controller selection policy. Uniform random
                 selection draws once from the same section/action menu and does
-                not call the Controller LM.
+                not call the Controller LM. Jev uses a typed joint-choice API.
+            jev_controller: Required typed API client when selecting ``jev``.
             rng: Seeded strategy RNG. When ``None``, GEPA replaces the
                 deterministic default with the engine RNG at wiring time.
             logger: Optional run logger shared by all roles.
@@ -522,6 +525,10 @@ class ThreeRoleReflectionLM:
             )
         if level == 0 and controller_selection != "verbalized":
             raise ValueError("controller_selection must be 'verbalized' when reflection level is 0")
+        if controller_selection == "jev" and (level != 2 or jev_controller is None or controller_lm is not None):
+            raise ValueError("Jev requires level 2, a jev_controller, and no generative controller_lm.")
+        if controller_selection != "jev" and jev_controller is not None:
+            raise ValueError("jev_controller requires controller_selection='jev'.")
         if template_family not in TEMPLATE_FAMILIES:
             raise ValueError(f"template_family must be one of {sorted(TEMPLATE_FAMILIES)}; got {template_family!r}")
         self.templates: dict[str, DocumentTemplate] = {**TEMPLATE_FAMILIES[template_family], **(templates or {})}
@@ -544,6 +551,7 @@ class ThreeRoleReflectionLM:
         self.k = k
         self.tau = tau
         self.controller_selection = controller_selection
+        self.jev_controller = jev_controller
         self._rng_explicit = rng is not None
         self.rng = rng if rng is not None else random.Random(0)
         self.logger = logger
@@ -625,7 +633,9 @@ class ThreeRoleReflectionLM:
             for kind in active_kinds
         }
         controller: dict[str, Any]
-        if self.level >= 2 and self.controller_selection == "uniform_random":
+        if self.jev_controller is not None:
+            controller = self.jev_controller.run_contract()
+        elif self.level >= 2 and self.controller_selection == "uniform_random":
             controller = {
                 **UNIFORM_RANDOM_CONTROLLER_POLICY_CONTRACT,
                 "max_menu": self.max_menu,
@@ -701,7 +711,11 @@ class ThreeRoleReflectionLM:
             "text_limits": self.text_limits.to_dict(),
             "manifestor_traces_chars": self.manifestor_traces_chars,
             "reflection_context": deepcopy(REFLECTION_CONTEXT_CONTRACT),
-            "generalization": deepcopy(FOREST_REFLECTION_CONTRACT),
+            "generalization": {
+                **deepcopy(FOREST_REFLECTION_CONTRACT),
+                **({"controller_direction": "Jev selects the pair; Manifestor derives the edit direction from evidence"}
+                   if self.jev_controller is not None else {}),
+            },
             "manifestor_delivery": "user_message",
             "branch_history": {
                 "storage": "target_scoped_user_assistant_messages",
@@ -798,6 +812,8 @@ class ThreeRoleReflectionLM:
             manifestor_cursor = getattr(self.manifestor_lm, "response_journal_cursor_state", None)
             if callable(manifestor_cursor):
                 state["manifestor_lm_cursor"] = manifestor_cursor()
+        if self.jev_controller is not None:
+            state["jev_controller_cursor"] = self.jev_controller.response_journal_cursor_state()
         return state
 
     def set_batch_retry_state(self, state: Mapping[str, Any]) -> None:
@@ -817,6 +833,11 @@ class ThreeRoleReflectionLM:
         if not isinstance(rng_state, tuple):
             raise TypeError("ThreeRoleReflectionLM retry rng_state must be a tuple.")
         self.rng.setstate(rng_state)
+        jev_cursor = state.get("jev_controller_cursor")
+        if jev_cursor is not None:
+            if self.jev_controller is None:
+                raise TypeError("Jev Controller cannot restore its response-journal cursor.")
+            self.jev_controller.restore_response_journal_cursor_state(jev_cursor)
         base_cursor = state.get("base_lm_cursor")
         if base_cursor is not None:
             restore = getattr(self.base_lm, "restore_response_journal_cursor_state", None)
@@ -888,6 +909,8 @@ class ThreeRoleReflectionLM:
             Combined tracked cost.
         """
         cost = float(getattr(self.base_lm, "total_cost", 0.0))
+        if self.jev_controller is not None:
+            cost += self.jev_controller.total_cost
         if self.controller_lm is not self.base_lm:
             cost += float(getattr(self.controller_lm, "total_cost", 0.0))
         if self.manifestor_lm is not self.base_lm and self.manifestor_lm is not self.controller_lm:
@@ -1009,7 +1032,12 @@ class ThreeRoleReflectionLM:
                 max_menu=self.max_menu,
             )
             controller_direction = None
-            if self.controller_selection == "uniform_random":
+            if self.jev_controller is not None:
+                action, controller_sampling = self.jev_controller.select(
+                    menu, sections=section_bodies, section_descriptions=template.sections,
+                    traces=traces, rng=self.rng,
+                )
+            elif self.controller_selection == "uniform_random":
                 action = self.rng.choice(menu)
                 controller_sampling = _uniform_controller_sampling_record(menu, action, self.level)
             else:

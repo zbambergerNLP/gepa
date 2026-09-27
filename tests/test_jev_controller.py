@@ -17,7 +17,7 @@ from gepa.proposer.reflective_mutation.three_role import ensure_reflection_run_c
 from gepa.response_journal import ResponseJournalError, response_journal_scope
 from gepa.strategies.document_template import TEMPLATES
 from gepa.strategies.edit_tools import EDIT_TOOL_SETS
-from gepa.strategies.intervention import build_controller_menu
+from gepa.strategies.intervention import SEMANTIC_ACTIONS, build_controller_menu
 from gepa.strategies.jev_controller import JEV_MODEL, JevController, JevControllerError
 
 
@@ -94,7 +94,13 @@ def test_live_sdk_request_preserves_constraints_evidence_and_cost(setup_controll
     assert request["state"]["training_evidence"] == "long evidence " * 10000
     assert request["state"]["component"] == "sys"
     choices = request["questions"]["edit"]["criteria"]
-    assert "constraints" in choices[action.menu_id]
+    specs = {spec.name: spec for spec in SEMANTIC_ACTIONS}
+    for key, criterion in choices.items():
+        spec = specs[key.split("@", 1)[0]]
+        assert criterion["constraints"] == spec.instruction
+        assert criterion["operator"] == spec.edit_tool.value
+    assert "NOT a new instruction" in choices["contextualize@Rules/INSERT_TEXT"]["description"]
+    assert "end-to-end failure alone does not prove" in request["questions"]["edit"]["instructions"]
     assert all(not key.startswith("prune_context@Task/") for key in choices)
     assert any(key.startswith("contextualize@Task/") for key in choices)
     assert record["excluded_choices"]
@@ -107,7 +113,9 @@ def test_live_sdk_request_preserves_constraints_evidence_and_cost(setup_controll
     assert "test-secret-key" not in json.dumps(controller.run_contract())
 
 
-@pytest.mark.parametrize("damage", ["missing", "extra", "negative", "nan", "sum", "model", "usage", "argmax", "type"])
+@pytest.mark.parametrize(
+    "damage", ["missing", "extra", "negative", "nan", "sum", "rounded_sum", "model", "usage", "argmax", "type"]
+)
 def test_invalid_results_fail_closed_without_sampling_or_fallback(setup_controller, damage, tmp_path):
     controller, requests, replies = setup_controller
 
@@ -127,6 +135,8 @@ def test_invalid_results_fail_closed_without_sampling_or_fallback(setup_controll
             probs[chosen] = "NaN"
         elif damage == "sum":
             probs[chosen] = 0.2
+        elif damage == "rounded_sum":
+            probs[chosen] = 0.99
         elif damage == "model":
             result["model"] = "jev-future"
         elif damage == "usage":
@@ -254,6 +264,23 @@ def test_seeded_sampling_uses_probabilities_rather_than_api_argmax(setup_control
     assert action.menu_id != record["jev_argmax"]
     assert record["sampling_probs"][record["jev_argmax"]] == pytest.approx(0.68)
     assert record["sampling_probs"][action.menu_id] == pytest.approx(0.32)
+
+
+def test_revised_policy_rejects_old_journal_identity_before_network(setup_controller, monkeypatch, tmp_path):
+    controller, requests, _ = setup_controller
+    current_contract = controller.run_contract()
+    assert current_contract["policy"] == "jev_joint_action_section_v2"
+    old_contract = deepcopy(current_contract)
+    old_contract["policy"] = "jev_joint_action_section_v1"
+    old_contract.pop("selection_guidance")
+    old_contract.pop("canonical_constraints")
+    monkeypatch.setattr(controller, "run_contract", lambda: old_contract)
+    with response_journal_scope("iteration:policy-check"):
+        select(controller)
+    resumed = JevController(response_journal_path=tmp_path / "responses.sqlite3")
+    with response_journal_scope("iteration:policy-check"), pytest.raises(ResponseJournalError):
+        select(resumed)
+    assert len(requests) == 1
 
 
 def test_deadline_prevents_more_physical_requests(setup_controller, monkeypatch):

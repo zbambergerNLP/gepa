@@ -7,7 +7,7 @@ TypeSafe `Choice` request over the joint action/section menu. It uses the pinned
 Jev returns probabilities, not a written rationale. The Manifestor develops the
 edit direction from the selected pair and the training evidence; the Editor still
 receives the full canonical action constraints independently. This is a new
-policy, `jev_joint_action_section_v1`, rather than a behavior-preserving model swap.
+policy, `jev_joint_action_section_v2`, rather than a behavior-preserving model swap.
 It contains neither the outcome-history nor sibling-diversity revisions.
 
 ## Setup
@@ -59,6 +59,12 @@ strategy = ThreeRoleReflectionLM(
 
 - Send every component section, its description, full structured training traces,
   and every action's canonical constraints. No evidence is silently truncated.
+- Describe each action by what it changes and what it must preserve. Classify the
+  intended correction before selecting its action and section: adding a behavior
+  rule changes meaning, while adding background preserves every operative rule.
+  These selection glosses do not change the canonical constraints used by the
+  Manifestor and Editor. Version 2 has a separate request and run identity from
+  version 1, so existing decisions cannot silently resume under revised wording.
 - Exclude delete, replace and move operations on empty sections, recording each
   reason. Other existing menu entries remain eligible.
 - Validate the returned model, complete probability map, argmax, confidence and
@@ -100,7 +106,7 @@ sampling, mechanical exclusions, invalid responses, authentication failures,
 bounded retries, batch fallback, accounting and deterministic response replay.
 Existing Controller tests cover compatibility with the original defaults.
 
-A live integration check used the first saved training context for each of the
+An earlier version-1 integration check used the first saved training context for each of the
 four components, recovered from the checksum-verified completed FOREST archive.
 Each contained the original three training examples and the complete action menu
 before mechanical exclusions. Four API requests succeeded without retries:
@@ -123,3 +129,41 @@ including any changed Manifestor work, before claiming preserved performance.
 Local evidence is in `outputs/jev-controller-live-check-20260927/`: the full
 request/response ledger, replay journal and `proof.json` with source-file hashes.
 These operational files are ignored and are not part of a deployment.
+
+### Version-2 selection diagnostic
+
+Four wording variants were compared on ten explicit edit-classification cases.
+The selection score was probability on the fixed correct action/section under
+the unchanged 90/10 sampler, with invalid responses scored zero. The combination
+of contrastive descriptions and effect-first guidance won and was frozen before
+querying 20 fresh authored cases, two per action. All labels and requests were
+saved before querying. This was a small manual variant comparison, not a GEPA
+optimization run or an external benchmark.
+
+| Fresh cases | Version 1 | Version 2 |
+|---|---:|---:|
+| Correct top pair, including rejected responses | 17/20 | 20/20 |
+| Valid response | 12/20 | 15/20 |
+| Correct top pair and valid response | 10/20 | 15/20 |
+| Mean correct-pair sampling probability; invalid = 0 | 28.6% | 54.0% |
+| Mean input tokens | 8,898 | 9,995 |
+| Median API seconds | 0.157 | 0.168 |
+
+Five version-2 responses were rejected because their probabilities summed to
+0.99. The strict validator, failure accounting and no-reroll behavior remain
+unchanged. Thus 20 correct top labels do not mean 20 usable decisions. Even among
+the seven cases with valid responses in both arms, correct-pair probability
+increased from 55.8% to 75.7%; this restricted comparison is descriptive.
+
+On twelve archived training states, version 1 preferred `contextualize` in all
+twelve; version 2 preferred it in five and `restrict_meaning` in seven. Both had
+eleven valid responses. These are top choices, not accepted edits, and those
+states have no unique action gold labels. Some failures originate in another
+component, so choosing a different action does not necessarily fix them.
+
+The study made 104 physical Controller calls, including 19 rejected responses,
+with no transport retries, at an estimated total cost of $0.039144. It made no
+Manifestor, Editor, solver, validation or test requests. This supports improved
+classification on the authored cases, not improved optimization scores or
+production readiness. The remaining distribution failures need resolution before
+deployment. Full ignored evidence is in `outputs/jev-definition-study-20260927/`.

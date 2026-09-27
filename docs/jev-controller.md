@@ -7,7 +7,7 @@ TypeSafe `Choice` request over the joint action/section menu. It uses the pinned
 Jev returns probabilities, not a written rationale. The Manifestor develops the
 edit direction from the selected pair and the training evidence; the Editor still
 receives the full canonical action constraints independently. This is a new
-policy, `jev_joint_action_section_v2`, rather than a behavior-preserving model swap.
+policy, `jev_joint_action_section_v3`, rather than a behavior-preserving model swap.
 It contains neither the outcome-history nor sibling-diversity revisions.
 
 ## Setup
@@ -63,12 +63,16 @@ strategy = ThreeRoleReflectionLM(
   intended correction before selecting its action and section: adding a behavior
   rule changes meaning, while adding background preserves every operative rule.
   These selection glosses do not change the canonical constraints used by the
-  Manifestor and Editor. Version 2 has a separate request and run identity from
-  version 1, so existing decisions cannot silently resume under revised wording.
+  Manifestor and Editor. Each policy revision has a distinct request and run
+  identity, so existing decisions cannot silently resume under revised behavior.
 - Exclude delete, replace and move operations on empty sections, recording each
   reason. Other existing menu entries remain eligible.
 - Validate the returned model, complete probability map, argmax, confidence and
-  usage. Locally sample with the existing seeded 90% model probability plus 10%
+  usage. Normalize complete, finite, nonnegative maps when their total is within
+  0.01 of one (0.99 through 1.01); reject larger discrepancies. The API schema
+  specifies an approximate sum, and observed two-decimal responses can total
+  0.99. Division by that total preserves relative weights, ordering and zeros.
+  Locally sample with the existing seeded 90% model probability plus 10%
   uniform-positive-support mixture. The API's argmax is recorded separately.
   Model-assigned zeros remain zero.
 - Use at most four physical attempts for transient transport errors, HTTP 408,
@@ -93,11 +97,17 @@ unmatched start identifies interrupted work whose server usage is unknown.
 Failed responses remain in this ledger, with credentials redacted. Unknown token
 usage is `null`, not an assertion of zero provider consumption.
 
-Proposal metadata records raw and sampled probabilities, excluded pairs, the
+Proposal metadata records raw, normalized and sampled probabilities, excluded pairs, the
 selected action, API argmax, request identity, replay status, latency and usage.
 Cost is an estimate from the documented input price of **$0.042 per million
 tokens**, with free output tokens, pinned in the policy as of September 27, 2026.
 It is not an invoice. Known usage from failed attempts remains charged.
+
+The attempt ledger, response journal and proposal metadata retain the raw
+distribution and its normalization record: raw total, applied flag, scale and
+absolute tolerance. Normalization is arithmetic on the same response; it makes
+no new API call. Missing/extra choices, invalid values, inconsistent argmax,
+incorrect model, missing usage and large mass errors still fail immediately.
 
 ## Verification
 
@@ -150,8 +160,8 @@ optimization run or an external benchmark.
 | Median API seconds | 0.157 | 0.168 |
 
 Five version-2 responses were rejected because their probabilities summed to
-0.99. The strict validator, failure accounting and no-reroll behavior remain
-unchanged. Thus 20 correct top labels do not mean 20 usable decisions. Even among
+0.99. The original strict validator was held fixed for that experiment. Thus 20
+correct top labels did not mean 20 usable decisions. Even among
 the seven cases with valid responses in both arms, correct-pair probability
 increased from 55.8% to 75.7%; this restricted comparison is descriptive.
 
@@ -165,5 +175,32 @@ The study made 104 physical Controller calls, including 19 rejected responses,
 with no transport retries, at an estimated total cost of $0.039144. It made no
 Manifestor, Editor, solver, validation or test requests. This supports improved
 classification on the authored cases, not improved optimization scores or
-production readiness. The remaining distribution failures need resolution before
-deployment. Full ignored evidence is in `outputs/jev-definition-study-20260927/`.
+production readiness. Full ignored evidence is in `outputs/jev-definition-study-20260927/`.
+
+### Version-3 normalization correction
+
+The live [OpenAPI schema](https://api.typesafe.ai/openapi.json) describes Choice
+probabilities as summing to approximately one. The SDK passes their values
+through; our former 0.0001 sum tolerance rejected otherwise usable responses.
+Version 3 retains the tested wording and adds the bounded normalization above.
+It has a separate identity from versions 1 and 2.
+
+All 162 saved responses from the integration, quality, context and definition
+checks pass the new validator, including all 23 previously rejected 0.99 totals.
+Their original failure records and costs remain unchanged. A fresh reliability
+check made 32 requests: all succeeded, including six needing normalization, with
+zero retries, at an estimated cost of $0.012210. Raw HTTP and SDK probability maps
+matched in all 32 responses. These reused states test runtime behavior, not new
+unseen classification quality.
+
+Applying the same normalization retrospectively to **both** arms of the saved
+20-case diagnostic yields correct-pair sampling probability of 47.4% for the
+initial wording and 69.6% for the revised wording. This arithmetic reanalysis is
+separate from the original frozen scores; it credits neither version alone for
+the reliability repair. The top-pair counts remain 17/20 and 20/20.
+
+Tests cover both tolerance boundaries, larger errors, support preservation,
+relative weights, unchanged raw evidence, no extra API calls, exact replay and
+rejection of old policy identities. The observed probability-total issue is
+resolved; generated-edit quality and end-to-end optimization remain untested.
+Full evidence is in `outputs/jev-probability-normalization-20260927/`.

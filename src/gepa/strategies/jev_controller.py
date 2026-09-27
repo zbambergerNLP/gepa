@@ -35,6 +35,7 @@ JEV_MODEL = "jev-1.13.0"
 JEV_API_BASE = "https://api.typesafe.ai"
 JEV_TIMEOUT_SECONDS = 30.0
 JEV_INPUT_USD_PER_MILLION = 0.042
+JEV_PROBABILITY_SUM_TOLERANCE = 0.01
 JEV_ACTION_DESCRIPTIONS = {
     "contextualize": (
         "Add background facts or explanations only. Keep every existing word and rule. NOT a new instruction, "
@@ -97,7 +98,7 @@ JEV_SELECTION_GUIDANCE = (
     "owns the text being changed. The full canonical constraints below are authoritative.\n"
 )
 JEV_CONTROLLER_POLICY_CONTRACT = {
-    "policy": "jev_joint_action_section_v2",
+    "policy": "jev_joint_action_section_v3",
     "model": JEV_MODEL,
     "api_base": JEV_API_BASE,
     "sdk_version": "0.7.1",
@@ -106,6 +107,12 @@ JEV_CONTROLLER_POLICY_CONTRACT = {
     "context": "full component and full structured training evidence; no truncation",
     "selection_guidance": "contrastive action descriptions; classify the intended effect before choosing a pair",
     "canonical_constraints": "unchanged; authoritative over the selection glosses",
+    "probability_normalization": {
+        "policy": "bounded_sum_v1",
+        "max_absolute_sum_error": JEV_PROBABILITY_SUM_TOLERANCE,
+        "method": "divide by raw total; preserve zero support and relative weights",
+        "evidence": "retain raw probabilities and normalization metadata",
+    },
     "mechanical_exclusions": "delete/replace/move on empty sections",
     "sampling": "Jev probabilities mixed with uniform exploration on positive support",
     "exploration_epsilon": FULL_SUPPORT_EXPLORATION_EPSILON,
@@ -259,9 +266,10 @@ class JevController:
             raise JevControllerError("Jev must return exactly the requested action/section distribution.")
         if any(type(p) not in (int, float) or not math.isfinite(p) or not 0 <= p <= 1 for p in probabilities.values()):
             raise JevControllerError("Jev returned invalid probabilities.")
-        total = sum(probabilities.values())
-        if not math.isclose(total, 1.0, rel_tol=0, abs_tol=1e-4):
-            raise JevControllerError("Jev probabilities do not sum to one.")
+        total = math.fsum(probabilities.values())
+        # The API schema promises an approximate sum; observed two-decimal maps can total 0.99.
+        if not math.isclose(total, 1.0, rel_tol=0, abs_tol=JEV_PROBABILITY_SUM_TOLERANCE + 1e-12):
+            raise JevControllerError("Jev probability total exceeds the normalization tolerance.")
         if answer.get("choice") not in choices or probabilities[answer["choice"]] != max(probabilities.values()):
             raise JevControllerError("Jev's argmax choice disagrees with its probabilities.")
         confidence = answer.get("confidence")
@@ -275,6 +283,18 @@ class JevController:
         if JevController._usage(response) is None:
             raise JevControllerError("Jev response is missing valid token usage.")
         return {key: value / total for key, value in probabilities.items()}
+
+    @staticmethod
+    def _normalization_record(probabilities: Mapping[str, float]) -> dict[str, Any]:
+        """Describe normalization of an already validated raw probability map."""
+        total = math.fsum(probabilities.values())
+        return {
+            "policy": "bounded_sum_v1",
+            "raw_total": total,
+            "applied": not math.isclose(total, 1.0, rel_tol=0, abs_tol=1e-12),
+            "scale": 1.0 / total,
+            "max_absolute_sum_error": JEV_PROBABILITY_SUM_TOLERANCE,
+        }
 
     def _live(self, request: dict[str, Any], choices: set[str]) -> dict[str, Any]:
         if typesafe_sdk is None:
@@ -312,6 +332,7 @@ class JevController:
             self._log({**record, "event": "started"})
             attempt_started = time.monotonic()
             response = None
+            normalization = None
             error: BaseException | None = None
             retryable = False
             try:
@@ -324,6 +345,7 @@ class JevController:
                 )
                 response = result.model_dump(mode="json")
                 self._validate(response, choices)
+                normalization = self._normalization_record(response["answers"]["edit"]["probabilities"])
             except (typesafe_sdk.TypeSafeError, JevControllerError) as exc:
                 error = exc
                 retryable = isinstance(
@@ -353,6 +375,7 @@ class JevController:
                     **record,
                     "event": "finished",
                     "response": response,
+                    "probability_normalization": normalization,
                     "usage": usage,
                     "elapsed_seconds": time.monotonic() - attempt_started,
                     "outcome": "error" if error else "success",
@@ -364,6 +387,7 @@ class JevController:
             if error is None:
                 return {
                     "response": response,
+                    "probability_normalization": normalization,
                     "usage": usage,
                     "request_id": request_id,
                     "physical_attempts": attempt,
@@ -449,7 +473,9 @@ class JevController:
         return action, {
             "policy": JEV_CONTROLLER_POLICY_CONTRACT["policy"],
             "model": JEV_MODEL,
+            "raw_probs": deepcopy(payload["response"]["answers"]["edit"]["probabilities"]),
             "probs": probabilities,
+            "probability_normalization": payload["probability_normalization"],
             "sampling_probs": sampling,
             "sampled": [action.menu_id],
             "sampled_reasonings": [None],

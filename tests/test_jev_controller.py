@@ -113,9 +113,7 @@ def test_live_sdk_request_preserves_constraints_evidence_and_cost(setup_controll
     assert "test-secret-key" not in json.dumps(controller.run_contract())
 
 
-@pytest.mark.parametrize(
-    "damage", ["missing", "extra", "negative", "nan", "sum", "rounded_sum", "model", "usage", "argmax", "type"]
-)
+@pytest.mark.parametrize("damage", ["missing", "extra", "negative", "nan", "sum", "model", "usage", "argmax", "type"])
 def test_invalid_results_fail_closed_without_sampling_or_fallback(setup_controller, damage, tmp_path):
     controller, requests, replies = setup_controller
 
@@ -135,8 +133,6 @@ def test_invalid_results_fail_closed_without_sampling_or_fallback(setup_controll
             probs[chosen] = "NaN"
         elif damage == "sum":
             probs[chosen] = 0.2
-        elif damage == "rounded_sum":
-            probs[chosen] = 0.99
         elif damage == "model":
             result["model"] = "jev-future"
         elif damage == "usage":
@@ -266,14 +262,19 @@ def test_seeded_sampling_uses_probabilities_rather_than_api_argmax(setup_control
     assert record["sampling_probs"][action.menu_id] == pytest.approx(0.32)
 
 
-def test_revised_policy_rejects_old_journal_identity_before_network(setup_controller, monkeypatch, tmp_path):
+@pytest.mark.parametrize("old_version", ["jev_joint_action_section_v1", "jev_joint_action_section_v2"])
+def test_revised_policy_rejects_old_journal_identity_before_network(
+    setup_controller, monkeypatch, tmp_path, old_version
+):
     controller, requests, _ = setup_controller
     current_contract = controller.run_contract()
-    assert current_contract["policy"] == "jev_joint_action_section_v2"
+    assert current_contract["policy"] == "jev_joint_action_section_v3"
     old_contract = deepcopy(current_contract)
-    old_contract["policy"] = "jev_joint_action_section_v1"
-    old_contract.pop("selection_guidance")
-    old_contract.pop("canonical_constraints")
+    old_contract["policy"] = old_version
+    old_contract.pop("probability_normalization")
+    if old_version == "jev_joint_action_section_v1":
+        old_contract.pop("selection_guidance")
+        old_contract.pop("canonical_constraints")
     monkeypatch.setattr(controller, "run_contract", lambda: old_contract)
     with response_journal_scope("iteration:policy-check"):
         select(controller)
@@ -281,6 +282,82 @@ def test_revised_policy_rejects_old_journal_identity_before_network(setup_contro
     with response_journal_scope("iteration:policy-check"), pytest.raises(ResponseJournalError):
         select(resumed)
     assert len(requests) == 1
+
+
+@pytest.mark.parametrize("total", [0.99, 0.995, 1.0, 1.005, 1.01])
+def test_near_unit_probability_maps_normalize_without_retry_and_replay_exactly(setup_controller, tmp_path, total):
+    controller, requests, replies = setup_controller
+    raw = {}
+
+    def rounded(request):
+        result = response(request)
+        answer = result["answers"]["edit"]
+        second = next(key for key in answer["probabilities"] if key != answer["choice"])
+        raw.update(
+            {
+                key: 0.6 if key == answer["choice"] else total - 0.6 if key == second else 0.0
+                for key in answer["probabilities"]
+            }
+        )
+        answer["probabilities"] = raw.copy()
+        return httpx2.Response(200, json=result)
+
+    replies.append(rounded)
+    rng = random.Random(19)
+    initial_rng = rng.getstate()
+    with response_journal_scope("iteration:rounded"):
+        choice, first = select(controller, rng)
+    assert len(requests) == 1 and first["physical_attempts"] == 1
+    assert first["raw_probs"] == raw
+    assert sum(first["probs"].values()) == pytest.approx(1.0)
+    assert sum(first["sampling_probs"].values()) == pytest.approx(1.0)
+    assert {key: p for key, p in first["probs"].items() if p == 0} == {key: p for key, p in raw.items() if p == 0}
+    positive = [key for key, p in raw.items() if p > 0]
+    assert first["probs"][positive[0]] / first["probs"][positive[1]] == pytest.approx(
+        raw[positive[0]] / raw[positive[1]]
+    )
+    audit = first["probability_normalization"]
+    assert audit["raw_total"] == pytest.approx(total)
+    assert audit["scale"] == pytest.approx(1 / total)
+    assert audit["applied"] is (total != 1.0)
+    finished = json.loads((tmp_path / "attempts.jsonl").read_text().splitlines()[-1])
+    assert finished["response"]["answers"]["edit"]["probabilities"] == raw
+    assert finished["probability_normalization"] == audit
+    assert finished["outcome"] == "success" and not finished["will_retry"]
+    resumed = JevController(
+        response_journal_path=tmp_path / "responses.sqlite3", attempt_log_path=tmp_path / "attempts.jsonl"
+    )
+    resumed_rng = random.Random()
+    resumed_rng.setstate(initial_rng)
+    with response_journal_scope("iteration:rounded"):
+        replayed, record = select(resumed, resumed_rng)
+    assert replayed == choice and record["replayed"] and record["physical_attempts"] == 0
+    assert record["probs"] == first["probs"] and record["raw_probs"] == raw
+    assert record["probability_normalization"] == audit
+    assert resumed_rng.getstate() == rng.getstate()
+    assert resumed.total_cost == controller.total_cost
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("total", [0.0, 0.2, 0.98, 0.989999, 1.010001, 1.02, 1.5])
+def test_normalization_refuses_large_mass_errors(setup_controller, total):
+    controller, requests, replies = setup_controller
+
+    def malformed(request):
+        result = response(request)
+        answer = result["answers"]["edit"]
+        second = next(key for key in answer["probabilities"] if key != answer["choice"])
+        answer["probabilities"] = {
+            key: total / 2 if key in {answer["choice"], second} else 0.0 for key in answer["probabilities"]
+        }
+        return httpx2.Response(200, json=result)
+
+    replies.append(malformed)
+    rng = random.Random(19)
+    before = rng.getstate()
+    with pytest.raises(JevControllerError):
+        select(controller, rng)
+    assert len(requests) == 1 and rng.getstate() == before
 
 
 def test_deadline_prevents_more_physical_requests(setup_controller, monkeypatch):

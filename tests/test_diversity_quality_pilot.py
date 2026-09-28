@@ -256,7 +256,7 @@ def test_em_only_evaluator_preserves_production_task_scores_and_traces_without_f
     def forbidden_f1(*args):
         raise AssertionError("The EM-only pilot must not calculate F1")
 
-    monkeypatch.setattr(utils, "f1_score", forbidden_f1)
+    monkeypatch.setattr(utils, "f1_score", forbidden_f1, raising=False)
     actual = pilot.make_evaluator(*arguments, **options)(parent, example)
     assert actual == expected
     assert calls[0] == calls[1]

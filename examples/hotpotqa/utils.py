@@ -6,7 +6,6 @@ import random
 import re
 import string
 import unicodedata
-from collections import Counter
 from copy import deepcopy
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import distribution as package_distribution
@@ -288,29 +287,6 @@ def normalize_answer(text: str) -> str:
     return " ".join(text.split())
 
 
-def f1_score(prediction: str, gold: str) -> float:
-    """Compute the pinned DSPy artifact's ordinary token-overlap F1.
-
-    Args:
-        prediction: Model answer.
-        gold: Reference answer.
-
-    Returns:
-        Token F1 in the inclusive range from zero to one.
-    """
-    pred = normalize_answer(prediction)
-    truth = normalize_answer(gold)
-    pred_tokens = pred.split()
-    truth_tokens = truth.split()
-    common = Counter(pred_tokens) & Counter(truth_tokens)
-    num_same = sum(common.values())
-    if num_same == 0:
-        return 0.0
-    precision = num_same / len(pred_tokens)
-    recall = num_same / len(truth_tokens)
-    return (2 * precision * recall) / (precision + recall)
-
-
 def _extract_final_response(output: str) -> str:
     """Extract the last marked final response after removing reasoning blocks.
 
@@ -503,23 +479,11 @@ def hotpotqa_metric(prediction: str, gold: str) -> tuple[float, str]:
         gold: Reference answer.
 
     Returns:
-        Exact-match score and grounded feedback containing token F1.
+        Exact-match score and feedback with the predicted and reference answers.
     """
-    f1 = f1_score(prediction, gold)
     em = float(normalize_answer(prediction) == normalize_answer(gold))
-
-    if em >= 1.0:
-        feedback = f"Exact match: prediction='{prediction}', gold='{gold}', token-F1=1.00, EM=1"
-    elif f1 > 0.0:
-        feedback = (
-            f"Partial token overlap: prediction='{prediction}', gold='{gold}', "
-            f"token-F1={f1:.2f}, EM={em:.0f}. Check the answer wording."
-        )
-    else:
-        feedback = (
-            f"No token overlap: prediction='{prediction}', gold='{gold}', "
-            f"token-F1={f1:.2f}, EM={em:.0f}. Check the evidence across retrieved passages."
-        )
+    outcome = "Exact match" if em else "Incorrect answer"
+    feedback = f"{outcome}: prediction='{prediction}', gold='{gold}', EM={em:.0f}"
 
     return em, feedback
 

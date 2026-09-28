@@ -192,7 +192,7 @@ limits remain. See [shared decisions](../../scripts/della/README.md).
 Final testing includes one shared starting-prompt baseline per model. Alongside
 the first completed cell's held-out evaluation, run the original prompts once
 over the same 300 test questions using that model's frozen task runtime. All seven
-cells reference those same baseline scores and report EM/F1 gains. This adds 300
+cells reference those same baseline scores and report EM gains. This adds 300
 question executions per model, accounted separately from optimization. Training
 pilot scores continue to serve calibration only.
 
@@ -248,7 +248,7 @@ The approved pilot acceptance criteria are:
 - Every question completes the pipeline and returns a usable prediction.
 - Unresolved provider or parsing errors, and output cutoffs, require
   investigation before proceeding to the full campaign.
-- Record EM/F1 as baseline measurements with no minimum accuracy threshold.
+- Record EM as baseline measurements with no minimum accuracy threshold.
 
 Check execution evidence separately from scores: the normal evaluator assigns
 zero to malformed task output, which is a pilot reliability issue. An ordinary
@@ -268,7 +268,7 @@ their execution paths are the same. Stop after the completed cycle regardless
 of metric direction or candidate acceptance. The three-question and full
 150-question initial-prompt calibration stages remain separate.
 
-The check passes when that process completes correctly. Tied or lower EM/F1,
+The check passes when that process completes correctly. Tied or lower EM,
 wrong answers, and rejected candidates are valid outcomes, with no minimum
 score or improvement requirement. Recovered editor tool errors are acceptable
 when normal feedback allows completion. Investigate unresolved execution errors

@@ -258,7 +258,7 @@ def _proposal_step(
         }
         _save(generated_path, {"proposal": proposal, "after": _snapshot(strategy, population)})
     revised = (
-        evaluate_records(directory / "training", proposal["candidate"], examples, evaluate, workers, compute_f1=False)
+        evaluate_records(directory / "training", proposal["candidate"], examples, evaluate, workers)
         if proposal["changed"]
         else original
     )
@@ -396,9 +396,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         solver_lm_kwargs=observed_kwargs(args.model, args.api_base, args.output_dir, "solver"),
         reflection_diagnostics=True,
     )
-    original = evaluate_records(
-        args.output_dir / "parent-training", parent, train[:36], evaluate, args.workers, compute_f1=False
-    )
+    original = evaluate_records(args.output_dir / "parent-training", parent, train[:36], evaluate, args.workers)
     comparisons = []
     for index, (component, indices) in enumerate(
         zip(PROTOCOL["components"], PROTOCOL["proposal_batches"], strict=True)
@@ -440,16 +438,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         transfer_examples,
         evaluate,
         args.workers,
-        compute_f1=False,
     )
     for row in comparisons:
         if row.get("perfect_batch_skip"):
             continue
         directory = args.output_dir / row["arm"] / f"opportunity-{row['opportunity']}"
         revised_transfer = (
-            evaluate_records(
-                directory / "transfer", row["candidate"], transfer_examples, evaluate, args.workers, compute_f1=False
-            )
+            evaluate_records(directory / "transfer", row["candidate"], transfer_examples, evaluate, args.workers)
             if row["changed"]
             else original_transfer
         )

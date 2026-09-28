@@ -198,7 +198,7 @@ Current component length: {prompt_chars} characters.
 Score {k} candidate actions by how likely each is to improve the document given \
 the feedback. In each <probability> field, give a finite nonnegative relative weight. \
 The harness normalizes these weights; they do not need to sum to 1. \
-Do not calculate or repeatedly adjust their sum. At least one weight must be positive.
+Do not calculate or repeatedly adjust their sum. {weight_rule}
 {support_rule}
 
 Consider less obvious actions when the feedback supports them. Preserve useful \
@@ -460,9 +460,7 @@ class VerbalizedActionSelector(Generic[SelectableItemT]):
             if eligible_total > 0:
                 sampled_probability_by_id = {
                     menu_id: sum(
-                        probability
-                        for action, probability, _ in eligible
-                        if cast(Any, action).menu_id == menu_id
+                        probability for action, probability, _ in eligible if cast(Any, action).menu_id == menu_id
                     )
                     / eligible_total
                     for menu_id in {cast(Any, action).menu_id for action, _, _ in eligible}
@@ -479,9 +477,7 @@ class VerbalizedActionSelector(Generic[SelectableItemT]):
             sampled_reasonings.append(reasons[0] if len(reasons) == 1 else "")
         self.history.append(
             {
-                "probs": {
-                    cast(Any, action).menu_id: probability for action, probability, _ in distribution.entries
-                },
+                "probs": {cast(Any, action).menu_id: probability for action, probability, _ in distribution.entries},
                 "sampling_probs": sampled_probability_by_id,
                 "sampled": [cast(Any, action).menu_id for action in result],
                 "sampled_reasonings": sampled_reasonings,
@@ -522,34 +518,35 @@ class VerbalizedActionSelector(Generic[SelectableItemT]):
             IncompleteActionDistributionError: Two full-support responses fail
                 to score every declared action exactly once.
         """
+        self.raw_outputs.clear()
         action_menu = "\n".join(
             f"- {cast(Any, action).menu_id}: {cast(Any, action).menu_description}" for action in self.actions
         )
+        weight_rule = "All weights may be zero." if self.allow_zero_weights else "At least one weight must be positive."
+        support_rule = ""
+        if self.require_full_support:
+            support_rule = (
+                "Score every available action exactly once; do not omit or repeat an action. Assign probability 0 "
+                "when an action's stated precondition is not supported by the region and feedback; the sampler "
+                "reserves a small uniform exploration probability only among choices with positive probability. "
+            )
+            support_rule += (
+                "Zero expresses low expected usefulness, not mechanical impossibility. Recovery will try executable "
+                "zero-weight pairs after positive choices. Give an executable intended change and scope for each "
+                "pair whenever possible; downstream incompatibility is a generation error returned to the planner."
+                if self.allow_zero_weights
+                else "This is the sole applicability judgment; "
+                "downstream roles realize whichever action is sampled without reclassifying it."
+            )
         prompt = VERBALIZED_ACTION_PROMPT.format(
             current_prompt=candidate,
             prompt_chars=len(candidate),
             feedback_summary=feedback_summary,
             action_menu=action_menu,
             k=self.k,
-            support_rule=(
-                "Score every available action exactly once; do not omit or repeat an action. Assign probability 0 "
-                "when an action's stated precondition is not supported by the region and feedback; the sampler "
-                "reserves a small uniform exploration probability only among choices with positive probability. "
-                "This is the sole applicability judgment; "
-                "downstream roles realize whichever action is sampled without reclassifying it."
-                if self.require_full_support
-                else ""
-            ),
+            weight_rule=weight_rule,
+            support_rule=support_rule,
         )
-        if self.allow_zero_weights:
-            prompt = prompt.replace("At least one weight must be positive.", "All weights may be zero.")
-            prompt = prompt.replace(
-                "This is the sole applicability judgment; "
-                "downstream roles realize whichever action is sampled without reclassifying it.",
-                "Zero expresses low expected usefulness, not mechanical impossibility. Recovery will try executable "
-                "zero-weight pairs after positive choices. Give an executable intended change and scope for each "
-                "pair whenever possible; downstream incompatibility is a generation error returned to the planner.",
-            )
         if self.action_constraints:
             prompt += "\n" + self.action_constraints
         if self.text_limits.selector_target_chars is not None:
@@ -567,10 +564,8 @@ class VerbalizedActionSelector(Generic[SelectableItemT]):
                 f"{prompt}\n\n"
                 "Your previous response was incomplete or malformed. Return one complete <response> now, "
                 "with every available action exactly once and finite nonnegative relative weights. "
-                "At least one weight must be positive. The harness normalizes them; do not calculate their sum."
+                f"{weight_rule} The harness normalizes them; do not calculate their sum."
             )
-            if self.allow_zero_weights:
-                retry_prompt = retry_prompt.replace("At least one weight must be positive.", "All weights may be zero.")
             self.text_limits.check_prompt(retry_prompt)
             retry_output = self.lm(retry_prompt)
             self.raw_outputs.append(retry_output)
@@ -587,7 +582,8 @@ class VerbalizedActionSelector(Generic[SelectableItemT]):
         Menu identifiers match exactly or case-insensitively. Without the
         full-support policy, malformed or unknown entries are skipped when the
         remaining entries define positive mass. Invalid numeric probabilities
-        or non-positive total mass cause a uniform fallback. With full support,
+        or non-positive total mass cause a uniform fallback, unless
+        ``allow_zero_weights`` explicitly permits all-zero recovery plans. With full support,
         every configured action must appear exactly once or the complete menu
         receives the uniform fallback.
 

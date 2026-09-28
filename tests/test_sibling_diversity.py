@@ -15,11 +15,18 @@ from gepa.core.adapter import EvaluationBatch
 from gepa.core.state import GEPAState
 from gepa.lm import NativeToolCall, ToolCompletion
 from gepa.proposer.base import CandidateProposal
+from gepa.proposer.reflective_mutation.manifestor import ManifestationError, Manifestor
 from gepa.proposer.reflective_mutation.sibling_policy import SIBLING_POLICY_ID, SiblingInvariantError
 from gepa.proposer.reflective_mutation.three_role import ThreeRoleReflectionLM
-from gepa.strategies.document_template import DocumentTemplate
-from gepa.strategies.edit_tools import EDIT_TOOL_SETS
-from gepa.strategies.intervention import Controller, build_controller_menu, canonical_action_constraints
+from gepa.strategies.document_template import DocumentTemplate, EditTarget, MalformedDocumentError
+from gepa.strategies.edit_tools import EDIT_TOOL_SETS, EditTool
+from gepa.strategies.intervention import (
+    Controller,
+    ControllerChoice,
+    SemanticActionSpec,
+    build_controller_menu,
+    canonical_action_constraints,
+)
 from gepa.strategies.proposal_sampling import SameParentSampling
 
 TEMPLATE = DocumentTemplate("prompt", {"Style": "Presentation", "Objective": "Task purpose"})
@@ -193,6 +200,36 @@ def test_editor_generation_errors_replan_without_unchanged_candidate(failure):
     assert lm.sibling_planner.accepted == {}
 
 
+def test_direct_reflection_rejects_noncanonical_parent_before_model_calls():
+    parent = {"system_prompt": SEED["system_prompt"] + "\n\n"}
+    roles = Roles(["whitespace"])
+    lm = strategy(roles)
+    with pytest.raises(MalformedDocumentError, match="canonical"):
+        reflect(lm, candidate=parent)
+    assert not roles.controller_prompts and not roles.editor_tasks
+    assert not lm.sibling_planner.accepted
+
+
+@pytest.mark.parametrize("editor_mode", ["react", "single_call"])
+def test_sibling_policy_rejects_incompatible_edit_basis_before_model_calls(editor_mode):
+    roles = Roles()
+    with pytest.raises(ValueError, match="broad direct-tool basis"):
+        ThreeRoleReflectionLM(roles, level=2, edit_tool_set="minimal", editor_mode=editor_mode)
+    assert not roles.controller_prompts and not roles.editor_tasks
+
+
+def test_required_edit_manifestor_checks_fixed_guidance_instead_of_bypassing_validation():
+    roles = Roles(incompatible=True)
+    spec = SemanticActionSpec("fixed_context", "Add context.", EditTool.INSERT_TEXT, fixed_text="Keep unchanged.")
+    action = ControllerChoice(EditTarget("system_prompt", "Style"), spec)
+    manifestor = Manifestor(roles)
+    assert manifestor.manifest(action, "Brief.", "Feedback", "Traces") == "Keep unchanged."
+    with pytest.raises(ManifestationError, match="incompatible"):
+        manifestor.manifest(action, "Brief.", "Feedback", "Traces", require_edit=True)
+    assert len(roles.manifestor_prompts) == 1
+    assert spec.fixed_text in roles.manifestor_prompts[0]
+
+
 def test_full_constraints_identical_in_all_roles():
     roles = Roles()
     reflect(strategy(roles))
@@ -301,6 +338,15 @@ def test_policy_identity_rejects_old_checkpoint():
     assert lm.run_contract(SEED)["controller"]["identity"] == SIBLING_POLICY_ID
     with pytest.raises(SiblingInvariantError):
         lm.set_state({"rng_state": random.Random(0).getstate()})
+
+
+@pytest.mark.parametrize("version", [None, -1])
+def test_policy_rejects_missing_or_mismatched_checkpoint_version(version):
+    lm = strategy()
+    snapshot = lm.get_state()
+    snapshot["sibling_policy"]["contract_version"] = version
+    with pytest.raises(SiblingInvariantError, match="identity mismatch"):
+        strategy().set_state(snapshot)
 
 
 def test_reporting_separates_siblings_vertical_repeats_and_errors():
@@ -541,7 +587,8 @@ def test_recovery_failures_never_inherit_the_successful_edits_score():
     assert "accepted" in messages[1]["content"] and "Score after: 1" in messages[1]["content"]
 
 
-def test_engine_guard_rejects_duplicate_siblings_before_full_validation(tmp_path, monkeypatch):
+@pytest.mark.parametrize("raise_on_exception", [True, False])
+def test_engine_guard_rejects_duplicate_siblings_before_full_validation(tmp_path, monkeypatch, raise_on_exception):
     lm = strategy()
     first = reflect(lm)
     second = deepcopy(first)
@@ -563,7 +610,7 @@ def test_engine_guard_rejects_duplicate_siblings_before_full_validation(tmp_path
             sampling_strategy=SameParentSampling(n=2),
             run_dir=str(tmp_path),
             display_progress_bar=False,
-            raise_on_exception=True,
+            raise_on_exception=raise_on_exception,
         )
     assert not lm.sibling_planner.accepted
     assert len(GEPAState.load(str(tmp_path)).program_candidates) == 1
@@ -581,6 +628,19 @@ def test_all_zero_controller_select_is_not_a_malformed_distribution():
     assert len(result) == 1
     assert controller.history[-1]["sampling_policy"] == "zero_weight_uniform"
     assert not controller.history[-1]["fallback"]
+
+
+def test_controller_raw_outputs_only_keep_the_current_scoring_attempts():
+    controller = Controller(
+        build_controller_menu(TEMPLATE, "sys", EDIT_TOOL_SETS["broad"], 2, rng=random.Random(0)),
+        Roles(),
+        k=20,
+        require_full_support=True,
+    )
+    for _ in range(3):
+        controller.select(1, candidate=SEED["system_prompt"], feedback_summary="Improve this.")
+        assert len(controller.raw_outputs) == 1
+    assert len(controller.history) == 3
 
 
 def test_role_journal_replays_completed_manifestor_inside_interrupted_edit_step(tmp_path, monkeypatch):

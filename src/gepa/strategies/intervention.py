@@ -37,7 +37,8 @@ class SemanticActionSpec:
         description: Menu text describing the intended revision.
         edit_tool: The one direct text operator coupled to this action.
         instruction: Instruction the Manifestor realizes against run evidence.
-        fixed_text: Literal steering text that bypasses the Manifestor LM.
+        fixed_text: Literal steering text that bypasses the Manifestor LM under
+            the independent policy. Real-edit planning still validates it.
 
     Raises:
         TypeError: ``edit_tool`` is not one :class:`EditTool` value.
@@ -294,9 +295,7 @@ SEMANTIC_ACTIONS: tuple[SemanticActionSpec, ...] = (
     ),
     SemanticActionSpec(
         "revise_meaning",
-        (
-            "Change operative meaning so the current and resulting meanings overlap while neither contains the other."
-        ),
+        ("Change operative meaning so the current and resulting meanings overlap while neither contains the other."),
         EditTool.REPLACE_TEXT,
         instruction=(
             "Replace one or more exact target substrings inside the current text. The current and resulting text must admit at "
@@ -499,6 +498,7 @@ class Controller(VerbalizedActionSelector[ControllerChoice]):
         require_full_support: Require every option exactly once and mix uniform
             exploration among positive-probability choices.
     """
+
 
 def summarize_feedback(reflective_entries: Any, max_chars: int | None = None) -> str:
     """Join all feedback, optionally retaining a marked prefix.

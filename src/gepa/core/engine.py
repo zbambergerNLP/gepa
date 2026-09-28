@@ -53,6 +53,7 @@ from gepa.logging.utils import log_detailed_metrics_after_discovering_new_progra
 from gepa.proposer.base import CandidateProposal
 from gepa.proposer.merge import MergeProposer
 from gepa.proposer.reflective_mutation.reflective_mutation import ReflectiveMutationProposer
+from gepa.response_journal import ResponseJournalError
 from gepa.strategies.acceptance import AcceptanceCriterion, ImprovementOrEqualAcceptance, StrictImprovementAcceptance
 from gepa.strategies.eval_policy import EvaluationPolicy, FullEvaluationPolicy
 from gepa.strategies.proposal_selection import AllImprovements, SelectionStrategy
@@ -972,7 +973,8 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
         evaluates the seed on the valset, then iterates: save state, attempt a
         merge if one is due, propose and gate a reflective batch, and notify the
         iteration callbacks. Per-iteration exceptions are reported through
-        ``on_error`` and re-raised only when ``raise_on_exception`` is set.
+        ``on_error``. Integrity failures always abort; other errors abort when
+        ``raise_on_exception`` is set or the iteration made no progress.
 
         Returns:
             The final optimization state, after the closing save and the
@@ -1368,6 +1370,10 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
                 self.logger.log(f"Iteration {state.i + 1}: Exception during optimization: {e}")
                 self.logger.log(traceback.format_exc())
                 made_progress = state.total_num_evals > evals_before_iteration
+                # Continuing after a journal or sibling invariant failure cannot preserve exact recovery.
+                will_continue = (
+                    not self.raise_on_exception and made_progress and not isinstance(e, ResponseJournalError)
+                )
                 # Notify error callback
                 notify_callbacks(
                     self.callbacks,
@@ -1375,10 +1381,10 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
                     ErrorEvent(
                         iteration=state.i + 1,
                         exception=e,
-                        will_continue=not self.raise_on_exception and made_progress,
+                        will_continue=will_continue,
                     ),
                 )
-                if self.raise_on_exception or not made_progress:
+                if not will_continue:
                     raise
                 continue
             finally:

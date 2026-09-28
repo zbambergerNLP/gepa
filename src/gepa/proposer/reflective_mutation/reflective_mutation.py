@@ -135,9 +135,9 @@ class ReflectiveMutationProposer:
         self.action_selector = action_selector
         inherited_limits = getattr(reflection_strategy, "text_limits", None)
         self.text_limits = resolve_text_limits(
-            text_limits if text_limits is not None else (
-                inherited_limits if isinstance(inherited_limits, TextLimits) else None
-            )
+            text_limits
+            if text_limits is not None
+            else (inherited_limits if isinstance(inherited_limits, TextLimits) else None)
         )
         if text_limits is not None and reflection_strategy is not None:
             strategy_limits = getattr(reflection_strategy, "text_limits", None)
@@ -480,8 +480,9 @@ class ReflectiveMutationProposer:
                 if task.parent_idx not in redirected_parents:
                     redirected_parents[task.parent_idx] = planner.eligible_parent(state, task.parent_idx)
                 parent_idx = redirected_parents[task.parent_idx]
-                redirected.append(replace(task, parent_idx=parent_idx,
-                                          parent_candidate=state.program_candidates[parent_idx]))
+                redirected.append(
+                    replace(task, parent_idx=parent_idx, parent_candidate=state.program_candidates[parent_idx])
+                )
             tasks = redirected
         if not tasks:
             return []
@@ -749,8 +750,11 @@ class ReflectiveMutationProposer:
                     state.record_proposal_attempts(
                         task.parent_idx,
                         reflection_metadata,
-                        outcome="generation_exhausted" if reflection_metadata.get("generation_exhausted") else "dropped",
-                        reason="All remaining executable pairs failed." if reflection_metadata.get("generation_exhausted")
+                        outcome="generation_exhausted"
+                        if reflection_metadata.get("generation_exhausted")
+                        else "dropped",
+                        reason="All remaining executable pairs failed."
+                        if reflection_metadata.get("generation_exhausted")
                         else "Reflection attempt produced no completed text update.",
                     )
                     capped_metadata: dict[str, Any] = {"proposal_id": f"{i}-{len(children)}"}
@@ -940,6 +944,8 @@ class ReflectiveMutationProposer:
                 tag="reflective_mutation",
                 metadata=_lm_metadata,
             )
+            if planner is not None:
+                planner.observe_evaluation(proposal, task.parent_candidate)
             proposals.append(proposal)
 
         return proposals

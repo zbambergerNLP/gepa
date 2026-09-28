@@ -72,7 +72,9 @@ def source_identity(root: Path) -> dict:
     return {"commit": commit, "manifest_sha256": manifest, "directory": str(root)}
 
 
-def evaluate_records(directory: Path, candidate: dict, examples: list[dict], evaluate, workers: int) -> list[dict]:
+def evaluate_records(
+    directory: Path, candidate: dict, examples: list[dict], evaluate, workers: int, *, compute_f1: bool = True
+) -> list[dict]:
     """Persist scored outcomes, including task-format zeros, with exact recovery identities."""
     require_contract(directory, {"candidate": candidate, "examples": examples})
 
@@ -92,10 +94,11 @@ def evaluate_records(directory: Path, candidate: dict, examples: list[dict], eva
             "id": example["id"],
             "identity": identity,
             "score": score,
-            "f1": f1_score(prediction, example["answer"]),
             "feedback": feedback,
             "allocation": os.environ.get("SLURM_JOB_ID"),
         }
+        if compute_f1:
+            record["f1"] = f1_score(prediction, example["answer"])
         atomic_json(path, {"record": record, "sha256": digest(record)})
         return record
 

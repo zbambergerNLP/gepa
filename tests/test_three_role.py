@@ -107,6 +107,7 @@ def test_generalization_policy_is_part_of_resume_identity() -> None:
 @pytest.mark.parametrize("level", [1, 2])
 def test_sampled_controller_direction_reaches_downstream_roles_independently(editor_mode: str, level: int) -> None:
     """Keep the chosen option's rationale even when Manifestor advice tries to redirect it."""
+
     class DirectedLM(ThreeRoleLM):
         def __call__(self, prompt):
             """Give every option a distinct direction and conflicting Manifestor advice."""
@@ -151,7 +152,9 @@ def test_sampled_controller_direction_reaches_downstream_roles_independently(edi
 def test_random_controller_does_not_invent_a_model_direction(editor_mode: str) -> None:
     """Preserve the random ablation's missing model rationale in every downstream role."""
     reflection, lm = strategy(
-        2, controller_selection="uniform_random", editor_mode=editor_mode,
+        2,
+        controller_selection="uniform_random",
+        editor_mode=editor_mode,
         react_replies=["<finish>No supported edit for this random action.</finish>"],
     )
     proposal, _ = reflection.reflect({"sys": PROMPT}, SYS_REFLECTIVE_DATASET, ["sys"])
@@ -204,7 +207,6 @@ MINIMAL_REEXPRESS_REPLIES = [
     tool_call(EditTool.INSERT_TEXT, anchor="", where="after", text="- be kind\n- be brief"),
     "<finish>The semantic edit is complete.</finish>",
 ]
-
 
 
 def historical_strategy(*args, **kwargs) -> ThreeRoleReflectionLM:
@@ -763,16 +765,16 @@ def test_single_call_editor_preserves_three_roles_and_rejects_old_resume(tmp_pat
     """Keep the Controller and Manifestor, remove only the editor observation loop."""
     lm = ThreeRoleLM([tool_call(EditTool.REPLACE_TEXT, target="be nice", text="be kind")])
     strat, _ = strategy(2, lm=lm, editor_mode="single_call")
-    proposal, _ = strat.reflect({"sys":PROMPT}, deepcopy(SYS_REFLECTIVE_DATASET), ["sys"])
+    proposal, _ = strat.reflect({"sys": PROMPT}, deepcopy(SYS_REFLECTIVE_DATASET), ["sys"])
     assert lm.roles == ["controller", "manifestor", "react_v2"]
     assert proposal.new_texts["sys"] != PROMPT
     assert proposal.metadata["proposer_backend"] == "single_call"
     assert proposal.metadata["action_choice"] == "reexpress@Rules/REPLACE_TEXT"
     assert proposal.metadata["three_role_actions"][0]["react_iterations"] == 1
     old, _ = strategy(2)
-    ensure_reflection_run_contract(str(tmp_path), old.run_contract({"sys":PROMPT}))
+    ensure_reflection_run_contract(str(tmp_path), old.run_contract({"sys": PROMPT}))
     with pytest.raises(ValueError, match="different reflection strategy contract"):
-        ensure_reflection_run_contract(str(tmp_path), strat.run_contract({"sys":PROMPT}))
+        ensure_reflection_run_contract(str(tmp_path), strat.run_contract({"sys": PROMPT}))
 
 
 @pytest.mark.parametrize("selection", ["verbalized", "uniform_random"])
@@ -784,8 +786,7 @@ def test_default_strategy_keeps_one_controller_choice_across_ten_edits(selection
     """
     replacements = ["be nice"] + [f"be kind {index}" for index in range(10)]
     replies = [
-        tool_call(EditTool.REPLACE_TEXT, target=before, text=after)
-        for before, after in pairwise(replacements)
+        tool_call(EditTool.REPLACE_TEXT, target=before, text=after) for before, after in pairwise(replacements)
     ] + ["<finish>Done.</finish>"]
     lm = ThreeRoleLM(replies)
     strat, _ = strategy(2, lm=lm, controller_selection=selection)

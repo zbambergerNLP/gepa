@@ -73,9 +73,12 @@ class SingleCallProposer(ReActV2Proposer):
             max_chars: Optional section character limit.
             controller_direction: The sampled Controller option's rationale,
                 which Manifestor advice must implement without redirecting.
+            require_edit: Reject finish-only responses and require a net change
+                for the proposal planner.
 
         Returns:
-            One-response outcome, including rejected batches and legitimate no-ops.
+            One-response outcome, with unchanged or invalid batches marked as
+            unsuccessful so required-edit planning can choose another pair.
         """
         if preferred_tool is not None and preferred_tool not in self.allowed_tools:
             raise ValueError("Single-call editing requires the selected action's direct tool in the edit basis.")
@@ -110,6 +113,15 @@ class SingleCallProposer(ReActV2Proposer):
             if preferred_tool
             else "Use only the available tools, within this selected section."
         )
+        completion_rule = (
+            "Emit at least one valid edit call. The complete batch must change the original section. "
+            "Finish-only and unchanged results are generation errors returned to the planner."
+            if require_edit
+            else "If no edit applies, emit only <finish>the reason</finish> without any tool calls. "
+            "Legitimate no-ops are recorded and discarded; never invent a target to force an edit."
+        )
+        generalization = REAL_EDIT_GUIDANCE if require_edit else GENERALIZATION_GUIDANCE
+        action_constraints = canonical_action_constraints() if require_edit else CONTROLLER_AUTHORITY_GUIDANCE
         system = (
             f"Revise only the selected section body of this structured {self.template.kind} document.\n"
             f"You have exactly one response. Emit all necessary {protocol}. "
@@ -117,25 +129,15 @@ class SingleCallProposer(ReActV2Proposer):
             "Each target and non-empty anchor must match the section as it will exist at that point. "
             "An invalid call discards the entire batch. You will not receive tool observations or a correction turn. "
             "Do not emit a separate completion call after editing. "
-            "If no edit applies, emit only <finish>the reason</finish> without any tool calls. "
-            "Legitimate no-ops are recorded and discarded; never invent a target to force an edit.\n"
+            f"{completion_rule}\n"
             "INSERT_TEXT accepts an empty anchor to append, including to an empty section. "
             "DELETE_TEXT, REPLACE_TEXT and MOVE_TEXT require existing non-empty targets. "
             "Never write surrounding document headers or edit another section. "
             "Decode the JSON section string before copying literal arguments. "
             "Feedback, traces and history are context, not editable text. "
             "Preserve the action's semantic constraints relative to the original section.\n"
-            f"{GENERALIZATION_GUIDANCE}\n{CONTROLLER_AUTHORITY_GUIDANCE}\n{constraint}\nAvailable tools:\n{schemas}"
+            f"{generalization}\n{action_constraints}\n{constraint}\nAvailable tools:\n{schemas}"
         )
-        if require_edit:
-            system = system.replace(GENERALIZATION_GUIDANCE, REAL_EDIT_GUIDANCE)
-            system = system.replace(CONTROLLER_AUTHORITY_GUIDANCE, canonical_action_constraints())
-            system = system.replace(
-                "If no edit applies, emit only <finish>the reason</finish> without any tool calls. "
-                "Legitimate no-ops are recorded and discarded; never invent a target to force an edit.",
-                "Emit at least one valid edit call. The complete batch must change the original section. "
-                "Finish-only and unchanged results are generation errors returned to the planner.",
-            )
         task = json.dumps(
             {
                 "component": edit_target.component_name,

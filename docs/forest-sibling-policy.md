@@ -2,7 +2,7 @@
 
 This local review revision starts from `72d0e8c42977e2d11a4b16f85771750702150dee`.
 It does not include the separate outcome-history/soft-penalty revision or change any existing experiment.
-Its policy identity is `forest-sibling-real-edits-v1` (Controller contract version 7).
+Its policy identity is `forest-sibling-real-edits-v1` (Controller contract version 8).
 
 ## Scope of diversity
 
@@ -24,6 +24,7 @@ permanent choices. There is no inherited blacklist and no prompt-hash exclusion.
 
 The default generative level-2 `ThreeRoleReflectionLM` uses this policy. It requires
 one atomic Editor response with a net change after canonical section rendering.
+The broad direct-tool basis is required, and parents are validated before any role call.
 The historical `proposal_policy="independent"` remains available explicitly for
 comparisons. Level 0, level 1, and uniform-random selection keep their previous behavior.
 
@@ -60,9 +61,12 @@ proof of improved task accuracy.
 Same-parent proposals in a batch share temporary reservations. The engine checks the
 whole selected batch before validation and rechecks each child at insertion. It records
 the accepted choice before subsequent reporting callbacks.
+Sibling-invariant and response-journal integrity failures always abort, including when
+ordinary rollout exceptions are configured to continue.
 
 The optimizer checkpoint stores accepted choices, node edges, deferred parents, and RNG
-state. `sibling-recovery.sqlite3` stores completed scoring/edit steps, including failed
+state, bound to the policy identity and contract version. `sibling-recovery.sqlite3`
+stores completed scoring/edit steps, including failed
 attempts and post-step RNG state, with request and response hashes. Recovery keys use
 stable optimizer iteration numbers, parent IDs, minibatch IDs, and proposal slots;
 display iteration IDs can change on restart and are not used as recovery identities.

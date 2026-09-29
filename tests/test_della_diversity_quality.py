@@ -26,6 +26,11 @@ def _prepared(tmp_path, pilot_only="1"):
     batch = source / "examples/hotpotqa/run_hotpotqa.sbatch"
     batch.parent.mkdir(parents=True)
     batch.write_text('printf "%s\\n" "$HOTPOTQA_PILOT_STAGE" "$PWD" "$GEPA_VENV_DIR" "$HOME"\n')
+    bootstrap = tmp_path / "bootstrap.sh"
+    bootstrap.write_text('module() { [[ "$*" == "load proxy/default" ]]; }\n')
+    uv = tmp_path / "uv"
+    uv.write_text('#!/bin/bash\n[[ "$*" == *"examples.hotpotqa.typesafe_preflight"* ]]\n')
+    uv.chmod(0o700)
     export_path = tmp_path / "pilot.env"
     export_path.write_bytes(
         b"\0".join(
@@ -35,6 +40,8 @@ def _prepared(tmp_path, pilot_only="1"):
                 f"SCRATCH_BASE={tmp_path}",
                 f"HOTPOTQA_SOURCE_COMMIT={'a' * 40}",
                 f"GEPA_VENV_DIR={tmp_path}/.venv-jev",
+                f"GEPA_UV_BIN={uv}",
+                f"HOTPOTQA_PILOT_ROOT={tmp_path}/pilot-output",
                 "HOME=/must-not-replace-home",
             ]
         )
@@ -51,7 +58,7 @@ def test_wrapper_preserves_native_entrypoint_and_prepared_environment(tmp_path, 
     source, export_path = _prepared(tmp_path)
     result = subprocess.run(
         ["bash", str(WRAPPER), str(export_path), stage],
-        env={**_env(), "SLURM_JOB_ID": "test-allocation"},
+        env={**_env(), "SLURM_JOB_ID": "test-allocation", "BASH_ENV": str(tmp_path / "bootstrap.sh")},
         capture_output=True,
         text=True,
     )

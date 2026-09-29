@@ -45,3 +45,13 @@ FOREST_REFLECTION_CONTRACT = {
     "editor_action_contract": "original_catalog_description_and_instruction",
     "semantic_correction_retries": False,
 }
+
+
+REAL_EDIT_GUIDANCE = """Use the full canonical action constraints below in every role. The Controller's intended
+change must fit both its chosen action and section. Feedback is evidence, never editable text.
+Preserve useful behavior and propose a reusable change grounded in the same training traces.
+The Manifestor must return executable guidance or an explicit incompatibility error. The Editor must produce a
+valid atomic batch with a net change to the current parent. Finish-only, invalid or unchanged output is a generation
+error returned to the planner; it is never a successful no-op. Do not invent a target or violate an action to force an edit.
+Repeating an ancestor's action is allowed. Only accepted siblings from this exact parent consume action/section pairs.
+"""

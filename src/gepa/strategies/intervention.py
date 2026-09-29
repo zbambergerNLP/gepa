@@ -37,7 +37,8 @@ class SemanticActionSpec:
         description: Menu text describing the intended revision.
         edit_tool: The one direct text operator coupled to this action.
         instruction: Instruction the Manifestor realizes against run evidence.
-        fixed_text: Literal steering text that bypasses the Manifestor LM.
+        fixed_text: Literal steering text that bypasses the Manifestor LM under
+            the independent policy. Real-edit planning still validates it.
 
     Raises:
         TypeError: ``edit_tool`` is not one :class:`EditTool` value.
@@ -294,9 +295,7 @@ SEMANTIC_ACTIONS: tuple[SemanticActionSpec, ...] = (
     ),
     SemanticActionSpec(
         "revise_meaning",
-        (
-            "Change operative meaning so the current and resulting meanings overlap while neither contains the other."
-        ),
+        ("Change operative meaning so the current and resulting meanings overlap while neither contains the other."),
         EditTool.REPLACE_TEXT,
         instruction=(
             "Replace one or more exact target substrings inside the current text. The current and resulting text must admit at "
@@ -500,6 +499,7 @@ class Controller(VerbalizedActionSelector[ControllerChoice]):
             exploration among positive-probability choices.
     """
 
+
 def summarize_feedback(reflective_entries: Any, max_chars: int | None = None) -> str:
     """Join all feedback, optionally retaining a marked prefix.
 
@@ -521,3 +521,12 @@ def summarize_feedback(reflective_entries: Any, max_chars: int | None = None) ->
     summary = "\n".join(parts)
     summary = clip_text(summary, max_chars)
     return summary or "(no feedback available)"
+
+
+def canonical_action_constraints() -> str:
+    """Render the same complete semantic constraints for every proposal role."""
+    return "\n\n".join(
+        f"Action: {spec.name}\nDescription: {spec.description}\nDirect tool: {spec.edit_tool.value}\n"
+        f"Binding instruction: {spec.instruction or spec.fixed_text}"
+        for spec in SEMANTIC_ACTIONS
+    )

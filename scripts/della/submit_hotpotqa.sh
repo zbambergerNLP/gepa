@@ -46,7 +46,7 @@ if [[ -n "$(git -C "${REPO_ROOT}" status --porcelain --untracked-files=normal)" 
 fi
 HOTPOTQA_SOURCE_COMMIT="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
 REMOTE_SOURCE_DIR="${REMOTE_DIR%/}/sources/${HOTPOTQA_SOURCE_COMMIT}"
-GEPA_VENV_DIR="${REMOTE_DIR%/}/.venv"
+GEPA_VENV_DIR="${GEPA_VENV_DIR:-${REMOTE_DIR%/}/.venv}"
 HOTPOTQA_UV_VERSION="0.9.13"
 GEPA_UV_BIN="${REMOTE_DIR%/}/.tools/uv-${HOTPOTQA_UV_VERSION}/uv"
 SOURCE_MANIFEST_OUTPUT="$(mktemp)"
@@ -433,7 +433,7 @@ if [[ ! -f "${GEPA_VENV_DIR}/.gepa-env-spec.sha256" \
     exit 1
 fi
 if ! "\${GEPA_UV_BIN}" sync --python "\${HOTPOTQA_PYTHON_VERSION}" --frozen --check --no-install-project \
-    --extra dev --extra wiki17 --group hotpotqa-task-program; then
+    --extra dev --extra wiki17 --extra jev --group hotpotqa-task-program; then
     echo "ERROR: shared GEPA environment has drifted from uv.lock; run scripts/della/build_env.sh" >&2
     exit 1
 fi

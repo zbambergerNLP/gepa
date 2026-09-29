@@ -103,3 +103,46 @@ def test_interactive_launcher_checks_network_before_starting_models(tmp_path, ex
     )
     assert result.returncode == exit_code, result.stderr
     assert marker.exists() is (exit_code == 0)
+
+
+@pytest.mark.parametrize("transport", ["offline", "invalid"])
+def test_offline_launcher_uses_files_without_proxy_or_compute_credentials(tmp_path, transport):
+    root = tmp_path / "sources" / "test-source"
+    (root / "examples/hotpotqa").mkdir(parents=True)
+    marker = tmp_path / "started"
+    (root / "examples/hotpotqa/run_hotpotqa.sbatch").write_text(
+        '[[ "$GEPA_JEV_HANDOFF_DIR" == "$HOTPOTQA_PILOT_ROOT/jev-handoff" ]] || exit 80\n'
+        '[[ -z "${TYPESAFE_API_KEY:-}" ]] || exit 81\n'
+        'touch "$MODEL_MARKER"\n'
+    )
+    bootstrap = tmp_path / "bootstrap.sh"
+    bootstrap.write_text("module() { exit 82; }\n")
+    export = tmp_path / "interactive.env"
+    export.write_bytes(
+        b"\0".join(
+            f"{key}={value}".encode()
+            for key, value in {
+                "HOTPOTQA_PILOT_ONLY": "1",
+                "SCRATCH_BASE": tmp_path,
+                "HOTPOTQA_SOURCE_COMMIT": "test-source",
+                "HOTPOTQA_PILOT_ROOT": tmp_path / "output",
+            }.items()
+        )
+        + b"\0"
+    )
+    script = Path(__file__).resolve().parents[1] / "scripts/della/remote/run_hotpotqa_interactive.sh"
+    stage = "jev-quality" if "jev-quality)" in script.read_text() else "diversity-quality"
+    result = subprocess.run(
+        ["bash", str(script), str(export), stage, transport],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "SLURM_JOB_ID": "test",
+            "TYPESAFE_API_KEY": "private",
+            "BASH_ENV": str(bootstrap),
+            "MODEL_MARKER": str(marker),
+        },
+    )
+    assert result.returncode == (0 if transport == "offline" else 1), result.stderr
+    assert marker.exists() == (transport == "offline")

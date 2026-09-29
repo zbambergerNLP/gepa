@@ -29,6 +29,7 @@ from gepa.response_journal import (
 from gepa.strategies.action_space import FULL_SUPPORT_EXPLORATION_EPSILON
 from gepa.strategies.edit_tools import EditTool
 from gepa.strategies.intervention import ControllerChoice
+from gepa.strategies.jev_handoff import HANDOFF_ENV, exchange
 from gepa.strategies.reflection_context import GENERALIZATION_GUIDANCE
 
 JEV_MODEL = "jev-1.13.0"
@@ -146,6 +147,9 @@ class JevController:
     part of a request journal, attempt log, or scientific run identity.
     """
 
+    JOURNAL_NAMESPACE = "jev-controller"
+    ROLE = "controller"
+
     def __init__(
         self,
         *,
@@ -156,7 +160,7 @@ class JevController:
         self._api_key = api_key
         self._client: Any = None
         self._journal = (
-            ResumeResponseJournal(response_journal_path, "jev-controller") if response_journal_path else None
+            ResumeResponseJournal(response_journal_path, self.JOURNAL_NAMESPACE) if response_journal_path else None
         )
         self._attempt_log = Path(attempt_log_path) if attempt_log_path else None
         self._lock = threading.RLock()
@@ -197,7 +201,7 @@ class JevController:
     def _log(self, record: dict[str, Any]) -> None:
         if self._attempt_log is None:
             return
-        record = {"schema_version": 1, "role": "controller", "provider": "typesafe", **record}
+        record = {"schema_version": 1, "role": self.ROLE, "provider": "typesafe", **record}
         # Preserve a started record before the network call, including interrupted attempts.
         try:
             self._attempt_log.parent.mkdir(parents=True, exist_ok=True)
@@ -297,6 +301,8 @@ class JevController:
         }
 
     def _live(self, request: dict[str, Any], choices: set[str]) -> dict[str, Any]:
+        if os.environ.get(HANDOFF_ENV):
+            return exchange(self, request)
         if typesafe_sdk is None:
             raise JevControllerError("The Jev Controller requires the 'jev' extra: uv sync --extra jev")
         if typesafe_sdk.__version__ != JEV_CONTROLLER_POLICY_CONTRACT["sdk_version"]:

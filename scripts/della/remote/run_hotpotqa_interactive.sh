@@ -23,4 +23,16 @@ fi
 export HOTPOTQA_PILOT_STAGE="${PILOT_STAGE}"
 export SLURM_SUBMIT_DIR="${SCRATCH_BASE}/sources/${HOTPOTQA_SOURCE_COMMIT}"
 cd "${SLURM_SUBMIT_DIR}"
+case "${PILOT_STAGE}" in
+    jev-quality|diversity-quality)
+        module load proxy/default
+        # The external API needs the proxy; local GPU servers must bypass it.
+        export NO_PROXY="localhost,127.0.0.1,::1,${NO_PROXY:-},${no_proxy:-}"
+        export no_proxy="${NO_PROXY}"
+        export PYTHONPATH="${PWD}/src:${PWD}"
+        "${GEPA_UV_BIN:?pinned uv required}" run --no-project --python "${GEPA_VENV_DIR:?}/bin/python" \
+            python -m examples.hotpotqa.typesafe_preflight \
+            --output "${HOTPOTQA_PILOT_ROOT:?}/network-preflight-${SLURM_JOB_ID}.json"
+        ;;
+esac
 exec bash examples/hotpotqa/run_hotpotqa.sbatch

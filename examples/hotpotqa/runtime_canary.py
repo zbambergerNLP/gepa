@@ -33,7 +33,7 @@ _EDIT_STEERING = {
     EditTool.INSERT_TEXT: (
         'Use INSERT_TEXT with anchor "Verify every claim.", where "after", and text " State uncertainty explicitly."'
     ),
-    EditTool.DELETE_TEXT: 'Use DELETE_TEXT with target "Avoid unsupported conclusions."',
+    EditTool.DELETE_TEXT: 'Use DELETE_TEXT with target "Include unsupported conclusions."',
     EditTool.REPLACE_TEXT: (
         'Use REPLACE_TEXT with target "Cite primary sources." and text "Cite primary sources inline."'
     ),
@@ -226,7 +226,7 @@ def _validate_edit_result(tool: EditTool, edited_text: str) -> None:
     """
     if tool is EditTool.INSERT_TEXT and "State uncertainty explicitly." not in edited_text:
         raise RuntimeCanaryError("INSERT_TEXT probe omitted the requested inserted text.")
-    if tool is EditTool.DELETE_TEXT and "Avoid unsupported conclusions." in edited_text:
+    if tool is EditTool.DELETE_TEXT and "Include unsupported conclusions." in edited_text:
         raise RuntimeCanaryError("DELETE_TEXT probe retained the requested deletion target.")
     if tool is EditTool.REPLACE_TEXT and (
         "Cite primary sources inline." not in edited_text or "Cite primary sources. " in edited_text
@@ -265,8 +265,14 @@ def _edit_probe(lm: LM, tool: EditTool, attempt: int, result_log: Path | None = 
         max_iterations=None,
         max_tool_calls=1,
     )
+    # Deleting the faulty instruction must agree with the failure evidence.
+    region_text = (
+        _EDIT_REGION.replace("Avoid unsupported conclusions.", "Include unsupported conclusions.")
+        if tool is EditTool.DELETE_TEXT
+        else _EDIT_REGION
+    )
     result = proposer.propose(
-        region_text=_EDIT_REGION,
+        region_text=region_text,
         edit_target=EditTarget("final_answer", "Task"),
         preferred_tool=tool,
         steering_message=(

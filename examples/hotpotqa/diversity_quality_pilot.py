@@ -37,7 +37,7 @@ from examples.hotpotqa.utils import (
 from gepa.core.state import GEPAState
 from gepa.proposer.base import CandidateProposal
 from gepa.proposer.reflective_mutation.three_role import ThreeRoleReflectionLM
-from gepa.strategies.jev_handoff import HANDOFF_ENV
+from gepa.strategies.jev_handoff import HANDOFF_ENV, HANDOFF_WAIT_SECONDS
 
 COMPONENTS = ("summarize1", "create_query_hop2", "summarize2", "final_answer")
 ARMS = {
@@ -371,7 +371,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     runtime = build_run_contract("react_v2", settings)
     if os.environ.get(HANDOFF_ENV):
         runtime["execution"] = {
-            "jev_transport": "offline-file-handoff-v1",
+            "jev_transport": "persistent-file-mailbox-v1",
+            "handoff_wait_seconds": HANDOFF_WAIT_SECONDS,
             "proposal_seconds_include_stage_waits": True,
         }
         for role in ("solver", "reflection"):

@@ -161,6 +161,7 @@ def test_offline_verifier_retains_native_classification(setup_verifier, tmp_path
     from gepa.strategies.jev_handoff import resolve
 
     verifier, requests, _ = setup_verifier
+    monkeypatch.setattr("gepa.strategies.jev_handoff.HANDOFF_WAIT_SECONDS", 0.0)
     monkeypatch.setenv("GEPA_JEV_HANDOFF_DIR", str(tmp_path / "handoff"))
     monkeypatch.delenv("SLURM_JOB_ID", raising=False)
     with pytest.raises(SystemExit) as exc:

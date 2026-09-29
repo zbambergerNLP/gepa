@@ -37,6 +37,10 @@ case "${PILOT_STAGE}" in
         if [[ "$JEV_TRANSPORT" == offline ]]; then
             export GEPA_JEV_HANDOFF_DIR="${HOTPOTQA_PILOT_ROOT:?}/jev-handoff"
             unset TYPESAFE_API_KEY
+            export PYTHONPATH="${PWD}/src:${PWD}"
+            "${GEPA_UV_BIN:?pinned uv required}" run --no-project --python "${GEPA_VENV_DIR:?}/bin/python" \
+                python -m examples.hotpotqa.jev_mailbox check-ready "$GEPA_JEV_HANDOFF_DIR" \
+                --job "$SLURM_JOB_ID" --source "$HOTPOTQA_SOURCE_COMMIT"
         else
             unset GEPA_JEV_HANDOFF_DIR
             module load proxy/default

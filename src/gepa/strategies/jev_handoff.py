@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 
 HANDOFF_ENV = "GEPA_JEV_HANDOFF_DIR"
 HANDOFF_EXIT_CODE = 75
+HANDOFF_WAIT_SECONDS = 300.0
 
 
 def save(path: Path, record: dict[str, Any]) -> None:
@@ -38,7 +39,7 @@ def load(path: Path) -> dict[str, Any]:
 
 
 def exchange(controller: JevController, request: dict[str, Any]) -> dict[str, Any]:
-    """Import one external result or end this GPU stage without a provider call."""
+    """Wait for an external result while retaining the allocated model servers."""
     scope = ACTIVE_RESPONSE_JOURNAL_SCOPE.get()
     if not scope or controller._journal is None or controller._attempt_log is None:
         raise ResponseJournalError("Offline Jev requires durable response/attempt journals and a logical scope.")
@@ -64,7 +65,13 @@ def exchange(controller: JevController, request: dict[str, Any]) -> dict[str, An
     if not response_path.exists():
         save(directory / "waiting.json", {"request_sha256": key, "allocation": os.environ.get("SLURM_JOB_ID")})
         print(f"JEV_HANDOFF_PENDING={request_path}", flush=True)
-        raise SystemExit(HANDOFF_EXIT_CODE)
+        deadline = time.monotonic() + HANDOFF_WAIT_SECONDS
+        while not response_path.exists():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                print(f"JEV_HANDOFF_TIMEOUT={request_path}", flush=True)
+                raise SystemExit(HANDOFF_EXIT_CODE)
+            time.sleep(min(1.0, remaining))
     response = load(response_path)
     if response["request_sha256"] != key:
         raise ResponseJournalError("Jev handoff response belongs to another request.")

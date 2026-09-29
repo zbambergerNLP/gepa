@@ -180,6 +180,54 @@ def test_completed_resume_reuses_proposals_scores_and_real_populations(harness):
     assert events == []
 
 
+def test_offline_stage_resume_preserves_population_and_skips_completed_work(harness, monkeypatch):
+    args, events, _ = harness
+    monkeypatch.delenv("TYPESAFE_API_KEY")
+    monkeypatch.setenv("GEPA_JEV_HANDOFF_DIR", str(args.output_dir.parent / "handoff"))
+    monkeypatch.setattr(
+        pilot,
+        "build_run_contract",
+        lambda _, settings: {
+            "models": {
+                "solver_api_base": settings.solver_api_base,
+                "reflection_api_base": settings.reflection_api_base,
+            },
+        },
+    )
+    args.api_base = "http://localhost:1234/v1"
+    args.reflection_api_base = "http://localhost:1235/v1"
+    original_builder = pilot.build_strategy
+    interrupted = []
+
+    def builder(settings, directory, arm):
+        strategy = original_builder(settings, directory, arm)
+        reflect = strategy.reflect
+
+        def pause(*values, **kwargs):
+            if arm == "diversity_quality_jev" and kwargs["metadata"]["optimizer_iteration"] == 5 and not interrupted:
+                interrupted.append(True)
+                raise SystemExit(75)
+            return reflect(*values, **kwargs)
+
+        strategy.reflect = pause
+        return strategy
+
+    monkeypatch.setattr(pilot, "build_strategy", builder)
+    with pytest.raises(SystemExit) as exc:
+        pilot.run(args)
+    assert exc.value.code == 75
+    completed = [event for event in events if event[0] == "reflect"]
+    args.api_base = "http://localhost:2234/v1"
+    args.reflection_api_base = "http://localhost:2235/v1"
+    summary = pilot.run(args)
+    reflections = [event for event in events if event[0] == "reflect"]
+    assert reflections[: len(completed)] == completed
+    assert len(reflections) == 33
+    assert len([event for event in events if event[0] == "evaluate"]) == 528
+    assert len(summary["populations"]["diversity_quality_jev"]) == 5
+    assert summary["execution_completed"]
+
+
 def test_interruption_after_generation_reuses_generated_candidate_and_rng(harness):
     args, events, controls = harness
     controls["interrupt"] = 36

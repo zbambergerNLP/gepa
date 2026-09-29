@@ -29,6 +29,7 @@ from gepa.response_journal import (
 from gepa.strategies.action_space import FULL_SUPPORT_EXPLORATION_EPSILON
 from gepa.strategies.edit_tools import EditTool
 from gepa.strategies.intervention import ControllerChoice
+from gepa.strategies.jev_handoff import HANDOFF_ENV, exchange
 from gepa.strategies.reflection_context import GENERALIZATION_GUIDANCE
 
 JEV_MODEL = "jev-1.13.0"
@@ -300,6 +301,8 @@ class JevController:
         }
 
     def _live(self, request: dict[str, Any], choices: set[str]) -> dict[str, Any]:
+        if os.environ.get(HANDOFF_ENV):
+            return exchange(self, request)
         if typesafe_sdk is None:
             raise JevControllerError("The Jev Controller requires the 'jev' extra: uv sync --extra jev")
         if typesafe_sdk.__version__ != JEV_CONTROLLER_POLICY_CONTRACT["sdk_version"]:

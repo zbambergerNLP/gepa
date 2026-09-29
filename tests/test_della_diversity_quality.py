@@ -109,6 +109,7 @@ def _dispatch_fixture(tmp_path, source, *, secret="test-only-credential", failur
         "HOTPOTQA_PILOT_STAGE": "diversity-quality",
         "HOTPOTQA_CANARY_ONLY": "0",
         "HOTPOTQA_EDITOR_MODE": "single_call",
+        "GEPA_JEV_HANDOFF_DIR": "",
     }
     return block, env
 
@@ -152,6 +153,15 @@ def test_dispatch_missing_or_empty_secret_fails_before_pilot(tmp_path, secret):
     result = subprocess.run(["bash", "-c", "set -euo pipefail\n" + block], env=env, capture_output=True, text=True)
     assert result.returncode != 0
     assert not Path(env["CALLS"]).exists()
+
+
+def test_offline_dispatch_does_not_require_compute_node_credentials(tmp_path):
+    block, env = _dispatch_fixture(tmp_path, WORKLOAD.read_text(), secret=None)
+    env["GEPA_JEV_HANDOFF_DIR"] = str(tmp_path / "handoff")
+    result = subprocess.run(["bash", "-c", "set -euo pipefail\n" + block], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    rows = [json.loads(line) for line in Path(env["CALLS"]).read_text().splitlines()]
+    assert len(rows) == 1 and rows[0]["key_loaded"] is False
 
 
 @pytest.mark.parametrize("pilot,stage", [("0", "diversity-quality"), ("1", "smoke")])

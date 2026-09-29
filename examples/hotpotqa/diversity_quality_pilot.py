@@ -16,6 +16,7 @@ from examples.common.react_v2 import benchmark_data_identity, resolve_template_f
 from examples.common.wiki17_bm25 import Wiki17BM25Retriever
 from examples.hotpotqa.generalization_pilot import evaluate_records, paired_outcomes, source_identity
 from examples.hotpotqa.main import (
+    _contract_api_base,
     _is_task_output_parse_error,
     _validate_scientific_data_identity,
     _verify_scientific_retriever_integrity,
@@ -36,6 +37,7 @@ from examples.hotpotqa.utils import (
 from gepa.core.state import GEPAState
 from gepa.proposer.base import CandidateProposal
 from gepa.proposer.reflective_mutation.three_role import ThreeRoleReflectionLM
+from gepa.strategies.jev_handoff import HANDOFF_ENV
 
 COMPONENTS = ("summarize1", "create_query_hop2", "summarize2", "final_answer")
 ARMS = {
@@ -233,7 +235,10 @@ def _proposal_step(
         _restore(strategy, population, generated["after"])
         proposal = generated["proposal"]
     else:
-        started = time.monotonic()
+        start_path = directory / "proposal-started.json"
+        if not start_path.exists():
+            atomic_json(start_path, {"time_unix": time.time()})
+        started = json.loads(start_path.read_text())["time_unix"]
         result, _ = strategy.reflect(
             parent,
             {component: evidence},
@@ -251,7 +256,7 @@ def _proposal_step(
         proposal = {
             "candidate": candidate,
             "changed": candidate != parent,
-            "seconds": time.monotonic() - started,
+            "seconds": time.time() - started,
             "metadata": result.metadata,
             "prompts": result.prompts,
             "raw_lm_outputs": result.raw_lm_outputs,
@@ -314,7 +319,7 @@ def _proposal_step(
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
     """Run matched training proposals before revealing any transfer outcomes."""
-    if not os.environ.get("TYPESAFE_API_KEY"):
+    if not os.environ.get("TYPESAFE_API_KEY") and not os.environ.get(HANDOFF_ENV):
         raise RuntimeError("TYPESAFE_API_KEY must be available before the pilot starts")
     settings = build_parser().parse_args(
         [
@@ -364,6 +369,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     settings.retrieval_provenance = retriever.provenance()
     parent = seed_candidate("2stage", "structured", resolve_template_family("auto", args.model))
     runtime = build_run_contract("react_v2", settings)
+    if os.environ.get(HANDOFF_ENV):
+        runtime["execution"] = {
+            "jev_transport": "offline-file-handoff-v1",
+            "proposal_seconds_include_stage_waits": True,
+        }
+        for role in ("solver", "reflection"):
+            models = runtime.get("models", {})
+            field = f"{role}_api_base"
+            if field in models:
+                models[field] = _contract_api_base(models[field], scientific_contract=True)
     runtime.setdefault("program", {})["reported_supplemental_metric"] = None
     if "optimizer" in runtime:
         runtime["configured_search_not_executed"] = runtime.pop("optimizer")

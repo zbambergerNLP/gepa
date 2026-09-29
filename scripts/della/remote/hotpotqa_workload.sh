@@ -145,12 +145,14 @@ if [[ "${HOTPOTQA_INITIAL_THROUGHPUT:-0}" == "1" && "${HOTPOTQA_PILOT_ONLY}" == 
 fi
 
 if [[ "${HOTPOTQA_PILOT_ONLY}" == "1" && "${HOTPOTQA_PILOT_STAGE:-}" == "diversity-quality" ]]; then
-    TYPESAFE_API_KEY="$(cat "${SCRATCH_BASE}/.secrets/typesafe-api-key")"
-    if [[ -z "${TYPESAFE_API_KEY}" ]]; then
-        echo "ERROR: the diversity-quality pilot requires the protected TypeSafe credential" >&2
-        exit 1
+    if [[ -z "${GEPA_JEV_HANDOFF_DIR:-}" ]]; then
+        TYPESAFE_API_KEY="$(cat "${SCRATCH_BASE}/.secrets/typesafe-api-key")"
+        if [[ -z "${TYPESAFE_API_KEY}" ]]; then
+            echo "ERROR: the diversity-quality pilot requires the protected TypeSafe credential" >&2
+            exit 1
+        fi
+        export TYPESAFE_API_KEY
     fi
-    export TYPESAFE_API_KEY
     "${PY}" -m examples.hotpotqa.diversity_quality_pilot \
         --model "${SOLVER_MODEL}" --api-base "${SOLVER_API_BASE}" \
         --reflection-model "${REFLECTION_MODEL}" --reflection-api-base "${REFLECTION_API_BASE}" \

@@ -157,6 +157,29 @@ def test_journal_replay_after_cursor_rewind_never_repeats_network_or_cost(setup_
     assert resumed._client is None
 
 
+def test_offline_verifier_retains_native_classification(setup_verifier, tmp_path, monkeypatch):
+    from gepa.strategies.jev_handoff import resolve
+
+    verifier, requests, _ = setup_verifier
+    monkeypatch.setenv("GEPA_JEV_HANDOFF_DIR", str(tmp_path / "handoff"))
+    monkeypatch.delenv("SLURM_JOB_ID", raising=False)
+    with pytest.raises(SystemExit) as exc:
+        classify(verifier)
+    assert exc.value.code == 75 and not requests
+    request = next((tmp_path / "handoff").glob("*/request.json"))
+    monkeypatch.delenv("GEPA_JEV_HANDOFF_DIR")
+    external = JevEditVerifier()
+    external._client = verifier._client
+    verifier._client = None
+    resolve(request, external)
+    monkeypatch.setenv("GEPA_JEV_HANDOFF_DIR", str(tmp_path / "handoff"))
+    result = classify(verifier)
+    assert result["verdict"] == "duplicate"
+    assert result["matched_attempt_id"] == "attempt-b"
+    assert len(requests) == 1
+    assert verifier.total_tokens_in == 1000
+
+
 def test_raw_response_is_durable_before_verdict_exposed(setup_verifier, monkeypatch, tmp_path):
     verifier, requests, _ = setup_verifier
 

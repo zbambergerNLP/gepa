@@ -117,6 +117,9 @@ def test_offline_launcher_uses_files_without_proxy_or_compute_credentials(tmp_pa
     )
     bootstrap = tmp_path / "bootstrap.sh"
     bootstrap.write_text("module() { exit 82; }\n")
+    fake_uv = tmp_path / "uv"
+    fake_uv.write_text('#!/bin/bash\n[[ "$*" == *"jev_mailbox check-ready"* ]] || exit 83\n')
+    fake_uv.chmod(0o700)
     export = tmp_path / "interactive.env"
     export.write_bytes(
         b"\0".join(
@@ -126,6 +129,8 @@ def test_offline_launcher_uses_files_without_proxy_or_compute_credentials(tmp_pa
                 "SCRATCH_BASE": tmp_path,
                 "HOTPOTQA_SOURCE_COMMIT": "test-source",
                 "HOTPOTQA_PILOT_ROOT": tmp_path / "output",
+                "GEPA_UV_BIN": fake_uv,
+                "GEPA_VENV_DIR": tmp_path / "venv",
             }.items()
         )
         + b"\0"

@@ -19,6 +19,7 @@ from gepa.strategies.jev_handoff import HANDOFF_ENV, load, resolve
 
 @pytest.fixture
 def setup(tmp_path, monkeypatch):
+    monkeypatch.setattr("gepa.strategies.jev_handoff.HANDOFF_WAIT_SECONDS", 0.0)
     monkeypatch.delenv("SLURM_JOB_ID", raising=False)
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
     monkeypatch.setenv(HANDOFF_ENV, str(tmp_path / "remote"))
@@ -111,6 +112,27 @@ def test_pause_external_request_resume_and_journal_replay(setup, tmp_path, monke
     assert len(calls) == 1
     assert len((tmp_path / "attempts.jsonl").read_text().splitlines()) == 2
     assert "test-private-key" not in response.read_text()
+
+
+def test_response_arrives_without_exiting_or_reloading_controller(setup, tmp_path, monkeypatch):
+    factory, calls, _ = setup
+    remote, external = export_request(tmp_path, factory(), calls)
+    monkeypatch.delenv(HANDOFF_ENV)
+    response = resolve(external, factory(live=True))
+    monkeypatch.setenv(HANDOFF_ENV, str(tmp_path / "remote"))
+    monkeypatch.setattr("gepa.strategies.jev_handoff.HANDOFF_WAIT_SECONDS", 300.0)
+    waits = []
+
+    def deliver(seconds):
+        waits.append(seconds)
+        shutil.copyfile(response, remote.with_name("response.json"))
+
+    monkeypatch.setattr("gepa.strategies.jev_handoff.time.sleep", deliver)
+    resident = factory()
+    assert choose(resident)["probs"]
+    assert resident.total_tokens_in == 100
+    assert waits == [1.0]
+    assert len(calls) == 1
 
 
 def test_external_failure_is_retained_and_not_retried_by_resume(setup, tmp_path, monkeypatch):

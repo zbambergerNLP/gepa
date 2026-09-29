@@ -26,7 +26,7 @@ from examples.hotpotqa.main import (
 from examples.hotpotqa.pilot import observed_kwargs
 from examples.hotpotqa.utils import HOTPOTQA_HF_REVISION, load_hotpotqa_dataset
 from gepa.response_journal import response_journal_scope
-from gepa.strategies.jev_handoff import HANDOFF_ENV
+from gepa.strategies.jev_handoff import HANDOFF_ENV, HANDOFF_WAIT_SECONDS
 
 COMPONENTS = ("summarize1", "create_query_hop2", "summarize2", "final_answer")
 PROTOCOL = {
@@ -104,7 +104,8 @@ def run(args: argparse.Namespace) -> dict:
     }
     if os.environ.get(HANDOFF_ENV):
         contract["execution"] = {
-            "jev_transport": "offline-file-handoff-v1",
+            "jev_transport": "persistent-file-mailbox-v1",
+            "handoff_wait_seconds": HANDOFF_WAIT_SECONDS,
             "proposal_seconds_include_stage_waits": True,
         }
         for role in ("solver", "reflection"):

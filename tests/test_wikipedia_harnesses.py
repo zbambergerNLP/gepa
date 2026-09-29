@@ -1123,7 +1123,7 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     assert "HOTPOTQA_PRODUCTION_LAUNCH=1" in submit
     assert 'HOTPOTQA_SOURCE_COMMIT="$(git -C "${REPO_ROOT}" rev-parse HEAD)"' in submit
     assert 'REMOTE_SOURCE_DIR="${REMOTE_DIR%/}/sources/${HOTPOTQA_SOURCE_COMMIT}"' in submit
-    assert 'GEPA_VENV_DIR="${REMOTE_DIR%/}/.venv"' in submit
+    assert 'GEPA_VENV_DIR="${GEPA_VENV_DIR:-${REMOTE_DIR%/}/.venv}"' in submit
     assert '"${GEPA_VENV_DIR}/bin/python" -m examples.common.slurm_continuation add' in submit
     assert '"${GEPA_VENV_DIR}/bin/python" -m examples.common.slurm_continuation start' in submit
     assert 'SYNC_SOURCE_COMMIT="${HOTPOTQA_SOURCE_COMMIT}"' in submit

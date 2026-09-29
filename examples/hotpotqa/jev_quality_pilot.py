@@ -107,9 +107,7 @@ def run(args: argparse.Namespace) -> dict:
         solver_lm_kwargs=observed_kwargs(args.model, args.api_base, args.output_dir, "solver"),
         reflection_diagnostics=True,
     )
-    original = evaluate_records(
-        args.output_dir / "parent", parent, train[:36], evaluate, args.workers, compute_f1=False
-    )
+    original = evaluate_records(args.output_dir / "parent", parent, train[:36], evaluate, args.workers)
     transfer = PROTOCOL["transfer_train_indices"]
     comparisons = []
     for index, (component, indices) in enumerate(
@@ -168,7 +166,6 @@ def run(args: argparse.Namespace) -> dict:
                     [train[i] for i in chosen],
                     evaluate,
                     args.workers,
-                    compute_f1=False,
                 )
                 if proposal["changed"]
                 else before

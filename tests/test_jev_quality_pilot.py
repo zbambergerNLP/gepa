@@ -23,8 +23,7 @@ def test_matched_proposals_keep_transfer_out_of_reflection(tmp_path, monkeypatch
     calls = []
     evaluations = []
 
-    def evaluate(directory, candidate, examples, evaluator, workers, *, compute_f1):
-        assert compute_f1 is False
+    def evaluate(directory, candidate, examples, evaluator, workers):
         evaluations.append([int(e["id"]) for e in examples])
         return [
             {

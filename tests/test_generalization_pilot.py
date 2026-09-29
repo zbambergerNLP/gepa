@@ -70,6 +70,7 @@ def test_evaluation_reuses_exact_records_and_detects_drift(tmp_path: Path) -> No
     candidate = {"sys": "original"}
     records = evaluate_records(tmp_path, candidate, examples, evaluate, 1)
     assert records[0]["score"] == 0 and records[0]["feedback"]["evaluation_error"]
+    assert "f1" not in records[0]
     assert evaluate_records(tmp_path, candidate, examples, evaluate, 1) == records
     assert calls == ["a"]
     with pytest.raises(ValueError, match="configuration changed"):

@@ -5,6 +5,11 @@ set -euo pipefail
 python() { "${GEPA_UV_BIN}" run --no-project --python "${GEPA_VENV_DIR}/bin/python" python "$@"; }
 PY=python
 HOTPOTQA_EDITOR_MODE="${HOTPOTQA_EDITOR_MODE:-react}"
+HOTPOTQA_CONTROLLER_SELECTION="${HOTPOTQA_CONTROLLER_SELECTION:-verbalized}"
+case "${HOTPOTQA_CONTROLLER_SELECTION}" in
+    verbalized|jev) ;;
+    *) echo "ERROR: unsupported Controller selection" >&2; exit 1 ;;
+esac
 TRACKING_ARGS=()
 if [[ -n "${HOTPOTQA_WANDB_PROJECT:-}" ]]; then
     export WANDB_MODE=offline
@@ -68,7 +73,8 @@ if [[ "${REFLECTION_MODEL}" == "hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash" ]];
     DEEPSEEK_CANARY_MARKER="${DEEPSEEK_CANARY_DIR}/${CANARY_IDENTITY_SHA256}.ok"
     mkdir -p "${DEEPSEEK_CANARY_DIR}"
     if [[ "${HOTPOTQA_CANARY_ONLY}" == "1" \
-        || ( "${HOTPOTQA_PILOT_ONLY}" == "1" && ! -f "${DEEPSEEK_CANARY_MARKER}" ) ]]; then
+        || ( ( "${HOTPOTQA_PILOT_ONLY}" == "1" || "${HOTPOTQA_CONTROLLER_SELECTION}" == "jev" ) \
+             && ! -f "${DEEPSEEK_CANARY_MARKER}" ) ]]; then
         echo "==> running the fail-closed DeepSeek multi-tool canary"
         "${PY}" -m examples.hotpotqa.runtime_canary \
             --model "${REFLECTION_MODEL}" \
@@ -267,6 +273,7 @@ echo "==> retrieval=Wiki-2017/BM25 k=7 concurrent_examples=${MAX_WORKERS} root=$
     "${REFLECTION_API_ARG[@]}" \
     --max-metric-calls "${MAX_METRIC_CALLS}" \
     --condition "${CONDITION}" \
+    --controller-selection "${HOTPOTQA_CONTROLLER_SELECTION}" \
     --editor-mode "${HOTPOTQA_EDITOR_MODE}" "${TRACKING_ARGS[@]}" \
     --text-limits "${HOTPOTQA_TEXT_LIMITS_JSON:-null}" \
     --program 2stage \

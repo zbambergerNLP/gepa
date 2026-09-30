@@ -7,7 +7,7 @@ TypeSafe `Choice` request over the joint action/section menu. It uses the pinned
 Jev returns probabilities, not a written rationale. The Manifestor develops the
 edit direction from the selected pair and the training evidence; the Editor still
 receives the full canonical action constraints independently. This is a new
-policy, `jev_joint_action_section_v3`, rather than a behavior-preserving model swap.
+policy, `jev_joint_action_section_v4`, rather than a behavior-preserving model swap.
 It contains neither the outcome-history nor sibling-diversity revisions.
 
 ## Setup
@@ -158,8 +158,17 @@ It is not an invoice. Known usage from failed attempts remains charged.
 The attempt ledger, response journal and proposal metadata retain the raw
 distribution and its normalization record: raw total, applied flag, scale and
 absolute tolerance. Normalization is arithmetic on the same response; it makes
-no new API call. Missing/extra choices, invalid values, inconsistent argmax,
-incorrect model, missing usage and large mass errors still fail immediately.
+no new API call. Invalid typed responses (including inconsistent argmax) receive
+correction feedback describing the validation error and the previous response.
+The evidence and available choices are unchanged. Corrections and transport
+retries share one initial attempt plus three retries and one 30-second deadline;
+SDK retries remain disabled. Exhaustion still stops without a fallback, and
+model-identity, authentication and programming failures stop immediately.
+
+Explicit recovery of an archived invalid response can consume only its remaining
+attempts. This user-initiated recovery starts a new deadline and records its link
+to the original failure. It is never triggered by ordinary journal replay or the
+mailbox server; a `started` request with an unknown outcome cannot be rerun.
 
 ## Verification
 

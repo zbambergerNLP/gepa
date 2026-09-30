@@ -124,6 +124,40 @@ def test_one_joint_decision_sees_all_evidence_and_edits_only_selected_module(bac
     assert "query mismatch" not in editor["execution_traces"]
 
 
+def test_joint_jev_correction_preserves_all_modules_and_edits_only_selected_module(setup_controller, monkeypatch):
+    """Recover an inconsistent choice without narrowing evidence or editing extra modules."""
+    controller, requests, replies = setup_controller
+    monkeypatch.setattr("gepa.strategies.jev_controller.time.sleep", lambda _: None)
+
+    def inconsistent_choice(request):
+        payload = jev_response(request).json()
+        answer = payload["answers"]["edit"]
+        answer["choice"] = next(key for key in answer["probabilities"] if key != answer["choice"])
+        return httpx2.Response(200, json=payload)
+
+    replies.extend([inconsistent_choice, jev_response])
+    lm = ModuleChoosingLM([EDIT])
+    reflection, _ = strategy(2, lm=lm, controller_selection="jev", editor_mode="single_call", jev_controller=controller)
+    reflection.bind_module_selector("controller")
+    proposal, _ = reflection.reflect(CANDIDATE, EVIDENCE, list(CANDIDATE))
+
+    assert len(requests) == 2
+    assert requests[0]["state"] == requests[1]["state"]
+    assert set(requests[1]["state"]["components"]) == set(CANDIDATE)
+    assert requests[0]["questions"]["edit"]["criteria"] == requests[1]["questions"]["edit"]["criteria"]
+    assert "argmax choice disagrees" in requests[1]["questions"]["edit"]["instructions"]
+    assert "Previous response:" in requests[1]["questions"]["edit"]["instructions"]
+    assert set(proposal.new_texts) == {"answer"}
+    assert proposal.new_texts["answer"] == PROMPT.replace("be nice", "be kind")
+    assert lm.roles == ["manifestor", "react_v2"]
+    assert proposal.metadata["controller_sampling"]["physical_attempts"] == 2
+    records = [json.loads(line) for line in controller._attempt_log.read_text().splitlines()]
+    finished = [record for record in records if record["event"] == "finished"]
+    assert [row["attempt"] for row in finished] == [1, 2]
+    assert [row["outcome"] for row in finished] == ["error", "success"]
+    assert finished[0]["request_id"] == finished[1]["request_id"]
+
+
 def test_component_menu_ids_are_casefold_unique_and_legacy_ids_unchanged():
     """Avoid collisions even for module names containing markup and delimiters."""
     names = ["a", "A", "a::b/@<x>", "תשובה"]

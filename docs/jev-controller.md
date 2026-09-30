@@ -7,7 +7,7 @@ TypeSafe `Choice` request over the joint action/section menu. It uses the pinned
 Jev returns probabilities, not a written rationale. The Manifestor develops the
 edit direction from the selected pair and the training evidence; the Editor still
 receives the full canonical action constraints independently. This is a new
-policy, `jev_joint_action_section_v3`, rather than a behavior-preserving model swap.
+policy, `jev_joint_action_section_v4`, rather than a behavior-preserving model swap.
 It contains neither the outcome-history nor sibling-diversity revisions.
 
 ## Setup
@@ -29,9 +29,10 @@ model server. The solver, Manifestor and Editor keep their existing model settin
 Do not pass a Jev key as a command-line argument.
 
 The benchmark derives a distinct run key and refuses incompatible checkpoint
-resumption. `--enforce-scientific-contract` rejects Jev because it is not part of
-the qualified Della campaign. None of this changes an existing source snapshot,
-export, checkpoint, queued worker or controller.
+resumption. The enforced Della contract permits the explicit 6,871-call Jev
+FOREST cell with Qwen solver and DeepSeek edit roles, retaining its other model,
+data, seed, retrieval and budget checks. Existing source snapshots, exports and
+checkpoints retain their original settings.
 
 Programmatic use:
 
@@ -54,6 +55,57 @@ strategy = ThreeRoleReflectionLM(
 )
 # Close controller.close() when the owning application finishes.
 ```
+
+## Choosing the module as well as the action
+
+`module_selector="controller"` lets a level-2 FOREST Controller jointly choose
+one **component, section and semantic action**. It works with both the generative
+(`controller_selection="verbalized"`) and Jev backends. Round robin remains the
+default. Parent selection is unchanged.
+
+Pass this setting to `gepa.optimize(..., reflection_strategy=strategy,
+module_selector="controller")`, or use
+`ReflectionConfig(reflection_strategy=strategy, module_selector="controller")`
+with `optimize_anything`. For direct calls to `strategy.reflect`, first call
+`strategy.bind_module_selector("controller")` and supply all eligible component
+names and their reflection datasets.
+
+For HotPotQA, add the following options to the normal experiment command:
+
+```sh
+# Jev chooses module, section and action.
+--condition react_v2 --reflection-level 2 --controller-selection jev --module-selector controller
+
+# The generative Controller makes the same joint choice.
+--condition react_v2 --reflection-level 2 --controller-selection verbalized --module-selector controller
+```
+
+The Della workload forwards `HOTPOTQA_MODULE_SELECTOR=controller` from a new
+prepared export. Its default is `round_robin`; this flag does not submit a job.
+
+The Controller receives each eligible module's current sections and training
+traces from the existing minibatch. It compares where information or behavior
+first went wrong and which module could address it. Modules without reflection
+evidence are ineligible. A single joint distribution covers every eligible
+module/section/action tuple; sampling uses the existing seeded probability rule.
+There is no extra module-selection API call or round-robin fallback. Only the
+selected module goes through Manifestor and Editor. Its proposal then follows
+the existing training-admission and full-validation rules. No validation or test
+examples are added to the Controller context.
+
+Joint menu IDs include a collision-safe component prefix. Saved metadata names
+the eligible and selected components, and the run contract records
+`P(component, region, action)` with component-selection version 1. Enabling or
+disabling this setting changes the run identity and rejects an incompatible
+checkpoint resume. The action catalog, edit tools, role models, retry policy,
+parent selection and evaluation budget are unchanged.
+
+The four Alibaba HotPotQA modules have 200 joint choices before mechanical
+exclusions. Jev permits at most 255 executable choices; larger menus fail before
+an API request. Its context limit still applies, and evidence is not silently
+cut to fit. The generative Controller must score the larger menu, so its latency
+may increase. This implementation enables the comparison; offline wiring tests
+do not establish that choosing modules improves optimization quality.
 
 ## Selection and recovery
 
@@ -106,8 +158,17 @@ It is not an invoice. Known usage from failed attempts remains charged.
 The attempt ledger, response journal and proposal metadata retain the raw
 distribution and its normalization record: raw total, applied flag, scale and
 absolute tolerance. Normalization is arithmetic on the same response; it makes
-no new API call. Missing/extra choices, invalid values, inconsistent argmax,
-incorrect model, missing usage and large mass errors still fail immediately.
+no new API call. Invalid typed responses (including inconsistent argmax) receive
+correction feedback describing the validation error and the previous response.
+The evidence and available choices are unchanged. Corrections and transport
+retries share one initial attempt plus three retries and one 30-second deadline;
+SDK retries remain disabled. Exhaustion still stops without a fallback, and
+model-identity, authentication and programming failures stop immediately.
+
+Explicit recovery of an archived invalid response can consume only its remaining
+attempts. This user-initiated recovery starts a new deadline and records its link
+to the original failure. It is never triggered by ordinary journal replay or the
+mailbox server; a `started` request with an unknown outcome cannot be rerun.
 
 ## Verification
 

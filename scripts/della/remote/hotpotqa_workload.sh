@@ -6,6 +6,15 @@ python() { "${GEPA_UV_BIN}" run --no-project --python "${GEPA_VENV_DIR}/bin/pyth
 PY=python
 HOTPOTQA_EDITOR_MODE="${HOTPOTQA_EDITOR_MODE:-react}"
 HOTPOTQA_CONTROLLER_SELECTION="${HOTPOTQA_CONTROLLER_SELECTION:-verbalized}"
+HOTPOTQA_MODULE_SELECTOR="${HOTPOTQA_MODULE_SELECTOR:-round_robin}"
+case "${HOTPOTQA_MODULE_SELECTOR}" in
+    round_robin) ;;
+    controller)
+        if [[ "${CONDITION:-}" != react_v2 ]]; then
+            echo "ERROR: Controller module selection requires FOREST" >&2; exit 1
+        fi ;;
+    *) echo "ERROR: unsupported module selector" >&2; exit 1 ;;
+esac
 case "${HOTPOTQA_CONTROLLER_SELECTION}" in
     verbalized|jev) ;;
     *) echo "ERROR: unsupported Controller selection" >&2; exit 1 ;;
@@ -274,6 +283,7 @@ echo "==> retrieval=Wiki-2017/BM25 k=7 concurrent_examples=${MAX_WORKERS} root=$
     --max-metric-calls "${MAX_METRIC_CALLS}" \
     --condition "${CONDITION}" \
     --controller-selection "${HOTPOTQA_CONTROLLER_SELECTION}" \
+    --module-selector "${HOTPOTQA_MODULE_SELECTOR}" \
     --editor-mode "${HOTPOTQA_EDITOR_MODE}" "${TRACKING_ARGS[@]}" \
     --text-limits "${HOTPOTQA_TEXT_LIMITS_JSON:-null}" \
     --program 2stage \

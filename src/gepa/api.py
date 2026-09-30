@@ -212,7 +212,7 @@ def optimize(
     - custom_candidate_proposer: Optional custom function for proposing new candidates. If provided, this will be used instead of the default LLM-based reflection approach. Cannot be used if adapter provides `propose_new_texts`. Signature: `(candidate, reflective_dataset, components_to_update) -> dict[str, str]`. The proposer may optionally accept a keyword argument `metadata` (an open context dict from the reflective proposer, e.g. iteration info); it is passed only if the signature accepts it, and the plain 3-arg form remains fully supported.
 
     # Component selection configuration
-    - module_selector: Component selection strategy. Can be a ReflectionComponentSelector instance or a string ('round_robin', 'all'). Defaults to 'round_robin'. The 'round_robin' strategy cycles through components in order. The 'all' strategy selects all components for modification in every GEPA iteration.
+    - module_selector: Component selection strategy. Can be a ReflectionComponentSelector instance or a string ('round_robin', 'all', 'controller'). Defaults to 'round_robin'. The 'round_robin' strategy cycles through components in order. The 'all' strategy selects all components for modification in every GEPA iteration. With a level-2 ThreeRoleReflectionLM, 'controller' supplies all components' training evidence to the Controller, which chooses one component/section/action jointly.
 
     # Merge-based configuration
     - use_merge: Whether to use the merge strategy.
@@ -481,10 +481,11 @@ def optimize(
         module_selector_cls = {
             "round_robin": RoundRobinReflectionComponentSelector,
             "all": AllReflectionComponentSelector,
+            "controller": AllReflectionComponentSelector,
         }.get(module_selector)
 
         assert module_selector_cls is not None, (
-            f"Unknown module_selector strategy: {module_selector}. Supported strategies: 'round_robin', 'all'"
+            f"Unknown module_selector strategy: {module_selector}. Supported strategies: 'round_robin', 'all', 'controller'"
         )
 
         module_selector_instance: ReflectionComponentSelector = module_selector_cls()
@@ -588,6 +589,14 @@ def optimize(
                     "template_family='generic'."
                 ) from exc
             raise
+
+    _bind_module_selector = getattr(reflection_strategy, "bind_module_selector", None)
+    if module_selector == "controller" and not callable(_bind_module_selector):
+        raise ValueError(
+            "module_selector='controller' requires a supporting strategy such as level-2 ThreeRoleReflectionLM."
+        )
+    if callable(_bind_module_selector):
+        _bind_module_selector(module_selector)
 
     if reflection_strategy is not None:
         _validate_candidate = getattr(reflection_strategy, "validate_candidate", None)

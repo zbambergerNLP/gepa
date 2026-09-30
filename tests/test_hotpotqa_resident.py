@@ -22,7 +22,8 @@ ROOT = Path(__file__).parents[1]
 
 
 @pytest.mark.parametrize("changes", [{}, {"max_metric_calls": 13742}, {"condition": "vanilla"}, {"seed": 1}])
-def test_jev_full_run_keeps_scientific_guards(monkeypatch, changes):
+@pytest.mark.parametrize("module_selector", ["round_robin", "controller"])
+def test_jev_full_run_keeps_scientific_guards(monkeypatch, changes, module_selector):
     """Admit the explicit Jev comparison while rejecting budget, method and seed drift."""
     for name, value in QWEN_SCIENTIFIC_RUNTIME.items():
         monkeypatch.setenv(name, value)
@@ -35,6 +36,7 @@ def test_jev_full_run_keeps_scientific_guards(monkeypatch, changes):
             "condition": "react_v2",
             "max_metric_calls": 6871,
             "controller_selection": "jev",
+            "module_selector": module_selector,
             "enforce_scientific_contract": True,
             "reflection_model": DEEPSEEK_V4_1_FLASH_MODEL,
             "reflection_api_base": "http://127.0.0.1:8201/v1",
@@ -53,6 +55,7 @@ def test_jev_full_run_keeps_scientific_guards(monkeypatch, changes):
         assert contract["optimizer"]["semantic_controller_policy"]["model"] == "jev-1.13.0"
         assert contract["optimizer"]["budget_stopping"] == "whole_iteration_threshold"
         assert contract["data"]["splits"]["test"]["count"] == 300
+        assert contract["optimizer"]["component_selector"] == module_selector
 
 
 @pytest.mark.parametrize("problem", [None, "coordinator", "pilot", "budget", "controller"])

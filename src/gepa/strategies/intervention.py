@@ -71,10 +71,12 @@ class ControllerChoice:
     Args:
         edit_target: Independently selectable named document section.
         semantic_action: Semantic action, or ``None`` at level 1.
+        include_component: Qualify menu IDs when choosing across components.
     """
 
     edit_target: EditTarget
     semantic_action: SemanticActionSpec | None
+    include_component: bool = False
     edit_tool: EditTool | None = field(init=False, compare=False)
     menu_id: str = field(init=False, compare=False)
     menu_description: str = field(init=False, compare=False)
@@ -97,6 +99,12 @@ class ControllerChoice:
         else:
             menu_id = f"EDIT@{self.edit_target.section}"
             menu_description = f"Revise region '{self.edit_target.section}' using the available edit-tool basis."
+        if self.include_component:
+            # Hex keeps names distinct under the selector's case-insensitive ID
+            # parser, including names containing delimiters or markup.
+            component_id = self.edit_target.component_name.encode("utf-8").hex()
+            menu_id = f"component_{component_id}::{menu_id}"
+            menu_description = f"Component {self.edit_target.component_name!r}: {menu_description}"
         object.__setattr__(self, "edit_tool", edit_tool)
         object.__setattr__(self, "menu_id", menu_id)
         object.__setattr__(self, "menu_description", menu_description)
@@ -116,6 +124,17 @@ CONTROLLER_POLICY_CONTRACT: dict[str, Any] = {
     "exploration_epsilon": FULL_SUPPORT_EXPLORATION_EPSILON,
     "distribution_failure": "retry_once_then_drop",
     "max_menu": None,
+}
+
+CONTROLLER_COMPONENT_SELECTION_CONTRACT: dict[str, Any] = {
+    "factorization": "P(component, region, action)",
+    "component_selection": {
+        "version": 1,
+        "eligible": "all components with training evidence",
+        "evidence": "per-component current prompts and structured training traces",
+        "mutations_per_proposal": 1,
+        "menu_ids": "utf8_hex_component_prefix",
+    },
 }
 
 UNIFORM_RANDOM_CONTROLLER_POLICY_CONTRACT: dict[str, Any] = {
@@ -424,6 +443,7 @@ def build_controller_menu(
     *,
     rng: random.Random,
     max_menu: int | None = None,
+    include_component: bool = False,
 ) -> list[ControllerChoice]:
     """Build the Controller's region/action menu.
 
@@ -443,6 +463,7 @@ def build_controller_menu(
         rng: Seeded RNG for optional deterministic menu subsampling.
         max_menu: Optional level-1 region bound. At level 2 or above it may be
             set only high enough to retain every cataloged region/action pair.
+        include_component: Qualify IDs when combining menus across components.
 
     Returns:
         Non-empty Controller menu.
@@ -462,7 +483,7 @@ def build_controller_menu(
         raise ValueError(f"Document template {template.kind!r} has no named sections to edit.")
     if level >= 2:
         specs = SEMANTIC_ACTIONS if template.kind in _SEMANTIC_ACTION_KINDS else ()
-        menu = [ControllerChoice(target, spec) for target in targets for spec in specs]
+        menu = [ControllerChoice(target, spec, include_component) for target in targets for spec in specs]
     else:
         menu = [ControllerChoice(target, None) for target in targets]
 

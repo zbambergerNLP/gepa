@@ -105,6 +105,7 @@ from gepa.strategies.batch_sampler import IndependentEpochShuffledBatchSampler
 from gepa.strategies.document_template import TEMPLATE_FAMILIES
 from gepa.strategies.instruction_proposal import InstructionProposalSignature
 from gepa.strategies.intervention import (
+    CONTROLLER_COMPONENT_SELECTION_CONTRACT,
     CONTROLLER_POLICY_CONTRACT,
     SEMANTIC_ACTION_CATALOGS,
     SEMANTIC_ACTIONS,
@@ -217,6 +218,11 @@ def _validate_scientific_contract(args, runtime_environment: dict | None = None)
     environment = os.environ if runtime_environment is None else runtime_environment
     if getattr(args, "enforce_scientific_contract", False):
         changed_axes = []
+        module_selector = getattr(args, "module_selector", "round_robin")
+        if module_selector not in {"round_robin", "controller"} or (
+            module_selector == "controller" and getattr(args, "condition", None) != "react_v2"
+        ):
+            changed_axes.append("Controller module selection requires the explicit FOREST condition")
         if getattr(args, "controller_selection", "verbalized") == "jev":
             if (
                 getattr(args, "condition", None) != "react_v2"
@@ -541,6 +547,11 @@ def _contract_api_base(api_base: str | None, *, scientific_contract: bool) -> st
 def _controller_selection(condition: str, args) -> str:
     """Resolve the requested Controller without changing existing ablation identities."""
     requested = getattr(args, "controller_selection", "verbalized")
+    module_selector = getattr(args, "module_selector", "round_robin")
+    if module_selector not in {"round_robin", "controller"}:
+        raise ValueError("module_selector must be round_robin or controller")
+    if module_selector == "controller" and (condition != "react_v2" or args.reflection_level != 2):
+        raise ValueError("Controller module selection requires --condition react_v2 --reflection-level 2")
     if requested not in {"verbalized", "jev"}:
         raise ValueError("controller_selection must be verbalized or jev")
     if requested == "jev" and (condition != "react_v2" or args.reflection_level != 2):
@@ -653,6 +664,10 @@ def build_run_contract(condition: str, args) -> dict:
             semantic_controller_policy = deepcopy(UNIFORM_RANDOM_CONTROLLER_POLICY_CONTRACT)
         else:
             semantic_controller_policy = deepcopy(CONTROLLER_POLICY_CONTRACT)
+        if getattr(args, "module_selector", "round_robin") == "controller":
+            semantic_controller_policy.update(deepcopy(CONTROLLER_COMPONENT_SELECTION_CONTRACT))
+            if jev:
+                reflection_role_decoding["controller"]["policy"] = deepcopy(semantic_controller_policy)
     return {
         "schema_version": 30,
         "baseline_protocol": dict(BASELINE_PROTOCOL),
@@ -698,7 +713,7 @@ def build_run_contract(condition: str, args) -> dict:
             "batch_sampler": "epoch_shuffled",
             "training_batch_order": IndependentEpochShuffledBatchSampler(3, args.seed).contract(),
             "reflection_minibatch_size": 3,
-            "component_selector": "round_robin",
+            "component_selector": getattr(args, "module_selector", "round_robin"),
             "reflection_context": deepcopy(REFLECTION_CONTEXT_CONTRACT),
             "generalization": ({
                 **deepcopy(FOREST_REFLECTION_CONTRACT),
@@ -1426,7 +1441,7 @@ def build_config(condition: str, args, reflection_lm_kwargs: dict, run_dir: str 
             perfect_score=1.0,
             batch_sampler=IndependentEpochShuffledBatchSampler(3, args.seed),
             reflection_minibatch_size=3,
-            module_selector="round_robin",
+            module_selector=getattr(args, "module_selector", "round_robin"),
             reflection_lm=args.reflection_model,
             reflection_lm_kwargs=reflection_proposer_kwargs,
             reflection_strategy=reflection_strategy,
@@ -1525,6 +1540,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--controller-selection", choices=["verbalized", "jev"], default="verbalized",
         help="Jev replaces only the level-2 FOREST Controller; requires API credentials or a resident mailbox and a new run directory",
+    )
+    parser.add_argument(
+        "--module-selector", choices=["round_robin", "controller"], default="round_robin",
+        help="Choose modules cyclically or let the level-2 Controller jointly choose one module, section and action",
     )
     parser.add_argument("--data-path", type=str, default=None, help="Path to HotpotQA JSONL sample (smoke, 14/3/3)")
     parser.add_argument(

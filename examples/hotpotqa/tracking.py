@@ -241,7 +241,6 @@ def report_completed(directory: Path, project: str, entity: str | None = None) -
                 "final_metrics": final,
                 "optimization/metric_calls": payload["total_metric_calls"],
                 "heldout/exact_match": final["test_exact_match"],
-                "heldout/f1": final["test_f1"],
                 "heldout/exact_match_gain": final["test_exact_match_gain"],
                 "baseline/exact_match": final["baseline"]["test_exact_match"],
                 "provider_usage_by_allocation": provider_usage(directory / "provider-attempts.jsonl"),

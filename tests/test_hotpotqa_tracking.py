@@ -60,7 +60,6 @@ def test_completed_backfill_checks_winner_and_is_idempotent(tmp_path, sdk):
         "candidate_sha256": _digest(candidates[1]),
         "best_validation_exact_match": 0.75,
         "test_exact_match": 0.7,
-        "test_f1": 0.8,
         "test_exact_match_gain": 0.2,
         "baseline": {"test_exact_match": 0.5},
     }
@@ -74,6 +73,7 @@ def test_completed_backfill_checks_winner_and_is_idempotent(tmp_path, sdk):
     assert report_completed(tmp_path, "project", "entity") == proof
     assert module.init.call_count == 1
     assert run.summary["heldout/exact_match"] == 0.7
+    assert "heldout/f1" not in run.summary
     assert run.summary["optimization/metric_calls"] == 6930
     assert run.summary["heldout_complete"] is True
     final["candidate_sha256"] = _digest(candidates[0])

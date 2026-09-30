@@ -71,7 +71,7 @@ def test_all_seven_ablations_share_one_baseline_per_model(tmp_path, monkeypatch)
             for condition in conditions:
                 contract = run_contract(model, condition, budget)
                 row = evaluate(tmp_path / f"{index}-{budget}-{condition}", contract)
-                assert row["test_exact_match"] == row["test_f1"] == 0.5
+                assert row["test_exact_match"] == 0.5
                 if reference is None:
                     reference = row
                 assert row == reference
@@ -134,7 +134,7 @@ def test_interrupted_baseline_resumes_only_missing_questions(tmp_path, monkeypat
     monkeypatch.setattr(hotpot, "run_program", task)
     row = evaluate(tmp_path / "another-ablation", contract)
     assert task.call_count == 1
-    assert row["test_exact_match"] == row["test_f1"] == 1.0
+    assert row["test_exact_match"] == 1.0
     assert saved[0].read_bytes() == original
     assert evaluate(tmp_path / "run", contract) == row
     assert task.call_count == 1
@@ -271,6 +271,6 @@ def test_cli_reports_baseline_gains_without_feeding_test_results_into_optimizati
     assert len(rows) == 2
     assert rows[0]["baseline"] == rows[1]["baseline"]
     for row in rows:
-        assert row["baseline"]["test_exact_match"] == row["baseline"]["test_f1"] == 0.0
-        assert row["test_exact_match_gain"] == row["test_f1_gain"] == (0.0 if unchanged_winner else 1.0)
+        assert row["baseline"]["test_exact_match"] == 0.0
+        assert row["test_exact_match_gain"] == (0.0 if unchanged_winner else 1.0)
         assert row["baseline"]["test_example_count"] == row["test_example_count"] == 2

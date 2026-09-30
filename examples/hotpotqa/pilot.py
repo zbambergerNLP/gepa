@@ -40,7 +40,6 @@ from examples.hotpotqa.tracking import HotpotqaWandb
 from examples.hotpotqa.utils import (
     HOTPOTQA_HF_REVISION,
     build_hotpotqa_task_lm,
-    f1_score,
     load_hotpotqa_dataset,
     normalize_answer,
     resolve_hotpotqa_lm_kwargs,
@@ -138,7 +137,6 @@ def run_calibration(
                 or record.get("id") != example["id"]
                 or record.get("exact_match")
                 != float(normalize_answer(record["prediction"]) == normalize_answer(example["answer"]))
-                or record.get("f1") != f1_score(record["prediction"], example["answer"])
             ):
                 raise ValueError(f"Invalid pilot recovery record: {path}")
             return record
@@ -152,7 +150,6 @@ def run_calibration(
             "prediction": prediction,
             "trace": trace,
             "exact_match": float(normalize_answer(prediction) == normalize_answer(example["answer"])),
-            "f1": f1_score(prediction, example["answer"]),
             "started_at": call_started,
             "ended_at": time.time(),
             "job_id": os.environ.get("SLURM_JOB_ID"),
@@ -188,7 +185,6 @@ def run_calibration(
         "stage": contract["stage"],
         "completed_questions": len(records),
         "exact_match": sum(row["exact_match"] for row in records) / len(records),
-        "f1": sum(row["f1"] for row in records) / len(records),
         "elapsed_seconds": elapsed,
         "questions_per_hour": len(records) * 3600 / max(elapsed, 1e-9),
         "unfinished_allocation_windows": sum(row["ended_at"] is None for row in windows),

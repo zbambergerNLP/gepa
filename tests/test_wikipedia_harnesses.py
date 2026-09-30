@@ -276,7 +276,7 @@ def test_hotpot_heldout_evaluation_checkpoints_and_reuses_predictions(monkeypatc
         checkpoint_dir=tmp_path,
     )
 
-    assert first == pytest.approx((0.5, 0.75))
+    assert first == pytest.approx(0.5)
     assert run_program.call_count == 2
     checkpoint_roots = [path for path in tmp_path.iterdir() if path.is_dir()]
     assert len(checkpoint_roots) == 1
@@ -291,10 +291,15 @@ def test_hotpot_heldout_evaluation_checkpoints_and_reuses_predictions(monkeypatc
         "candidate_sha256": checkpoint_root.name,
         "example_count": 2,
         "exact_match": 0.5,
-        "f1": 0.75,
         "schema_version": 1,
     }
 
+    for path in checkpoint_root.glob("[0-9]*.json"):
+        record = json.loads(path.read_text())
+        assert "f1" not in record
+        record["f1"] = 0.75
+        path.write_text(json.dumps(record))
+    before = {path: path.read_bytes() for path in checkpoint_root.glob("[0-9]*.json")}
     monkeypatch.setattr(hotpot_main, "run_program", Mock(side_effect=AssertionError("must resume")))
     second = hotpot_main.evaluate_on_set(
         candidate,
@@ -307,6 +312,7 @@ def test_hotpot_heldout_evaluation_checkpoints_and_reuses_predictions(monkeypatc
     )
 
     assert second == pytest.approx(first)
+    assert all(path.read_bytes() == content for path, content in before.items())
 
 
 def test_hotpot_heldout_evaluation_scores_only_task_parse_errors_as_zero(monkeypatch, tmp_path) -> None:
@@ -330,7 +336,7 @@ def test_hotpot_heldout_evaluation_scores_only_task_parse_errors_as_zero(monkeyp
         checkpoint_dir=tmp_path,
     )
 
-    assert scores == (0.0, 0.0)
+    assert scores == 0.0
     record_paths = [path for path in tmp_path.rglob("*.json") if path.name != "summary.json"]
     assert len(record_paths) == 1
     record = json.loads(record_paths[0].read_text())
@@ -867,11 +873,11 @@ def test_hotpot_component_feedback_uses_gold_only_after_execution() -> None:
 
 
 def test_hotpot_metric_uses_exact_match_as_primary_score() -> None:
-    """Keep token overlap in feedback without promoting it above exact match."""
+    """Score partial overlap as incorrect without calculating a supplemental metric."""
     score, feedback = hotpot_utils.hotpotqa_metric("Paris France", "Paris")
 
     assert score == 0.0
-    assert "token-F1" in feedback
+    assert "F1" not in feedback
     assert "EM=0" in feedback
 
 
@@ -884,10 +890,14 @@ def test_hotpot_normalization_matches_the_artifact_unicode_behavior() -> None:
     assert composed == "cafe\u0301"
 
 
-def test_hotpot_f1_uses_ordinary_token_overlap_for_yes_no_answers() -> None:
-    """Avoid adding the non-artifact yes/no exact-match guard to token F1."""
-    assert hotpot_utils.f1_score("yes perhaps", "yes") == pytest.approx(2 / 3)
-    assert hotpot_utils.f1_score("no", "yes") == 0.0
+@pytest.mark.parametrize("prediction,gold,expected", [
+    ("yes perhaps", "yes", 0.0), ("no", "yes", 0.0), ("The Paris!", "Paris", 1.0),
+])
+def test_hotpot_metric_preserves_normalized_em(prediction, gold, expected) -> None:
+    """Use exact match even when an incorrect answer partially overlaps."""
+    score, feedback = hotpot_utils.hotpotqa_metric(prediction, gold)
+    assert score == expected
+    assert "F1" not in feedback
 
 
 @pytest.mark.parametrize("benchmark", ["hotpotqa"])

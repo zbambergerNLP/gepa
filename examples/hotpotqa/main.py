@@ -76,7 +76,6 @@ from examples.hotpotqa.utils import (
     HOTPOTQA_SCIENTIFIC_SPLIT_SHA256,
     artifact_component_records,
     build_hotpotqa_task_lm,
-    f1_score,
     hotpotqa_metric,
     load_hotpotqa_dataset,
     normalize_answer,
@@ -648,7 +647,7 @@ def build_run_contract(condition: str, args) -> dict:
         else:
             semantic_controller_policy = deepcopy(CONTROLLER_POLICY_CONTRACT)
     return {
-        "schema_version": 29,
+        "schema_version": 30,
         "baseline_protocol": dict(BASELINE_PROTOCOL),
         "provider_retry_policy": deepcopy(PROVIDER_RETRY_POLICY),
         "benchmark": "hotpotqa-fullwiki-wiki17",
@@ -759,7 +758,7 @@ def build_run_contract(condition: str, args) -> dict:
             "dspy_memory_cache": False,
             "dspy_history": False,
             "primary_metric": "normalized_exact_match",
-            "reported_supplemental_metric": "token_f1",
+            "reported_supplemental_metric": None,
             "task_inputs": ["question"],
             "components": list(rendered_seed),
             "component_output_fields": (
@@ -1035,8 +1034,8 @@ def evaluate_on_set(
     retrieval_k: int = 7,
     solver_lm_kwargs: dict[str, object] | None = None,
     checkpoint_dir: str | Path | None = None,
-) -> tuple[float, float]:
-    """Evaluate a candidate on a dataset, returning mean exact match and F1.
+) -> float:
+    """Evaluate a candidate on a dataset, returning mean exact match.
 
     Args:
         candidate: Prompt components being evaluated.
@@ -1053,7 +1052,7 @@ def evaluate_on_set(
             are reused after an interrupted held-out evaluation.
 
     Returns:
-        Mean exact-match and token-F1 scores, or zeros for an empty dataset.
+        Mean exact-match score, or zero for an empty dataset.
     """
     task_lm = build_hotpotqa_task_lm(solver_model, api_base, solver_lm_kwargs) if program == "2stage" else None
 
@@ -1063,14 +1062,14 @@ def evaluate_on_set(
     if checkpoint_root is not None:
         checkpoint_root.mkdir(parents=True, exist_ok=True)
 
-    def score_one(index_and_example: tuple[int, dict]) -> tuple[float, float]:
+    def score_one(index_and_example: tuple[int, dict]) -> float:
         """Run and score one HotPotQA example.
 
         Args:
             index_and_example: Stable dataset position and question record.
 
         Returns:
-            Exact-match and token-F1 scores.
+            Exact-match score.
 
         Raises:
             ValueError: A persisted record is malformed or candidate execution
@@ -1085,7 +1084,7 @@ def evaluate_on_set(
                 record = json.loads(record_path.read_text(encoding="utf-8"))
                 if record.get("candidate_sha256") != candidate_sha256 or record.get("id") != str(example.get("id", "")):
                     raise ValueError(f"Held-out checkpoint identity mismatch at {record_path}.")
-                return float(record["exact_match"]), float(record["f1"])
+                return float(record["exact_match"])
 
         prediction = None
         parse_error = False
@@ -1107,11 +1106,9 @@ def evaluate_on_set(
             parse_error = True
         if parse_error:
             exact_match = 0.0
-            f1 = 0.0
         else:
             assert prediction is not None
             exact_match = float(normalize_answer(prediction) == normalize_answer(example["answer"]))
-            f1 = f1_score(prediction, example["answer"])
 
         if record_path is not None:
             record = {
@@ -1120,7 +1117,6 @@ def evaluate_on_set(
                 "id": str(example.get("id", "")),
                 "prediction": prediction,
                 "exact_match": exact_match,
-                "f1": f1,
                 "task_output_parse_error": parse_error,
             }
             temporary_path = record_path.with_suffix(f".{os.getpid()}.{threading.get_ident()}.part")
@@ -1129,27 +1125,25 @@ def evaluate_on_set(
             with _HELDOUT_RECOVERY_LOCK:
                 records = sorted(checkpoint_root.glob("[0-9]*.json"))
                 seal_progress(checkpoint_root, len(records), records)
-        return exact_match, f1
+        return exact_match
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         scores = list(pool.map(score_one, enumerate(dataset)))
     if not scores:
-        return 0.0, 0.0
-    mean_em = sum(s[0] for s in scores) / len(scores)
-    mean_f1 = sum(s[1] for s in scores) / len(scores)
+        return 0.0
+    mean_em = sum(scores) / len(scores)
     if checkpoint_root is not None:
         summary = {
             "schema_version": 1,
             "candidate_sha256": candidate_sha256,
             "example_count": len(scores),
             "exact_match": mean_em,
-            "f1": mean_f1,
         }
         summary_path = checkpoint_root / "summary.json"
         temporary_path = summary_path.with_suffix(f".{os.getpid()}.part")
         temporary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         temporary_path.replace(summary_path)
-    return mean_em, mean_f1
+    return mean_em
 
 
 def evaluate_starting_baseline(
@@ -1171,7 +1165,7 @@ def evaluate_starting_baseline(
         solver_lm_kwargs: Resolved task-model request settings.
 
     Returns:
-        Verified baseline identity and test EM/F1 for the final comparison.
+        Verified baseline identity and test EM for the final comparison.
 
     Raises:
         ValueError: The baseline identity or test examples have changed.
@@ -1803,7 +1797,7 @@ def main():
             for component, text in cand.items():
                 print(f"\n[{name}] {component}:\n{text}")
 
-    # Report: test EM/F1 + diversity
+    # Report: test EM + diversity
     print(f"\n{'=' * 60}")
     print("  Comparison")
     print(f"{'=' * 60}\n")
@@ -1812,7 +1806,7 @@ def main():
         baseline = evaluate_starting_baseline(
             Path(run_dirs[name]), run_contracts[name], testset, retriever, solver_api_base, solver_lm_kwargs
         )
-        test_em, test_f1 = evaluate_on_set(
+        test_em = evaluate_on_set(
             result.best_candidate,
             testset,
             args.solver_model,
@@ -1842,11 +1836,9 @@ def main():
             "candidates_explored": len(result.candidates),
             "best_validation_exact_match": float(result.val_aggregate_scores[result.best_idx]),
             "test_exact_match": float(test_em),
-            "test_f1": float(test_f1),
             "test_example_count": len(testset),
             "baseline": baseline,
             "test_exact_match_gain": test_em - baseline["test_exact_match"],
-            "test_f1_gain": test_f1 - baseline["test_f1"],
             "diversity": diversity,
         }
         final_metrics_path = Path(run_dirs[name]) / "final_metrics.json"
@@ -1865,12 +1857,8 @@ def main():
         print(f"  candidates explored:      {len(result.candidates)}")
         print(f"  best val score (EM):      {result.val_aggregate_scores[result.best_idx]:.4f}")
         print(f"  test EM:                  {test_em:.2%}")
-        print(f"  test F1:                  {test_f1:.2%}")
-        print(f"  starting baseline EM/F1: {baseline['test_exact_match']:.2%} / {baseline['test_f1']:.2%}")
-        print(
-            f"  test gain EM/F1:         {final_metrics['test_exact_match_gain'] * 100:+.2f} pp / "
-            f"{final_metrics['test_f1_gain'] * 100:+.2f} pp"
-        )
+        print(f"  starting baseline EM: {baseline['test_exact_match']:.2%}")
+        print(f"  test gain EM: {final_metrics['test_exact_match_gain'] * 100:+.2f} pp")
         print(f"  final metrics:            {final_metrics_path}")
         for component, stats in diversity.items():
             print(

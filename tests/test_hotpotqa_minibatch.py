@@ -95,3 +95,30 @@ def test_workload_forwards_minibatch_to_experiment(size):
     assert result.returncode == 0, result.stderr
     arguments = result.stdout.splitlines()
     assert arguments[arguments.index("--reflection-minibatch-size") + 1] == size
+
+
+def test_minibatch_locks_allow_matched_campaign_concurrency():
+    """Keep the legacy lock and isolate new sizes while sharing a baseline campaign."""
+    source = (ROOT / "examples/hotpotqa/run_hotpotqa.sbatch").read_text()
+    start = source.index('MINIBATCH_LOCK_SUFFIX=""')
+    block = source[start : source.index("exec {RUN_LOCK_FD}", start)]
+    paths = []
+    for size in (3, 8, 16, 32):
+        result = subprocess.run(
+            ["bash", "-c", "set -eu\n" + block + '\nprintf "%s" "$RUN_LOCK_PATH"'],
+            env={
+                **os.environ,
+                "RUN_LOCK_DIR": "/fixture",
+                "MODEL_PROFILE": "qwen",
+                "BUDGET_PROFILE": "standard",
+                "CONDITION": "vanilla",
+                "HOTPOTQA_PILOT_ONLY": "0",
+                "HOTPOTQA_REFLECTION_MINIBATCH_SIZE": str(size),
+            },
+            text=True,
+            capture_output=True,
+        )
+        assert result.returncode == 0, result.stderr
+        paths.append(result.stdout)
+    assert paths[0] == "/fixture/qwen-standard-vanilla-pilot0.lock"
+    assert len(set(paths)) == 4

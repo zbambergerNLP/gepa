@@ -104,6 +104,14 @@ diagnostic text. Set `HOTPOTQA_TEXT_LIMITS_JSON` for this launcher or pass
 `--text-limits` to the Python CLI. Model context and per-call output limits still
 apply. Resolved settings are recorded in run contracts for resume validation.
 
+Minibatch ablations use `HOTPOTQA_REFLECTION_MINIBATCH_SIZE` (default `3`),
+forwarded to `--reflection-minibatch-size`. The size controls both the training
+sampler and the proposal/admission batch, and is part of the checkpoint contract
+and run key. Changing it requires a fresh search; it does not change the ordered
+data splits or optimization budget. Module selection remains round-robin.
+Fresh DeepSeek run identities execute the strict canary before either vanilla
+or FOREST optimization when no matching passed marker exists.
+
 After configuring `scripts/della/.env` from `.env.example`, prepare artifacts,
 complete the pilots, and apply their reviewed schedule when submitting:
 

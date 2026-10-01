@@ -220,10 +220,10 @@ def _validate_scientific_contract(args, runtime_environment: dict | None = None)
         if getattr(args, "controller_selection", "verbalized") == "jev":
             if (
                 getattr(args, "condition", None) != "react_v2"
-                or args.max_metric_calls != 6_871
+                or args.max_metric_calls not in {6_871, 13_742}
                 or (args.solver_model, args.reflection_model) != (QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL)
             ):
-                changed_axes.append("Jev requires the 6871-call FOREST cell with Qwen solver and DeepSeek edit roles")
+                changed_axes.append("Jev requires a standard or expanded FOREST cell with Qwen solver and DeepSeek edit roles")
         required_values = (
             ("program", "2stage"),
             ("seed_style", "structured"),

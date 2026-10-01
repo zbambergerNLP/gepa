@@ -12,11 +12,14 @@ done < "$1"
 unset entry
 if [[ "${HOTPOTQA_PRODUCTION_LAUNCH:-}" != 1 || "${HOTPOTQA_PILOT_ONLY:-}" != 0 \
     || "${MODEL_PROFILE:-}" != deepseek-teacher-qwen-student \
-    || "${CONDITION:-}" != react_v2 || "${BUDGET_PROFILE:-}" != standard \
-    || "${MAX_METRIC_CALLS:-}" != 6871 || "${HOTPOTQA_CONTROLLER_SELECTION:-}" != jev ]]; then
-    echo "ERROR: resident full run requires the prepared standard Jev FOREST cell" >&2
+    || "${CONDITION:-}" != react_v2 || "${HOTPOTQA_CONTROLLER_SELECTION:-}" != jev ]]; then
+    echo "ERROR: resident full run requires a prepared Jev FOREST cell" >&2
     exit 1
 fi
+case "${BUDGET_PROFILE:-}:${MAX_METRIC_CALLS:-}" in
+    standard:6871|expanded:13742) ;;
+    *) echo "ERROR: resident budget must match the standard or expanded profile" >&2; exit 1 ;;
+esac
 export GEPA_JEV_HANDOFF_DIR="$2"
 unset TYPESAFE_API_KEY
 export SLURM_SUBMIT_DIR="${SCRATCH_BASE:?}/sources/${HOTPOTQA_SOURCE_COMMIT:?}"

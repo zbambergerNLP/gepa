@@ -9,6 +9,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
+from examples.common.experiment_models import EXPERIMENT_CONTEXT_TOKENS
 from examples.common.pilot_checks import atomic_json
 from examples.common.provider_retries import PROVIDER_RETRY_KEY, provider_retry_kwargs
 from examples.hotpotqa.runtime_canary import _EDIT_REGION, _EDIT_STEERING, _validate_loopback_api_base
@@ -17,6 +18,7 @@ from gepa.lm import LM, ToolCompletion
 from gepa.proposer.reflective_mutation.react_v2_proposer import ReActV2Proposer
 from gepa.strategies.document_template import TEMPLATE_FAMILIES, EditTarget
 from gepa.strategies.edit_tools import EDIT_TOOL_SETS, EditTool
+from gepa.strategies.forest_constants import BROAD_EDIT_TOOL_SET, OPTIMIZER_ROLE
 
 
 class FaultInjectingLM:
@@ -64,7 +66,7 @@ def verify_error_recovery(lm: Any) -> dict[str, Any]:
     proposer = ReActV2Proposer(
         wrapped,
         TEMPLATE_FAMILIES["generic"]["system_prompt"],
-        EDIT_TOOL_SETS["broad"],
+        EDIT_TOOL_SETS[BROAD_EDIT_TOOL_SET],
         max_iterations=4,
         max_tool_calls=3,
     )
@@ -104,12 +106,12 @@ def verify_error_recovery(lm: Any) -> dict[str, Any]:
 def run_probe(model: str, api_base: str, attempt_log: Path) -> dict[str, Any]:
     """Use the approved optimizer settings and reject any truncated diagnostic call."""
     _validate_loopback_api_base(api_base)
-    kwargs: dict[str, Any] = dict(resolve_hotpotqa_lm_kwargs(model, api_base, role="optimizer"))
+    kwargs: dict[str, Any] = dict(resolve_hotpotqa_lm_kwargs(model, api_base, role=OPTIMIZER_ROLE))
     kwargs.update(provider_retry_kwargs(attempt_log, "error_recovery_probe"))
     retry = kwargs[PROVIDER_RETRY_KEY]
     assert isinstance(retry, dict)
     retry.update(
-        token_limits={"max_output_tokens": kwargs["max_tokens"], "context_tokens": 262144},
+        token_limits={"max_output_tokens": kwargs["max_tokens"], "context_tokens": EXPERIMENT_CONTEXT_TOKENS},
         token_usage_log=str(attempt_log.with_name("tokens-" + attempt_log.name)),
     )
     result = verify_error_recovery(LM(model, **kwargs))

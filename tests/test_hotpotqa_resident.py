@@ -120,7 +120,8 @@ def test_resident_entrypoint_checks_coordinator_before_models(tmp_path, profile,
 
 
 @pytest.mark.parametrize("probe_status", [0, 1])
-def test_full_jev_run_requires_the_exact_editor_canary(tmp_path, probe_status):
+@pytest.mark.parametrize("controller", ["jev", "verbalized"])
+def test_full_run_requires_the_exact_editor_canary(tmp_path, probe_status, controller):
     """Run the strict canary on a new full-run identity and stop on failure."""
     source = (ROOT / "scripts/della/remote/hotpotqa_workload.sh").read_text()
     start = source.index('if [[ "${REFLECTION_MODEL}" ==')
@@ -139,7 +140,7 @@ def test_full_jev_run_requires_the_exact_editor_canary(tmp_path, probe_status):
         "REFLECTION_MODEL": DEEPSEEK_V4_1_FLASH_MODEL,
         "HOTPOTQA_CANARY_ONLY": "0",
         "HOTPOTQA_PILOT_ONLY": "0",
-        "HOTPOTQA_CONTROLLER_SELECTION": "jev",
+        "HOTPOTQA_CONTROLLER_SELECTION": controller,
     }
     result = subprocess.run(
         ["bash", "-c", "set -euo pipefail\nGEN_PID=$$\ngenerator_reports_expected_model() { return 0; }\n" + block],

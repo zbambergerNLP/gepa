@@ -35,6 +35,11 @@ from examples.common.provider_retries import (
     provider_retry_kwargs,
 )
 from examples.terminalbench.token_usage import observe_harbor
+from gepa.lm_constants import PROVIDER_ATTEMPT_LOG, TOKEN_USAGE_LOG
+
+MILLISECONDS_PER_SECOND = 1000
+SUMMARY_TERMINAL_TAIL_CHARS = 1000
+SUMMARY_TARGET_FREE_TOKENS = 4000
 
 
 class PromptedTerminus(Terminus2):
@@ -84,7 +89,7 @@ class PromptedTerminus(Terminus2):
             self._model_name = requested_model
             cast(LiteLLM, self._llm)._model_name = requested_model
         llm = cast(LiteLLM, self._llm)
-        llm._llm_kwargs.update(provider_retry_kwargs(logs_dir / "provider-attempts.jsonl", "task_agent"))
+        llm._llm_kwargs.update(provider_retry_kwargs(logs_dir / PROVIDER_ATTEMPT_LOG, "task_agent"))
         # The transport wrapper owns all retries; Harbor's decorator would multiply them.
         llm.call = MethodType(cast(Any, LiteLLM.call).__wrapped__, llm)
 
@@ -99,7 +104,7 @@ class PromptedTerminus(Terminus2):
         llm._handle_litellm_error = translate_error
         logs_dir.mkdir(parents=True, exist_ok=True)
         if token_limits is not None:
-            observe_harbor(self._llm, logs_dir / "token-usage.jsonl", token_limits)
+            observe_harbor(self._llm, logs_dir / TOKEN_USAGE_LOG, token_limits)
         self._llm_call_kwargs.update({
             key: llm._llm_kwargs[key] for key in (PROVIDER_RETRY_KEY, "num_retries", "max_retries")
         })
@@ -304,7 +309,7 @@ class PromptedTerminus(Terminus2):
             start_time = time.time()
             llm_response = await chat.chat(prompt, **self._llm_call_kwargs)
             end_time = time.time()
-            request_time_ms = (end_time - start_time) * 1000
+            request_time_ms = (end_time - start_time) * MILLISECONDS_PER_SECOND
             self._api_request_times.append(request_time_ms)
             return llm_response
         except ContextLengthExceededError:
@@ -314,7 +319,7 @@ class PromptedTerminus(Terminus2):
             self.logger.debug("Context length exceeded. Using fallback summarization.")
             if session is None:
                 raise RuntimeError("Cannot handle context length error without session")
-            self._unwind_messages_to_free_tokens(chat, target_free_tokens=4000)
+            self._unwind_messages_to_free_tokens(chat, target_free_tokens=SUMMARY_TARGET_FREE_TOKENS)
             summary_prompt = None
             try:
                 self.logger.debug("SUMMARIZATION: Attempting full summary")
@@ -330,7 +335,7 @@ class PromptedTerminus(Terminus2):
                 try:
                     self.logger.debug("SUMMARIZATION: Attempting short summary")
                     current_screen = await session.capture_pane(capture_entire=False)
-                    limited_screen = current_screen[-1000:] if current_screen else ""
+                    limited_screen = current_screen[-SUMMARY_TERMINAL_TAIL_CHARS:] if current_screen else ""
                     short_prompt = self._document(
                         "short_summary", original_instruction=original_instruction, terminal_state=limited_screen
                     )
@@ -349,7 +354,7 @@ class PromptedTerminus(Terminus2):
             if summary_prompt is None:
                 self.logger.debug("SUMMARIZATION: Using ultimate fallback")
                 current_screen = await session.capture_pane(capture_entire=False)
-                limited_screen = current_screen[-1000:] if current_screen else ""
+                limited_screen = current_screen[-SUMMARY_TERMINAL_TAIL_CHARS:] if current_screen else ""
                 summary_prompt = self._document(
                     "context_recovery",
                     original_instruction=original_instruction,
@@ -360,7 +365,7 @@ class PromptedTerminus(Terminus2):
                 start_time = time.time()
                 llm_response = await chat.chat(summary_prompt, **self._llm_call_kwargs)
                 end_time = time.time()
-                request_time_ms = (end_time - start_time) * 1000
+                request_time_ms = (end_time - start_time) * MILLISECONDS_PER_SECOND
                 self._api_request_times.append(request_time_ms)
             except Exception as e:
                 if is_provider_request_error(e):

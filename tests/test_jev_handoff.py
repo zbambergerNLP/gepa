@@ -19,6 +19,15 @@ from gepa.strategies.jev_handoff import HANDOFF_ENV, load, resolve
 
 @pytest.fixture
 def setup(tmp_path, monkeypatch):
+    """Prepare isolated handoff clients and an inspectable mocked provider.
+
+    Args:
+        tmp_path: Directory for mailbox artifacts, ledgers and response journals.
+        monkeypatch: Fixture for isolating allocation, credential and timeout state.
+
+    Returns:
+        Controller factory, captured request list and mutable failure switches.
+    """
     monkeypatch.setattr("gepa.strategies.jev_handoff.HANDOFF_WAIT_SECONDS", 0.0)
     monkeypatch.delenv("SLURM_JOB_ID", raising=False)
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
@@ -27,6 +36,17 @@ def setup(tmp_path, monkeypatch):
     failures = []
 
     def handler(request):
+        """Record an SDK request and simulate a typed response or connection failure.
+
+        Args:
+            request: Outgoing HTTP request from the mocked external Controller.
+
+        Returns:
+            Valid response with all probability mass on the first choice.
+
+        Raises:
+            httpx2.ConnectError: A test has enabled the shared failure switch.
+        """
         data = json.loads(request.content)
         calls.append(data)
         if failures:
@@ -50,6 +70,14 @@ def setup(tmp_path, monkeypatch):
         )
 
     def controller(live=False):
+        """Create a journaled allocation client or a mocked direct-API resolver.
+
+        Args:
+            live: Whether to attach mocked HTTP transport instead of local journals.
+
+        Returns:
+            Controller configured for the requested side of the file handoff.
+        """
         client = JevController(
             api_key="test-private-key" if live else None,
             response_journal_path=None if live else tmp_path / "responses.sqlite3",
@@ -67,6 +95,14 @@ def setup(tmp_path, monkeypatch):
 
 
 def choose(controller):
+    """Select the standard test menu under a stable logical request scope.
+
+    Args:
+        controller: Allocation or replay Controller to exercise.
+
+    Returns:
+        Audit metadata for the selected action/section choice.
+    """
     template = TEMPLATES["system_prompt"]
     menu = build_controller_menu(template, "sys", EDIT_TOOL_SETS["broad"], 2, rng=random.Random(0))
     with response_journal_scope("pilot/opportunity-3"):
@@ -81,6 +117,16 @@ def choose(controller):
 
 
 def export_request(tmp_path, controller, calls):
+    """Capture a timed-out allocation request and copy it to the resolver directory.
+
+    Args:
+        tmp_path: Shared test root containing the allocation mailbox.
+        controller: Journaled Controller configured for an immediate handoff timeout.
+        calls: Captured provider calls, which must remain empty during export.
+
+    Returns:
+        Original allocation request path and its independent external copy.
+    """
     with pytest.raises(SystemExit) as exc:
         choose(controller)
     assert exc.value.code == 75
@@ -93,6 +139,7 @@ def export_request(tmp_path, controller, calls):
 
 
 def test_pause_external_request_resume_and_journal_replay(setup, tmp_path, monkeypatch):
+    """Resolve and replay one external request without duplicate calls or charges."""
     factory, calls, _ = setup
     remote, external = export_request(tmp_path, factory(), calls)
     assert not (tmp_path / "attempts.jsonl").exists()
@@ -115,6 +162,7 @@ def test_pause_external_request_resume_and_journal_replay(setup, tmp_path, monke
 
 
 def test_response_arrives_without_exiting_or_reloading_controller(setup, tmp_path, monkeypatch):
+    """Import a response arriving during polling while retaining the resident Controller."""
     factory, calls, _ = setup
     remote, external = export_request(tmp_path, factory(), calls)
     monkeypatch.delenv(HANDOFF_ENV)
@@ -124,6 +172,11 @@ def test_response_arrives_without_exiting_or_reloading_controller(setup, tmp_pat
     waits = []
 
     def deliver(seconds):
+        """Deliver the saved response during a mocked polling interval.
+
+        Args:
+            seconds: Requested sleep duration to record before delivering the file.
+        """
         waits.append(seconds)
         shutil.copyfile(response, remote.with_name("response.json"))
 
@@ -136,6 +189,7 @@ def test_response_arrives_without_exiting_or_reloading_controller(setup, tmp_pat
 
 
 def test_external_failure_is_retained_and_not_retried_by_resume(setup, tmp_path, monkeypatch):
+    """Preserve an exhausted external request and import its attempts only once."""
     factory, calls, failures = setup
     remote, external = export_request(tmp_path, factory(), calls)
     failures.append(True)
@@ -156,6 +210,7 @@ def test_external_failure_is_retained_and_not_retried_by_resume(setup, tmp_path,
 
 
 def test_interrupted_external_attempt_requires_review(setup, tmp_path, monkeypatch):
+    """Refuse another external call when a started marker has no completed response."""
     factory, calls, _ = setup
     _, external = export_request(tmp_path, factory(), calls)
     external.with_name("started.json").write_text("{}")
@@ -166,6 +221,7 @@ def test_interrupted_external_attempt_requires_review(setup, tmp_path, monkeypat
 
 
 def test_import_after_journal_store_interruption_charges_once(setup, tmp_path, monkeypatch):
+    """Avoid duplicate calls and charges after interruption between import and journaling."""
     factory, calls, _ = setup
     remote, external = export_request(tmp_path, factory(), calls)
     monkeypatch.delenv(HANDOFF_ENV)
@@ -185,6 +241,7 @@ def test_import_after_journal_store_interruption_charges_once(setup, tmp_path, m
 
 @pytest.mark.parametrize("kind", ["request", "response"])
 def test_tampering_is_rejected_before_reuse(setup, tmp_path, monkeypatch, kind):
+    """Reject modified sealed requests or responses before they can be reused."""
     factory, calls, _ = setup
     remote, external = export_request(tmp_path, factory(), calls)
     monkeypatch.delenv(HANDOFF_ENV)
@@ -205,6 +262,7 @@ def test_tampering_is_rejected_before_reuse(setup, tmp_path, monkeypatch, kind):
 
 
 def test_external_resolver_refuses_compute_allocation(setup, tmp_path, monkeypatch):
+    """Prevent direct provider resolution from a compute allocation."""
     factory, calls, _ = setup
     _, external = export_request(tmp_path, factory(), calls)
     monkeypatch.delenv(HANDOFF_ENV)

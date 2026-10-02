@@ -10,12 +10,14 @@ from pathlib import Path
 from typing import Any
 
 from examples.common.recovery import seal_progress
+from gepa.lm_constants import LENGTH_FINISH_REASON, PROVIDER_ATTEMPT_LOG, PROVIDER_MAX_ATTEMPTS
+from gepa.strategies.forest_constants import DEFAULT_REFLECTION_MINIBATCH_SIZE
 
 METHODS = ("vanilla", "react_v2", "react_v2_random", "action")
 OPTIMIZER_PILOT_PROTOCOL = {
     "version": 3,
     "split": "train",
-    "minibatch_size": 3,
+    "minibatch_size": DEFAULT_REFLECTION_MINIBATCH_SIZE,
     "cycles": 1,
     "stop_after": "completed_candidate_reevaluation_and_decision",
     "metric_improvement_required": False,
@@ -59,7 +61,7 @@ def unrecovered_provider_failures(attempts: list[dict]) -> list[dict]:
     def failed(row: dict) -> bool:
         return bool(
             row.get("length_finish") or row.get("output_cap_reached")
-            or "length" in (row.get("finish_reasons") or [])
+            or LENGTH_FINISH_REASON in (row.get("finish_reasons") or [])
             or row.get("empty_completion") or row.get("response_error")
             or row.get("outcome") in {"error", "cancelled"}
         )
@@ -70,7 +72,7 @@ def unrecovered_provider_failures(attempts: list[dict]) -> list[dict]:
             requests.setdefault(row["request_id"], []).append(row)
     recovered = {
         request_id for request_id, rows in requests.items()
-        if 2 <= len(rows) <= 4
+        if 2 <= len(rows) <= PROVIDER_MAX_ATTEMPTS
         and [row.get("attempt") for row in rows] == list(range(1, len(rows) + 1))
         and all(row.get("outcome") == "error" and row.get("will_retry") is True for row in rows[:-1])
         and rows[-1].get("outcome") == "success" and rows[-1].get("will_retry") is False
@@ -84,7 +86,7 @@ def unrecovered_provider_failures(attempts: list[dict]) -> list[dict]:
 
 def _provider_attempts_digest(directory: Path) -> str | None:
     """Reject unrecovered output and bind coverage to every physical attempt."""
-    path = directory / "provider-attempts.jsonl"
+    path = directory / PROVIDER_ATTEMPT_LOG
     if not path.exists():
         return None
     attempts = [json.loads(line) for line in path.read_text().splitlines()]

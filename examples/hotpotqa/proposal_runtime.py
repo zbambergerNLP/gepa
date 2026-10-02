@@ -13,7 +13,10 @@ from pathlib import Path
 
 SHARED_MODULES = {
     "gepa.lm": "src/gepa/lm.py",
+    "gepa.lm_constants": "src/gepa/lm_constants.py",
+    "gepa.strategies.forest_constants": "src/gepa/strategies/forest_constants.py",
     "examples.common.provider_retries": "examples/common/provider_retries.py",
+    "examples.hotpotqa.benchmark_settings": "examples/hotpotqa/benchmark_settings.py",
 }
 
 

@@ -7,6 +7,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from examples.hotpotqa.source_compatibility import comparison_runtime
+from gepa.strategies.forest_constants import SOLVER_ROLE
 
 BASELINE_PROTOCOL = {
     "version": 1,
@@ -34,7 +35,7 @@ def build_baseline_contract(run_contract: dict) -> dict:
             "schema_version": 1,
             "protocol": BASELINE_PROTOCOL,
             "candidate": run_contract["optimizer"]["rendered_seed"],
-            "models": {key: value for key, value in run_contract["models"].items() if key.startswith("solver")},
+            "models": {key: value for key, value in run_contract["models"].items() if key.startswith(SOLVER_ROLE)},
             **{
                 key: run_contract[key]
                 for key in (

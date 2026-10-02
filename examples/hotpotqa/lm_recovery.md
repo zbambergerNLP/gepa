@@ -1,5 +1,13 @@
 # Recovering incomplete reasoning-model output
 
+Role-specific output and thinking limits live in
+[`model_settings.py`](model_settings.py). Shared model defaults live in
+[`experiment_models.py`](../common/experiment_models.py); retry limits,
+response-error codes and usage filenames live in
+[`lm_constants.py`](../../src/gepa/lm_constants.py). Dispatch and
+qualification checks consume the same retry limit. Independent test expectations
+retain literal values so an accidental configuration change is detectable.
+
 The September 23 qualification's revised Controller exhausted all 131,072 output
 tokens in reasoning, repeatedly recalculating a probability sum, and returned
 no final content. This was an HTTP-successful generation failure, not a network
@@ -48,3 +56,7 @@ retry allowance cannot explain a comparison result. New traces and baselines are
 computed; no earlier failed request or checkpoint is reused. Technical success
 and the preregistered usefulness signal are reviewed separately. Neither releases
 the production design hold automatically.
+
+The isolated proposal runtime hashes and shares `gepa.lm_constants`,
+`gepa.strategies.forest_constants`, and the worker driver's benchmark settings
+alongside `gepa.lm` and `provider_retries`. Each arm's strategy remains source-pinned.

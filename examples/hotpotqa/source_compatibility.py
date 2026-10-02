@@ -5,6 +5,8 @@ import json
 import os
 import re
 
+from examples.hotpotqa.benchmark_settings import EXPANDED_METRIC_CALLS, STANDARD_METRIC_CALLS
+
 
 def comparison_runtime(contract: dict) -> dict:
     """Normalize only the two reviewed source fields; retain every runtime setting."""
@@ -16,11 +18,15 @@ def comparison_runtime(contract: dict) -> dict:
     if not isinstance(review, dict):
         raise ValueError("Source compatibility requires an explicit review record.")
     if review.get("schema_version") == 1:
-        allowed = cell == ("random", 6_871)
+        allowed = cell == ("random", STANDARD_METRIC_CALLS)
     elif review.get("schema_version") == 2:
         allowed = review.get("kind") == "single_call_editor_tracking_handoff" and cell in {
-            ("react_v2", 6_871), ("react_v2_random", 6_871), ("action", 6_871), ("random", 6_871),
-            ("vanilla", 13_742), ("react_v2", 13_742),
+            ("react_v2", STANDARD_METRIC_CALLS),
+            ("react_v2_random", STANDARD_METRIC_CALLS),
+            ("action", STANDARD_METRIC_CALLS),
+            ("random", STANDARD_METRIC_CALLS),
+            ("vanilla", EXPANDED_METRIC_CALLS),
+            ("react_v2", EXPANDED_METRIC_CALLS),
         }
         optimizer = contract.get("optimizer", {})
         if "rendered_seed" in optimizer:

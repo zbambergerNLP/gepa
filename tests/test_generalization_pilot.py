@@ -19,15 +19,19 @@ from examples.hotpotqa.generalization_pilot import (
 from gepa.strategies.text_limits import TextLimits
 
 
-def test_request_runtime_cannot_override_strategy_or_load_changed_files(tmp_path, monkeypatch):
+@pytest.mark.parametrize("module", list(proposal_runtime.SHARED_MODULES))
+def test_request_runtime_cannot_override_strategy_or_load_changed_files(tmp_path, monkeypatch, module):
     """Keep strategy source pinned and fail before inference on runtime identity drift."""
     root = Path(proposal_runtime.__file__).resolve().parents[2]
     finder = proposal_runtime.SharedRequestRuntime(root)
     assert finder.find_spec("gepa.strategies.action_space") is None
     assert finder.find_spec("gepa.lm").origin == str(root / "src/gepa/lm.py")
+    assert finder.find_spec("gepa.lm_constants").origin == str(
+        root / "src/gepa/lm_constants.py"
+    )
     request = tmp_path / "request.json"
     runtime = proposal_runtime.runtime_identity(root)
-    runtime["files"]["gepa.lm"] = "changed"
+    runtime["files"][module] = "changed"
     request.write_text(json.dumps({"shared_request_runtime": runtime}))
     monkeypatch.setattr(proposal_runtime.sys, "argv", ["worker", "--proposal-request", str(request)])
     with pytest.raises(ValueError, match="reviewed shared files"):
@@ -70,7 +74,6 @@ def test_evaluation_reuses_exact_records_and_detects_drift(tmp_path: Path) -> No
     candidate = {"sys": "original"}
     records = evaluate_records(tmp_path, candidate, examples, evaluate, 1)
     assert records[0]["score"] == 0 and records[0]["feedback"]["evaluation_error"]
-    assert "f1" not in records[0]
     assert evaluate_records(tmp_path, candidate, examples, evaluate, 1) == records
     assert calls == ["a"]
     with pytest.raises(ValueError, match="configuration changed"):

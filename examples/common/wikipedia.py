@@ -12,6 +12,9 @@ from typing import Any, Callable, Mapping, Protocol, Sequence
 DEFAULT_WIKIPEDIA_ENDPOINT = "https://en.wikipedia.org/w/api.php"
 
 
+SQLITE_TIMEOUT_SECONDS = 30
+
+
 @dataclass(frozen=True)
 class WikipediaPassage:
     """Represent a retrieved Wikipedia page and its plain-text introduction."""
@@ -185,7 +188,7 @@ class WikipediaClient:
         """Create the SQLite cache table when persistent caching is enabled."""
         assert self.cache_path is not None
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.cache_path, timeout=30) as connection:
+        with sqlite3.connect(self.cache_path, timeout=SQLITE_TIMEOUT_SECONDS) as connection:
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS searches "
                 "(endpoint TEXT NOT NULL, query TEXT NOT NULL, result_limit INTEGER NOT NULL, payload TEXT NOT NULL, "
@@ -205,7 +208,7 @@ class WikipediaClient:
         """
         if self.cache_path is None:
             return None
-        with sqlite3.connect(self.cache_path, timeout=30) as connection:
+        with sqlite3.connect(self.cache_path, timeout=SQLITE_TIMEOUT_SECONDS) as connection:
             row = connection.execute(
                 "SELECT payload FROM searches WHERE endpoint = ? AND query = ? AND result_limit = ?",
                 (self.endpoint, query, limit),
@@ -226,7 +229,7 @@ class WikipediaClient:
         if self.cache_path is None:
             return
         payload = json.dumps([asdict(passage) for passage in passages], ensure_ascii=False)
-        with sqlite3.connect(self.cache_path, timeout=30) as connection:
+        with sqlite3.connect(self.cache_path, timeout=SQLITE_TIMEOUT_SECONDS) as connection:
             connection.execute(
                 "INSERT OR REPLACE INTO searches(endpoint, query, result_limit, payload) VALUES (?, ?, ?, ?)",
                 (self.endpoint, query, limit, payload),

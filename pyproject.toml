@@ -20,6 +20,13 @@ requires-python = ">=3.10, <3.15"
 dependencies = []
 
 [project.optional-dependencies]
+analysis = [
+    "numpy>=1.26",
+    "scikit-learn>=1.5; python_version < '3.14'",
+    # These releases provide CPython 3.14 wheels rather than a source build.
+    "scikit-learn>=1.8; python_version >= '3.14'",
+    "scipy>=1.16.3; python_version >= '3.14'",
+]
 jev = ["typesafe-sdk==0.7.1"]
 full = [
     # Common dependencies (all Python versions)
@@ -54,7 +61,7 @@ confidence = [
 ]
 dspy = []
 test = [
-    "gepa[full,jev]",
+    "gepa[full,jev,analysis]",
     "pytest",
     "pyright"
 ]

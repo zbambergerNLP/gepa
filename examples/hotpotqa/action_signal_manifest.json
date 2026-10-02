@@ -1,0 +1,1013 @@
+{
+  "archives": [
+    {
+      "cohort": "FOREST + generative Controller",
+      "completed_iterations": 413,
+      "expected_counts": {
+        "decisions": 250,
+        "record_improvements": 5,
+        "validated_children": 39
+      },
+      "files": {
+        ".evaluation-journal/responses.sqlite3": "86ae83d2992cfffffd0ed2ea929888670ef3e2161c196b8c9e72ae0f5a1f829f",
+        "action_summary.json": "e497bbc4f2159f095e68750cc36ca30e768ada47f7971eff77b75c0b1e29dc31",
+        "candidates.json": "abe7c5f78cf39b2df0be7674075f617aab131c37658c1df9a31fe3a78f37d09a",
+        "gepa_state.bin": "01384bcc13fa92101ae5ab9b1631f03476d0cc40af0a60f97a3c43fd8a2c50cf",
+        "run_log.json": "d38508026b7e75dd9f49b8ddb7b61536e9cafc59f6c02fcf978ac3c3017cf328"
+      },
+      "id": "react_v2-expanded",
+      "identity": {
+        "archive_source": "72d0e8c42977e2d11a4b16f85771750702150dee",
+        "comparison": {
+          "action_catalog": {
+            "sha256": "0f8d0d5acc4a56148290639f44d362c3803ca1f2a48590107f365c79aaaacc21",
+            "version": 3
+          },
+          "admission": "strict_improvement",
+          "data": {
+            "train": {
+              "count": 150,
+              "sha256": "0287a62f31caa939df13d9e176436293a5c071164728bcb3cfcbf8dd40a7918e"
+            },
+            "val": {
+              "count": 300,
+              "sha256": "c6d794b172724eb87e8087d671b74e94725040b79c9a63980cb45dcb53146408"
+            }
+          },
+          "data_source": {
+            "config": "fullwiki",
+            "dataset": "hotpot_qa",
+            "experiment_seed": 0,
+            "revision": "1908d6afbbead072334abe2965f91bd2709910ab",
+            "source_split": "train",
+            "split_policy": "ordered-40-40-20-then-independent-seed1-sampling",
+            "type": "huggingface"
+          },
+          "editor_role_decoding": {
+            "manifestor": {
+              "provider_ignored_fields": [],
+              "requested": {
+                "max_tokens": 131072,
+                "seed": 0,
+                "temperature": 1.0,
+                "top_p": 0.95
+              }
+            },
+            "react_v2_proposer": {
+              "provider_ignored_fields": [],
+              "requested": {
+                "max_tokens": 131072,
+                "seed": 0,
+                "temperature": 1.0,
+                "top_p": 0.95
+              }
+            }
+          },
+          "generalization_sha256": "1f9c41b83cc1977aead3281832a12b4541f6c138ebc2aff033ced672c5e4e76a",
+          "minibatch_size": 3,
+          "models": {
+            "reflection": "hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash",
+            "reflection_decoding": {
+              "max_tokens": 131072,
+              "seed": 0,
+              "temperature": 1.0,
+              "top_p": 0.95
+            },
+            "reflection_version": "dba1be0a40aa45a94ad051997016db3960a90277",
+            "solver": "hosted_vllm/Qwen/Qwen3.8-27B",
+            "solver_decoding": {
+              "max_tokens": 65536,
+              "seed": 0,
+              "temperature": 1.0,
+              "top_k": 20,
+              "top_p": 0.95
+            },
+            "solver_version": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+          },
+          "module_selector": "round_robin",
+          "optimizer_contract_sha256": "fe60ab619de763e7bd0b67163ae8e03e559cc451e4b0fc285009416c501cb351",
+          "program": {
+            "cache_evaluation": false,
+            "component_output_fields": {
+              "create_query_hop2": [
+                "reasoning",
+                "query"
+              ],
+              "final_answer": [
+                "reasoning",
+                "answer"
+              ],
+              "summarize1": [
+                "reasoning",
+                "summary"
+              ],
+              "summarize2": [
+                "reasoning",
+                "summary"
+              ]
+            },
+            "components": [
+              "summarize1",
+              "create_query_hop2",
+              "summarize2",
+              "final_answer"
+            ],
+            "dspy_disk_cache": false,
+            "dspy_history": false,
+            "dspy_memory_cache": false,
+            "dspy_runtime_commit": "62dc3b634d7dc0c4889abcf905cb4c391ea6b396",
+            "dspy_runtime_version": "2.6.23",
+            "name": "2stage",
+            "parallel_workers": 32,
+            "predictor_adapter": "dspy_chat_adapter",
+            "predictor_type": "dspy_chain_of_thought",
+            "primary_metric": "normalized_exact_match",
+            "retrieval_k": 7,
+            "task_inputs": [
+              "question"
+            ]
+          },
+          "retrieval": {
+            "archive_sha256": "744183e61af986bde9b25c880b59c1502618a8b673671e189cbc0ee684fceb42",
+            "archive_size": 608448121,
+            "b": 0.4,
+            "backend": "wiki17-bm25s",
+            "bm25s_version": "0.2.12",
+            "corpus": "wiki.abstracts.2017.jsonl",
+            "corpus_sha256": "c006527c7c600f85ed594afa36d2a34d0598996405f560474227738342463724",
+            "corpus_size": 1780742620,
+            "document_count": 5233330,
+            "gepa_artifact_commit": "a924c2045b6f000d2d23ea3b8f8f16b2c08d9e88",
+            "huggingface_revision": "ef6a5e72a98b47cef31574a400fea8fe149559a3",
+            "integrity_manifest_sha256": "77da95225b6a1a048047087f47edbd797320ce246b00ecfe4966e3941ea8553b",
+            "jax_version": "0.6.0",
+            "k1": 0.9,
+            "pystemmer_version": "2.2.0.3",
+            "retrieval_threads": 1,
+            "stemmer": "PyStemmer english",
+            "stopwords": "en"
+          },
+          "sampling": {
+            "mutations_per_parent": 1,
+            "name": "single_mutation",
+            "parents_per_iteration": 1
+          },
+          "template_family": "alibaba"
+        },
+        "comparison_id": "42a3ae2250277ef799bb5c22ed8c0e8be59d65c5f56b2c1f855fc2135f373e52",
+        "controller": {
+          "candidates": "all cataloged region/action pairs",
+          "distribution_failure": "retry_once_then_drop",
+          "exploration_epsilon": 0.1,
+          "factorization": "P(region, action)",
+          "max_menu": null,
+          "sampling": "verbalized positive support mixed with uniform exploration",
+          "scoring": "relative_weights_normalized_by_harness",
+          "verbalized_candidates": "all",
+          "version": 5
+        },
+        "controller_decoding": {
+          "provider_ignored_fields": [],
+          "requested": {
+            "max_tokens": 131072,
+            "seed": 0,
+            "temperature": 1.0,
+            "top_p": 0.95
+          }
+        },
+        "controller_direction": "selected_option_rationale_passed_to_manifestor_and_editor",
+        "source_scope": "archive contract; imported decisions retain their logged controller policy"
+      },
+      "kind": "search",
+      "lineage": "react_v2",
+      "root": "../../../gepa-consolidated/outputs/hotpotqa-reliability-20260916/expanded-budget-extension-20260926/react_v2-completed-archive/sources/72d0e8c42977e2d11a4b16f85771750702150dee/outputs/hotpotqa_react_v2_alibaba-l2-broad-ba511e1de1_expanded",
+      "standard_end_iteration": 191
+    },
+    {
+      "cohort": "FOREST + generative Controller",
+      "completed_iterations": 191,
+      "files": {
+        ".evaluation-journal/responses.sqlite3": "99cdfe630c535dee2ab8af01310c5581e909f566aeb6d6325cf28aee24901a62",
+        "action_summary.json": "880fc58f2276ed76beb5018fc9ec072990d18664d581cb9e584111e0c2404fb0",
+        "candidates.json": "ab5bfc8f729a8dc41c6db5b51d8779fd0be67caef8e437abb3b295265987a2b3",
+        "gepa_state.bin": "1fa84a72758a1e06d66de59f84403d8a5d258a6444147b6dfd2b493382a748ff",
+        "run_log.json": "c6038d8c12c59656f135ad5903af94ef4d1ea0f31b8868787072f40fb11d1025"
+      },
+      "id": "generative-standard-prefix",
+      "identity": {
+        "archive_source": "72d0e8c42977e2d11a4b16f85771750702150dee",
+        "comparison": {
+          "action_catalog": {
+            "sha256": "0f8d0d5acc4a56148290639f44d362c3803ca1f2a48590107f365c79aaaacc21",
+            "version": 3
+          },
+          "admission": "strict_improvement",
+          "data": {
+            "train": {
+              "count": 150,
+              "sha256": "0287a62f31caa939df13d9e176436293a5c071164728bcb3cfcbf8dd40a7918e"
+            },
+            "val": {
+              "count": 300,
+              "sha256": "c6d794b172724eb87e8087d671b74e94725040b79c9a63980cb45dcb53146408"
+            }
+          },
+          "data_source": {
+            "config": "fullwiki",
+            "dataset": "hotpot_qa",
+            "experiment_seed": 0,
+            "revision": "1908d6afbbead072334abe2965f91bd2709910ab",
+            "source_split": "train",
+            "split_policy": "ordered-40-40-20-then-independent-seed1-sampling",
+            "type": "huggingface"
+          },
+          "editor_role_decoding": {
+            "manifestor": {
+              "provider_ignored_fields": [],
+              "requested": {
+                "max_tokens": 131072,
+                "seed": 0,
+                "temperature": 1.0,
+                "top_p": 0.95
+              }
+            },
+            "react_v2_proposer": {
+              "provider_ignored_fields": [],
+              "requested": {
+                "max_tokens": 131072,
+                "seed": 0,
+                "temperature": 1.0,
+                "top_p": 0.95
+              }
+            }
+          },
+          "generalization_sha256": "1f9c41b83cc1977aead3281832a12b4541f6c138ebc2aff033ced672c5e4e76a",
+          "minibatch_size": 3,
+          "models": {
+            "reflection": "hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash",
+            "reflection_decoding": {
+              "max_tokens": 131072,
+              "seed": 0,
+              "temperature": 1.0,
+              "top_p": 0.95
+            },
+            "reflection_version": "dba1be0a40aa45a94ad051997016db3960a90277",
+            "solver": "hosted_vllm/Qwen/Qwen3.8-27B",
+            "solver_decoding": {
+              "max_tokens": 65536,
+              "seed": 0,
+              "temperature": 1.0,
+              "top_k": 20,
+              "top_p": 0.95
+            },
+            "solver_version": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+          },
+          "module_selector": "round_robin",
+          "optimizer_contract_sha256": "fe60ab619de763e7bd0b67163ae8e03e559cc451e4b0fc285009416c501cb351",
+          "program": {
+            "cache_evaluation": false,
+            "component_output_fields": {
+              "create_query_hop2": [
+                "reasoning",
+                "query"
+              ],
+              "final_answer": [
+                "reasoning",
+                "answer"
+              ],
+              "summarize1": [
+                "reasoning",
+                "summary"
+              ],
+              "summarize2": [
+                "reasoning",
+                "summary"
+              ]
+            },
+            "components": [
+              "summarize1",
+              "create_query_hop2",
+              "summarize2",
+              "final_answer"
+            ],
+            "dspy_disk_cache": false,
+            "dspy_history": false,
+            "dspy_memory_cache": false,
+            "dspy_runtime_commit": "62dc3b634d7dc0c4889abcf905cb4c391ea6b396",
+            "dspy_runtime_version": "2.6.23",
+            "name": "2stage",
+            "parallel_workers": 32,
+            "predictor_adapter": "dspy_chat_adapter",
+            "predictor_type": "dspy_chain_of_thought",
+            "primary_metric": "normalized_exact_match",
+            "retrieval_k": 7,
+            "task_inputs": [
+              "question"
+            ]
+          },
+          "retrieval": {
+            "archive_sha256": "744183e61af986bde9b25c880b59c1502618a8b673671e189cbc0ee684fceb42",
+            "archive_size": 608448121,
+            "b": 0.4,
+            "backend": "wiki17-bm25s",
+            "bm25s_version": "0.2.12",
+            "corpus": "wiki.abstracts.2017.jsonl",
+            "corpus_sha256": "c006527c7c600f85ed594afa36d2a34d0598996405f560474227738342463724",
+            "corpus_size": 1780742620,
+            "document_count": 5233330,
+            "gepa_artifact_commit": "a924c2045b6f000d2d23ea3b8f8f16b2c08d9e88",
+            "huggingface_revision": "ef6a5e72a98b47cef31574a400fea8fe149559a3",
+            "integrity_manifest_sha256": "77da95225b6a1a048047087f47edbd797320ce246b00ecfe4966e3941ea8553b",
+            "jax_version": "0.6.0",
+            "k1": 0.9,
+            "pystemmer_version": "2.2.0.3",
+            "retrieval_threads": 1,
+            "stemmer": "PyStemmer english",
+            "stopwords": "en"
+          },
+          "sampling": {
+            "mutations_per_parent": 1,
+            "name": "single_mutation",
+            "parents_per_iteration": 1
+          },
+          "template_family": "alibaba"
+        },
+        "comparison_id": "42a3ae2250277ef799bb5c22ed8c0e8be59d65c5f56b2c1f855fc2135f373e52",
+        "controller": {
+          "candidates": "all cataloged region/action pairs",
+          "distribution_failure": "retry_once_then_drop",
+          "exploration_epsilon": 0.1,
+          "factorization": "P(region, action)",
+          "max_menu": null,
+          "sampling": "verbalized positive support mixed with uniform exploration",
+          "scoring": "relative_weights_normalized_by_harness",
+          "verbalized_candidates": "all",
+          "version": 5
+        },
+        "controller_decoding": {
+          "provider_ignored_fields": [],
+          "requested": {
+            "max_tokens": 131072,
+            "seed": 0,
+            "temperature": 1.0,
+            "top_p": 0.95
+          }
+        },
+        "controller_direction": "selected_option_rationale_passed_to_manifestor_and_editor",
+        "source_scope": "archive contract; imported decisions retain their logged controller policy"
+      },
+      "kind": "search",
+      "lineage": "react_v2",
+      "root": "../../../gepa-consolidated/outputs/hotpotqa-reliability-20260916/expanded-budget-extension-20260926/react_v2-completed-archive/logs/hotpotqa/hp-lm-recovery-main-20260923-72d0e8c4/72d0e8c42977e2d11a4b16f85771750702150dee/continuation-expanded-from-standard-20260926/react_v2/preserved-standard",
+      "standard_end_iteration": 191
+    },
+    {
+      "cohort": "Vanilla GEPA",
+      "completed_iterations": 156,
+      "files": {
+        "candidates.json": "e5db9fc900cc320d5f1f4df10e4c0ef472f4c428f85d5862c23eda2f8ab9d60a",
+        "gepa_state.bin": "851af78fa958580cb3d17c2d707c7c853a51dbaab3266eb7179da5439cd93733",
+        "run_log.json": "b14ae125e9d3aede096ba982d704b3cb2b201230599bc03d25b4f698889b1c75"
+      },
+      "id": "vanilla-expanded",
+      "identity": {
+        "archive_source": "72d0e8c42977e2d11a4b16f85771750702150dee",
+        "comparison": {
+          "action_catalog": null,
+          "admission": "strict_improvement",
+          "data": {
+            "train": {
+              "count": 150,
+              "sha256": "0287a62f31caa939df13d9e176436293a5c071164728bcb3cfcbf8dd40a7918e"
+            },
+            "val": {
+              "count": 300,
+              "sha256": "c6d794b172724eb87e8087d671b74e94725040b79c9a63980cb45dcb53146408"
+            }
+          },
+          "data_source": {
+            "config": "fullwiki",
+            "dataset": "hotpot_qa",
+            "experiment_seed": 0,
+            "revision": "1908d6afbbead072334abe2965f91bd2709910ab",
+            "source_split": "train",
+            "split_policy": "ordered-40-40-20-then-independent-seed1-sampling",
+            "type": "huggingface"
+          },
+          "editor_role_decoding": {},
+          "generalization_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "minibatch_size": 3,
+          "models": {
+            "reflection": "hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash",
+            "reflection_decoding": {
+              "max_tokens": 131072,
+              "seed": 0,
+              "temperature": 1.0,
+              "top_p": 0.95
+            },
+            "reflection_version": "dba1be0a40aa45a94ad051997016db3960a90277",
+            "solver": "hosted_vllm/Qwen/Qwen3.8-27B",
+            "solver_decoding": {
+              "max_tokens": 65536,
+              "seed": 0,
+              "temperature": 1.0,
+              "top_k": 20,
+              "top_p": 0.95
+            },
+            "solver_version": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+          },
+          "module_selector": "round_robin",
+          "optimizer_contract_sha256": "88452fb6e79319d2400009c0e989796a37be0a6efe354080600bf5b19bc82100",
+          "program": {
+            "cache_evaluation": false,
+            "component_output_fields": {
+              "create_query_hop2": [
+                "reasoning",
+                "query"
+              ],
+              "final_answer": [
+                "reasoning",
+                "answer"
+              ],
+              "summarize1": [
+                "reasoning",
+                "summary"
+              ],
+              "summarize2": [
+                "reasoning",
+                "summary"
+              ]
+            },
+            "components": [
+              "summarize1",
+              "create_query_hop2",
+              "summarize2",
+              "final_answer"
+            ],
+            "dspy_disk_cache": false,
+            "dspy_history": false,
+            "dspy_memory_cache": false,
+            "dspy_runtime_commit": "62dc3b634d7dc0c4889abcf905cb4c391ea6b396",
+            "dspy_runtime_version": "2.6.23",
+            "name": "2stage",
+            "parallel_workers": 32,
+            "predictor_adapter": "dspy_chat_adapter",
+            "predictor_type": "dspy_chain_of_thought",
+            "primary_metric": "normalized_exact_match",
+            "retrieval_k": 7,
+            "task_inputs": [
+              "question"
+            ]
+          },
+          "retrieval": {
+            "archive_sha256": "744183e61af986bde9b25c880b59c1502618a8b673671e189cbc0ee684fceb42",
+            "archive_size": 608448121,
+            "b": 0.4,
+            "backend": "wiki17-bm25s",
+            "bm25s_version": "0.2.12",
+            "corpus": "wiki.abstracts.2017.jsonl",
+            "corpus_sha256": "c006527c7c600f85ed594afa36d2a34d0598996405f560474227738342463724",
+            "corpus_size": 1780742620,
+            "document_count": 5233330,
+            "gepa_artifact_commit": "a924c2045b6f000d2d23ea3b8f8f16b2c08d9e88",
+            "huggingface_revision": "ef6a5e72a98b47cef31574a400fea8fe149559a3",
+            "integrity_manifest_sha256": "77da95225b6a1a048047087f47edbd797320ce246b00ecfe4966e3941ea8553b",
+            "jax_version": "0.6.0",
+            "k1": 0.9,
+            "pystemmer_version": "2.2.0.3",
+            "retrieval_threads": 1,
+            "stemmer": "PyStemmer english",
+            "stopwords": "en"
+          },
+          "sampling": {
+            "mutations_per_parent": 1,
+            "name": "single_mutation",
+            "parents_per_iteration": 1
+          },
+          "template_family": "alibaba"
+        },
+        "comparison_id": "636fa9b586233f01e5f84a5253f26143af2d61ec94afc21e391826e6644c0793",
+        "controller": null,
+        "controller_decoding": null,
+        "controller_direction": null,
+        "source_scope": "archive contract; imported decisions retain their logged controller policy"
+      },
+      "kind": "vanilla",
+      "lineage": "vanilla",
+      "root": "../../../gepa-consolidated/outputs/hotpotqa-reliability-20260916/expanded-budget-extension-20260926/vanilla-completed-archive/sources/72d0e8c42977e2d11a4b16f85771750702150dee/outputs/hotpotqa_vanilla_alibaba-a6b3b115cf_expanded",
+      "standard_end_iteration": 77
+    },
+    {
+      "cohort": "FOREST + Jev",
+      "completed_iterations": 248,
+      "expected_counts": {
+        "decisions": 156,
+        "record_improvements": 7,
+        "validated_children": 19
+      },
+      "files": {
+        ".evaluation-journal/responses.sqlite3": "f2d244621488336c8cdc68707b01969c2f32b0dd55a83e8edd8b30312ffc5bf1",
+        "action_summary.json": "8b8735ce669195030d1053878b2786bb37d56ca3466d3d214f261a45d22f00b3",
+        "candidates.json": "8cdf730bef9d2e306c5bec5c41a7c4366fc7fe079528c813dc4126c63886b756",
+        "gepa_state.bin": "a042800d5d9106c299fec9a6a115202e0cf4f983983fdb89c8f14c778e938175",
+        "run_log.json": "71772e9af481b8c33d74f653a1579c7d3f4b2801580df05b5df00f088da0c7a0"
+      },
+      "id": "jev-standard",
+      "identity": {
+        "archive_source": "875d3fa40a1e508eecc65d9ca19491f8609ba4f5",
+        "comparison": {
+          "action_catalog": {
+            "sha256": "0f8d0d5acc4a56148290639f44d362c3803ca1f2a48590107f365c79aaaacc21",
+            "version": 3
+          },
+          "admission": "strict_improvement",
+          "data": {
+            "train": {
+              "count": 150,
+              "sha256": "0287a62f31caa939df13d9e176436293a5c071164728bcb3cfcbf8dd40a7918e"
+            },
+            "val": {
+              "count": 300,
+              "sha256": "c6d794b172724eb87e8087d671b74e94725040b79c9a63980cb45dcb53146408"
+            }
+          },
+          "data_source": {
+            "config": "fullwiki",
+            "dataset": "hotpot_qa",
+            "experiment_seed": 0,
+            "revision": "1908d6afbbead072334abe2965f91bd2709910ab",
+            "source_split": "train",
+            "split_policy": "ordered-40-40-20-then-independent-seed1-sampling",
+            "type": "huggingface"
+          },
+          "editor_role_decoding": {
+            "manifestor": {
+              "provider_ignored_fields": [],
+              "requested": {
+                "max_tokens": 131072,
+                "seed": 0,
+                "temperature": 1.0,
+                "top_p": 0.95
+              }
+            },
+            "react_v2_proposer": {
+              "provider_ignored_fields": [],
+              "requested": {
+                "max_tokens": 131072,
+                "seed": 0,
+                "temperature": 1.0,
+                "top_p": 0.95
+              }
+            }
+          },
+          "generalization_sha256": "1f9c41b83cc1977aead3281832a12b4541f6c138ebc2aff033ced672c5e4e76a",
+          "minibatch_size": 3,
+          "models": {
+            "reflection": "hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash",
+            "reflection_decoding": {
+              "max_tokens": 131072,
+              "seed": 0,
+              "temperature": 1.0,
+              "top_p": 0.95
+            },
+            "reflection_version": "dba1be0a40aa45a94ad051997016db3960a90277",
+            "solver": "hosted_vllm/Qwen/Qwen3.8-27B",
+            "solver_decoding": {
+              "max_tokens": 65536,
+              "seed": 0,
+              "temperature": 1.0,
+              "top_k": 20,
+              "top_p": 0.95
+            },
+            "solver_version": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+          },
+          "module_selector": "round_robin",
+          "optimizer_contract_sha256": "fe60ab619de763e7bd0b67163ae8e03e559cc451e4b0fc285009416c501cb351",
+          "program": {
+            "cache_evaluation": false,
+            "component_output_fields": {
+              "create_query_hop2": [
+                "reasoning",
+                "query"
+              ],
+              "final_answer": [
+                "reasoning",
+                "answer"
+              ],
+              "summarize1": [
+                "reasoning",
+                "summary"
+              ],
+              "summarize2": [
+                "reasoning",
+                "summary"
+              ]
+            },
+            "components": [
+              "summarize1",
+              "create_query_hop2",
+              "summarize2",
+              "final_answer"
+            ],
+            "dspy_disk_cache": false,
+            "dspy_history": false,
+            "dspy_memory_cache": false,
+            "dspy_runtime_commit": "62dc3b634d7dc0c4889abcf905cb4c391ea6b396",
+            "dspy_runtime_version": "2.6.23",
+            "name": "2stage",
+            "parallel_workers": 32,
+            "predictor_adapter": "dspy_chat_adapter",
+            "predictor_type": "dspy_chain_of_thought",
+            "primary_metric": "normalized_exact_match",
+            "retrieval_k": 7,
+            "task_inputs": [
+              "question"
+            ]
+          },
+          "retrieval": {
+            "archive_sha256": "744183e61af986bde9b25c880b59c1502618a8b673671e189cbc0ee684fceb42",
+            "archive_size": 608448121,
+            "b": 0.4,
+            "backend": "wiki17-bm25s",
+            "bm25s_version": "0.2.12",
+            "corpus": "wiki.abstracts.2017.jsonl",
+            "corpus_sha256": "c006527c7c600f85ed594afa36d2a34d0598996405f560474227738342463724",
+            "corpus_size": 1780742620,
+            "document_count": 5233330,
+            "gepa_artifact_commit": "a924c2045b6f000d2d23ea3b8f8f16b2c08d9e88",
+            "huggingface_revision": "ef6a5e72a98b47cef31574a400fea8fe149559a3",
+            "integrity_manifest_sha256": "77da95225b6a1a048047087f47edbd797320ce246b00ecfe4966e3941ea8553b",
+            "jax_version": "0.6.0",
+            "k1": 0.9,
+            "pystemmer_version": "2.2.0.3",
+            "retrieval_threads": 1,
+            "stemmer": "PyStemmer english",
+            "stopwords": "en"
+          },
+          "sampling": {
+            "mutations_per_parent": 1,
+            "name": "single_mutation",
+            "parents_per_iteration": 1
+          },
+          "template_family": "alibaba"
+        },
+        "comparison_id": "42a3ae2250277ef799bb5c22ed8c0e8be59d65c5f56b2c1f855fc2135f373e52",
+        "controller": {
+          "api_base": "https://api.typesafe.ai",
+          "canonical_constraints": "unchanged; authoritative over the selection glosses",
+          "context": "full component and full structured training evidence; no truncation",
+          "cost_estimate": {
+            "input_usd_per_million": 0.042,
+            "output_usd_per_million": 0,
+            "pricing_date": "2026-09-27",
+            "source": "https://docs.typesafe.ai/models"
+          },
+          "direction": "Manifestor derives guidance within Jev's chosen action/section; Jev emits no rationale",
+          "exploration_epsilon": 0.1,
+          "factorization": "P(region, action)",
+          "invalid_distribution": "correct within shared attempt/deadline budget; fail closed after exhaustion",
+          "mechanical_exclusions": "delete/replace/move on empty sections",
+          "model": "jev-1.13.0",
+          "policy": "jev_joint_action_section_v4",
+          "primitive": "choice",
+          "probability_normalization": {
+            "evidence": "retain raw probabilities and normalization metadata",
+            "max_absolute_sum_error": 0.01,
+            "method": "divide by raw total; preserve zero support and relative weights",
+            "policy": "bounded_sum_v1"
+          },
+          "retry": {
+            "backoff": "full jitter; independent of selection RNG",
+            "deadline_seconds": 30.0,
+            "max_attempts": 4,
+            "response_correction": "append validation error and prior response; preserve evidence and criteria",
+            "retryable": "transport, 408, 429, 5xx, invalid typed response",
+            "sdk_retries": 0
+          },
+          "sampling": "Jev probabilities mixed with uniform exploration on positive support",
+          "sdk_version": "0.7.1",
+          "selection_guidance": "contrastive action descriptions; classify the intended effect before choosing a pair"
+        },
+        "controller_decoding": {
+          "policy": {
+            "api_base": "https://api.typesafe.ai",
+            "canonical_constraints": "unchanged; authoritative over the selection glosses",
+            "context": "full component and full structured training evidence; no truncation",
+            "cost_estimate": {
+              "input_usd_per_million": 0.042,
+              "output_usd_per_million": 0,
+              "pricing_date": "2026-09-27",
+              "source": "https://docs.typesafe.ai/models"
+            },
+            "direction": "Manifestor derives guidance within Jev's chosen action/section; Jev emits no rationale",
+            "exploration_epsilon": 0.1,
+            "factorization": "P(region, action)",
+            "invalid_distribution": "correct within shared attempt/deadline budget; fail closed after exhaustion",
+            "mechanical_exclusions": "delete/replace/move on empty sections",
+            "model": "jev-1.13.0",
+            "policy": "jev_joint_action_section_v4",
+            "primitive": "choice",
+            "probability_normalization": {
+              "evidence": "retain raw probabilities and normalization metadata",
+              "max_absolute_sum_error": 0.01,
+              "method": "divide by raw total; preserve zero support and relative weights",
+              "policy": "bounded_sum_v1"
+            },
+            "retry": {
+              "backoff": "full jitter; independent of selection RNG",
+              "deadline_seconds": 30.0,
+              "max_attempts": 4,
+              "response_correction": "append validation error and prior response; preserve evidence and criteria",
+              "retryable": "transport, 408, 429, 5xx, invalid typed response",
+              "sdk_retries": 0
+            },
+            "sampling": "Jev probabilities mixed with uniform exploration on positive support",
+            "sdk_version": "0.7.1",
+            "selection_guidance": "contrastive action descriptions; classify the intended effect before choosing a pair"
+          },
+          "provider": "typesafe",
+          "provider_ignored_fields": [],
+          "requested": {}
+        },
+        "controller_direction": "Jev selects the pair; Manifestor derives the edit direction from evidence",
+        "source_scope": "archive contract; imported decisions retain their logged controller policy"
+      },
+      "kind": "search",
+      "lineage": "jev",
+      "root": "../../../gepa-jev-retry-20260930/outputs/forest-jev-retry-20260930/checks/20261001-132429/terminal-artifacts/run",
+      "standard_end_iteration": 248
+    },
+    {
+      "cohort": "Sibling policy pilot",
+      "files": {
+        "pilot-contract.json": "dfd11b81435f57b85d0accb39601f544285fe017a70758fe70166329322064bd",
+        "summary.json": "3f560e6cd17cb3591c6026df7f81542b9227abf65a0dc7ddd3c074d19b919831"
+      },
+      "id": "diversity-pilot",
+      "identity": {
+        "protocol": {
+          "accepted_pairs": "consume only on actual admitted child; retain across opportunities",
+          "admission": "changed candidate with strictly higher mean EM on its actual three training examples",
+          "arm_order": "rotate by opportunity index",
+          "arms": {
+            "diversity_quality_generative": [
+              "diversity_quality",
+              "generative"
+            ],
+            "diversity_quality_jev": [
+              "diversity_quality",
+              "jev"
+            ],
+            "sibling_diverse": [
+              "sibling_diverse",
+              "generative"
+            ]
+          },
+          "components": [
+            "summarize1",
+            "create_query_hop2",
+            "summarize2",
+            "final_answer",
+            "summarize1",
+            "create_query_hop2",
+            "summarize2",
+            "final_answer",
+            "summarize1",
+            "create_query_hop2",
+            "summarize2",
+            "final_answer"
+          ],
+          "controller_selection": "verbalized_in_all_arms",
+          "identity": "diversity-quality-paired-training-pilot-v1",
+          "interpretation": "small paired diagnostic; training-admitted pilot children are not full-validation candidates",
+          "maximum_logical_evaluations": 588,
+          "metric": "normalized_exact_match_only",
+          "missing_component_trace": "retain actual question, whole-program score and raw feedback with an explicit availability flag",
+          "parent": "original node 0 for every opportunity; independent persistent population per arm",
+          "primary_measure": "paired transfer exact-match gain; retain exhaustion, ties and losses",
+          "proposal_batches": [
+            [
+              0,
+              1,
+              2
+            ],
+            [
+              3,
+              4,
+              5
+            ],
+            [
+              6,
+              7,
+              8
+            ],
+            [
+              9,
+              10,
+              11
+            ],
+            [
+              12,
+              13,
+              14
+            ],
+            [
+              15,
+              16,
+              17
+            ],
+            [
+              18,
+              19,
+              20
+            ],
+            [
+              21,
+              22,
+              23
+            ],
+            [
+              24,
+              25,
+              26
+            ],
+            [
+              27,
+              28,
+              29
+            ],
+            [
+              30,
+              31,
+              32
+            ],
+            [
+              33,
+              34,
+              35
+            ]
+          ],
+          "recovery": "finite native planner recovery within the selected component only",
+          "secondary_measures": [
+            "training gain",
+            "accepted siblings",
+            "redundancy",
+            "generation errors",
+            "latency",
+            "usage"
+          ],
+          "seed": 0,
+          "skip": "skip all arms when parent answers all three training examples correctly",
+          "supplementary_metrics": [],
+          "transfer_order": "evaluate original and candidate transfer only after every generation and admission decision",
+          "transfer_train_indices": [
+            36,
+            37,
+            38,
+            39,
+            40,
+            41,
+            42,
+            43,
+            44,
+            45,
+            46,
+            47
+          ],
+          "unique_training_examples": 48,
+          "validation_or_test_evaluation": false
+        },
+        "source": {
+          "commit": "15e6b6278ee6536cdedb50317b910d83e96791c0",
+          "directory": "/scratch/gpfs/BSTEWART/gm8296/gepa/sources/15e6b6278ee6536cdedb50317b910d83e96791c0",
+          "manifest_sha256": "ed852f77257c58fa1b02f478493004354da401112e869cef2a4a700e61ec3ad9"
+        },
+        "training_identity": "4cd9d62fb95c9dc02ed1c2cfb5fedf616084dd9a9b8368702f02d59d8a975384"
+      },
+      "kind": "pilot",
+      "lineage": "diversity-pilot",
+      "root": "../../../gepa-consolidated/outputs/pilot-monitor-20260928/20260929-152954-resident-artifacts/14664776/outputs/diversity-quality"
+    },
+    {
+      "cohort": "Controller pilot",
+      "files": {
+        "opportunity-0/jev/proposal.json": "0cd3bb2b5cad27d0dbc21b0850cf00963dfa38cb5b5f6f816668d850cefd0150",
+        "opportunity-0/verbalized/proposal.json": "98f79d06eefae28735339dcf9095d0e7fdb6768d7cf6bb2faed523d38d92ffdc",
+        "opportunity-1/jev/proposal.json": "a14f14515009200b0ee532e2f3b690b21b97cc8efcebdf9d4937eb63167a2bdf",
+        "opportunity-1/verbalized/proposal.json": "11f6e5f3be2113d728563d31ab0baf234a2c14abbbe062d665dcc84b460be571",
+        "opportunity-3/jev/proposal.json": "5429899a61eb471fd0211ee0c853b7ee0df512272f103da317958e47701e67e1",
+        "opportunity-3/verbalized/proposal.json": "5c5214857673cf7dc79a0e756902e201628cd72796ae63702d683537711921ce",
+        "opportunity-4/jev/proposal.json": "89612b65889a5c2deca9098c3a2430e13c735612477e2e45849d3a3497b557b0",
+        "opportunity-4/verbalized/proposal.json": "61a59b1f527eeda803a08bbf8cfc768b4e7ae768c1676da8024be04d7a7bb4f1",
+        "opportunity-5/jev/proposal.json": "207cb7492633cce7c9c740a4eac8ff3a35ef4ebdbc2854e97d792424f96f72d2",
+        "opportunity-5/verbalized/proposal.json": "bf432f011bc0582543db0b13191dedf1649c951592b75e39e4fa4ea51996f202",
+        "opportunity-6/jev/proposal.json": "015f0f23404930417ad96fce325d631fc961a873f4161ff94a3e1594836114bb",
+        "opportunity-6/verbalized/proposal.json": "f54d92a4c814a12020a043d03365a0dd7e57901c2dd1e5722e60f3e1024ef396",
+        "opportunity-7/jev/proposal.json": "bc0e47daaef68c75dd457801bf5a3519b5bad771f04f6d213ad1d27876636215",
+        "opportunity-7/verbalized/proposal.json": "a88f335e1436286c227cf3d76afa4622e7d1029ba4ec2c0fbb78267b492da2fb",
+        "pilot-contract.json": "821ff6532f5911c07856cc3364754be75c8b501ef43cfd293b24cd6af21fe581",
+        "summary.json": "d077f190b8bc657aecb57a6879e09af1425e7bf2f23cba05fb1f949e53e64e96"
+      },
+      "id": "controller-pilot",
+      "identity": {
+        "protocol": {
+          "arms": [
+            "verbalized",
+            "jev"
+          ],
+          "components": [
+            "summarize1",
+            "create_query_hop2",
+            "summarize2",
+            "final_answer",
+            "summarize1",
+            "create_query_hop2",
+            "summarize2",
+            "final_answer"
+          ],
+          "controller_policy": "jev_joint_action_section_v3",
+          "identity": "jev-paired-proposal-quality-v1",
+          "interpretation": "small paired training diagnostic; not held-out performance or an independent search",
+          "parent": "original prompts for every opportunity",
+          "primary_measure": "paired transfer exact-match change from parent, including no-ops",
+          "proposal_batches": [
+            [
+              0,
+              1,
+              2
+            ],
+            [
+              3,
+              4,
+              5
+            ],
+            [
+              6,
+              7,
+              8
+            ],
+            [
+              9,
+              10,
+              11
+            ],
+            [
+              12,
+              13,
+              14
+            ],
+            [
+              15,
+              16,
+              17
+            ],
+            [
+              18,
+              19,
+              20
+            ],
+            [
+              21,
+              22,
+              23
+            ]
+          ],
+          "secondary_measures": [
+            "training gain",
+            "edit validity",
+            "latency",
+            "tokens",
+            "provider failures"
+          ],
+          "selection": "one proposal per arm; no retries for semantic failure, no-op, tie or loss",
+          "skip": "skip both arms if all three parent training answers are correct",
+          "transfer_train_indices": [
+            24,
+            25,
+            26,
+            27,
+            28,
+            29,
+            30,
+            31,
+            32,
+            33,
+            34,
+            35
+          ],
+          "validation_or_test_evaluation": false
+        },
+        "source": {
+          "commit": "420aea3007fa86cc7b8d05d524c0f28973d8b50d",
+          "directory": "/scratch/gpfs/BSTEWART/gm8296/gepa/sources/420aea3007fa86cc7b8d05d524c0f28973d8b50d",
+          "manifest_sha256": "3b7668a21bb7c9c85f154afe35e09bf4374c6c22bcae71fa352e11c1ff520a26"
+        },
+        "training_identity": "656b23ded389d4fe479e4fbe5aae16fcb4c7581dcfe88217d60bb05e60bc213c"
+      },
+      "kind": "pilot",
+      "lineage": "controller-pilot",
+      "root": "../../../gepa-jev-controller-20260927/outputs/jev-quality-canaryfix-20260929/completed-artifacts-20260930-142201/14684829/outputs/jev-quality"
+    }
+  ],
+  "schema_version": 1
+}

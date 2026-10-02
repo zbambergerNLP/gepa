@@ -1232,7 +1232,7 @@ def test_hotpotqa_della_launchers_enforce_the_scientific_matrix() -> None:
     ):
         assert rejected_cell not in sbatch
     assert (
-        'RUN_LOCK_PATH="${RUN_LOCK_DIR}/${MODEL_PROFILE}-${BUDGET_PROFILE}-${CONDITION}-pilot${HOTPOTQA_PILOT_ONLY}.lock"'
+        'RUN_LOCK_PATH="${RUN_LOCK_DIR}/${MODEL_PROFILE}-${BUDGET_PROFILE}-${CONDITION}-pilot${HOTPOTQA_PILOT_ONLY}${MINIBATCH_LOCK_SUFFIX}.lock"'
         in sbatch
     )
     assert 'if ! flock -n "${RUN_LOCK_FD}"' in sbatch

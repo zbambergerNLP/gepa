@@ -238,6 +238,9 @@ def _validate_scientific_contract(args, runtime_environment: dict | None = None)
     Raises:
         ValueError: An enforced scientific run changes a methodology axis.
     """
+    minibatch_size = getattr(args, "reflection_minibatch_size", DEFAULT_REFLECTION_MINIBATCH_SIZE)
+    if type(minibatch_size) is not int or minibatch_size < 1:
+        raise ValueError("--reflection-minibatch-size must be a positive integer")
     environment = os.environ if runtime_environment is None else runtime_environment
     if getattr(args, "enforce_scientific_contract", False):
         changed_axes = []
@@ -732,8 +735,10 @@ def build_run_contract(condition: str, args) -> dict:
             "acceptance_criterion": "strict_improvement",
             "raise_on_exception": True,
             "batch_sampler": "epoch_shuffled",
-            "training_batch_order": IndependentEpochShuffledBatchSampler(3, args.seed).contract(),
-            "reflection_minibatch_size": DEFAULT_REFLECTION_MINIBATCH_SIZE,
+            "training_batch_order": IndependentEpochShuffledBatchSampler(
+                getattr(args, "reflection_minibatch_size", DEFAULT_REFLECTION_MINIBATCH_SIZE), args.seed
+            ).contract(),
+            "reflection_minibatch_size": getattr(args, "reflection_minibatch_size", DEFAULT_REFLECTION_MINIBATCH_SIZE),
             "component_selector": "round_robin",
             "reflection_context": deepcopy(REFLECTION_CONTEXT_CONTRACT),
             "generalization": ({
@@ -1470,8 +1475,8 @@ def build_config(condition: str, args, reflection_lm_kwargs: dict, run_dir: str 
         reflection=ReflectionConfig(
             skip_perfect_score=True,
             perfect_score=1.0,
-            batch_sampler=IndependentEpochShuffledBatchSampler(3, args.seed),
-            reflection_minibatch_size=DEFAULT_REFLECTION_MINIBATCH_SIZE,
+            batch_sampler=IndependentEpochShuffledBatchSampler(getattr(args, "reflection_minibatch_size", DEFAULT_REFLECTION_MINIBATCH_SIZE), args.seed),
+            reflection_minibatch_size=getattr(args, "reflection_minibatch_size", DEFAULT_REFLECTION_MINIBATCH_SIZE),
             module_selector="round_robin",
             reflection_lm=args.reflection_model,
             reflection_lm_kwargs=reflection_proposer_kwargs,
@@ -1581,6 +1586,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=STANDARD_METRIC_CALLS,
         help="Budget per condition (paper: 6871, smoke: 200, two-times compute: 13742)",
+    )
+    parser.add_argument(
+        "--reflection-minibatch-size",
+        type=int,
+        default=DEFAULT_REFLECTION_MINIBATCH_SIZE,
+        help="Training examples used to propose and screen each edit; recorded in the run contract",
     )
     parser.add_argument(
         "--solver-model",

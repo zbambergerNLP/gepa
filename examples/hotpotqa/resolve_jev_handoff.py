@@ -1,9 +1,10 @@
-"""Resolve an exported pilot request on the user's internet-connected computer."""
+"""Resolve an exported Jev request on an internet-connected host."""
 
 import argparse
 import os
 from pathlib import Path
 
+from gepa.strategies.jev_constants import JEV_API_KEY_ENV
 from gepa.strategies.jev_controller import JevController
 from gepa.strategies.jev_handoff import load, resolve
 
@@ -15,7 +16,22 @@ except ImportError:
 
 
 def resolve_saved_request(request_path: Path, key: str) -> Path:
-    """Resolve either supported role using its unchanged provider policy."""
+    """Resolve either supported role using its unchanged provider policy.
+
+    Args:
+        request_path: Sealed Controller or optional verifier request to resolve.
+        key: Nonempty TypeSafe credential kept outside the saved request.
+
+    Returns:
+        Path to the sealed successful response.
+
+    Raises:
+        ValueError: The key is empty, the saved role is unsupported, or resolution
+            is attempted from a compute allocation or offline transport.
+        ResponseJournalError: Saved evidence or provider policy fails validation.
+        FileExistsError: A started request has no known completed outcome.
+        SystemExit: The external call failed and its failure evidence was saved.
+    """
     if not key:
         raise ValueError("Supply a protected local TypeSafe key file or TYPESAFE_API_KEY.")
     record = load(request_path)
@@ -37,7 +53,7 @@ def main() -> None:
     parser.add_argument("request", type=Path)
     parser.add_argument("--key-file", type=Path)
     args = parser.parse_args()
-    key = args.key_file.read_text().strip() if args.key_file else os.environ.get("TYPESAFE_API_KEY", "")
+    key = args.key_file.read_text().strip() if args.key_file else os.environ.get(JEV_API_KEY_ENV, "")
     response = resolve_saved_request(args.request, key)
     print(response)
 

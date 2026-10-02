@@ -6,21 +6,36 @@ import argparse
 import json
 import os
 from datetime import datetime, timezone
+from http import HTTPStatus
 from pathlib import Path
 
 import httpx2
 
-API_BASE = "https://api.typesafe.ai"
+from gepa.strategies.jev_constants import JEV_API_BASE
+
+PREFLIGHT_TIMEOUT_SECONDS = 10.0
+REACHABLE_HTTP_STATUSES = {HTTPStatus.UNAUTHORIZED, HTTPStatus.NOT_FOUND, HTTPStatus.METHOD_NOT_ALLOWED}
 
 
 def check_connectivity(client: httpx2.Client) -> dict:
-    """Probe the API without credentials, inference, redirects or retries."""
+    """Probe the API without supplying credentials or requesting inference.
+
+    Args:
+        client: Credential-free HTTP client configured without redirects or retries.
+
+    Returns:
+        Pass/fail status and HTTP status, plus a sanitized error type when the
+        request fails before receiving an HTTP response.
+    """
     try:
-        response = client.head(API_BASE)
+        response = client.head(JEV_API_BASE)
     except httpx2.HTTPError as error:
         return {"status": "FAIL", "error_type": type(error).__name__, "http_status": None}
     # A missing root route or an authentication challenge still proves HTTPS reachability.
-    reachable = 200 <= response.status_code < 400 or response.status_code in {401, 404, 405}
+    reachable = (
+        HTTPStatus.OK <= response.status_code < HTTPStatus.BAD_REQUEST
+        or response.status_code in REACHABLE_HTTP_STATUSES
+    )
     return {"status": "PASS" if reachable else "FAIL", "http_status": response.status_code}
 
 
@@ -29,12 +44,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    with httpx2.Client(timeout=10.0, follow_redirects=False) as client:
+    with httpx2.Client(timeout=PREFLIGHT_TIMEOUT_SECONDS, follow_redirects=False) as client:
         result = check_connectivity(client)
     result.update(
         observed_at=datetime.now(timezone.utc).isoformat(),
         allocation_job_id=os.environ.get("SLURM_JOB_ID"),
-        api_base=API_BASE,
+        api_base=JEV_API_BASE,
         proxy_configured=any(os.environ.get(key) for key in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy")),
         model_requests=0,
         authentication_verified=False,
@@ -45,7 +60,7 @@ def main() -> None:
     if result["status"] != "PASS":
         raise SystemExit(
             "TypeSafe network preflight failed; no local models were loaded. "
-            "Princeton proxy/default must permit api.typesafe.ai:443 before this pilot can run."
+            "Princeton proxy/default must permit api.typesafe.ai:443 before this run can start."
         )
 
 

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from examples.common.pilot_checks import atomic_json, digest
 from examples.hotpotqa.pilot import PILOT_PROTOCOL, validate_calibration
+from gepa.lm_constants import PROVIDER_ATTEMPT_LOG
 
 
 def compare_profiles(directories: list[Path]) -> dict:
@@ -51,7 +52,7 @@ def compare_profiles(directories: list[Path]) -> dict:
         if shared is not None and identity != shared:
             raise ValueError("Batching measurements changed source, data, prompts, workers, or another runtime setting")
         shared = identity
-        usage = stage / "provider-attempts.jsonl"
+        usage = stage / PROVIDER_ATTEMPT_LOG
         attempts = [json.loads(line) for line in usage.read_text().splitlines()]
         if not attempts or any(row.get("outcome") != "success" for row in attempts):
             raise ValueError(f"Missing or failed physical model requests in {usage}")

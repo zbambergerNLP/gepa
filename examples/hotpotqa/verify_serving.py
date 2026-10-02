@@ -20,6 +20,7 @@ from typing import Any
 
 from examples.common.experiment_models import DEEPSEEK_V4_1_FLASH_MODEL
 from examples.common.provider_retries import PROVIDER_RETRY_POLICY, provider_retry_kwargs
+from examples.hotpotqa.model_settings import HOTPOTQA_REQUEST_TIMEOUT_SECONDS
 from examples.hotpotqa.runtime_canary import (
     RuntimeCanaryError as ServingVerificationError,
 )
@@ -35,8 +36,9 @@ from examples.hotpotqa.runtime_canary import (
 from examples.hotpotqa.utils import resolve_hotpotqa_lm_kwargs
 from gepa.lm import LM
 from gepa.strategies.edit_tools import EDIT_TOOL_SETS
+from gepa.strategies.forest_constants import BROAD_EDIT_TOOL_SET, OPTIMIZER_ROLE
 
-DEFAULT_TIMEOUT_SECONDS = 3600
+DEFAULT_TIMEOUT_SECONDS = HOTPOTQA_REQUEST_TIMEOUT_SECONDS
 
 
 def run_serving_verification(
@@ -69,13 +71,13 @@ def run_serving_verification(
         ValueError: The model identifier is outside the scientific catalog.
     """
     _validate_loopback_api_base(api_base)
-    tools = EDIT_TOOL_SETS["broad"]
+    tools = EDIT_TOOL_SETS[BROAD_EDIT_TOOL_SET]
     if attempts < len(tools):
         raise ServingVerificationError(
             f"At least {len(tools)} edit attempts are needed to exercise every broad edit tool once; "
             f"received {attempts}."
         )
-    lm_kwargs: dict[str, Any] = dict(resolve_hotpotqa_lm_kwargs(model, api_base, role="optimizer"))
+    lm_kwargs: dict[str, Any] = dict(resolve_hotpotqa_lm_kwargs(model, api_base, role=OPTIMIZER_ROLE))
     lm_kwargs.update(provider_retry_kwargs(attempt_log, "serving_verification"))
     lm_kwargs["timeout"] = timeout
     lm = LM(model, **lm_kwargs)
@@ -137,7 +139,7 @@ def main() -> None:
     parser.add_argument(
         "--attempts",
         type=int,
-        default=len(EDIT_TOOL_SETS["broad"]),
+        default=len(EDIT_TOOL_SETS[BROAD_EDIT_TOOL_SET]),
         help="ReAct V2 edit attempts cycled over the four broad edit tools (default: one per tool)",
     )
     parser.add_argument(

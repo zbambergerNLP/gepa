@@ -181,6 +181,20 @@ class JevController:
         response_journal_path: str | Path | None = None,
         attempt_log_path: str | Path | None = None,
     ) -> None:
+        """Configure deferred API access and restore recorded usage totals.
+
+        Args:
+            api_key: Explicit credential, or ``None`` to read the configured
+                environment variable when the client first connects.
+            response_journal_path: Optional SQLite journal for deterministic
+                replay of completed logical requests.
+            attempt_log_path: Optional append-only ledger of physical requests.
+                Existing ledger usage takes precedence over journal totals.
+
+        Raises:
+            JevControllerError: A saved attempt contains invalid usage.
+            ResponseJournalError: The response journal cannot be initialized.
+        """
         self._api_key = api_key
         self._client: Any = None
         self._journal = (
@@ -201,16 +215,31 @@ class JevController:
             self.total_cost, self.total_tokens_in, self.total_tokens_out = self._journal.usage_totals()
 
     def run_contract(self) -> dict[str, Any]:
-        """Return a public, immutable policy identity without credentials."""
+        """Return the public policy identity without credentials.
+
+        Returns:
+            Independent copy of the policy used to identify runs and requests.
+        """
         return deepcopy(JEV_CONTROLLER_POLICY_CONTRACT)
 
     def response_journal_cursor_state(self) -> dict[str, int]:
-        """Snapshot cursors before a batched reflection attempt."""
+        """Snapshot cursors before a batched reflection attempt.
+
+        Returns:
+            Mapping from logical scopes to their next request ordinals.
+        """
         with self._lock:
             return dict(self._ordinals)
 
     def restore_response_journal_cursor_state(self, state: Mapping[str, int]) -> None:
-        """Rewind logical calls while preserving already charged physical work."""
+        """Rewind logical calls while preserving already charged physical work.
+
+        Args:
+            state: Scope-to-ordinal mapping from a previous cursor snapshot.
+
+        Raises:
+            ValueError: A scope is empty or an ordinal is not a nonnegative integer.
+        """
         if any(not isinstance(k, str) or not k or type(v) is not int or v < 0 for k, v in state.items()):
             raise ValueError("Jev journal cursors must map nonempty scopes to nonnegative integers.")
         with self._lock:
@@ -223,6 +252,14 @@ class JevController:
             self._client = None
 
     def _log(self, record: dict[str, Any]) -> None:
+        """Persist one redacted provider event when an attempt ledger is configured.
+
+        Args:
+            record: Attempt details to append with the role and provider identity.
+
+        Raises:
+            ResponseJournalError: The event cannot be durably written.
+        """
         if self._attempt_log is None:
             return
         record = {"schema_version": JEV_ATTEMPT_SCHEMA_VERSION, "role": self.ROLE, "provider": JEV_PROVIDER, **record}
@@ -238,7 +275,15 @@ class JevController:
             raise ResponseJournalError("Could not persist Jev attempt evidence.") from exc
 
     def _safe_evidence(self, value: Any) -> Any:
-        """Retain malformed responses without logging echoed authentication."""
+        """Retain malformed responses without logging echoed authentication.
+
+        Args:
+            value: Evidence containing nested dictionaries, lists or scalar values.
+
+        Returns:
+            Evidence with credential fields and echoed keys redacted, and
+            nonfinite floats represented as strings for JSON serialization.
+        """
         if isinstance(value, dict):
             return {
                 key: "[REDACTED]"
@@ -256,6 +301,15 @@ class JevController:
         return value
 
     def _charge(self, usage: Mapping[str, Any]) -> None:
+        """Validate recorded usage before adding it to cumulative totals.
+
+        Args:
+            usage: Input/output token counts and the corresponding estimated cost.
+
+        Raises:
+            JevControllerError: Counts are invalid or cost disagrees with the
+                pinned input-token price.
+        """
         if (
             any(type(usage.get(key)) is not int or usage[key] < 0 for key in ("tokens_in", "tokens_out"))
             or type(usage.get("cost")) not in (int, float)
@@ -269,6 +323,15 @@ class JevController:
 
     @staticmethod
     def _usage(response: Mapping[str, Any]) -> dict[str, Any] | None:
+        """Extract token counts and estimate their cost under the pinned policy.
+
+        Args:
+            response: Provider response that may contain a usage mapping.
+
+        Returns:
+            Input/output token counts and estimated cost, or ``None`` when
+            complete nonnegative integer counts are unavailable.
+        """
         usage = response.get("usage")
         if not isinstance(usage, Mapping):
             return None
@@ -283,6 +346,20 @@ class JevController:
 
     @staticmethod
     def _validate(response: Mapping[str, Any], choices: set[str]) -> dict[str, float]:
+        """Validate the typed answer and normalize its complete probability map.
+
+        Args:
+            response: Provider response, including model identity and token usage.
+            choices: Exact set of executable action/section IDs requested.
+
+        Returns:
+            Probabilities normalized to unit mass without changing their relative
+            weights or zero support.
+
+        Raises:
+            JevControllerError: The model, answer, probabilities, argmax,
+                confidence or usage violates the request contract.
+        """
         if response.get("model") != JEV_MODEL:
             raise JevControllerError("Jev returned a different model version.")
         answers = response.get("answers")
@@ -320,7 +397,14 @@ class JevController:
 
     @staticmethod
     def _normalization_record(probabilities: Mapping[str, float]) -> dict[str, Any]:
-        """Describe normalization of an already validated raw probability map."""
+        """Describe normalization of an already validated raw probability map.
+
+        Args:
+            probabilities: Complete raw map accepted by :meth:`_validate`.
+
+        Returns:
+            Normalization policy, original mass, scale, tolerance and applied flag.
+        """
         total = math.fsum(probabilities.values())
         return {
             "policy": JEV_NORMALIZATION_POLICY,
@@ -331,6 +415,26 @@ class JevController:
         }
 
     def _live(self, request: dict[str, Any], choices: set[str]) -> dict[str, Any]:
+        """Execute a typed request through the API or configured file handoff.
+
+        Direct API attempts share one deadline and retain their usage and failure
+        evidence. Backoff uses an independent RNG so it cannot alter selection.
+
+        Args:
+            request: Complete model, state and typed-question payload.
+            choices: Exact action/section IDs expected in the response.
+
+        Returns:
+            Validated raw response, normalization evidence, usage, request ID,
+            physical attempt count and elapsed request time.
+
+        Raises:
+            JevControllerError: Configuration or response validation fails, or
+                the provider request exhausts its retry allowance or deadline.
+            ResponseJournalError: Attempt evidence or handoff identity is invalid
+                or cannot be persisted.
+            SystemExit: The configured handoff times out waiting for a response.
+        """
         if os.environ.get(HANDOFF_ENV):
             return exchange(self, request)
         if typesafe_sdk is None:
@@ -453,6 +557,24 @@ class JevController:
         guidance. The Manifestor supplies that guidance under the chosen pair.
         Invalid provider responses stop the run rather than invoking a costly
         generative fallback or silently substituting a uniform distribution.
+
+        Args:
+            menu: Semantic action/section choices for one component.
+            sections: Complete current section bodies for that component.
+            section_descriptions: Descriptions of the component's template sections.
+            traces: Full structured training evidence supplied to the Controller.
+            rng: Seeded selection RNG, separate from provider retry backoff.
+
+        Returns:
+            Selected choice and audit metadata, including raw and normalized
+            probabilities, sampling weights, replay status and provider usage.
+
+        Raises:
+            ValueError: A menu entry has no semantic action.
+            JevControllerError: The executable menu or provider response is invalid,
+                or a live request fails.
+            ResponseJournalError: Replay identity or durable request evidence fails.
+            SystemExit: The configured handoff times out waiting for a response.
         """
         feasible, excluded, criteria = [], {}, {}
         for choice in menu:

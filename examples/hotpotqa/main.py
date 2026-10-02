@@ -556,7 +556,19 @@ def _contract_api_base(api_base: str | None, *, scientific_contract: bool) -> st
 
 
 def _controller_selection(condition: str, args) -> str:
-    """Resolve the requested Controller without changing existing ablation identities."""
+    """Resolve the requested Controller without changing existing ablation identities.
+
+    Args:
+        condition: Optimization condition, including the uniform-random ablation.
+        args: Parsed arguments containing Controller selection and reflection level.
+
+    Returns:
+        Effective Controller selection after applying the condition's fixed policy.
+
+    Raises:
+        ValueError: The requested policy is unknown or Jev is selected outside
+            the level-2 FOREST condition.
+    """
     requested = getattr(args, "controller_selection", VERBALIZED_SELECTION)
     if requested not in {VERBALIZED_SELECTION, JEV_SELECTION}:
         raise ValueError("controller_selection must be verbalized or jev")
@@ -1547,6 +1559,9 @@ def build_parser() -> argparse.ArgumentParser:
     Production runs preserve the locked benchmark, retrieval, model, and
     optimization configuration. Explicit JSONL data remains available for
     local task-program checks when the production contract is not enforced.
+
+    Returns:
+        Argument parser for the supported benchmark and Controller settings.
     """
     parser = argparse.ArgumentParser(description="HotpotQA evaluation for action-conditioned reflection")
     parser.add_argument(

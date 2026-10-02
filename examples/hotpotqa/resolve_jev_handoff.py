@@ -16,7 +16,22 @@ except ImportError:
 
 
 def resolve_saved_request(request_path: Path, key: str) -> Path:
-    """Resolve either supported role using its unchanged provider policy."""
+    """Resolve either supported role using its unchanged provider policy.
+
+    Args:
+        request_path: Sealed Controller or optional verifier request to resolve.
+        key: Nonempty TypeSafe credential kept outside the saved request.
+
+    Returns:
+        Path to the sealed successful response.
+
+    Raises:
+        ValueError: The key is empty, the saved role is unsupported, or resolution
+            is attempted from a compute allocation or offline transport.
+        ResponseJournalError: Saved evidence or provider policy fails validation.
+        FileExistsError: A started request has no known completed outcome.
+        SystemExit: The external call failed and its failure evidence was saved.
+    """
     if not key:
         raise ValueError("Supply a protected local TypeSafe key file or TYPESAFE_API_KEY.")
     record = load(request_path)

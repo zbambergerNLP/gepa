@@ -25,7 +25,17 @@ KEY_FILE_FORBIDDEN_PERMISSIONS = 0o077
 
 
 def check_ready(directory: Path, job: str, source: str) -> None:
-    """Require the matching live coordinator before loading GPU models."""
+    """Require the matching live coordinator before loading GPU models.
+
+    Args:
+        directory: Shared mailbox containing the sealed coordinator status.
+        job: Expected Slurm job ID.
+        source: Expected frozen source commit.
+
+    Raises:
+        ResponseJournalError: The status checksum, identity, readiness or heartbeat
+            age fails validation.
+    """
     record = load(directory / COORDINATOR_STATUS_FILE)
     if record["job_id"] != job or record["source_commit"] != source or record["status"] != "ready":
         raise ResponseJournalError("Jev coordinator identity or status mismatch.")
@@ -34,7 +44,23 @@ def check_ready(directory: Path, job: str, source: str) -> None:
 
 
 def resolve_pending(directory: Path, job: str, source: str, key: str) -> int:
-    """Resolve only requests owned by this exact job and frozen source."""
+    """Resolve only requests owned by this exact job and frozen source.
+
+    Args:
+        directory: Shared mailbox containing request subdirectories.
+        job: Slurm job ID that must own each waiting marker.
+        source: Frozen source commit that must match each request.
+        key: TypeSafe credential used only by the external resolver.
+
+    Returns:
+        Number of newly resolved requests, excluding completed responses reused.
+
+    Raises:
+        ResponseJournalError: A sealed artifact or request identity is invalid,
+            or a saved response records an external failure.
+        FileExistsError: An unresolved started marker requires review.
+        SystemExit: A new external request fails and its evidence is retained.
+    """
     resolved = 0
     for waiting_path in sorted(directory.glob(f"*/{HANDOFF_WAITING_FILE}")):
         request_path = waiting_path.with_name(HANDOFF_REQUEST_FILE)
@@ -57,7 +83,19 @@ def resolve_pending(directory: Path, job: str, source: str, key: str) -> int:
 
 
 def job_state(job: str) -> str:
-    """Read the allocation state without submitting or changing a job."""
+    """Read the allocation state without submitting or changing a job.
+
+    Args:
+        job: Slurm job ID to query through ``sacct``.
+
+    Returns:
+        Scheduler state from the single row matching the requested job.
+
+    Raises:
+        RuntimeError: Accounting does not return exactly one matching job row.
+        subprocess.CalledProcessError: The accounting command fails.
+        subprocess.TimeoutExpired: The scheduler query exceeds its timeout.
+    """
     result = subprocess.run(
         ["sacct", "-n", "-X", "-j", job, "-o", "JobIDRaw,State", "-P"],
         check=True,
@@ -72,7 +110,24 @@ def job_state(job: str) -> str:
 
 
 def serve(directory: Path, job: str, source: str, key_file: Path) -> None:
-    """Serve one bounded job without running models or forwarding network traffic."""
+    """Serve one bounded job without running models or forwarding network traffic.
+
+    Publish coordinator heartbeats and resolve waiting requests while the job is
+    running. Stop on a terminal scheduler state; record and propagate failures.
+
+    Args:
+        directory: Shared mailbox to lock for this coordinator.
+        job: Slurm job ID whose lifecycle bounds the service.
+        source: Source commit that must match the local frozen-source marker.
+        key_file: Nonempty TypeSafe credential file accessible only to its owner.
+
+    Raises:
+        ValueError: Execution context, frozen source or credential permissions
+            violate the coordinator contract.
+        BlockingIOError: Another coordinator already holds the mailbox lock.
+        ResponseJournalError: Request or response evidence fails validation.
+        RuntimeError: The scheduler cannot establish a unique job state.
+    """
     if os.environ.get("SLURM_JOB_ID") or os.environ.get(HANDOFF_ENV):
         raise ValueError("The coordinator must run outside a compute allocation.")
     if source != (Path(__file__).resolve().parents[2] / ".gepa-source-commit").read_text().strip():

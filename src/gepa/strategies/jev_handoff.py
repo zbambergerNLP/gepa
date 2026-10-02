@@ -29,7 +29,12 @@ if TYPE_CHECKING:
 
 
 def save(path: Path, record: dict[str, Any]) -> None:
-    """Seal an artifact before exposing it to the other execution stage."""
+    """Seal an artifact before exposing it to the other execution stage.
+
+    Args:
+        path: Destination replaced atomically after the temporary file is flushed.
+        record: JSON-serializable payload to store with its canonical checksum.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(f".{os.getpid()}.tmp")
     with temporary.open("w") as stream:
@@ -41,7 +46,17 @@ def save(path: Path, record: dict[str, Any]) -> None:
 
 
 def load(path: Path) -> dict[str, Any]:
-    """Reject an incomplete or modified handoff artifact."""
+    """Read a sealed handoff artifact and verify its checksum.
+
+    Args:
+        path: Artifact written by :func:`save`.
+
+    Returns:
+        Verified payload without its checksum envelope.
+
+    Raises:
+        ResponseJournalError: The payload no longer matches its saved checksum.
+    """
     saved = json.loads(path.read_text())
     if canonical_request_digest(saved["record"]) != saved["sha256"]:
         raise ResponseJournalError(f"Jev handoff checksum mismatch: {path.name}")
@@ -49,7 +64,22 @@ def load(path: Path) -> dict[str, Any]:
 
 
 def exchange(controller: JevController, request: dict[str, Any]) -> dict[str, Any]:
-    """Wait for an external result while retaining the allocated model servers."""
+    """Wait for an external result while retaining the allocated model servers.
+
+    Args:
+        controller: Controller with durable response and attempt journals.
+        request: Typed request to publish under the active logical scope.
+
+    Returns:
+        External response payload after validating its identity and importing
+        each physical attempt and its known usage at most once.
+
+    Raises:
+        ResponseJournalError: Journals or scope are missing, artifact identities
+            disagree, imported evidence conflicts, or the external request failed.
+        JevControllerError: The external payload fails response validation.
+        SystemExit: The mailbox wait expires before a response arrives.
+    """
     scope = ACTIVE_RESPONSE_JOURNAL_SCOPE.get()
     if not scope or controller._journal is None or controller._attempt_log is None:
         raise ResponseJournalError("Offline Jev requires durable response/attempt journals and a logical scope.")
@@ -109,7 +139,26 @@ def exchange(controller: JevController, request: dict[str, Any]) -> dict[str, An
 
 
 def resolve(request_path: Path, controller: JevController) -> Path:
-    """Execute a saved request off-cluster, retaining the native retry allowance."""
+    """Execute a saved request off-cluster, retaining the native retry allowance.
+
+    Provider failures are saved in the response envelope together with attempt
+    evidence. An existing completed response is reused without another request.
+
+    Args:
+        request_path: Sealed request inside its checksum-named directory.
+        controller: Matching provider role configured for direct API access.
+
+    Returns:
+        Path to the sealed success or failure response.
+
+    Raises:
+        ValueError: Resolution is attempted inside a Slurm allocation or through
+            the offline transport itself.
+        ResponseJournalError: Policy, role or request identity disagrees, or an
+            attempt ledger exists without a completed response.
+        FileExistsError: A started marker leaves the previous request outcome
+            unknown and requires review before any further provider call.
+    """
     if os.environ.get("SLURM_JOB_ID") or os.environ.get(HANDOFF_ENV):
         raise ValueError("Resolve Jev requests outside a Slurm allocation and outside offline transport mode.")
     request = load(request_path)

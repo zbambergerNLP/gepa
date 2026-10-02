@@ -18,7 +18,15 @@ REACHABLE_HTTP_STATUSES = {HTTPStatus.UNAUTHORIZED, HTTPStatus.NOT_FOUND, HTTPSt
 
 
 def check_connectivity(client: httpx2.Client) -> dict:
-    """Probe the API without credentials, inference, redirects or retries."""
+    """Probe the API without supplying credentials or requesting inference.
+
+    Args:
+        client: Credential-free HTTP client configured without redirects or retries.
+
+    Returns:
+        Pass/fail status and HTTP status, plus a sanitized error type when the
+        request fails before receiving an HTTP response.
+    """
     try:
         response = client.head(JEV_API_BASE)
     except httpx2.HTTPError as error:

@@ -256,6 +256,7 @@ def _edit_probe(
         tool: Direct operator coupled to this attempt's semantic action.
         attempt: One-based repetition number used in diagnostic labels.
         result_log: Optional append-only record of every completed probe trajectory.
+        editor_mode: Multi-turn ``react`` or one-response ``single_call`` editing.
 
     Returns:
         Number of rejected actions corrected within this same conversation.

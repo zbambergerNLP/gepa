@@ -519,6 +519,7 @@ class ThreeRoleReflectionLM:
             proposer_model: Model identifier persisted in the run contract.
             react_max_iterations: Maximum ReAct turns, or ``None`` for no limit.
             react_max_tool_calls: Maximum valid calls, or ``None`` for no limit.
+            text_limits: Optional document, section and role-context character budgets.
 
         Raises:
             ValueError: A level, tool set, Controller selection, template

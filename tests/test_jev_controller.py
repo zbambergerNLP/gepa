@@ -150,8 +150,10 @@ def test_live_sdk_request_preserves_constraints_evidence_and_cost(setup_controll
 
 
 @pytest.mark.parametrize("damage", ["missing", "extra", "negative", "nan", "sum", "model", "usage", "argmax", "type"])
-def test_invalid_results_fail_closed_without_sampling_or_fallback(setup_controller, damage, tmp_path):
-    """Reject malformed responses before consuming selection RNG or invoking fallback."""
+def test_invalid_results_exhaust_shared_budget_without_sampling_or_fallback(
+    setup_controller, damage, tmp_path, monkeypatch
+):
+    """Exhaust correction retries without sampling or invoking a fallback."""
     controller, requests, replies = setup_controller
 
     def damaged(request):
@@ -188,13 +190,14 @@ def test_invalid_results_fail_closed_without_sampling_or_fallback(setup_controll
             answer["type"] = "score"
         return httpx2.Response(200, json=result)
 
-    replies.append(damaged)
+    replies.extend([damaged] * 4)
+    monkeypatch.setattr("gepa.strategies.jev_controller.time.sleep", lambda _: None)
     rng = random.Random(23)
     before = rng.getstate()
     with pytest.raises(LMRequestExhaustedError):
         select(controller, rng)
     assert rng.getstate() == before
-    assert len(requests) == 1
+    assert len(requests) == (1 if damage in {"model", "type", "nan"} else 4)
     finished = json.loads((tmp_path / "attempts.jsonl").read_text().splitlines()[-1])
     assert finished["outcome"] == "error" and not finished["will_retry"]
 
@@ -333,14 +336,16 @@ def test_seeded_sampling_uses_probabilities_rather_than_api_argmax(setup_control
     assert record["sampling_probs"][action.menu_id] == pytest.approx(0.32)
 
 
-@pytest.mark.parametrize("old_version", ["jev_joint_action_section_v1", "jev_joint_action_section_v2"])
+@pytest.mark.parametrize(
+    "old_version", ["jev_joint_action_section_v1", "jev_joint_action_section_v2", "jev_joint_action_section_v3"]
+)
 def test_revised_policy_rejects_old_journal_identity_before_network(
     setup_controller, monkeypatch, tmp_path, old_version
 ):
     """Reject replay under an older policy identity without another provider call."""
     controller, requests, _ = setup_controller
     current_contract = controller.run_contract()
-    assert current_contract["policy"] == "jev_joint_action_section_v3"
+    assert current_contract["policy"] == "jev_joint_action_section_v4"
     old_contract = deepcopy(current_contract)
     old_contract["policy"] = old_version
     old_contract.pop("probability_normalization")
@@ -421,8 +426,8 @@ def test_near_unit_probability_maps_normalize_without_retry_and_replay_exactly(s
 
 
 @pytest.mark.parametrize("total", [0.0, 0.2, 0.98, 0.989999, 1.010001, 1.02, 1.5])
-def test_normalization_refuses_large_mass_errors(setup_controller, total):
-    """Reject mass outside the normalization tolerance without retrying or sampling."""
+def test_normalization_refuses_large_mass_errors(setup_controller, total, monkeypatch):
+    """Reject mass outside the normalization tolerance after bounded corrections."""
     controller, requests, replies = setup_controller
 
     def malformed(request):
@@ -442,12 +447,13 @@ def test_normalization_refuses_large_mass_errors(setup_controller, total):
         }
         return httpx2.Response(200, json=result)
 
-    replies.append(malformed)
+    replies.extend([malformed] * 4)
+    monkeypatch.setattr("gepa.strategies.jev_controller.time.sleep", lambda _: None)
     rng = random.Random(19)
     before = rng.getstate()
     with pytest.raises(JevControllerError):
         select(controller, rng)
-    assert len(requests) == 1 and rng.getstate() == before
+    assert len(requests) == 4 and rng.getstate() == before
 
 
 def test_deadline_prevents_more_physical_requests(setup_controller, monkeypatch):
@@ -546,3 +552,168 @@ def test_strategy_uses_jev_then_manifestor_and_editor_and_restores_batch_state(s
     original, _ = strategy(2)
     with pytest.raises(ValueError):
         ensure_reflection_run_contract(tmp_path / "run", original.run_contract({"sys": PROMPT}))
+
+
+def inconsistent_choice(request):
+    """Return a response whose chosen option disagrees with its probability map.
+
+    Args:
+        request: Typed payload supplying the executable choices.
+
+    Returns:
+        Successful HTTP response containing an invalid typed answer.
+    """
+    result = response(request)
+    result["answers"]["edit"]["choice"] = next(
+        key for key, value in result["answers"]["edit"]["probabilities"].items() if value == 0
+    )
+    return httpx2.Response(200, json=result)
+
+
+def test_response_correction_preserves_task_and_charges_both_attempts(setup_controller, monkeypatch, tmp_path):
+    """Preserve task evidence and account for the failed and corrected responses."""
+    controller, requests, replies = setup_controller
+    replies.append(inconsistent_choice)
+    monkeypatch.setattr("gepa.strategies.jev_controller.time.sleep", lambda _: None)
+    _, metadata = select(controller)
+    assert len(requests) == metadata["physical_attempts"] == 2
+    assert requests[0]["state"] == requests[1]["state"]
+    assert requests[0]["questions"]["edit"]["criteria"] == requests[1]["questions"]["edit"]["criteria"]
+    instruction = requests[1]["questions"]["edit"]["instructions"]
+    assert instruction.startswith(requests[0]["questions"]["edit"]["instructions"])
+    assert "argmax choice disagrees" in instruction and "Previous response:" in instruction
+    assert "choice must have maximum probability" in instruction
+    assert controller.total_tokens_in == 2000
+    rows = [json.loads(line) for line in (tmp_path / "attempts.jsonl").read_text().splitlines()]
+    finished = [row for row in rows if row["event"] == "finished"]
+    assert [row["outcome"] for row in finished] == ["error", "success"]
+    assert [row["will_retry"] for row in finished] == [True, False]
+    assert len({row["request_id"] for row in finished}) == 1
+    assert len({row["logical_request_sha256"] for row in finished}) == 1
+
+
+def test_response_and_transport_retries_share_four_attempts(setup_controller, monkeypatch, tmp_path):
+    """Share one physical-attempt allowance across transport and response failures."""
+    controller, requests, replies = setup_controller
+    replies.extend([429, inconsistent_choice, 503])
+    monkeypatch.setattr("gepa.strategies.jev_controller.time.sleep", lambda _: None)
+    _, metadata = select(controller)
+    assert len(requests) == metadata["physical_attempts"] == 4
+    assert requests[0] == requests[1]
+    assert requests[2] == requests[3] != requests[0]
+    assert controller.total_tokens_in == 2000
+
+
+def test_response_correction_cannot_extend_original_deadline(setup_controller, monkeypatch, tmp_path):
+    """Stop correction attempts once the original deadline expires."""
+    controller, requests, replies = setup_controller
+    clock = [0.0]
+    monkeypatch.setattr("gepa.strategies.jev_controller.time.monotonic", lambda: clock[0])
+
+    def expire(request):
+        """Expire the request deadline before returning an invalid answer.
+
+        Args:
+            request: Typed payload supplying the executable choices.
+
+        Returns:
+            Response whose chosen option disagrees with its probability map.
+        """
+        clock[0] = 31.0
+        return inconsistent_choice(request)
+
+    replies.append(expire)
+    with pytest.raises(JevControllerError):
+        select(controller)
+    assert len(requests) == 1
+    row = json.loads((tmp_path / "attempts.jsonl").read_text().splitlines()[-1])
+    assert not row["will_retry"]
+
+
+def test_explicit_recovery_consumes_existing_attempt_and_preserves_failure(setup_controller, monkeypatch, tmp_path):
+    """Resume explicit recovery without rewriting or recounting the prior failure."""
+    controller, requests, replies = setup_controller
+    clock = [0.0]
+    monkeypatch.setattr("gepa.strategies.jev_controller.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("gepa.strategies.jev_controller.time.sleep", lambda _: None)
+
+    def expire(request):
+        """Expire the request deadline before returning an invalid answer.
+
+        Args:
+            request: Typed payload supplying the executable choices.
+
+        Returns:
+            Response whose chosen option disagrees with its probability map.
+        """
+        clock[0] = 31.0
+        return inconsistent_choice(request)
+
+    replies.append(expire)
+    with response_journal_scope("optimizer-iteration-53"), pytest.raises(JevControllerError):
+        select(controller)
+    path = tmp_path / "attempts.jsonl"
+    previous_bytes = path.read_bytes()
+    previous = json.loads(previous_bytes.splitlines()[-1])
+    clock[0] = 40.0
+    with response_journal_scope("optimizer-iteration-53"):
+        result = controller.retry_failed_response(previous["request"], [previous])
+    assert result["physical_attempts"] == 2 and len(requests) == 2
+    assert path.read_bytes().startswith(previous_bytes)
+    row = json.loads(path.read_text().splitlines()[-1])
+    assert row["attempt"] == 2 and row["request_id"] == previous["request_id"]
+    assert row["manual_recovery"]["prior_attempt"] == 1
+    assert "argmax choice disagrees" in requests[1]["questions"]["edit"]["instructions"]
+    assert controller.total_tokens_in == 2000
+
+
+def test_explicit_recovery_does_not_grant_four_more_attempts(setup_controller, monkeypatch, tmp_path):
+    """Count archived failures against the original physical-attempt allowance."""
+    controller, requests, replies = setup_controller
+    clock = [0.0]
+    monkeypatch.setattr("gepa.strategies.jev_controller.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("gepa.strategies.jev_controller.time.sleep", lambda _: None)
+
+    def expire(request):
+        """Expire the request deadline before returning an invalid answer.
+
+        Args:
+            request: Typed payload supplying the executable choices.
+
+        Returns:
+            Response whose chosen option disagrees with its probability map.
+        """
+        clock[0] = 31.0
+        return inconsistent_choice(request)
+
+    replies.append(expire)
+    with response_journal_scope("optimizer-iteration-53"), pytest.raises(JevControllerError):
+        select(controller)
+    previous = json.loads((tmp_path / "attempts.jsonl").read_text().splitlines()[-1])
+    clock[0] = 40.0
+    replies.extend([inconsistent_choice] * 4)
+    with response_journal_scope("optimizer-iteration-53"), pytest.raises(JevControllerError):
+        controller.retry_failed_response(previous["request"], [previous])
+    assert len(requests) == 4
+    rows = [json.loads(line) for line in (tmp_path / "attempts.jsonl").read_text().splitlines()]
+    assert [row["attempt"] for row in rows if row["event"] == "finished"] == [1, 2, 3, 4]
+
+
+def test_manual_recovery_rejects_changed_request_before_network(setup_controller):
+    """Reject mismatched recovery evidence before making a provider request."""
+    controller, requests, _ = setup_controller
+    with response_journal_scope("different"), pytest.raises(ValueError):
+        controller.retry_failed_response(
+            {"questions": {"edit": {"criteria": {}}}},
+            [
+                {
+                    "event": "finished",
+                    "attempt": 1,
+                    "request_id": "prior",
+                    "scope": "old",
+                    "outcome": "error",
+                    "request": {},
+                }
+            ],
+        )
+    assert not requests

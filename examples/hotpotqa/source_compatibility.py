@@ -19,8 +19,8 @@ def comparison_runtime(contract: dict) -> dict:
         raise ValueError("Source compatibility requires an explicit review record.")
     if review.get("schema_version") == 1:
         allowed = cell == ("random", STANDARD_METRIC_CALLS)
-    elif review.get("schema_version") == 2:
-        allowed = review.get("kind") == "single_call_editor_tracking_handoff" and cell in {
+    elif review.get("schema_version") in {2, 3}:
+        allowed = review.get("schema_version") == 2 and review.get("kind") == "single_call_editor_tracking_handoff" and cell in {
             ("react_v2", STANDARD_METRIC_CALLS),
             ("react_v2_random", STANDARD_METRIC_CALLS),
             ("action", STANDARD_METRIC_CALLS),
@@ -29,6 +29,11 @@ def comparison_runtime(contract: dict) -> dict:
             ("react_v2", EXPANDED_METRIC_CALLS),
         }
         optimizer = contract.get("optimizer", {})
+        if review.get("schema_version") == 3:
+            allowed = review.get("kind") == "jev_expanded_budget_handoff" and cell == ("react_v2", EXPANDED_METRIC_CALLS)
+            if "rendered_seed" in optimizer:
+                policy = optimizer.get("semantic_controller_policy") or {}
+                allowed = allowed and policy.get("model") == "jev-1.13.0" and policy.get("policy") == "jev_joint_action_section_v4"
         if "rendered_seed" in optimizer:
             digest = hashlib.sha256(json.dumps(optimizer, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
             allowed = allowed and digest == review.get("optimizer_sha256")

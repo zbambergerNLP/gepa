@@ -76,3 +76,31 @@ def test_editor_handoff_requires_its_own_review_and_exact_optimizer(reviewed_con
     contract["condition"] = "vanilla"
     with pytest.raises(ValueError):
         comparison_runtime(contract)
+
+
+@pytest.mark.parametrize("change", [None, "budget", "condition", "controller", "optimizer", "kind"])
+def test_jev_expanded_handoff_requires_review_and_exact_optimizer(reviewed_contract, change):
+    """Reuse the baseline only for the reviewed expanded Jev configuration."""
+    contract = reviewed_contract
+    contract["condition"] = "react_v2"
+    contract["optimizer"].update(max_metric_calls=13742, rendered_seed={"sys": "original"},
+        semantic_controller_policy={"model": "jev-1.13.0", "policy": "jev_joint_action_section_v4"})
+    review = contract["source_compatibility"]
+    review.update(schema_version=3, kind="jev_expanded_budget_handoff", optimizer_sha256=hashlib.sha256(
+        json.dumps(contract["optimizer"], sort_keys=True, separators=(",", ":")).encode()).hexdigest())
+    if change == "budget":
+        contract["optimizer"]["max_metric_calls"] = 6871
+    elif change == "condition":
+        contract["condition"] = "vanilla"
+    elif change == "controller":
+        contract["optimizer"]["semantic_controller_policy"]["model"] = "another-controller"
+    elif change == "optimizer":
+        contract["optimizer"]["rendered_seed"] = {"sys": "changed"}
+    elif change == "kind":
+        review["kind"] = "unreviewed"
+    if change is None:
+        assert comparison_runtime(contract)["source_commit"] == "a" * 40
+        assert contract["execution_runtime"]["source_commit"] == "b" * 40
+    else:
+        with pytest.raises(ValueError):
+            comparison_runtime(contract)

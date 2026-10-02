@@ -87,6 +87,9 @@ FAILURE_POLICY_CONTRACT = {
 }
 
 
+HARBOR_METADATA_TIMEOUT_SECONDS = 30
+
+
 class TerminalBenchOutput(TypedDict):
     """Opaque per-task output retained by GEPA."""
 
@@ -677,7 +680,7 @@ class HarborCLI:
             check=False,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=HARBOR_METADATA_TIMEOUT_SECONDS,
         )
         if harbor_version.returncode != 0:
             raise HarborRequirementError(
@@ -695,7 +698,7 @@ class HarborCLI:
             check=False,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=HARBOR_METADATA_TIMEOUT_SECONDS,
         )
         if docker_info.returncode != 0:
             detail = docker_info.stderr.strip() or docker_info.stdout.strip()

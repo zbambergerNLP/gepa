@@ -26,6 +26,7 @@
 
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$PWD}" || exit 1
+source "${PWD}/scripts/della/runtime_constants.sh"
 
 if [[ "${HOTPOTQA_PRODUCTION_LAUNCH:-}" != "1" ]]; then
     echo "ERROR: submit this production job through scripts/della/submit_hotpotqa.sh" >&2
@@ -33,7 +34,7 @@ if [[ "${HOTPOTQA_PRODUCTION_LAUNCH:-}" != "1" ]]; then
 fi
 
 MODEL_STORAGE="${MODEL_STORAGE:-/projects/BSTEWART/model_storage}"
-MODEL_PROFILE="${MODEL_PROFILE:-qwen3.8-27b}"
+MODEL_PROFILE="${MODEL_PROFILE:-${FOREST_QWEN_PROFILE}}"
 if [[ "${MODEL_PROFILE}" == "deepseek-teacher-qwen-student" ]]; then
     export PYTHONPATH="${PWD}/src:${PWD}"
     export DSPY_CACHEDIR="${SCRATCH_BASE}/.cache/dspy/paired-bootstrap"
@@ -57,14 +58,14 @@ if [[ "${HOTPOTQA_CANARY_ONLY}" != "0" && "${HOTPOTQA_CANARY_ONLY}" != "1" ]]; t
     echo "ERROR: HOTPOTQA_CANARY_ONLY must be 0 or 1" >&2
     exit 1
 fi
-if [[ "${HOTPOTQA_CANARY_ONLY}" == "1" && "${MODEL_PROFILE}" != "deepseek-v4.1-flash" ]]; then
+if [[ "${HOTPOTQA_CANARY_ONLY}" == "1" && "${MODEL_PROFILE}" != "${FOREST_DEEPSEEK_PROFILE}" ]]; then
     echo "ERROR: the runtime canary is reserved for the DeepSeek-V4.1-Flash profile" >&2
     exit 1
 fi
 GEN_PORT="${GEN_PORT:-}"
 MAX_WORKERS="${MAX_WORKERS:-32}"
-GEN_GMU=0.92
-GEN_MAX_LEN=262144
+GEN_GMU="${FOREST_GPU_MEMORY_UTILIZATION}"
+GEN_MAX_LEN="${FOREST_CONTEXT_TOKENS}"
 VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-1}"
 VLLM_API_SERVER_COUNT="${VLLM_API_SERVER_COUNT:-${VLLM_DATA_PARALLEL_SIZE}}"
 VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-1}"
@@ -73,11 +74,11 @@ case "${VLLM_MAX_NUM_SEQS}" in
     1|2|4|8|16|32) ;;
     *) echo "ERROR: VLLM_MAX_NUM_SEQS must be 1, 2, 4, 8, 16, or 32" >&2; exit 1 ;;
 esac
-VLLM_MAX_NUM_BATCHED_TOKENS="${VLLM_MAX_NUM_BATCHED_TOKENS:-16384}"
-HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-1800}"
+VLLM_MAX_NUM_BATCHED_TOKENS="${VLLM_MAX_NUM_BATCHED_TOKENS:-${FOREST_MAX_BATCHED_TOKENS}}"
+HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-${FOREST_HEALTH_TIMEOUT_SECONDS}}"
 SERVING_VENV_DIR="${SERVING_VENV_DIR:-}"
 SERVING_LOCK="examples/hotpotqa/serving/requirements-x86_64-linux-py312.txt"
-if [[ "${MODEL_PROFILE}" == "deepseek-v4.1-flash" ]]; then
+if [[ "${MODEL_PROFILE}" == "${FOREST_DEEPSEEK_PROFILE}" ]]; then
     SERVING_LOCK="examples/hotpotqa/serving/requirements-deepseek-v4.1-flash-x86_64-linux-py312.txt"
 fi
 GEPA_VENV_DIR="${GEPA_VENV_DIR:-}"
@@ -88,8 +89,8 @@ EXPECTED_HOTPOTQA_UV_VERSION="0.9.13"
 HOTPOTQA_UV_VERSION="${HOTPOTQA_UV_VERSION:-}"
 HOTPOTQA_UV_SHA256="${HOTPOTQA_UV_SHA256:-}"
 GEPA_UV_BIN="${GEPA_UV_BIN:-}"
-QWEN_REVISION="1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
-DEEPSEEK_REVISION="dba1be0a40aa45a94ad051997016db3960a90277"
+QWEN_REVISION="${FOREST_QWEN_REVISION}"
+DEEPSEEK_REVISION="${FOREST_DEEPSEEK_REVISION}"
 HOTPOTQA_DATA_REVISION="1908d6afbbead072334abe2965f91bd2709910ab"
 WIKI17_REVISION="ef6a5e72a98b47cef31574a400fea8fe149559a3"
 HOTPOTQA_DSPY_COMMIT="62dc3b634d7dc0c4889abcf905cb4c391ea6b396"
@@ -175,10 +176,10 @@ fi
 
 case "${BUDGET_PROFILE}" in
     standard)
-        EXPECTED_MAX_METRIC_CALLS=6871
+        EXPECTED_MAX_METRIC_CALLS=${HOTPOTQA_STANDARD_METRIC_CALLS}
         ;;
     expanded)
-        EXPECTED_MAX_METRIC_CALLS=13742
+        EXPECTED_MAX_METRIC_CALLS=${HOTPOTQA_EXPANDED_METRIC_CALLS}
         ;;
     *)
         echo "ERROR: BUDGET_PROFILE must be standard or expanded" >&2
@@ -201,26 +202,26 @@ case "${BUDGET_PROFILE}:${CONDITION}" in
 esac
 
 case "${MODEL_PROFILE}" in
-    qwen3.8-27b)
+    "${FOREST_QWEN_PROFILE}")
         MODEL="Qwen3.8-27B"
         SOLVER_MODEL_PATH="${MODEL_STORAGE}/${MODEL}"
-        SOLVER_SERVED_NAME="Qwen/Qwen3.8-27B"
-        SOLVER_MODEL="hosted_vllm/Qwen/Qwen3.8-27B"
+        SOLVER_SERVED_NAME="${FOREST_QWEN_REPO}"
+        SOLVER_MODEL="${FOREST_QWEN_MODEL}"
         HOTPOTQA_MODEL_REVISION="${QWEN_REVISION}"
         SOLVER_API_BASE=""
-        MODEL_SNAPSHOT_PROFILE="qwen3.8-27b"
+        MODEL_SNAPSHOT_PROFILE="${FOREST_QWEN_PROFILE}"
         SERVING_ENGINE="vllm"
         ;;
-    deepseek-v4.1-flash)
+    "${FOREST_DEEPSEEK_PROFILE}")
         MODEL="DeepSeek-V4.1-Flash"
         SOLVER_MODEL_PATH="${MODEL_STORAGE}/${MODEL}"
-        SOLVER_SERVED_NAME="deepseek-ai/DeepSeek-V4.1-Flash"
-        SOLVER_MODEL="hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash"
+        SOLVER_SERVED_NAME="${FOREST_DEEPSEEK_REPO}"
+        SOLVER_MODEL="${FOREST_DEEPSEEK_MODEL}"
         HOTPOTQA_MODEL_REVISION="${DEEPSEEK_REVISION}"
         SOLVER_API_BASE=""
-        MODEL_SNAPSHOT_PROFILE="deepseek-v4.1-flash"
+        MODEL_SNAPSHOT_PROFILE="${FOREST_DEEPSEEK_PROFILE}"
         SERVING_ENGINE="vllm"
-        GEN_MAX_LEN=262144
+        GEN_MAX_LEN="${FOREST_CONTEXT_TOKENS}"
         ;;
     *)
         echo "ERROR: MODEL_PROFILE must be qwen3.8-27b or deepseek-v4.1-flash" >&2
@@ -477,7 +478,7 @@ HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS="false"
 if [[ "${VLLM_MAX_NUM_SEQS}" == "1" ]]; then
     HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS="true"
 fi
-if [[ "${MODEL_PROFILE}" == "qwen3.8-27b" ]]; then
+if [[ "${MODEL_PROFILE}" == "${FOREST_QWEN_PROFILE}" ]]; then
     if [[ "${VLLM_TENSOR_PARALLEL_SIZE}" != "1" \
         || "${VLLM_DATA_PARALLEL_SIZE}" != "1" \
         || "${VLLM_API_SERVER_COUNT}" != "1" ]]; then
@@ -540,7 +541,7 @@ else
     export HOTPOTQA_KV_CACHE_DTYPE="fp8"
     HOTPOTQA_SERVE_ARGUMENTS="tp=4;ep=4;dp=1;api_servers=1;gpu_memory_utilization=${GEN_GMU};max_model_len=${GEN_MAX_LEN};max_num_seqs=${VLLM_MAX_NUM_SEQS};max_num_batched_tokens=${VLLM_MAX_NUM_BATCHED_TOKENS};dtype=bfloat16;weight_dtype=fp8;expert_dtype=fp4;engram_cpu_offload=true;kv_cache_dtype=fp8;block_size=auto;prefix_caching=false;tokenizer_mode=deepseek_v41;reasoning_parser=deepseek_v41;auto_tool_choice=true;tool_parser=deepseek_v41;speculative_decoding=false;seed=0;batch_invariant=false;single_sequence_replicas=${HOTPOTQA_VLLM_SINGLE_SEQUENCE_REPLICAS}"
     export FLASHINFER_NO_DOWNLOAD=1
-    export VLLM_ENGINE_READY_TIMEOUT_S=3600
+    export VLLM_ENGINE_READY_TIMEOUT_S="${FOREST_ENGINE_READY_TIMEOUT_SECONDS}"
     THINKING_REPAIR_SHA256="$(sha256sum examples/hotpotqa/serving/safe_thinking_budget.py | cut -d' ' -f1)"
     HOTPOTQA_SERVE_ARGUMENTS+=";thinking_budget_repair=${THINKING_REPAIR_SHA256}"
     echo "==> serving DeepSeek with vLLM TP4/EP4 on :${GEN_PORT}; log: ${GEN_LOG}"

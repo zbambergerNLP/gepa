@@ -242,7 +242,12 @@ def _validate_scientific_contract(args, runtime_environment: dict | None = None)
     if getattr(args, "enforce_scientific_contract", False):
         changed_axes = []
         if getattr(args, "controller_selection", VERBALIZED_SELECTION) == JEV_SELECTION:
-            changed_axes.append("Jev is a separate, unqualified Controller policy; it is not in the locked campaign")
+            if (
+                getattr(args, "condition", None) != "react_v2"
+                or args.max_metric_calls != STANDARD_METRIC_CALLS
+                or (args.solver_model, args.reflection_model) != (QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL)
+            ):
+                changed_axes.append("Jev requires the 6871-call FOREST cell with Qwen solver and DeepSeek edit roles")
         required_values = (
             ("program", "2stage"),
             ("seed_style", "structured"),
@@ -462,6 +467,8 @@ def _validate_scientific_contract(args, runtime_environment: dict | None = None)
                 teacher_args = deepcopy(args)
                 teacher_args.solver_model = args.reflection_model
                 teacher_args.solver_api_base = reflection_api_base
+                # This recursive check validates DeepSeek serving, not Controller selection.
+                teacher_args.controller_selection = VERBALIZED_SELECTION
                 _validate_scientific_contract(teacher_args, {**environment, **teacher})
             except (ValueError, TypeError) as exc:
                 changed_axes.append(f"HOTPOTQA_TEACHER_RUNTIME: {exc}")
@@ -1566,7 +1573,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="HotpotQA evaluation for action-conditioned reflection")
     parser.add_argument(
         "--controller-selection", choices=[VERBALIZED_SELECTION, JEV_SELECTION], default=VERBALIZED_SELECTION,
-        help="Jev replaces only the level-2 FOREST Controller; requires TYPESAFE_API_KEY and a new run directory",
+        help="Jev replaces only the level-2 FOREST Controller; requires API credentials or a resident mailbox and a new run directory",
     )
     parser.add_argument("--data-path", type=str, default=None, help="Path to HotpotQA JSONL sample (smoke, 14/3/3)")
     parser.add_argument(

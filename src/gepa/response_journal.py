@@ -18,6 +18,9 @@ from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlsplit, urlunsplit
 
+SQLITE_TIMEOUT_SECONDS = 60.0
+SQLITE_BUSY_TIMEOUT_MS = int(SQLITE_TIMEOUT_SECONDS * 1000)
+
 RESPONSE_JOURNAL_SCHEMA_VERSION = 2
 RESPONSE_JOURNAL_SCOPE_POLICY = "optimizer-state-iteration"
 ACTIVE_RESPONSE_JOURNAL_SCOPE: contextvars.ContextVar[str | None] = contextvars.ContextVar(
@@ -167,9 +170,9 @@ class ResumeResponseJournal:
         Returns:
             SQLite connection configured for full synchronous commits.
         """
-        connection = sqlite3.connect(self.path, timeout=60.0)
+        connection = sqlite3.connect(self.path, timeout=SQLITE_TIMEOUT_SECONDS)
         connection.execute("PRAGMA synchronous=FULL")
-        connection.execute("PRAGMA busy_timeout=60000")
+        connection.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
         return connection
 
     def _initialize(self) -> None:

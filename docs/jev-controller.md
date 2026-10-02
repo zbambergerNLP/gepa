@@ -55,6 +55,40 @@ strategy = ThreeRoleReflectionLM(
 # Close controller.close() when the owning application finishes.
 ```
 
+## Configuration owners
+
+Jev uses the shared constants introduced for FOREST's runtime configuration.
+Provider-specific settings have separate named owners where their semantics differ:
+
+| Settings | Owner |
+| --- | --- |
+| Four physical attempts and disabled SDK retries | `src/gepa/lm_constants.py` |
+| Controller selection and role names, semantic reflection level | `src/gepa/strategies/forest_constants.py` |
+| Jev model, SDK, endpoint, deadline, choice limit, probability tolerances, jitter and pricing | `src/gepa/strategies/jev_constants.py` |
+| Handoff filenames, schema, wait/poll limits and artifact permissions | `src/gepa/strategies/jev_constants.py` |
+| Coordinator heartbeat age, scheduler timeout and polling intervals | `examples/hotpotqa/jev_mailbox.py` |
+| Credential-free connectivity probe timeout and accepted statuses | `examples/hotpotqa/typesafe_preflight.py` |
+
+Jev's full-jitter backoff and all-5xx retry policy remain distinct from the
+generative provider wrapper. Extracting constants preserves their values and the
+serialized Jev policy identity.
+
+## Della handoff
+
+The file transport supports an allocation without external internet access.
+Set `GEPA_JEV_HANDOFF_DIR` to a shared-scratch mailbox for a separately authorized
+run. An internet-enabled host runs `examples.hotpotqa.jev_mailbox serve`, bound
+to the exact Slurm job ID and frozen source. Use its `check-ready` command before
+loading GPU models. The allocation keeps its models resident while it waits for
+the sealed response; credentials stay on the coordinator host.
+
+Each API request retains the same four-attempt, 30-second policy. Waiting for
+the mailbox is separately bounded at 300 seconds. The coordinator validates
+source, job and request identity, retains failed attempts, and refuses to repeat
+a started request with an unknown outcome. It never resubmits a GPU job.
+`examples.hotpotqa.typesafe_preflight` provides a credential-free HTTPS check
+for direct transport; a successful probe does not establish successful inference.
+
 ## Selection and recovery
 
 - Send every component section, its description, full structured training traces,
@@ -132,9 +166,8 @@ Total estimated cost: **$0.001142**. Median API latency: **0.140 seconds**.
 These are four Controller-only checks, not optimization results. No candidates
 were generated or evaluated, and no held-out data was used. The sampled action
 was `contextualize/Response` in all four checks (each used a reset seed-0 sampling
-RNG); that is not evidence of action diversity or edit quality. A future matched
-training-only pilot must assess useful edits and total proposal-cycle latency,
-including any changed Manifestor work, before claiming preserved performance.
+RNG); that is not evidence of action diversity or edit quality. These checks do
+not measure useful edits, total proposal-cycle latency or optimization performance.
 
 Local evidence is in `outputs/jev-controller-live-check-20260927/`: the full
 request/response ledger, replay journal and `proof.json` with source-file hashes.
@@ -202,5 +235,6 @@ the reliability repair. The top-pair counts remain 17/20 and 20/20.
 Tests cover both tolerance boundaries, larger errors, support preservation,
 relative weights, unchanged raw evidence, no extra API calls, exact replay and
 rejection of old policy identities. The observed probability-total issue is
-resolved; generated-edit quality and end-to-end optimization remain untested.
+resolved; these checks do not measure generated-edit quality or end-to-end
+optimization performance.
 Full evidence is in `outputs/jev-probability-normalization-20260927/`.

@@ -1,9 +1,10 @@
-"""Resolve an exported pilot request on the user's internet-connected computer."""
+"""Resolve an exported Jev request on an internet-connected host."""
 
 import argparse
 import os
 from pathlib import Path
 
+from gepa.strategies.jev_constants import JEV_API_KEY_ENV
 from gepa.strategies.jev_controller import JevController
 from gepa.strategies.jev_handoff import load, resolve
 
@@ -37,7 +38,7 @@ def main() -> None:
     parser.add_argument("request", type=Path)
     parser.add_argument("--key-file", type=Path)
     args = parser.parse_args()
-    key = args.key_file.read_text().strip() if args.key_file else os.environ.get("TYPESAFE_API_KEY", "")
+    key = args.key_file.read_text().strip() if args.key_file else os.environ.get(JEV_API_KEY_ENV, "")
     response = resolve_saved_request(args.request, key)
     print(response)
 

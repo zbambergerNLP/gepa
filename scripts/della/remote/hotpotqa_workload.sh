@@ -144,18 +144,6 @@ if [[ "${HOTPOTQA_INITIAL_THROUGHPUT:-0}" == "1" && "${HOTPOTQA_PILOT_ONLY}" == 
         --text-limits "${HOTPOTQA_TEXT_LIMITS_JSON:-null}" --stage throughput
 fi
 
-if [[ "${HOTPOTQA_PILOT_ONLY}" == "1" && "${HOTPOTQA_PILOT_STAGE:-}" == "jev-quality" ]]; then
-    if [[ -z "${GEPA_JEV_HANDOFF_DIR:-}" ]]; then
-        export TYPESAFE_API_KEY="$(cat "${SCRATCH_BASE}/.secrets/typesafe-api-key")"
-    fi
-    "${PY}" -m examples.hotpotqa.jev_quality_pilot \
-        --model "${SOLVER_MODEL}" --api-base "${SOLVER_API_BASE}" \
-        --reflection-model "${REFLECTION_MODEL}" --reflection-api-base "${REFLECTION_API_BASE}" \
-        --wiki17-dir "${WIKI17_DIR}" --workers "${MAX_WORKERS}" \
-        --output-dir "${HOTPOTQA_PILOT_ROOT}/jev-quality"
-    exit 0
-fi
-
 if [[ "${HOTPOTQA_PILOT_ONLY}" == "1" ]]; then
     if [[ "${MODEL_PROFILE}" == "deepseek-teacher-qwen-student" ]]; then
         QUALIFICATION_STAGE="${HOTPOTQA_PILOT_STAGE:-preliminary}"

@@ -9,6 +9,12 @@ from typing import Any
 
 from examples.hotpotqa.runtime_canary import _validate_loopback_api_base
 from examples.hotpotqa.smoke_serving import _post_json, build_chat_request
+from gepa.lm_constants import PROVIDER_ATTEMPT_LOG
+
+PROBE_THINKING_TOKENS = 0
+PROBE_MAX_OUTPUT_TOKENS = 256
+PROBE_TIMEOUT_SECONDS = 120
+REASONING_END_MARKER = "</think>"
 
 
 def verify_thinking_budget(model: str, api_base: str, output_dir: Path) -> dict[str, Any]:
@@ -26,8 +32,8 @@ def verify_thinking_budget(model: str, api_base: str, output_dir: Path) -> dict[
     request = build_chat_request(model, model.removeprefix("hosted_vllm/"), api_base)
     request.update(
         messages=[{"role": "user", "content": "Think carefully before answering. Return the word ready."}],
-        thinking_token_budget=0,
-        max_tokens=256,
+        thinking_token_budget=PROBE_THINKING_TOKENS,
+        max_tokens=PROBE_MAX_OUTPUT_TOKENS,
         return_token_ids=True,
     )
     output_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
@@ -36,12 +42,12 @@ def verify_thinking_budget(model: str, api_base: str, output_dir: Path) -> dict[
     request_path.chmod(0o600)
     end_tokens = _post_json(
         f"{api_base.removesuffix('/v1')}/tokenize",
-        {"model": request["model"], "prompt": "</think>", "add_special_tokens": False},
-        120,
+        {"model": request["model"], "prompt": REASONING_END_MARKER, "add_special_tokens": False},
+        PROBE_TIMEOUT_SECONDS,
     )["tokens"]
     response = _post_json(
-        f"{api_base.rstrip('/')}/chat/completions", request, 120,
-        attempt_log=output_dir / "provider-attempts.jsonl",
+        f"{api_base.rstrip('/')}/chat/completions", request, PROBE_TIMEOUT_SECONDS,
+        attempt_log=output_dir / PROVIDER_ATTEMPT_LOG,
     )
     response_path = output_dir / "response.json"
     response_path.write_text(json.dumps(response, indent=2) + "\n")
@@ -56,7 +62,7 @@ def verify_thinking_budget(model: str, api_base: str, output_dir: Path) -> dict[
     boundary_verified = len(end_tokens) == 1 and tokens[:1] == end_tokens
     healthy = (
         boundary_verified
-        and reasoning_tokens in (None, 0)
+        and reasoning_tokens in (None, PROBE_THINKING_TOKENS)
         and choice.get("finish_reason") == "stop"
         and bool(content and content.strip())
     )
@@ -64,8 +70,8 @@ def verify_thinking_budget(model: str, api_base: str, output_dir: Path) -> dict[
         "status": "PASS" if healthy else "FAIL",
         "response_id": response.get("id"),
         "model": model,
-        "thinking_token_budget": 0,
-        "max_tokens": 256,
+        "thinking_token_budget": PROBE_THINKING_TOKENS,
+        "max_tokens": PROBE_MAX_OUTPUT_TOKENS,
         "finish_reason": choice.get("finish_reason"),
         "boundary_verified": boundary_verified,
         "first_generated_token": tokens[0] if tokens else None,

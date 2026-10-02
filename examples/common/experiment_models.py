@@ -4,12 +4,27 @@ from copy import deepcopy
 
 from packaging.version import Version
 
+from gepa.lm_constants import PROVIDER_SDK_RETRIES
+
+EXPERIMENT_CONTEXT_TOKENS = 262_144
+EXPERIMENT_MAX_OUTPUT_TOKENS = 16_384
+EXPERIMENT_TEMPERATURE = 1.0
+EXPERIMENT_TOP_P = 0.95
+
+QWEN3_8_27B_PROFILE = "qwen3.8-27b"
+DEEPSEEK_V4_1_FLASH_PROFILE = "deepseek-v4.1-flash"
+QWEN_MIN_VLLM_VERSION = "0.17.0"
+DEEPSEEK_VLLM_VERSION = "0.1.1.dev5+ge77daef89"
+QWEN_TOP_K = 20
+QWEN_REASONING_EFFORT = "medium"
+DEEPSEEK_REASONING_EFFORT = 75
+
 QWEN3_8_27B_REPO = "Qwen/Qwen3.8-27B"
 QWEN3_8_27B_MODEL = f"hosted_vllm/{QWEN3_8_27B_REPO}"
 QWEN3_8_27B_REVISION = "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
 QWEN3_8_27B_MODEL_INFO = {
-    "max_input_tokens": 262_144,
-    "max_output_tokens": 16_384,
+    "max_input_tokens": EXPERIMENT_CONTEXT_TOKENS,
+    "max_output_tokens": EXPERIMENT_MAX_OUTPUT_TOKENS,
     "input_cost_per_token": 0.0,
     "output_cost_per_token": 0.0,
 }
@@ -17,13 +32,13 @@ DEEPSEEK_V4_1_FLASH_REPO = "deepseek-ai/DeepSeek-V4.1-Flash"
 DEEPSEEK_V4_1_FLASH_MODEL = f"hosted_vllm/{DEEPSEEK_V4_1_FLASH_REPO}"
 DEEPSEEK_V4_1_FLASH_REVISION = "dba1be0a40aa45a94ad051997016db3960a90277"
 DEEPSEEK_V4_1_FLASH_MODEL_INFO = {
-    "max_input_tokens": 262_144,
-    "max_output_tokens": 16_384,
+    "max_input_tokens": EXPERIMENT_CONTEXT_TOKENS,
+    "max_output_tokens": EXPERIMENT_MAX_OUTPUT_TOKENS,
     "input_cost_per_token": 0.0,
     "output_cost_per_token": 0.0,
 }
 EXPERIMENT_MODELS = (QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL)
-EXPERIMENT_NUM_RETRIES = 0
+EXPERIMENT_NUM_RETRIES = PROVIDER_SDK_RETRIES
 
 _EXPERIMENT_MODEL_VERSIONS = {
     QWEN3_8_27B_MODEL: QWEN3_8_27B_REVISION,
@@ -36,15 +51,15 @@ _EXPERIMENT_MODEL_VERSIONS = {
 #          https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash
 _EXPERIMENT_DECODING = {
     QWEN3_8_27B_MODEL: {
-        "temperature": 1.0,
-        "top_p": 0.95,
-        "top_k": 20,
-        "max_tokens": 16_384,
+        "temperature": EXPERIMENT_TEMPERATURE,
+        "top_p": EXPERIMENT_TOP_P,
+        "top_k": QWEN_TOP_K,
+        "max_tokens": EXPERIMENT_MAX_OUTPUT_TOKENS,
     },
     DEEPSEEK_V4_1_FLASH_MODEL: {
-        "temperature": 1.0,
-        "top_p": 0.95,
-        "max_tokens": 16_384,
+        "temperature": EXPERIMENT_TEMPERATURE,
+        "top_p": EXPERIMENT_TOP_P,
+        "max_tokens": EXPERIMENT_MAX_OUTPUT_TOKENS,
     },
 }
 
@@ -53,14 +68,14 @@ _EXPERIMENT_REQUEST_OVERRIDES: dict[str, dict[str, object]] = {
         "extra_body": {
             "chat_template_kwargs": {
                 "enable_thinking": True,
-                "reasoning_effort": "medium",
+                "reasoning_effort": QWEN_REASONING_EFFORT,
             },
         }
     },
     DEEPSEEK_V4_1_FLASH_MODEL: {
         "extra_body": {
             "chat_template_kwargs": {
-                "reasoning_effort": 75,
+                "reasoning_effort": DEEPSEEK_REASONING_EFFORT,
                 "thinking": True,
             },
         }
@@ -176,11 +191,11 @@ def validate_experiment_vllm_version(model: str, version: str) -> None:
     """
     validate_experiment_model_pair(model, model)
     if model == DEEPSEEK_V4_1_FLASH_MODEL:
-        expected = "0.1.1.dev5+ge77daef89"
+        expected = DEEPSEEK_VLLM_VERSION
         if Version(version) != Version(expected):
             raise ValueError(f"{model} requires the pinned vLLM build {expected}; found {version}.")
         return
-    minimum = "0.17.0"
+    minimum = QWEN_MIN_VLLM_VERSION
     if Version(version) < Version(minimum):
         raise ValueError(f"{model} requires vLLM>={minimum}; found {version}.")
 

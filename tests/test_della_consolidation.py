@@ -147,6 +147,7 @@ def test_submit_expands_the_remote_script_without_running_jobs(tmp_path, profile
     script_dir = tmp_path / "scripts" / "della"
     script_dir.mkdir(parents=True)
     shutil.copy2(ROOT / "scripts/della/submit_hotpotqa.sh", script_dir)
+    shutil.copy2(ROOT / "scripts/della/runtime_constants.sh", script_dir)
     config = script_dir / ".env"
     config.write_text(
         "REMOTE_USER=testuser\nREMOTE_HOST=login.example\nREMOTE_VIS_HOST=vis.example\n"
@@ -341,7 +342,7 @@ def test_deepseek_smoke_uses_the_campaign_serving_arguments():
     assert arguments(campaign) == arguments(smoke)
     assert arguments(campaign)["--tensor-parallel-size"] == "4"
     assert json.loads(arguments(campaign)["--engram-config"]) == {"cpu_offload": True}
-    for setting in ("GEN_MAX_LEN=262144", "GEN_GMU=0.92"):
+    for setting in ('GEN_MAX_LEN="${FOREST_CONTEXT_TOKENS}"', 'GEN_GMU="${FOREST_GPU_MEMORY_UTILIZATION}"'):
         assert setting in campaign and setting in smoke
 
 

@@ -34,6 +34,7 @@ from gepa.adapters.terminal_bench_adapter.documents import seed_documents
 from gepa.adapters.terminal_bench_adapter.text_scope import DEFAULT_OPTIMIZATION_SCOPE, TerminalBenchTextScope
 from gepa.core.result import GEPAResult
 from gepa.core.state import GEPAState
+from gepa.strategies.forest_constants import DEFAULT_REFLECTION_LEVEL, PROPOSER_ROLE
 from gepa.strategies.text_limits import resolve_text_limits
 
 FROZEN_COMPARISON_FILENAME = "frozen-comparison.json"
@@ -88,7 +89,7 @@ def load_completed_run(
         raise ValueError(f"{run_dir}: expected the {optimization_scope} optimization scope")
     if contract.get("budget") != budget:
         raise ValueError(f"{run_dir}: expected the {budget} budget for {condition}")
-    if contract.get("reflection_level") != (2 if condition in FOREST_CONDITIONS else 0):
+    if contract.get("reflection_level") != (DEFAULT_REFLECTION_LEVEL if condition in FOREST_CONDITIONS else 0):
         raise ValueError(f"{run_dir}: reflection level does not match the campaign method {condition}")
     if contract.get("experiment") not in EXPERIMENT_MANIFESTS:
         raise ValueError(f"{run_dir}: only Terminal-Bench 2.1 runs may enter final comparison")
@@ -106,7 +107,7 @@ def load_completed_run(
             f"{run_dir}: expected a matching {condition} run on the complete training and validation splits"
         )
     validate_review(contract.get("pilot_review"), contract, manifest)
-    for role in ("student", "proposer"):
+    for role in ("student", PROPOSER_ROLE):
         validate_identity((contract.get("execution_runtime") or {}).get(role), contract[f"{role}_model"])
     state = GEPAState.load(str(run_dir))
     completed_iterations = state.i + 1

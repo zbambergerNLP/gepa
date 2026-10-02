@@ -168,7 +168,9 @@ def test_transport_recovery_has_one_shared_budget_and_does_not_perturb_rng(setup
     assert len({row["request_id"] for row in finished}) == 1
 
 
-@pytest.mark.parametrize("status, attempts", [(401, 1), (403, 1), (400, 1), (422, 1), (500, 4)])
+@pytest.mark.parametrize(
+    "status, attempts", [(401, 1), (403, 1), (400, 1), (422, 1), (408, 4), (429, 4), (500, 4), (501, 4), (599, 4)]
+)
 def test_terminal_failures_never_fall_back_to_generative_controller(setup_controller, monkeypatch, status, attempts):
     controller, requests, replies = setup_controller
     replies.extend([status] * 5)

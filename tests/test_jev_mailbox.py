@@ -1,4 +1,4 @@
-"""Keep a resident GPU pilot bound to one coordinator, job and frozen source."""
+"""Keep a resident GPU job bound to one coordinator, job and frozen source."""
 
 import time
 

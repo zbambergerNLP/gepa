@@ -20,8 +20,10 @@ from examples.terminalbench.model_settings import (
     terminalbench_model_info,
 )
 from examples.terminalbench.pilot import (
+    FULL_TASK_COUNT,
     PILOT_PROTOCOL,
     PILOT_SCHEMA_VERSION,
+    SMOKE_TASK_COUNT,
     complete_pilot,
     load_completed_pilot,
     validate_runtime,
@@ -41,6 +43,7 @@ from gepa.adapters.terminal_bench_adapter.text_scope import (
     OPTIMIZATION_SCOPES,
     TerminalBenchTextScope,
 )
+from gepa.lm_constants import TOKEN_USAGE_SUMMARY
 from gepa.strategies.text_limits import parse_text_limits, resolve_text_limits
 
 
@@ -68,7 +71,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.n_concurrent <= 0:
         parser.error("--n-concurrent must be positive")
     manifest = load_terminalbench_manifest(EXPERIMENT_MANIFESTS[args.experiment])
-    stage_limit = 30 if args.stage == "full" else 3
+    stage_limit = FULL_TASK_COUNT if args.stage == "full" else SMOKE_TASK_COUNT
     if args.stage != "calibration" and args.train_limit not in (None, stage_limit):
         parser.error(f"The {args.stage} stage requires exactly {stage_limit} training tasks")
     train_limit = args.train_limit if args.stage == "calibration" and args.train_limit is not None else stage_limit
@@ -152,7 +155,7 @@ def main(argv: list[str] | None = None) -> None:
         (args.output_dir / "task-results.json").write_text(json.dumps(batch.outputs, indent=2) + "\n")
     finally:
         report = summarize_usage([args.output_dir / "harbor"])
-        (args.output_dir / "token-usage-summary.json").write_text(json.dumps(report, indent=2) + "\n")
+        (args.output_dir / TOKEN_USAGE_SUMMARY).write_text(json.dumps(report, indent=2) + "\n")
     complete_pilot(args.output_dir, time.monotonic() - started)
     print(f"Review token usage, cutoffs, timeouts, and throughput: {args.output_dir / 'pilot-summary.json'}")
     if args.stage == "smoke":

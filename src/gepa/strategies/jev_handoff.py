@@ -9,13 +9,23 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from gepa.response_journal import ACTIVE_RESPONSE_JOURNAL_SCOPE, ResponseJournalError, canonical_request_digest
+from gepa.strategies.jev_constants import (
+    HANDOFF_ATTEMPT_LOG,
+    HANDOFF_ENV,
+    HANDOFF_EXIT_CODE,
+    HANDOFF_POLL_SECONDS,
+    HANDOFF_REQUEST_FILE,
+    HANDOFF_RESPONSE_FILE,
+    HANDOFF_SCHEMA_VERSION,
+    HANDOFF_STARTED_FILE,
+    HANDOFF_WAIT_SECONDS,
+    HANDOFF_WAITING_FILE,
+    JEV_PRIVATE_FILE_MODE,
+    JEV_QUESTION_NAME,
+)
 
 if TYPE_CHECKING:
     from gepa.strategies.jev_controller import JevController
-
-HANDOFF_ENV = "GEPA_JEV_HANDOFF_DIR"
-HANDOFF_EXIT_CODE = 75
-HANDOFF_WAIT_SECONDS = 300.0
 
 
 def save(path: Path, record: dict[str, Any]) -> None:
@@ -23,7 +33,7 @@ def save(path: Path, record: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(f".{os.getpid()}.tmp")
     with temporary.open("w") as stream:
-        os.chmod(temporary, 0o600)
+        os.chmod(temporary, JEV_PRIVATE_FILE_MODE)
         json.dump({"record": record, "sha256": canonical_request_digest(record)}, stream, allow_nan=False)
         stream.flush()
         os.fsync(stream.fileno())
@@ -44,7 +54,7 @@ def exchange(controller: JevController, request: dict[str, Any]) -> dict[str, An
     if not scope or controller._journal is None or controller._attempt_log is None:
         raise ResponseJournalError("Offline Jev requires durable response/attempt journals and a logical scope.")
     record = {
-        "schema": 1,
+        "schema": HANDOFF_SCHEMA_VERSION,
         "policy": controller.run_contract(),
         "namespace": controller.JOURNAL_NAMESPACE,
         "role": controller.ROLE,
@@ -55,15 +65,15 @@ def exchange(controller: JevController, request: dict[str, Any]) -> dict[str, An
     }
     key = canonical_request_digest(record)
     directory = Path(os.environ[HANDOFF_ENV]) / key
-    request_path = directory / "request.json"
+    request_path = directory / HANDOFF_REQUEST_FILE
     if request_path.exists():
         if load(request_path) != record:
             raise ResponseJournalError("Jev handoff identity changed.")
     else:
         save(request_path, record)
-    response_path = directory / "response.json"
+    response_path = directory / HANDOFF_RESPONSE_FILE
     if not response_path.exists():
-        save(directory / "waiting.json", {"request_sha256": key, "allocation": os.environ.get("SLURM_JOB_ID")})
+        save(directory / HANDOFF_WAITING_FILE, {"request_sha256": key, "allocation": os.environ.get("SLURM_JOB_ID")})
         print(f"JEV_HANDOFF_PENDING={request_path}", flush=True)
         deadline = time.monotonic() + HANDOFF_WAIT_SECONDS
         while not response_path.exists():
@@ -71,13 +81,13 @@ def exchange(controller: JevController, request: dict[str, Any]) -> dict[str, An
             if remaining <= 0:
                 print(f"JEV_HANDOFF_TIMEOUT={request_path}", flush=True)
                 raise SystemExit(HANDOFF_EXIT_CODE)
-            time.sleep(min(1.0, remaining))
+            time.sleep(min(HANDOFF_POLL_SECONDS, remaining))
     response = load(response_path)
     if response["request_sha256"] != key:
         raise ResponseJournalError("Jev handoff response belongs to another request.")
     payload = response.get("payload")
     if payload is not None:
-        controller._validate(payload["response"], set(request["questions"]["edit"]["criteria"]))
+        controller._validate(payload["response"], set(request["questions"][JEV_QUESTION_NAME]["criteria"]))
     existing = {}
     if controller._attempt_log.exists():
         for line in controller._attempt_log.read_text().splitlines():
@@ -108,24 +118,26 @@ def resolve(request_path: Path, controller: JevController) -> Path:
         raise ResponseJournalError("External resolver policy or request identity mismatch.")
     if request["namespace"] != controller.JOURNAL_NAMESPACE or request["role"] != controller.ROLE:
         raise ResponseJournalError("External resolver uses the wrong Jev role.")
-    response_path = request_path.with_name("response.json")
+    response_path = request_path.with_name(HANDOFF_RESPONSE_FILE)
     if response_path.exists():
         if load(response_path)["request_sha256"] != key:
             raise ResponseJournalError("Existing external response identity mismatch.")
         return response_path
     # A crash after a remote request can leave an unknown outcome. Never reroll it silently.
-    with request_path.with_name("started.json").open("x") as stream:
+    with request_path.with_name(HANDOFF_STARTED_FILE).open("x") as stream:
         json.dump({"request_sha256": key, "time_unix": time.time()}, stream)
         stream.flush()
         os.fsync(stream.fileno())
-    controller._attempt_log = request_path.with_name("external-attempts.jsonl")
+    controller._attempt_log = request_path.with_name(HANDOFF_ATTEMPT_LOG)
     if controller._attempt_log.exists():
         raise ResponseJournalError("External attempt log already exists without a result; review before recovery.")
     token = ACTIVE_RESPONSE_JOURNAL_SCOPE.set(request["scope"])
     payload = None
     error = None
     try:
-        payload = controller._live(request["request"], set(request["request"]["questions"]["edit"]["criteria"]))
+        payload = controller._live(
+            request["request"], set(request["request"]["questions"][JEV_QUESTION_NAME]["criteria"])
+        )
     except Exception as exc:
         error = type(exc).__name__
     finally:

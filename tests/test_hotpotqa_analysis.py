@@ -120,7 +120,6 @@ def create_completed_run(
         "candidates_explored": 3,
         "best_validation_exact_match": 0.5,
         "test_exact_match": 0.4,
-        "test_f1": 0.55,
         "test_example_count": 300,
         "diversity": {
             "summarize1": {
@@ -207,7 +206,6 @@ def create_completed_run(
             "candidate_sha256": final_metrics["candidate_sha256"],
             "example_count": final_metrics["test_example_count"],
             "exact_match": final_metrics["test_exact_match"],
-            "f1": final_metrics["test_f1"],
         },
     )
     if with_baseline:
@@ -221,7 +219,6 @@ def create_completed_run(
                 "candidate_sha256": baseline_digest(candidate_values[0]),
                 "example_count": 300,
                 "exact_match": 0.2,
-                "f1": 0.3,
             },
         )
         final_metrics.update(
@@ -229,7 +226,6 @@ def create_completed_run(
                 "schema_version": 2,
                 "baseline": load_baseline_record(run_dir, contract),
                 "test_exact_match_gain": 0.2,
-                "test_f1_gain": 0.25,
             }
         )
         write_json(run_dir / "final_metrics.json", final_metrics)
@@ -247,12 +243,13 @@ def test_analysis_verifies_and_reports_the_shared_baseline(tmp_path: Path) -> No
     for path in (first, second):
         report = analyze_run(path, fallback_tau=0.1)
         assert report["baseline"]["test_exact_match"] == 0.2
-        assert report["baseline"]["test_f1"] == 0.3
+        assert "test_f1" not in report["baseline"]
         assert report["test_exact_match_gain"] == pytest.approx(0.2)
-        assert report["test_f1_gain"] == pytest.approx(0.25)
+        assert "test_f1_gain" not in report
     markdown = render_markdown(reports)
-    assert "20.00% / 30.00%" in markdown
-    assert "+20.00 / +25.00" in markdown
+    assert "20.00%" in markdown
+    assert "F1" not in markdown
+    assert "+20.00" in markdown
 
 
 @pytest.mark.parametrize("damage", ["missing", "summary", "identity", "gain", "count", "unrecorded"])
@@ -428,7 +425,7 @@ def test_markdown_and_json_present_the_same_completed_runs(tmp_path: Path) -> No
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     assert "| Qwen3.8-27B | standard | `react_v2`" in markdown
     assert "| Qwen3.8-27B | standard | `react_v2` | 2 | 1/2 |" in markdown
-    assert payload["runs"][0]["test_f1"] == pytest.approx(0.55)
+    assert "test_f1" not in payload["runs"][0]
     assert payload["analysis_source_commit"] == "c" * 40
     assert not list(tmp_path.glob("*.part"))
 
@@ -544,3 +541,18 @@ def test_campaign_writer_requires_explicit_source_review_for_addition(tmp_path: 
     added["condition"] = "react_v2"
     with pytest.raises(ValueError, match="restricted"):
         write_campaign_analysis([first, added], tmp_path / "analysis.json", "c" * 40)
+
+
+def test_analysis_accepts_legacy_f1_fields_without_modifying_them(tmp_path: Path) -> None:
+    """Read EM from old artifacts while preserving their supplemental measurements."""
+    run_dir = create_completed_run(tmp_path, with_baseline=True)
+    path = run_dir / "final_metrics.json"
+    final = json.loads(path.read_text())
+    final.update(test_f1=0.55, test_f1_gain=0.25)
+    final["baseline"]["test_f1"] = 0.3
+    write_json(path, final)
+    before = path.read_bytes()
+    report = analyze_run(run_dir, fallback_tau=0.1)
+    assert report["test_exact_match"] == 0.4
+    assert "test_f1" not in report
+    assert path.read_bytes() == before

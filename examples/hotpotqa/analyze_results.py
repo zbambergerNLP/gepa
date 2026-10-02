@@ -447,7 +447,6 @@ def analyze_run(run_dir: Path, fallback_tau: float) -> dict[str, Any]:
     heldout_comparisons = (
         ("example_count", "test_example_count", int),
         ("exact_match", "test_exact_match", float),
-        ("f1", "test_f1", float),
     )
     for heldout_field, final_field, converter in heldout_comparisons:
         heldout_value = converter(heldout_summary.get(heldout_field, math.nan))
@@ -459,12 +458,12 @@ def analyze_run(run_dir: Path, fallback_tau: float) -> dict[str, Any]:
     if contract.get("schema_version", 0) >= 26 or "baseline_protocol" in contract:
         baseline = load_baseline_record(run_dir, contract)
         if (
-            final_metrics.get("baseline") != baseline
+            {key: (final_metrics.get("baseline") or {}).get(key) for key in baseline} != baseline
             or baseline["test_example_count"] != final_metrics["test_example_count"]
         ):
             raise ValueError(f"Starting-baseline evidence mismatch in {run_dir}.")
         baseline_metrics["baseline"] = baseline
-        for metric in ("test_exact_match", "test_f1"):
+        for metric in ("test_exact_match",):
             gain = float(final_metrics[metric]) - baseline[metric]
             if not math.isclose(float(final_metrics.get(f"{metric}_gain", math.nan)), gain, abs_tol=1e-12):
                 raise ValueError(f"Starting-baseline {metric} gain mismatch in {run_dir}.")
@@ -520,7 +519,6 @@ def analyze_run(run_dir: Path, fallback_tau: float) -> dict[str, Any]:
         "completed_component_proposals": completed_component_proposals,
         "best_validation_exact_match": float(final_metrics["best_validation_exact_match"]),
         "test_exact_match": float(final_metrics["test_exact_match"]),
-        "test_f1": float(final_metrics["test_f1"]),
         "test_example_count": int(final_metrics["test_example_count"]),
         **baseline_metrics,
         "candidate_diversity": candidate_diversity(raw_candidates),
@@ -614,20 +612,20 @@ def render_markdown(reports: Sequence[Mapping[str, Any]]) -> str:
         Two GitHub-flavored Markdown tables.
     """
     lines = [
-        "| model | tree | condition | calls | candidates | best val EM | test EM | test F1 | baseline EM/F1 | gain EM/F1 (pp) |",
-        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|",
+        "| model | tree | condition | calls | candidates | best val EM | test EM | baseline EM | gain EM (pp) |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|",
     ]
     for report in reports:
         baseline = report.get("baseline")
         baseline_scores = gains = "-"
         if baseline is not None:
-            baseline_scores = f"{baseline['test_exact_match']:.2%} / {baseline['test_f1']:.2%}"
-            gains = f"{report['test_exact_match_gain'] * 100:+.2f} / {report['test_f1_gain'] * 100:+.2f}"
+            baseline_scores = f"{baseline['test_exact_match']:.2%}"
+            gains = f"{report['test_exact_match_gain'] * 100:+.2f}"
         lines.append(
             f"| {report['model_label']} | {report['budget_profile']} | `{report['condition']}` "
             f"| {report['total_metric_calls']:,} | {report['candidates_explored']} "
             f"| {report['best_validation_exact_match']:.2%} | {report['test_exact_match']:.2%} "
-            f"| {report['test_f1']:.2%} | {baseline_scores} | {gains} |"
+            f"| {baseline_scores} | {gains} |"
         )
 
     lines.extend(

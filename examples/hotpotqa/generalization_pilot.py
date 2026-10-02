@@ -33,7 +33,7 @@ from examples.hotpotqa.main import (
 )
 from examples.hotpotqa.pilot import observed_kwargs
 from examples.hotpotqa.tracking import HotpotqaWandb, provider_usage
-from examples.hotpotqa.utils import HOTPOTQA_HF_REVISION, f1_score, load_hotpotqa_dataset
+from examples.hotpotqa.utils import HOTPOTQA_HF_REVISION, load_hotpotqa_dataset
 from gepa.lm_constants import PROVIDER_ATTEMPT_LOG
 from gepa.strategies.forest_constants import (
     DEFAULT_REFLECTION_MINIBATCH_SIZE,
@@ -103,12 +103,10 @@ def evaluate_records(directory: Path, candidate: dict, examples: list[dict], eva
                 raise ValueError(f"Evaluation record changed: {path}")
             return saved["record"]
         score, feedback = evaluate(candidate, example)
-        prediction = feedback.get("final_answer_specific_info", {}).get("Generated Outputs", {}).get("answer", "")
         record = {
             "id": example["id"],
             "identity": identity,
             "score": score,
-            "f1": f1_score(prediction, example["answer"]),
             "feedback": feedback,
             "allocation": os.environ.get("SLURM_JOB_ID"),
         }

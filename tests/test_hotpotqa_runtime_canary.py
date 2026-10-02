@@ -105,6 +105,44 @@ def test_edit_probe_rejects_finish_without_edit(tmp_path: Path) -> None:
     assert lm.complete_with_tools.call_count == 1
 
 
+@pytest.mark.parametrize("editor_mode", ["react", "single_call"])
+def test_delete_probe_removes_the_cause_of_its_feedback(editor_mode: str) -> None:
+    """Align the deletion fixture with its feedback while retaining the real gate."""
+    lm = Mock(spec=LM)
+    lm.complete_with_tools.side_effect = [
+        ToolCompletion(
+            "",
+            (NativeToolCall("delete-1", "DELETE_TEXT", json.dumps({"target": "Include unsupported conclusions."})),),
+        ),
+        ToolCompletion("<finish>Done.</finish>", ()),
+    ]
+
+    assert runtime_canary._edit_probe(lm, EditTool.DELETE_TEXT, 6, editor_mode=editor_mode) == 0
+
+    messages = lm.complete_with_tools.call_args_list[0].args[0]
+    prompt = "\n".join(message["content"] for message in messages)
+    assert "Include unsupported conclusions." in prompt
+    assert "Avoid unsupported conclusions." not in prompt
+    assert "the answer stated an unsupported conclusion" in prompt
+    assert "Verify every claim." in prompt
+    assert "Cite primary sources." in prompt
+    assert lm.complete_with_tools.call_count == (1 if editor_mode == "single_call" else 2)
+
+
+@pytest.mark.parametrize("editor_mode", ["react", "single_call"])
+def test_delete_probe_still_rejects_a_noop(editor_mode: str, tmp_path: Path) -> None:
+    """Keep no-op evidence and refuse to pass the compatibility gate without an edit."""
+    lm = Mock(spec=LM)
+    lm.complete_with_tools.return_value = ToolCompletion("<finish>No edit applies.</finish>", ())
+    result_log = tmp_path / "edits.jsonl"
+
+    with pytest.raises(runtime_canary.RuntimeCanaryError, match="did not complete"):
+        runtime_canary._edit_probe(lm, EditTool.DELETE_TEXT, 6, result_log, editor_mode)
+
+    assert not json.loads(result_log.read_text())["result"]["changed"]
+    assert lm.complete_with_tools.call_count == 1
+
+
 @pytest.mark.parametrize(
     "api_base",
     [

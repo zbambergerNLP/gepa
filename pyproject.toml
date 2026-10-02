@@ -20,6 +20,7 @@ requires-python = ">=3.10, <3.15"
 dependencies = []
 
 [project.optional-dependencies]
+jev = ["typesafe-sdk==0.7.1"]
 full = [
     # Common dependencies (all Python versions)
     # litellm 1.92.0 introduced a native extension and publishes manylinux
@@ -53,7 +54,7 @@ confidence = [
 ]
 dspy = []
 test = [
-    "gepa[full]",
+    "gepa[full,jev]",
     "pytest",
     "pyright"
 ]

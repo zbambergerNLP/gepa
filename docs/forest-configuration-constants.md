@@ -8,6 +8,7 @@ precedence. This refactor does not change any default or scientific setting.
 | --- | --- |
 | Provider retries, backoff, response-error codes, usage artifact names | `src/gepa/lm_constants.py` |
 | Controller selection, Editor modes, tool sets, role names, reflection defaults | `src/gepa/strategies/forest_constants.py` |
+| Jev provider policy, probability tolerances, pricing and handoff protocol | `src/gepa/strategies/jev_constants.py` |
 | Action sampling support and verbalized candidate count | `src/gepa/strategies/action_space.py` |
 | Model identities, revisions, decoding, context capacity and provider effort | `examples/common/experiment_models.py` |
 | HotPotQA role output/thinking budgets and request timeout | `examples/hotpotqa/model_settings.py` |

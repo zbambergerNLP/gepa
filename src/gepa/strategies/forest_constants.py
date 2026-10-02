@@ -4,6 +4,7 @@ from typing import Final
 
 VERBALIZED_SELECTION: Final = "verbalized"
 UNIFORM_RANDOM_SELECTION: Final = "uniform_random"
+JEV_SELECTION: Final = "jev"
 REACT_EDITOR_MODE: Final = "react"
 SINGLE_CALL_EDITOR_MODE: Final = "single_call"
 MINIMAL_EDIT_TOOL_SET: Final = "minimal"

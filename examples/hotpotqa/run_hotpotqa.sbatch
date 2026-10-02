@@ -159,7 +159,7 @@ if [[ ! "${HOTPOTQA_ENV_SPEC_SHA256}" =~ ^[0-9a-f]{64}$ \
     exit 1
 fi
 if ! "${GEPA_UV_BIN}" sync --python "${HOTPOTQA_PYTHON_VERSION}" --frozen --check --no-install-project \
-    --extra dev --extra wiki17 --group hotpotqa-task-program; then
+    --extra dev --extra wiki17 --extra jev --group hotpotqa-task-program; then
     echo "ERROR: GEPA environment has drifted from uv.lock" >&2
     exit 1
 fi

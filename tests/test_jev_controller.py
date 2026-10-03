@@ -7,18 +7,20 @@ from types import SimpleNamespace
 
 import httpx2
 import pytest
+from test_generation_recovery import Roles
 from test_three_role import PROMPT, SYS_REFLECTIVE_DATASET, make_reflective_proposer, strategy
 from test_wikipedia_react_v2_config import _hotpot_args
 from typesafe_sdk import RetryPolicy, TypeSafeClient
 
 from examples.hotpotqa.main import _run_key, build_config, build_parser, build_run_contract
 from gepa.lm import LMRequestExhaustedError
-from gepa.proposer.reflective_mutation.three_role import ensure_reflection_run_contract
+from gepa.proposer.reflective_mutation.three_role import ThreeRoleReflectionLM, ensure_reflection_run_contract
 from gepa.response_journal import ResponseJournalError, response_journal_scope
 from gepa.strategies.document_template import TEMPLATES
 from gepa.strategies.edit_tools import EDIT_TOOL_SETS
 from gepa.strategies.intervention import SEMANTIC_ACTIONS, build_controller_menu
 from gepa.strategies.jev_controller import JEV_MODEL, JevController, JevControllerError
+from gepa.strategies.reflection_context import REAL_EDIT_GUIDANCE
 
 
 @pytest.fixture
@@ -116,6 +118,116 @@ def select(controller, rng=None, traces="full training evidence"):
         traces=traces,
         rng=rng or random.Random(0),
     )
+
+
+def recovery_strategy(controller, roles):
+    return ThreeRoleReflectionLM(
+        roles,
+        level=2,
+        controller_selection="jev",
+        jev_controller=controller,
+        base_lm_run_identity={"test": "roles"},
+        rng=random.Random(0),
+    )
+
+
+def recover(reflection):
+    return reflection.reflect(
+        {"sys": PROMPT},
+        SYS_REFLECTIVE_DATASET,
+        ["sys"],
+        metadata={"candidate_idx": 0, "iteration_id": "test", "minibatch_ids": [0]},
+    )[0]
+
+
+@pytest.mark.parametrize("failure", ["finish", "empty", "manifestor"])
+def test_jev_no_edit_recovery_uses_one_distribution_and_preserves_evidence(setup_controller, failure):
+    controller, requests, _ = setup_controller
+
+    class OnceIncompatible(Roles):
+        def __call__(self, prompt):
+            self.incompatible = failure == "manifestor" and not self.manifestor_prompts
+            return super().__call__(prompt)
+
+    roles = OnceIncompatible([failure] if failure != "manifestor" else [])
+    reflection = recovery_strategy(controller, roles)
+    proposal = recover(reflection)
+    assert proposal.new_texts and not roles.controller_prompts
+    assert len(requests) == 1
+    assert requests[0]["state"]["training_evidence"] == json.dumps(
+        SYS_REFLECTIVE_DATASET["sys"], sort_keys=True, ensure_ascii=False
+    )
+    assert REAL_EDIT_GUIDANCE in requests[0]["questions"]["edit"]["instructions"]
+    plan = proposal.metadata["controller_plans"]["sys"]["controller_sampling"]
+    records = proposal.metadata["attempt_records"]
+    assert records[0]["action_choice"] == plan["sampled"][0] == "reexpress@Rules/REPLACE_TEXT"
+    assert plan["physical_attempts"] == 1
+    assert {r["controller_sampling"]["source_request_id"] for r in records} == {plan["request_id"]}
+    assert len({r["action_choice"] for r in records}) == len(records)
+    assert all("physical_attempts" not in r["controller_sampling"] for r in records)
+    if failure == "empty":
+        assert len(records) == 1 and len(roles.editor_tasks) == 2
+    else:
+        assert len(records) >= 2 and records[0]["attempt_status"] == "generation_error"
+    contract = reflection.run_contract({"sys": PROMPT})
+    assert contract["react_execution"]["max_iterations"] == 2
+    assert contract["controller"]["model"] == JEV_MODEL
+
+
+def test_jev_recovery_resumes_without_repeating_the_controller_request(setup_controller, tmp_path):
+    controller, requests, _ = setup_controller
+    interrupted = recovery_strategy(controller, Roles(["finish"], interrupt_at=1))
+    interrupted.recovery_planner.bind_run_dir(str(tmp_path))
+    before = interrupted.get_state()
+    with pytest.raises(KeyboardInterrupt):
+        recover(interrupted)
+    resumed_roles = Roles()
+    resumed = recovery_strategy(controller, resumed_roles)
+    resumed.recovery_planner.bind_run_dir(str(tmp_path))
+    resumed.set_state(before)
+    proposal = recover(resumed)
+    assert proposal.new_texts and len(requests) == 1
+    assert proposal.metadata["generation_error_count"] >= 1
+    assert not resumed_roles.controller_prompts
+    assert len(resumed_roles.editor_tasks) == 1
+
+
+def test_jev_provider_exhaustion_does_not_trigger_pair_recovery(setup_controller, monkeypatch):
+    controller, requests, replies = setup_controller
+    replies.extend([500] * 5)
+    monkeypatch.setattr("gepa.strategies.jev_controller.time.sleep", lambda _: None)
+    roles = Roles()
+    with pytest.raises(JevControllerError):
+        recover(recovery_strategy(controller, roles))
+    assert len(requests) == 4
+    assert not roles.manifestor_prompts and not roles.editor_tasks
+
+
+def test_jev_recovery_preserves_first_sample_then_tries_remaining_positive_support(setup_controller):
+    controller, requests, replies = setup_controller
+
+    def weighted(request):
+        result = response(request)
+        answer = result["answers"]["edit"]
+        answer["probabilities"] = {
+            key: 0.7
+            if key == "reexpress@Rules/REPLACE_TEXT"
+            else 0.3
+            if key == "contextualize@Role/INSERT_TEXT"
+            else 0.0
+            for key in answer["probabilities"]
+        }
+        return httpx2.Response(200, json=result)
+
+    replies.append(weighted)
+    proposal = recover(recovery_strategy(controller, Roles(["finish"])))
+    records = proposal.metadata["attempt_records"]
+    plan = proposal.metadata["controller_plans"]["sys"]["controller_sampling"]
+    assert len(requests) == 1 and len(records) == 2
+    assert records[0]["action_choice"] == plan["sampled"][0]
+    assert records[0]["controller_sampling"]["sampled_probabilities"] == pytest.approx(plan["sampled_probabilities"])
+    assert {r["action_choice"] for r in records} == {"reexpress@Rules/REPLACE_TEXT", "contextualize@Role/INSERT_TEXT"}
+    assert records[1]["controller_sampling"]["phase"] == "positive"
 
 
 def test_live_sdk_request_preserves_constraints_evidence_and_cost(setup_controller, tmp_path):

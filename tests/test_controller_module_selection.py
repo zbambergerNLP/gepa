@@ -8,14 +8,17 @@ from unittest.mock import Mock
 
 import httpx2
 import pytest
+from test_generation_recovery import Roles
 from test_jev_controller import setup_controller as _setup_controller
 from test_three_role import PROMPT, ThreeRoleLM, strategy, tool_call
 from test_wikipedia_react_v2_config import _hotpot_args
 
 from examples.hotpotqa.main import _run_key, build_config, build_parser, build_run_contract
 from gepa import optimize
+from gepa.core.adapter import EvaluationBatch
 from gepa.gepa_launcher import EngineConfig, GEPAConfig, ReflectionConfig, optimize_anything
-from gepa.proposer.reflective_mutation.three_role import ensure_reflection_run_contract
+from gepa.proposer.reflective_mutation.generation_recovery import GenerationRecoveryError
+from gepa.proposer.reflective_mutation.three_role import ThreeRoleReflectionLM, ensure_reflection_run_contract
 from gepa.response_journal import ResponseJournalError, response_journal_scope
 from gepa.strategies.component_selector import AllReflectionComponentSelector
 from gepa.strategies.document_template import TEMPLATE_FAMILIES, TEMPLATES
@@ -29,6 +32,52 @@ EVIDENCE = {
     for name in CANDIDATE
 }
 EDIT = tool_call(EditTool.REPLACE_TEXT, target="be nice", text="be kind")
+
+
+class JointRecoveryRoles(Roles):
+    """Score the joint menu once and exercise the real Manifestor/Editor protocol."""
+
+    def __call__(self, prompt):
+        if prompt.startswith("Validate and manifest"):
+            return super().__call__(prompt)
+        self.controller_prompts.append(prompt)
+        options = [line[2:].split(": ", 1)[0] for line in prompt.splitlines() if line.startswith("- ") and ": " in line]
+        chosen = f"component_{b'answer'.hex()}::reexpress@Rules/REPLACE_TEXT"
+        assert chosen in options
+        return (
+            "<response>"
+            + "".join(
+                f"<candidate><action>{key}</action><reasoning>Repair answer wording.</reasoning>"
+                f"<probability>{int(key == chosen)}</probability></candidate>"
+                for key in options
+            )
+            + "</response>"
+        )
+
+
+def joint_recovery(roles, backend, controller):
+    """Configure the default recovery policy with explicit joint selection."""
+    reflection = ThreeRoleReflectionLM(
+        roles,
+        level=2,
+        rng=random.Random(0),
+        controller_selection=backend,
+        jev_controller=controller if backend == "jev" else None,
+        base_lm_run_identity={"test": "joint-recovery"},
+        editor_mode="single_call",
+    )
+    reflection.bind_module_selector("controller")
+    return reflection
+
+
+def recover_joint(reflection):
+    """Use stable parent and training identities for generation and replay."""
+    return reflection.reflect(
+        CANDIDATE,
+        EVIDENCE,
+        list(CANDIDATE),
+        metadata={"candidate_idx": 0, "iteration_id": "joint-recovery", "minibatch_ids": [0]},
+    )[0]
 
 
 @pytest.fixture
@@ -80,6 +129,146 @@ def jev_response(request):
             },
         },
     )
+
+
+@pytest.mark.parametrize("backend", ["verbalized", "jev"])
+@pytest.mark.parametrize("failure", ["finish", "empty", "unchanged", "manifestor"])
+def test_joint_recovery_reuses_one_distribution_after_generation_failure(backend, failure, setup_controller):
+    controller, requests, replies = setup_controller
+    replies.append(jev_response)
+
+    class OnceIncompatible(JointRecoveryRoles):
+        def __call__(self, prompt):
+            self.incompatible = failure == "manifestor" and not self.manifestor_prompts
+            return super().__call__(prompt)
+
+    roles = OnceIncompatible([failure] if failure != "manifestor" else [])
+    before = deepcopy(CANDIDATE)
+    proposal = recover_joint(joint_recovery(roles, backend, controller))
+    assert CANDIDATE == before
+    assert len(proposal.new_texts) == 1
+    name, text = next(iter(proposal.new_texts.items()))
+    assert text != CANDIDATE[name]
+    records = proposal.metadata["attempt_records"]
+    assert records[0]["component"] == "answer"
+    assert records[-1]["component"] == name
+    assert len({r["action_choice"] for r in records}) == len(records)
+    assert proposal.metadata["generation_error_count"] == (0 if failure == "empty" else 1)
+    assert set(proposal.metadata["controller_plans"]) == {"joint"}
+    assert len(requests) == int(backend == "jev")
+    assert len(roles.controller_prompts) == int(backend == "verbalized")
+    context = json.dumps(requests[0]["state"]) if requests else roles.controller_prompts[0]
+    assert all(name + " mismatch" in context for name in CANDIDATE)
+    if failure == "empty":
+        assert len(records) == 1
+        first, correction = roles.editor_tasks
+        assert {key: correction[key] for key in first} == first
+        assert "native_protocol_correction" in correction
+    else:
+        assert len(records) == 2
+        assert records[0]["attempt_status"] == "generation_error"
+
+
+@pytest.mark.parametrize("backend", ["verbalized", "jev"])
+def test_joint_recovery_exhausts_both_modules_without_rescoring(backend, setup_controller):
+    controller, requests, replies = setup_controller
+    replies.append(jev_response)
+    roles = JointRecoveryRoles(incompatible=True)
+    proposal = recover_joint(joint_recovery(roles, backend, controller))
+    records = proposal.metadata["attempt_records"]
+    assert not proposal.new_texts and proposal.metadata["generation_exhausted"]
+    assert {row["component"] for row in records} == set(CANDIDATE)
+    assert len({row["action_choice"] for row in records}) == len(records)
+    assert len(records) == len(proposal.metadata["controller_plans"]["joint"]["entries"])
+    assert proposal.metadata["generation_error_count"] == len(records)
+    assert not roles.editor_tasks
+    assert len(requests) + len(roles.controller_prompts) == 1
+
+
+@pytest.mark.parametrize("backend", ["verbalized", "jev"])
+def test_joint_recovery_replays_failed_attempt_and_rng_without_new_controller_call(backend, setup_controller, tmp_path):
+    controller, requests, replies = setup_controller
+    replies.append(jev_response)
+    interrupted = joint_recovery(JointRecoveryRoles(["finish"], interrupt_at=1), backend, controller)
+    interrupted.recovery_planner.bind_run_dir(str(tmp_path / "recovery"))
+    before = interrupted.get_state()
+    with pytest.raises(KeyboardInterrupt):
+        recover_joint(interrupted)
+    roles = JointRecoveryRoles()
+    resumed = joint_recovery(roles, backend, controller)
+    resumed.recovery_planner.bind_run_dir(str(tmp_path / "recovery"))
+    resumed.set_state(before)
+    actual = recover_joint(resumed)
+    assert not roles.controller_prompts
+    assert len(requests) == int(backend == "jev")
+    assert len(roles.editor_tasks) == 1
+    replies.append(jev_response)
+    expected_lm = joint_recovery(JointRecoveryRoles(["finish"]), backend, controller)
+    expected = recover_joint(expected_lm)
+    assert actual.new_texts == expected.new_texts
+    actual_record = deepcopy(actual.metadata["attempt_records"][0])
+    expected_record = deepcopy(expected.metadata["attempt_records"][0])
+    # The uninterrupted reference makes its own physical Jev request.
+    actual_record["controller_sampling"].pop("source_request_id")
+    expected_record["controller_sampling"].pop("source_request_id")
+    assert actual_record == expected_record
+    assert resumed.rng.getstate() == expected_lm.rng.getstate()
+
+
+@pytest.mark.parametrize("backend", ["verbalized", "jev"])
+@pytest.mark.parametrize("child_score", [0.0, 0.25, 0.5])
+def test_joint_engine_retries_generation_but_never_scored_ties_or_losses(
+    backend, child_score, setup_controller, tmp_path
+):
+    controller, requests, replies = setup_controller
+    replies.append(jev_response)
+    roles = JointRecoveryRoles(["finish"])
+    reflection = joint_recovery(roles, backend, controller)
+
+    class Adapter:
+        propose_new_texts = None
+
+        def __init__(self):
+            self.evaluations = []
+
+        def evaluate(self, batch, candidate, capture_traces=False):
+            self.evaluations.append(deepcopy(candidate))
+            return EvaluationBatch(
+                outputs=["answer"] * len(batch),
+                scores=[0.25 if candidate == CANDIDATE else child_score] * len(batch),
+                trajectories=[{}] * len(batch) if capture_traces else None,
+            )
+
+        def make_reflective_dataset(self, candidate, evaluation, components):
+            return {name: EVIDENCE[name] for name in components}
+
+    adapter = Adapter()
+    result = optimize(
+        seed_candidate=CANDIDATE,
+        trainset=[1, 2, 3],
+        valset=[4, 5],
+        adapter=adapter,
+        reflection_strategy=reflection,
+        module_selector="controller",
+        reflection_minibatch_size=3,
+        max_metric_calls=8,
+        run_dir=str(tmp_path / "run"),
+        display_progress_bar=False,
+        raise_on_exception=True,
+    )
+    assert len(adapter.evaluations) == (4 if child_score > 0.25 else 3)
+    assert len(result.candidates) == (2 if child_score > 0.25 else 1)
+    assert len(roles.editor_tasks) == 2
+    assert len(requests) + len(roles.controller_prompts) == 1
+    assert sum(adapter.evaluations[2][name] != CANDIDATE[name] for name in CANDIDATE) == 1
+
+
+def test_joint_recovery_rejects_round_robin_checkpoint():
+    reflection = joint_recovery(JointRecoveryRoles(), "verbalized", None)
+    joint_contract = reflection.recovery_planner.get_state()
+    reflection.bind_module_selector("round_robin")
+    with pytest.raises(GenerationRecoveryError, match="identity mismatch"):
+        reflection.recovery_planner.set_state(joint_contract)
 
 
 @pytest.mark.parametrize("backend", ["verbalized", "jev"])

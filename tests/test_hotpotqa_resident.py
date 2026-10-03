@@ -21,10 +21,11 @@ from examples.hotpotqa.main import TEACHER_RUNTIME_KEYS, build_run_contract
 ROOT = Path(__file__).parents[1]
 
 
-@pytest.mark.parametrize("changes", [{}, {"max_metric_calls": 13742}, {"condition": "vanilla"}, {"seed": 1}])
+@pytest.mark.parametrize("budget", [6871, 13742])
+@pytest.mark.parametrize("changes", [{}, {"max_metric_calls": 10000}, {"condition": "vanilla"}, {"seed": 1}])
 @pytest.mark.parametrize("module_selector", ["round_robin", "controller"])
-def test_jev_full_run_keeps_scientific_guards(monkeypatch, changes, module_selector):
-    """Admit the explicit Jev comparison while rejecting budget, method and seed drift."""
+def test_jev_full_run_keeps_scientific_guards(monkeypatch, budget, changes, module_selector):
+    """Admit both approved budgets while rejecting unapproved budget, method and seed drift."""
     for name, value in QWEN_SCIENTIFIC_RUNTIME.items():
         monkeypatch.setenv(name, value)
     teacher = {
@@ -34,7 +35,7 @@ def test_jev_full_run_keeps_scientific_guards(monkeypatch, changes, module_selec
     args = _hotpot_args(
         **{
             "condition": "react_v2",
-            "max_metric_calls": 6871,
+            "max_metric_calls": budget,
             "controller_selection": "jev",
             "module_selector": module_selector,
             "enforce_scientific_contract": True,
@@ -58,8 +59,9 @@ def test_jev_full_run_keeps_scientific_guards(monkeypatch, changes, module_selec
         assert contract["optimizer"]["component_selector"] == module_selector
 
 
-@pytest.mark.parametrize("problem", [None, "coordinator", "pilot", "budget", "controller"])
-def test_resident_entrypoint_checks_coordinator_before_models(tmp_path, problem):
+@pytest.mark.parametrize("profile,budget", [("standard", "6871"), ("expanded", "13742")])
+@pytest.mark.parametrize("problem", [None, "coordinator", "pilot", "budget", "controller", "profile"])
+def test_resident_entrypoint_checks_coordinator_before_models(tmp_path, profile, budget, problem):
     """Refuse invalid exports and stale coordinators before starting GPU processes."""
     source = tmp_path / "sources" / ("a" * 40)
     source.mkdir(parents=True)
@@ -76,19 +78,20 @@ def test_resident_entrypoint_checks_coordinator_before_models(tmp_path, problem)
         "HOTPOTQA_PILOT_ONLY": "0",
         "MODEL_PROFILE": "deepseek-teacher-qwen-student",
         "CONDITION": "react_v2",
-        "BUDGET_PROFILE": "standard",
-        "MAX_METRIC_CALLS": "6871",
+        "BUDGET_PROFILE": profile,
+        "MAX_METRIC_CALLS": budget,
         "HOTPOTQA_CONTROLLER_SELECTION": "jev",
         "SCRATCH_BASE": str(tmp_path),
         "HOTPOTQA_SOURCE_COMMIT": "a" * 40,
         "GEPA_UV_BIN": str(bin_dir / "uv"),
         "GEPA_VENV_DIR": str(tmp_path / "venv"),
     }
-    if problem in {"pilot", "budget", "controller"}:
+    if problem in {"pilot", "budget", "controller", "profile"}:
         key, value = {
             "pilot": ("HOTPOTQA_PILOT_ONLY", "1"),
-            "budget": ("MAX_METRIC_CALLS", "13742"),
+            "budget": ("MAX_METRIC_CALLS", "13742" if budget == "6871" else "6871"),
             "controller": ("HOTPOTQA_CONTROLLER_SELECTION", "verbalized"),
+            "profile": ("BUDGET_PROFILE", "unapproved"),
         }[problem]
         settings[key] = value
     export = tmp_path / "prepared.env"
@@ -120,7 +123,8 @@ def test_resident_entrypoint_checks_coordinator_before_models(tmp_path, problem)
 
 
 @pytest.mark.parametrize("probe_status", [0, 1])
-def test_full_jev_run_requires_the_exact_editor_canary(tmp_path, probe_status):
+@pytest.mark.parametrize("controller", ["jev", "verbalized"])
+def test_full_run_requires_the_exact_editor_canary(tmp_path, probe_status, controller):
     """Run the strict canary on a new full-run identity and stop on failure."""
     source = (ROOT / "scripts/della/remote/hotpotqa_workload.sh").read_text()
     start = source.index('if [[ "${REFLECTION_MODEL}" ==')
@@ -139,7 +143,7 @@ def test_full_jev_run_requires_the_exact_editor_canary(tmp_path, probe_status):
         "REFLECTION_MODEL": DEEPSEEK_V4_1_FLASH_MODEL,
         "HOTPOTQA_CANARY_ONLY": "0",
         "HOTPOTQA_PILOT_ONLY": "0",
-        "HOTPOTQA_CONTROLLER_SELECTION": "jev",
+        "HOTPOTQA_CONTROLLER_SELECTION": controller,
     }
     result = subprocess.run(
         ["bash", "-c", "set -euo pipefail\nGEN_PID=$$\ngenerator_reports_expected_model() { return 0; }\n" + block],

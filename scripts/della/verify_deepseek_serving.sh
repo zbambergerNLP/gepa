@@ -35,13 +35,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+source "${REPO_ROOT}/scripts/della/runtime_constants.sh"
 cd "${REPO_ROOT}"
 
 MODEL_STORAGE="${MODEL_STORAGE:-/projects/BSTEWART/model_storage}"
 MODEL="DeepSeek-V4.1-Flash"
 SOLVER_MODEL_PATH="${MODEL_STORAGE}/${MODEL}"
-SOLVER_SERVED_NAME="deepseek-ai/DeepSeek-V4.1-Flash"
-SOLVER_MODEL="hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash"
+SOLVER_SERVED_NAME="${FOREST_DEEPSEEK_REPO}"
+SOLVER_MODEL="${FOREST_DEEPSEEK_MODEL}"
 SERVING_VENV_DIR="${SERVING_VENV_DIR:-${REPO_ROOT}/.serving-venv-deepseek-v4.1-flash}"
 GEPA_VENV_DIR="${GEPA_VENV_DIR:-${REPO_ROOT}/.venv}"
 SCRATCH_BASE="${SCRATCH_BASE:-/scratch/gpfs/BSTEWART/${USER}/gepa}"
@@ -50,14 +51,14 @@ HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-3600}"
 VERIFY_ATTEMPTS="${VERIFY_ATTEMPTS:-4}"
 VERIFY_TIMEOUT="${VERIFY_TIMEOUT:-3600}"
 # Same serving values as run_hotpotqa.sbatch.
-GEN_GMU=0.92
-GEN_MAX_LEN=262144
+GEN_GMU="${FOREST_GPU_MEMORY_UTILIZATION}"
+GEN_MAX_LEN="${FOREST_CONTEXT_TOKENS}"
 VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-1}"
 case "${VLLM_MAX_NUM_SEQS}" in
     1|2|4) ;;
     *) echo "ERROR: VLLM_MAX_NUM_SEQS must be 1, 2, or 4" >&2; exit 1 ;;
 esac
-VLLM_MAX_NUM_BATCHED_TOKENS="${VLLM_MAX_NUM_BATCHED_TOKENS:-16384}"
+VLLM_MAX_NUM_BATCHED_TOKENS="${VLLM_MAX_NUM_BATCHED_TOKENS:-${FOREST_MAX_BATCHED_TOKENS}}"
 
 VLLM_PY="${SERVING_VENV_DIR}/bin/python"
 VLLM_BIN="${SERVING_VENV_DIR}/bin/vllm"
@@ -113,7 +114,7 @@ export VLLM_LOGGING_LEVEL=INFO
 export VLLM_USE_FLASHINFER_SAMPLER=0
 export FLASHINFER_WORKSPACE_BASE="${SCRATCH_BASE}"
 export FLASHINFER_NO_DOWNLOAD=1
-export VLLM_ENGINE_READY_TIMEOUT_S=3600
+export VLLM_ENGINE_READY_TIMEOUT_S="${FOREST_ENGINE_READY_TIMEOUT_SECONDS}"
 LOG_DIR="${SCRATCH_BASE}/logs/hotpotqa/verify"
 # Everything this run produces lands in one directory named after the Slurm job.
 RUN_DIR="${LOG_DIR}/${SLURM_JOB_ID:-$(date +%Y%m%dT%H%M%S)-$$}"

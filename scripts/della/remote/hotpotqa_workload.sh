@@ -6,6 +6,10 @@ python() { "${GEPA_UV_BIN}" run --no-project --python "${GEPA_VENV_DIR}/bin/pyth
 PY=python
 HOTPOTQA_EDITOR_MODE="${HOTPOTQA_EDITOR_MODE:-react}"
 HOTPOTQA_CONTROLLER_SELECTION="${HOTPOTQA_CONTROLLER_SELECTION:-verbalized}"
+HOTPOTQA_REFLECTION_MINIBATCH_SIZE="${HOTPOTQA_REFLECTION_MINIBATCH_SIZE:-3}"
+if [[ ! "${HOTPOTQA_REFLECTION_MINIBATCH_SIZE}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: HOTPOTQA_REFLECTION_MINIBATCH_SIZE must be a positive integer" >&2; exit 1
+fi
 HOTPOTQA_MODULE_SELECTOR="${HOTPOTQA_MODULE_SELECTOR:-round_robin}"
 case "${HOTPOTQA_MODULE_SELECTOR}" in
     round_robin) ;;
@@ -81,9 +85,7 @@ if [[ "${REFLECTION_MODEL}" == "hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash" ]];
     fi
     DEEPSEEK_CANARY_MARKER="${DEEPSEEK_CANARY_DIR}/${CANARY_IDENTITY_SHA256}.ok"
     mkdir -p "${DEEPSEEK_CANARY_DIR}"
-    if [[ "${HOTPOTQA_CANARY_ONLY}" == "1" \
-        || ( ( "${HOTPOTQA_PILOT_ONLY}" == "1" || "${HOTPOTQA_CONTROLLER_SELECTION}" == "jev" ) \
-             && ! -f "${DEEPSEEK_CANARY_MARKER}" ) ]]; then
+    if [[ "${HOTPOTQA_CANARY_ONLY}" == "1" || ! -f "${DEEPSEEK_CANARY_MARKER}" ]]; then
         echo "==> running the fail-closed DeepSeek multi-tool canary"
         "${PY}" -m examples.hotpotqa.runtime_canary \
             --model "${REFLECTION_MODEL}" \
@@ -157,18 +159,6 @@ if [[ "${HOTPOTQA_INITIAL_THROUGHPUT:-0}" == "1" && "${HOTPOTQA_PILOT_ONLY}" == 
         --output-dir "${HOTPOTQA_PILOT_ROOT:?pilot output root required}" \
         --editor-mode "${HOTPOTQA_EDITOR_MODE}" "${TRACKING_ARGS[@]}" \
         --text-limits "${HOTPOTQA_TEXT_LIMITS_JSON:-null}" --stage throughput
-fi
-
-if [[ "${HOTPOTQA_PILOT_ONLY}" == "1" && "${HOTPOTQA_PILOT_STAGE:-}" == "jev-quality" ]]; then
-    if [[ -z "${GEPA_JEV_HANDOFF_DIR:-}" ]]; then
-        export TYPESAFE_API_KEY="$(cat "${SCRATCH_BASE}/.secrets/typesafe-api-key")"
-    fi
-    "${PY}" -m examples.hotpotqa.jev_quality_pilot \
-        --model "${SOLVER_MODEL}" --api-base "${SOLVER_API_BASE}" \
-        --reflection-model "${REFLECTION_MODEL}" --reflection-api-base "${REFLECTION_API_BASE}" \
-        --wiki17-dir "${WIKI17_DIR}" --workers "${MAX_WORKERS}" \
-        --output-dir "${HOTPOTQA_PILOT_ROOT}/jev-quality"
-    exit 0
 fi
 
 if [[ "${HOTPOTQA_PILOT_ONLY}" == "1" ]]; then
@@ -281,6 +271,7 @@ echo "==> retrieval=Wiki-2017/BM25 k=7 concurrent_examples=${MAX_WORKERS} root=$
     "${SOLVER_API_ARG[@]}" \
     "${REFLECTION_API_ARG[@]}" \
     --max-metric-calls "${MAX_METRIC_CALLS}" \
+    --reflection-minibatch-size "${HOTPOTQA_REFLECTION_MINIBATCH_SIZE}" \
     --condition "${CONDITION}" \
     --controller-selection "${HOTPOTQA_CONTROLLER_SELECTION}" \
     --module-selector "${HOTPOTQA_MODULE_SELECTOR}" \

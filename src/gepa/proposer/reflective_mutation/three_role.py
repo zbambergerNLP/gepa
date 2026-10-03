@@ -22,6 +22,7 @@ from dataclasses import replace
 from typing import Any
 
 from gepa.proposer.reflective_mutation.base import LanguageModel, ReflectionComponentSelector
+from gepa.proposer.reflective_mutation.generation_recovery import RECOVERY_POLICY_CONTRACT, GenerationRecoveryPlanner
 from gepa.proposer.reflective_mutation.manifestor import (
     ManifestationError,
     Manifestor,
@@ -34,9 +35,18 @@ from gepa.proposer.reflective_mutation.reflection_lm import (
 )
 from gepa.proposer.reflective_mutation.single_call_proposer import SINGLE_CALL_EXECUTION_CONTRACT, SingleCallProposer
 from gepa.response_journal import stable_api_base_identity
-from gepa.strategies.action_space import IncompleteActionDistributionError
+from gepa.strategies.action_space import DEFAULT_VERBALIZED_ACTION_K, IncompleteActionDistributionError
 from gepa.strategies.document_template import TEMPLATE_FAMILIES, DocumentTemplate, MalformedDocumentError
 from gepa.strategies.edit_tools import EDIT_TOOL_SETS
+from gepa.strategies.forest_constants import (
+    BROAD_EDIT_TOOL_SET,
+    JEV_SELECTION,
+    REACT_EDITOR_MODE,
+    SEMANTIC_REFLECTION_LEVEL,
+    SINGLE_CALL_EDITOR_MODE,
+    UNIFORM_RANDOM_SELECTION,
+    VERBALIZED_SELECTION,
+)
 from gepa.strategies.intervention import (
     CONTROLLER_COMPONENT_SELECTION_CONTRACT,
     CONTROLLER_POLICY_CONTRACT,
@@ -59,7 +69,7 @@ from gepa.strategies.text_limits import TextLimitError, TextLimits, clip_text, r
 MAX_HISTORY_STEPS = 16
 MAX_HISTORY_EDIT_ENTRIES = 32
 REFLECTION_RUN_CONTRACT_FILENAME = "reflection-run-contract.json"
-_CONTROLLER_SELECTIONS = ("verbalized", "uniform_random", "jev")
+_CONTROLLER_SELECTIONS = (VERBALIZED_SELECTION, UNIFORM_RANDOM_SELECTION, JEV_SELECTION)
 _SENSITIVE_CONFIG_KEYS = {
     "access_token",
     "api_key",
@@ -315,9 +325,9 @@ def _uniform_controller_sampling_record(
         "exploration_epsilon": 0.0,
         "used_full_fallback": False,
         "entropy_bits": math.log2(len(menu)),
-        "policy": "joint_region_action_uniform_v1" if level >= 2 else "region_uniform_v1",
+        "policy": "joint_region_action_uniform_v1" if level >= SEMANTIC_REFLECTION_LEVEL else "region_uniform_v1",
     }
-    if level >= 2:
+    if level >= SEMANTIC_REFLECTION_LEVEL:
         record["joint_sampling_probability"] = probability
     return record
 
@@ -446,13 +456,13 @@ class ThreeRoleReflectionLM:
         base_lm: LanguageModel,
         level: int,
         *,
-        edit_tool_set: str = "broad",
+        edit_tool_set: str = BROAD_EDIT_TOOL_SET,
         component_kinds: dict[str, str] | None = None,
         template_family: str = "generic",
         templates: Mapping[str, DocumentTemplate] | None = None,
-        k: int = 5,
+        k: int = DEFAULT_VERBALIZED_ACTION_K,
         tau: float | None = None,
-        controller_selection: str = "verbalized",
+        controller_selection: str = VERBALIZED_SELECTION,
         jev_controller: JevController | None = None,
         rng: random.Random | None = None,
         logger: Any | None = None,
@@ -468,7 +478,8 @@ class ThreeRoleReflectionLM:
         proposer_model: str | None = None,
         react_max_iterations: int | None = None,
         react_max_tool_calls: int | None = None,
-        editor_mode: str = "react",
+        editor_mode: str = REACT_EDITOR_MODE,
+        proposal_policy: str = "real_edit",
         text_limits: TextLimits | None = None,
     ):
         """Validate and store the complete three-role strategy configuration.
@@ -507,10 +518,14 @@ class ThreeRoleReflectionLM:
                 Manifestor model.
             manifestor_traces_chars: Maximum trace characters shown to the
                 Manifestor.
-            editor_mode: Multi-turn ``react`` or one-response ``single_call`` editing.
+            editor_mode: Legacy multi-turn ``react`` or one-response ``single_call`` editing.
+            proposal_policy: ``real_edit`` retries failed generation for level-2
+                generative, Jev and random Controllers. ``independent`` retains
+                historical behavior; lower-level Controllers are unchanged.
             proposer_model: Model identifier persisted in the run contract.
             react_max_iterations: Maximum ReAct turns, or ``None`` for no limit.
             react_max_tool_calls: Maximum valid calls, or ``None`` for no limit.
+            text_limits: Optional document, section and role-context character budgets.
 
         Raises:
             ValueError: A level, tool set, Controller selection, template
@@ -524,11 +539,13 @@ class ThreeRoleReflectionLM:
             raise ValueError(
                 f"controller_selection must be one of {list(_CONTROLLER_SELECTIONS)}; got {controller_selection!r}"
             )
-        if level == 0 and controller_selection != "verbalized":
+        if level == 0 and controller_selection != VERBALIZED_SELECTION:
             raise ValueError("controller_selection must be 'verbalized' when reflection level is 0")
-        if controller_selection == "jev" and (level != 2 or jev_controller is None or controller_lm is not None):
+        if controller_selection == JEV_SELECTION and (
+            level != SEMANTIC_REFLECTION_LEVEL or jev_controller is None or controller_lm is not None
+        ):
             raise ValueError("Jev requires level 2, a jev_controller, and no generative controller_lm.")
-        if controller_selection != "jev" and jev_controller is not None:
+        if controller_selection != JEV_SELECTION and jev_controller is not None:
             raise ValueError("jev_controller requires controller_selection='jev'.")
         if template_family not in TEMPLATE_FAMILIES:
             raise ValueError(f"template_family must be one of {sorted(TEMPLATE_FAMILIES)}; got {template_family!r}")
@@ -537,12 +554,21 @@ class ThreeRoleReflectionLM:
             if kind not in self.templates:
                 raise ValueError(f"component_kinds[{name!r}] must be one of {sorted(self.templates)}; got {kind!r}")
 
-        if editor_mode not in {"react", "single_call"}:
+        if editor_mode not in {REACT_EDITOR_MODE, SINGLE_CALL_EDITOR_MODE}:
             raise ValueError("editor_mode must be react or single_call")
-        if editor_mode == "single_call" and edit_tool_set != "broad":
+        if proposal_policy not in {"real_edit", "independent"}:
+            raise ValueError("proposal_policy must be real_edit or independent")
+        self.recovery_planner = (
+            GenerationRecoveryPlanner(self)
+            if proposal_policy == "real_edit" and level == SEMANTIC_REFLECTION_LEVEL
+            else None
+        )
+        if self.recovery_planner is not None:
+            editor_mode = SINGLE_CALL_EDITOR_MODE
+        if editor_mode == SINGLE_CALL_EDITOR_MODE and edit_tool_set != BROAD_EDIT_TOOL_SET:
             raise ValueError("Single-call editing requires the broad direct-tool basis")
         self.editor_mode = editor_mode
-        self.proposer_backend = "single_call" if editor_mode == "single_call" else "react_v2"
+        self.proposer_backend = SINGLE_CALL_EDITOR_MODE if editor_mode == SINGLE_CALL_EDITOR_MODE else "react_v2"
         self.base_lm = base_lm
         self.level = level
         self.edit_tool_set = edit_tool_set
@@ -596,9 +622,19 @@ class ThreeRoleReflectionLM:
     def bind_module_selector(self, module_selector: ReflectionComponentSelector | str) -> None:
         """Let the Controller choose a component only for the explicit opt-in mode."""
         enabled = isinstance(module_selector, str) and module_selector == "controller"
-        if enabled and (self.level != 2 or self.controller_selection not in {"verbalized", "jev"}):
+        if enabled and (
+            self.level != SEMANTIC_REFLECTION_LEVEL or self.controller_selection not in {VERBALIZED_SELECTION, "jev"}
+        ):
             raise ValueError("Controller component selection requires level 2 and a verbalized or Jev Controller.")
         self.controller_selects_component = enabled
+        if self.recovery_planner is not None:
+            self.recovery_planner.contract = deepcopy(RECOVERY_POLICY_CONTRACT)
+            if enabled:
+                self.recovery_planner.contract.update(
+                    component_selection=deepcopy(CONTROLLER_COMPONENT_SELECTION_CONTRACT),
+                    recovery="remaining_joint_component_section_action_choices_without_replacement",
+                    controller_distribution="one_joint_distribution_per_opportunity",
+                )
 
     def _component_kind(self, name: str) -> str:
         """Resolve a candidate component to its role-specific template key.
@@ -644,22 +680,22 @@ class ThreeRoleReflectionLM:
         controller: dict[str, Any]
         if self.jev_controller is not None:
             controller = self.jev_controller.run_contract()
-        elif self.level >= 2 and self.controller_selection == "uniform_random":
+        elif self.level >= SEMANTIC_REFLECTION_LEVEL and self.controller_selection == UNIFORM_RANDOM_SELECTION:
             controller = {
                 **UNIFORM_RANDOM_CONTROLLER_POLICY_CONTRACT,
                 "max_menu": self.max_menu,
             }
-        elif self.level >= 2:
+        elif self.level >= SEMANTIC_REFLECTION_LEVEL:
             controller = {
-                **CONTROLLER_POLICY_CONTRACT,
+                **(self.recovery_planner.contract if self.recovery_planner else CONTROLLER_POLICY_CONTRACT),
                 "tau": self.tau,
                 "max_menu": self.max_menu,
             }
-        elif self.controller_selection == "uniform_random":
+        elif self.controller_selection == UNIFORM_RANDOM_SELECTION:
             controller = {
                 "version": 1,
                 "factorization": "region_only",
-                "selection": "uniform_random",
+                "selection": UNIFORM_RANDOM_SELECTION,
                 "sampling": "uniform over all candidates",
                 "context": "none",
                 "max_menu": self.max_menu,
@@ -677,12 +713,12 @@ class ThreeRoleReflectionLM:
         proposer_lm_identity = _language_model_run_identity(self.base_lm, self.base_lm_run_identity)
         controller_lm_identity = (
             _language_model_run_identity(self.controller_lm, self.controller_lm_run_identity)
-            if self.level >= 1 and self.controller_selection == "verbalized"
+            if self.level >= 1 and self.controller_selection == VERBALIZED_SELECTION
             else None
         )
         manifestor_lm_identity = (
             _language_model_run_identity(self.manifestor_lm, self.manifestor_lm_run_identity)
-            if self.level >= 2
+            if self.level >= SEMANTIC_REFLECTION_LEVEL
             else None
         )
         unstable_roles = [
@@ -701,6 +737,23 @@ class ThreeRoleReflectionLM:
                 "base_lm_run_identity, controller_lm_run_identity, or manifestor_lm_run_identity "
                 "when constructing ThreeRoleReflectionLM with custom callables."
             )
+        max_proposer_model_calls = 1 if self.editor_mode == "single_call" else self.react_max_iterations
+        execution_contract = dict(
+            SINGLE_CALL_EXECUTION_CONTRACT if self.editor_mode == "single_call" else REACT_V2_EXECUTION_CONTRACT
+        )
+        if self.recovery_planner is not None:
+            max_proposer_model_calls = 2 * sum(
+                len(self.templates[kind].sections) * len(SEMANTIC_ACTION_CATALOGS[self.templates[kind].kind]["actions"])
+                for kind in component_kinds.values()
+            )
+            execution_contract.update(
+                version=2,
+                completion="atomic_batch_with_optional_native_protocol_correction",
+                unchanged_finish="generation_error_then_replan",
+                invalid_batch="atomic_rollback_then_replan_another_pair",
+                missing_native_calls="one_same_action_protocol_correction_then_replan",
+                max_responses_per_pair=2,
+            )
         return {
             "schema_version": 11,
             "strategy": "three_role_reflection",
@@ -714,7 +767,7 @@ class ThreeRoleReflectionLM:
             "controller": controller,
             "semantic_action_spaces": (
                 {kind: deepcopy(SEMANTIC_ACTION_CATALOGS[self.templates[kind].kind]) for kind in active_kinds}
-                if self.level >= 2
+                if self.level >= SEMANTIC_REFLECTION_LEVEL
                 else None
             ),
             "max_chars": self.max_chars,
@@ -723,27 +776,36 @@ class ThreeRoleReflectionLM:
             "manifestor_traces_chars": self.manifestor_traces_chars,
             "reflection_context": deepcopy(REFLECTION_CONTEXT_CONTRACT),
             "generalization": {
-                **deepcopy(FOREST_REFLECTION_CONTRACT),
-                **({"controller_direction": "Jev selects the pair; Manifestor derives the edit direction from evidence"}
-                   if self.jev_controller is not None else {}),
+                **deepcopy(self.recovery_planner.contract if self.recovery_planner else FOREST_REFLECTION_CONTRACT),
+                **(
+                    {
+                        "controller_direction": "Jev selects the pair; Manifestor derives the edit direction from evidence"
+                    }
+                    if self.jev_controller is not None
+                    else {}
+                ),
             },
             "manifestor_delivery": "user_message",
             "branch_history": {
                 "storage": "target_scoped_user_assistant_messages",
                 "direct_deepseek_native_delivery": "quoted_user_context",
-                "other_delivery": "quoted_user_context" if self.editor_mode == "single_call" else "provider_chat_messages",
+                "other_delivery": "quoted_user_context"
+                if self.editor_mode == SINGLE_CALL_EDITOR_MODE
+                else "provider_chat_messages",
             },
             "proposer_model": self.proposer_model,
             "proposer_backend": self.proposer_backend,
             "proposer_lm": proposer_lm_identity,
             "controller_lm": controller_lm_identity,
             "manifestor_lm": manifestor_lm_identity,
-            "max_proposer_model_calls": 1 if self.editor_mode == "single_call" else self.react_max_iterations,
+            "max_proposer_model_calls": max_proposer_model_calls,
             "react_max_iterations": self.react_max_iterations,
             "react_max_tool_calls": self.react_max_tool_calls,
             "react_execution": {
-                **(SINGLE_CALL_EXECUTION_CONTRACT if self.editor_mode == "single_call" else REACT_V2_EXECUTION_CONTRACT),
-                "max_iterations": 1 if self.editor_mode == "single_call" else self.react_max_iterations,
+                **execution_contract,
+                "max_iterations": 2
+                if self.recovery_planner is not None
+                else (1 if self.editor_mode == SINGLE_CALL_EDITOR_MODE else self.react_max_iterations),
                 "max_tool_calls": self.react_max_tool_calls,
             },
         }
@@ -760,7 +822,9 @@ class ThreeRoleReflectionLM:
         """
         for name, text in candidate.items():
             template = self.templates[self._component_kind(name)]
-            if self.level >= 2 and not SEMANTIC_ACTION_CATALOGS.get(template.kind, {}).get("actions"):
+            if self.level >= SEMANTIC_REFLECTION_LEVEL and not SEMANTIC_ACTION_CATALOGS.get(template.kind, {}).get(
+                "actions"
+            ):
                 raise ValueError(
                     f"Component {name!r} uses document kind {template.kind!r}, which has no level-2 semantic catalog."
                 )
@@ -799,7 +863,9 @@ class ThreeRoleReflectionLM:
             Serializable RNG snapshot. Branch-local user and assistant history
             remains in :class:`GEPAState` rather than this strategy object.
         """
-        state = {"rng_state": self.rng.getstate()}
+        state: dict[str, Any] = {"rng_state": self.rng.getstate()}
+        if self.recovery_planner is not None:
+            state["generation_recovery"] = self.recovery_planner.get_state()
         return state
 
     def get_batch_retry_state(self) -> dict[str, Any]:
@@ -811,7 +877,7 @@ class ThreeRoleReflectionLM:
         """
         if self._stateless is not None:
             return self._stateless.get_batch_retry_state()
-        state: dict[str, Any] = {"rng_state": self.rng.getstate()}
+        state: dict[str, Any] = self.get_state()
         base_cursor = getattr(self.base_lm, "response_journal_cursor_state", None)
         if callable(base_cursor):
             state["base_lm_cursor"] = base_cursor()
@@ -843,7 +909,7 @@ class ThreeRoleReflectionLM:
         rng_state = state.get("rng_state")
         if not isinstance(rng_state, tuple):
             raise TypeError("ThreeRoleReflectionLM retry rng_state must be a tuple.")
-        self.rng.setstate(rng_state)
+        self.set_state(state)
         jev_cursor = state.get("jev_controller_cursor")
         if jev_cursor is not None:
             if self.jev_controller is None:
@@ -882,6 +948,8 @@ class ThreeRoleReflectionLM:
         if not isinstance(rng_state, tuple):
             raise TypeError("Persisted ThreeRoleReflectionLM rng_state must be a tuple")
         self.rng.setstate(rng_state)
+        if self.recovery_planner is not None:
+            self.recovery_planner.set_state(state.get("generation_recovery", {}))
         if self._stateless is not None:
             self._stateless.bind_rng(self.rng)
 
@@ -958,6 +1026,8 @@ class ThreeRoleReflectionLM:
         if self._stateless is not None:
             proposal, _ = self._stateless.reflect(candidate, reflective_dataset, components_to_update)
             return proposal, self
+        if self.recovery_planner is not None:
+            return self.recovery_planner.generate(candidate, reflective_dataset, components_to_update, metadata), self
         return self._reflect_operated(candidate, reflective_dataset, components_to_update, metadata)
 
     def reflect_many(
@@ -982,8 +1052,13 @@ class ThreeRoleReflectionLM:
         if len(contexts) != len(jobs):
             raise ValueError(f"Expected {len(jobs)} metadata records; got {len(contexts)}")
         return [
-            self.reflect(candidate, dataset, components, metadata=context)
-            for (candidate, dataset, components), context in zip(jobs, contexts, strict=True)
+            self.reflect(
+                candidate,
+                dataset,
+                components,
+                metadata={**(context or {}), "proposal_slot": index} if self.recovery_planner else context,
+            )
+            for index, ((candidate, dataset, components), context) in enumerate(zip(jobs, contexts, strict=True))
         ]
 
     def _select_action(
@@ -1052,17 +1127,17 @@ class ThreeRoleReflectionLM:
                 traces=context["training_evidence"],
                 rng=self.rng,
             )
-        elif self.controller_selection == "uniform_random":
+        elif self.controller_selection == UNIFORM_RANDOM_SELECTION:
             action = self.rng.choice(menu)
             controller_sampling = _uniform_controller_sampling_record(menu, action, self.level)
         else:
             controller = Controller(
                 menu,
                 self.controller_lm,
-                k=len(menu) if self.level >= 2 else self.k,
+                k=len(menu) if self.level >= SEMANTIC_REFLECTION_LEVEL else self.k,
                 tau=self.tau,
                 rng=self.rng,
-                require_full_support=self.level >= 2,
+                require_full_support=self.level >= SEMANTIC_REFLECTION_LEVEL,
                 text_limits=self.text_limits,
             )
             action = controller.select(
@@ -1082,7 +1157,7 @@ class ThreeRoleReflectionLM:
                     + clip_text(controller_traces, self.text_limits.controller_feedback_chars)
                 ),
             )[0]
-            if self.level >= 2:
+            if self.level >= SEMANTIC_REFLECTION_LEVEL:
                 controller_sampling = _joint_controller_sampling_record(controller.history[-1])
             else:
                 controller_sampling = _controller_sampling_record(controller.history[-1])
@@ -1104,6 +1179,9 @@ class ThreeRoleReflectionLM:
         reflective_dataset: Mapping[str, Sequence[Mapping[str, Any]]],
         components_to_update: list[str],
         metadata: Mapping[str, Any] | None,
+        *,
+        selected: tuple[ControllerChoice, dict[str, Any], str | None] | None = None,
+        require_edit: bool = False,
     ) -> tuple[ReflectionProposal, ThreeRoleReflectionLM]:
         """Run Controller, optional Manifestor, and ReAct V2 per component.
 
@@ -1112,6 +1190,8 @@ class ThreeRoleReflectionLM:
             reflective_dataset: Per-component run evidence.
             components_to_update: Components selected for mutation.
             metadata: Parent-specific chat history and iteration anchors.
+            selected: Planner-selected action, sampling evidence, and direction.
+            require_edit: Return generation errors for invalid or unchanged edits.
 
         Returns:
             Reflection proposal and this strategy.
@@ -1123,7 +1203,9 @@ class ThreeRoleReflectionLM:
         controller_failures: list[dict[str, str]] = []
         dropped: list[str] = []
 
-        groups = [components_to_update] if self.controller_selects_component else [[name] for name in components_to_update]
+        groups = (
+            [components_to_update] if self.controller_selects_component else [[name] for name in components_to_update]
+        )
         for group in groups:
             names = [name for name in group if reflective_dataset.get(name)]
             if not names:
@@ -1131,11 +1213,19 @@ class ThreeRoleReflectionLM:
                     self.logger.log(f"Components {group!r} have no reflective evidence. Skipping.")
                 continue
             try:
-                action, controller_sampling, controller_direction = self._select_action(
-                    candidate, reflective_dataset, names,
-                )
+                if selected is not None:
+                    action, controller_sampling, controller_direction = selected
+                else:
+                    action, controller_sampling, controller_direction = self._select_action(
+                        candidate,
+                        reflective_dataset,
+                        names,
+                    )
             except IncompleteActionDistributionError as exc:
-                error = _bounded_history_text(exc, self.text_limits.history_text_chars) or "Controller action distribution failed."
+                error = (
+                    _bounded_history_text(exc, self.text_limits.history_text_chars)
+                    or "Controller action distribution failed."
+                )
                 controller_failures.extend({"component": name, "error": error} for name in names)
                 dropped.extend(names)
                 if self.logger is not None:
@@ -1154,7 +1244,7 @@ class ThreeRoleReflectionLM:
             region_text = section_bodies[section]
             history = _branch_history(metadata, action.edit_target.label)
             steering_message = None
-            if self.level >= 2:
+            if self.level >= SEMANTIC_REFLECTION_LEVEL:
                 manifestor = Manifestor(
                     self.manifestor_lm,
                     self.logger,
@@ -1168,6 +1258,7 @@ class ThreeRoleReflectionLM:
                         feedback,
                         traces,
                         controller_direction=controller_direction,
+                        require_edit=require_edit,
                     )
                 except ManifestationError as exc:
                     error = _bounded_history_text(exc, self.text_limits.history_text_chars)
@@ -1201,7 +1292,7 @@ class ThreeRoleReflectionLM:
                                 }
                             ],
                             "dropped_reason": error,
-                            "attempt_status": "dropped",
+                            "attempt_status": "generation_error" if require_edit else "dropped",
                             "tracking_id": _tracking_id(action),
                             "branch_history_length": len(history),
                             **failed_proposer_record,
@@ -1212,7 +1303,7 @@ class ThreeRoleReflectionLM:
                         self.logger.log(f"Component {name!r} dropped after Manifestor failure: {exc}")
                     continue
 
-            proposer_class = SingleCallProposer if self.editor_mode == "single_call" else ReActV2Proposer
+            proposer_class = SingleCallProposer if self.editor_mode == SINGLE_CALL_EDITOR_MODE else ReActV2Proposer
             react = proposer_class(
                 self.base_lm,
                 template,
@@ -1240,6 +1331,7 @@ class ThreeRoleReflectionLM:
                 history,
                 self.max_chars,
                 controller_direction=controller_direction,
+                **({"require_edit": True} if require_edit else {}),
             )
             proposer_record = {
                 "react_iterations": result.iterations,
@@ -1265,7 +1357,11 @@ class ThreeRoleReflectionLM:
             new_component = None
             if result.changed:
                 new_component = template.replace_section_body(text, section, result.new_text)
-                if self.max_chars is not None and len(new_component) > self.max_chars:
+                if require_edit and new_component == text:
+                    result.changed = False
+                    result.dropped_reason = "The batch produced no net change after canonical section rendering."
+                    new_component = None
+                elif self.max_chars is not None and len(new_component) > self.max_chars:
                     result.changed = False
                     result.dropped_reason = (
                         f"Edited component is {len(new_component)} characters, exceeding max_chars={self.max_chars}."
@@ -1288,7 +1384,9 @@ class ThreeRoleReflectionLM:
                 "action_target_section": section,
                 "preferred_edit_tool": preferred_edit_tool,
                 "semantic_action": semantic_action,
-                "steering_message": _bounded_history_text(steering_message, self.text_limits.history_text_chars) if steering_message is not None else "",
+                "steering_message": _bounded_history_text(steering_message, self.text_limits.history_text_chars)
+                if steering_message is not None
+                else "",
                 "manifestor_delivery": "user_message",
                 "feedback": _bounded_history_text(feedback, self.text_limits.history_text_chars),
                 "controller_sampling": controller_sampling,
@@ -1299,7 +1397,9 @@ class ThreeRoleReflectionLM:
                     for value in list(result.executed_edit)[:MAX_HISTORY_EDIT_ENTRIES]
                 ],
                 "dropped_reason": _bounded_history_text(result.dropped_reason, self.text_limits.history_text_chars),
-                "attempt_status": "completed" if result.changed else "dropped",
+                "attempt_status": "completed"
+                if result.changed
+                else ("generation_error" if require_edit else "dropped"),
                 "tracking_id": _tracking_id(action),
                 "branch_history_length": len(history),
                 **proposer_record,

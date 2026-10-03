@@ -134,9 +134,9 @@ class ReflectiveMutationProposer:
         self.action_selector = action_selector
         inherited_limits = getattr(reflection_strategy, "text_limits", None)
         self.text_limits = resolve_text_limits(
-            text_limits if text_limits is not None else (
-                inherited_limits if isinstance(inherited_limits, TextLimits) else None
-            )
+            text_limits
+            if text_limits is not None
+            else (inherited_limits if isinstance(inherited_limits, TextLimits) else None)
         )
         if text_limits is not None and reflection_strategy is not None:
             strategy_limits = getattr(reflection_strategy, "text_limits", None)
@@ -378,6 +378,9 @@ class ReflectiveMutationProposer:
         if not jobs:
             return []
         mds: list[Mapping[str, Any] | None] = metadatas if metadatas is not None else [None] * len(jobs)
+        if getattr(self._reflection_lm, "recovery_planner", None) is not None:
+            # Generation recovery owns retries; provider and integrity failures must not rerun the batch.
+            return list(self._propose_texts_batch(jobs, mds))
         retry_state_getter = getattr(self._reflection_lm, "get_batch_retry_state", None)
         retry_state_setter = getattr(self._reflection_lm, "set_batch_retry_state", None)
         retry_state = retry_state_getter() if callable(retry_state_getter) else None
@@ -689,6 +692,8 @@ class ReflectiveMutationProposer:
                 "iteration_id": iteration_id,
                 "parent_iteration_id": state.iteration_id_for_candidate_idx(p[0].parent_idx),
                 "candidate_idx": p[0].parent_idx,
+                "minibatch_ids": list(p[0].minibatch_ids),
+                "optimizer_iteration": state.i,
                 "branch_edit_history": deepcopy(state.revision_history_by_candidate[p[0].parent_idx]),
             }
             for p in prepared
@@ -726,12 +731,16 @@ class ReflectiveMutationProposer:
                 # attempted proposal produced no completed edit.
                 dropped = (reflection_metadata or {}).get("length_capped_dropped")
                 attempt_records = (reflection_metadata or {}).get("attempt_records")
-                if dropped or attempt_records:
+                if dropped or attempt_records or (reflection_metadata or {}).get("generation_exhausted"):
                     state.record_proposal_attempts(
                         task.parent_idx,
                         reflection_metadata,
-                        outcome="dropped",
-                        reason="Reflection attempt produced no completed text update.",
+                        outcome="generation_exhausted"
+                        if reflection_metadata.get("generation_exhausted")
+                        else "dropped",
+                        reason="All remaining executable pairs failed."
+                        if reflection_metadata.get("generation_exhausted")
+                        else "Reflection attempt produced no completed text update.",
                     )
                     capped_metadata: dict[str, Any] = {"proposal_id": f"{i}-{len(children)}"}
                     for meta_key, meta_val in reflection_metadata.items():

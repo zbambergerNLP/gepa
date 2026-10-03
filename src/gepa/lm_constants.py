@@ -1,0 +1,22 @@
+"""Shared language-model limits and provider protocol values."""
+
+PROVIDER_RETRY_KEY = "_gepa_provider_retry"
+DEFAULT_LM_NUM_RETRIES = 3
+PROVIDER_MAX_RETRIES = DEFAULT_LM_NUM_RETRIES
+PROVIDER_MAX_ATTEMPTS = 1 + PROVIDER_MAX_RETRIES
+PROVIDER_BACKOFF_SECONDS = (1.0, 2.0, 4.0)
+PROVIDER_RETRYABLE_HTTP_STATUSES = (408, 429, 500, 502, 503, 504)
+PROVIDER_SDK_RETRIES = 0
+PROVIDER_ATTEMPT_LOG = "provider-attempts.jsonl"
+TOKEN_USAGE_LOG = "token-usage.jsonl"
+TOKEN_USAGE_SUMMARY = "token-usage-summary.json"
+PROVIDER_FAILURE_DIRECTORY = "provider-failures"
+PROVIDER_SEED_MODULUS = 2**32
+PROVIDER_MIN_TIMEOUT_SECONDS = 0.001
+PROVIDER_TIMEOUT_FIELDS = ("timeout", "request_timeout")
+PROVIDER_WRAPPER_ATTRIBUTE = "_gepa_retry_wrapper"
+
+OUTPUT_LENGTH_ERROR = "output_length"
+EMPTY_COMPLETION_ERROR = "empty_completion"
+MISSING_CHOICES_ERROR = "missing_choices"
+LENGTH_FINISH_REASON = "length"

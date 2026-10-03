@@ -198,7 +198,7 @@ Current component length: {prompt_chars} characters.
 Score {k} candidate actions by how likely each is to improve the document given \
 the feedback. In each <probability> field, give a finite nonnegative relative weight. \
 The harness normalizes these weights; they do not need to sum to 1. \
-Do not calculate or repeatedly adjust their sum. At least one weight must be positive.
+Do not calculate or repeatedly adjust their sum. {weight_rule}
 {support_rule}
 
 Consider less obvious actions when the feedback supports them. Preserve useful \
@@ -339,6 +339,8 @@ class VerbalizedActionSelector(Generic[SelectableItemT]):
         rng: random.Random | None = None,
         require_full_support: bool = False,
         text_limits: TextLimits | None = None,
+        allow_zero_weights: bool = False,
+        action_constraints: str = "",
     ):
         """Configure verbalized selection without calling the language model.
 
@@ -353,6 +355,8 @@ class VerbalizedActionSelector(Generic[SelectableItemT]):
                 and sampling mixes uniform exploration among positive-probability
                 choices.
             text_limits: Optional soft size target and complete-prompt cap.
+            allow_zero_weights: Permit complete all-zero scores for exhaustive recovery.
+            action_constraints: Canonical constraints shared with downstream editing roles.
 
         Raises:
             ValueError: The menu is empty or contains an empty, padded, or
@@ -370,6 +374,9 @@ class VerbalizedActionSelector(Generic[SelectableItemT]):
         # fallback for both uniform and mildly-peaked distributions.
         self.tau = tau if tau is not None else 1.0 / k
         self.rng = rng if rng is not None else random.Random(0)
+        self.allow_zero_weights = allow_zero_weights
+        self.action_constraints = action_constraints
+        self.raw_outputs: list[str] = []
         self.require_full_support = require_full_support
         self.text_limits = resolve_text_limits(text_limits)
         self._action_by_id: dict[str, SelectableItemT] = {cast(Any, action).menu_id: action for action in actions}
@@ -416,11 +423,12 @@ class VerbalizedActionSelector(Generic[SelectableItemT]):
             actions = [action for action, _, _ in distribution.entries]
             probabilities = [probability for _, probability, _ in distribution.entries]
             positive_count = sum(probability > 0 for probability in probabilities)
-            assert positive_count > 0
             mixed_probabilities = [
                 (1.0 - epsilon) * probability + (epsilon / positive_count if probability > 0 else 0.0)
                 for probability in probabilities
             ]
+            if not positive_count:
+                mixed_probabilities = [1.0 / len(actions)] * len(actions)
             result = rng.choices(actions, weights=mixed_probabilities, k=n)
             sampled_probability_by_id = {
                 cast(Any, action).menu_id: probability
@@ -435,7 +443,7 @@ class VerbalizedActionSelector(Generic[SelectableItemT]):
                     probability * math.log2(probability) for probability in probabilities if probability > 0
                 ),
             )
-            sampling_policy = "positive_support_uniform_mixture"
+            sampling_policy = "positive_support_uniform_mixture" if positive_count else "zero_weight_uniform"
         else:
             epsilon = 0.0
             result, stats = _sample_from_tails(distribution, n, self.tau, rng)
@@ -452,9 +460,7 @@ class VerbalizedActionSelector(Generic[SelectableItemT]):
             if eligible_total > 0:
                 sampled_probability_by_id = {
                     menu_id: sum(
-                        probability
-                        for action, probability, _ in eligible
-                        if cast(Any, action).menu_id == menu_id
+                        probability for action, probability, _ in eligible if cast(Any, action).menu_id == menu_id
                     )
                     / eligible_total
                     for menu_id in {cast(Any, action).menu_id for action, _, _ in eligible}
@@ -471,9 +477,7 @@ class VerbalizedActionSelector(Generic[SelectableItemT]):
             sampled_reasonings.append(reasons[0] if len(reasons) == 1 else "")
         self.history.append(
             {
-                "probs": {
-                    cast(Any, action).menu_id: probability for action, probability, _ in distribution.entries
-                },
+                "probs": {cast(Any, action).menu_id: probability for action, probability, _ in distribution.entries},
                 "sampling_probs": sampled_probability_by_id,
                 "sampled": [cast(Any, action).menu_id for action in result],
                 "sampled_reasonings": sampled_reasonings,
@@ -514,25 +518,37 @@ class VerbalizedActionSelector(Generic[SelectableItemT]):
             IncompleteActionDistributionError: Two full-support responses fail
                 to score every declared action exactly once.
         """
+        self.raw_outputs.clear()
         action_menu = "\n".join(
             f"- {cast(Any, action).menu_id}: {cast(Any, action).menu_description}" for action in self.actions
         )
+        weight_rule = "All weights may be zero." if self.allow_zero_weights else "At least one weight must be positive."
+        support_rule = ""
+        if self.require_full_support:
+            support_rule = (
+                "Score every available action exactly once; do not omit or repeat an action. Assign probability 0 "
+                "when an action's stated precondition is not supported by the region and feedback; the sampler "
+                "reserves a small uniform exploration probability only among choices with positive probability. "
+            )
+            support_rule += (
+                "Zero expresses low expected usefulness, not mechanical impossibility. Recovery will try executable "
+                "zero-weight pairs after positive choices. Give an executable intended change and scope for each "
+                "pair whenever possible; downstream incompatibility is a generation error returned to the planner."
+                if self.allow_zero_weights
+                else "This is the sole applicability judgment; "
+                "downstream roles realize whichever action is sampled without reclassifying it."
+            )
         prompt = VERBALIZED_ACTION_PROMPT.format(
             current_prompt=candidate,
             prompt_chars=len(candidate),
             feedback_summary=feedback_summary,
             action_menu=action_menu,
             k=self.k,
-            support_rule=(
-                "Score every available action exactly once; do not omit or repeat an action. Assign probability 0 "
-                "when an action's stated precondition is not supported by the region and feedback; the sampler "
-                "reserves a small uniform exploration probability only among choices with positive probability. "
-                "This is the sole applicability judgment; "
-                "downstream roles realize whichever action is sampled without reclassifying it."
-                if self.require_full_support
-                else ""
-            ),
+            weight_rule=weight_rule,
+            support_rule=support_rule,
         )
+        if self.action_constraints:
+            prompt += "\n" + self.action_constraints
         if self.text_limits.selector_target_chars is not None:
             prompt += (
                 f"\n\nComponent size target: ~{self.text_limits.selector_target_chars} characters. "
@@ -541,16 +557,18 @@ class VerbalizedActionSelector(Generic[SelectableItemT]):
             )
         self.text_limits.check_prompt(prompt)
         raw_output = self.lm(prompt)
+        self.raw_outputs.append(raw_output)
         distribution = self._parse_distribution(raw_output, rng)
         if self.require_full_support and distribution.is_fallback:
             retry_prompt = (
                 f"{prompt}\n\n"
                 "Your previous response was incomplete or malformed. Return one complete <response> now, "
                 "with every available action exactly once and finite nonnegative relative weights. "
-                "At least one weight must be positive. The harness normalizes them; do not calculate their sum."
+                f"{weight_rule} The harness normalizes them; do not calculate their sum."
             )
             self.text_limits.check_prompt(retry_prompt)
             retry_output = self.lm(retry_prompt)
+            self.raw_outputs.append(retry_output)
             distribution = self._parse_distribution(retry_output, rng)
             if distribution.is_fallback:
                 raise IncompleteActionDistributionError(
@@ -564,7 +582,8 @@ class VerbalizedActionSelector(Generic[SelectableItemT]):
         Menu identifiers match exactly or case-insensitively. Without the
         full-support policy, malformed or unknown entries are skipped when the
         remaining entries define positive mass. Invalid numeric probabilities
-        or non-positive total mass cause a uniform fallback. With full support,
+        or non-positive total mass cause a uniform fallback, unless
+        ``allow_zero_weights`` explicitly permits all-zero recovery plans. With full support,
         every configured action must appear exactly once or the complete menu
         receives the uniform fallback.
 
@@ -622,7 +641,7 @@ class VerbalizedActionSelector(Generic[SelectableItemT]):
         )
         total = sum(probability for _, probability, _ in entries)
         is_fallback = False
-        if not entries or full_support_invalid or invalid_probability or total <= 0:
+        if not entries or full_support_invalid or invalid_probability or (total <= 0 and not self.allow_zero_weights):
             reason = "incomplete" if full_support_invalid else "invalid"
             logger.warning("Received %s verbalized action distribution; falling back to uniform.", reason)
             n_actions = len(self.actions)
@@ -634,6 +653,6 @@ class VerbalizedActionSelector(Generic[SelectableItemT]):
             scale = max(probability for _, probability, _ in entries)
             entries = [(a, p / scale, r) for a, p, r in entries]
             total = sum(p for _, p, _ in entries)
-        entries = [(a, p / total, r) for a, p, r in entries]
+        entries = [(a, p / total if total else 0.0, r) for a, p, r in entries]
 
         return ActionDistribution(entries=entries, is_fallback=is_fallback)

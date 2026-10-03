@@ -5,6 +5,8 @@ import json
 import os
 import re
 
+from examples.hotpotqa.benchmark_settings import EXPANDED_METRIC_CALLS, STANDARD_METRIC_CALLS
+
 
 def comparison_runtime(contract: dict) -> dict:
     """Normalize only the two reviewed source fields; retain every runtime setting."""
@@ -16,13 +18,22 @@ def comparison_runtime(contract: dict) -> dict:
     if not isinstance(review, dict):
         raise ValueError("Source compatibility requires an explicit review record.")
     if review.get("schema_version") == 1:
-        allowed = cell == ("random", 6_871)
-    elif review.get("schema_version") == 2:
-        allowed = review.get("kind") == "single_call_editor_tracking_handoff" and cell in {
-            ("react_v2", 6_871), ("react_v2_random", 6_871), ("action", 6_871), ("random", 6_871),
-            ("vanilla", 13_742), ("react_v2", 13_742),
+        allowed = cell == ("random", STANDARD_METRIC_CALLS)
+    elif review.get("schema_version") in {2, 3}:
+        allowed = review.get("schema_version") == 2 and review.get("kind") == "single_call_editor_tracking_handoff" and cell in {
+            ("react_v2", STANDARD_METRIC_CALLS),
+            ("react_v2_random", STANDARD_METRIC_CALLS),
+            ("action", STANDARD_METRIC_CALLS),
+            ("random", STANDARD_METRIC_CALLS),
+            ("vanilla", EXPANDED_METRIC_CALLS),
+            ("react_v2", EXPANDED_METRIC_CALLS),
         }
         optimizer = contract.get("optimizer", {})
+        if review.get("schema_version") == 3:
+            allowed = review.get("kind") == "jev_expanded_budget_handoff" and cell == ("react_v2", EXPANDED_METRIC_CALLS)
+            if "rendered_seed" in optimizer:
+                policy = optimizer.get("semantic_controller_policy") or {}
+                allowed = allowed and policy.get("model") == "jev-1.13.0" and policy.get("policy") == "jev_joint_action_section_v4"
         if "rendered_seed" in optimizer:
             digest = hashlib.sha256(json.dumps(optimizer, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
             allowed = allowed and digest == review.get("optimizer_sha256")

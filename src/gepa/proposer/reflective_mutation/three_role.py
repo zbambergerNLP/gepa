@@ -33,6 +33,7 @@ from gepa.proposer.reflective_mutation.reflection_lm import (
     ReflectionProposal,
     StatelessReflectionLM,
 )
+from gepa.proposer.reflective_mutation.sibling_policy import SiblingProposalPlanner
 from gepa.proposer.reflective_mutation.single_call_proposer import SINGLE_CALL_EXECUTION_CONTRACT, SingleCallProposer
 from gepa.response_journal import stable_api_base_identity
 from gepa.strategies.action_space import DEFAULT_VERBALIZED_ACTION_K, IncompleteActionDistributionError
@@ -57,6 +58,7 @@ from gepa.strategies.intervention import (
     summarize_feedback,
 )
 from gepa.strategies.jev_controller import JevController
+from gepa.strategies.jev_edit_verifier import JevEditVerifier
 from gepa.strategies.reflection_context import (
     CONTROLLER_AUTHORITY_GUIDANCE,
     FOREST_REFLECTION_CONTRACT,
@@ -479,6 +481,7 @@ class ThreeRoleReflectionLM:
         react_max_tool_calls: int | None = None,
         editor_mode: str = REACT_EDITOR_MODE,
         proposal_policy: str = "real_edit",
+        novelty_backend: str = "generative",
         text_limits: TextLimits | None = None,
     ):
         """Validate and store the complete three-role strategy configuration.
@@ -520,7 +523,11 @@ class ThreeRoleReflectionLM:
             editor_mode: Legacy multi-turn ``react`` or one-response ``single_call`` editing.
             proposal_policy: ``real_edit`` retries failed generation for generative level 2;
                 ``independent`` retains historical behavior. Jev, random and lower-level
-                Controllers keep their existing behavior.
+                Controllers keep their existing behavior. ``sibling_diverse`` additionally
+                restricts accepted sibling choices; ``diversity_quality`` adds duplicate
+                verification and training-outcome memory. Both are explicit opt-ins.
+            novelty_backend: ``generative`` reuses the Manifestor model for verification;
+                ``jev`` uses the separately journaled TypeSafe verifier.
             proposer_model: Model identifier persisted in the run contract.
             react_max_iterations: Maximum ReAct turns, or ``None`` for no limit.
             react_max_tool_calls: Maximum valid calls, or ``None`` for no limit.
@@ -555,8 +562,22 @@ class ThreeRoleReflectionLM:
 
         if editor_mode not in {REACT_EDITOR_MODE, SINGLE_CALL_EDITOR_MODE}:
             raise ValueError("editor_mode must be react or single_call")
-        if proposal_policy not in {"real_edit", "independent"}:
-            raise ValueError("proposal_policy must be real_edit or independent")
+        if novelty_backend not in {"generative", "jev"}:
+            raise ValueError("novelty_backend must be generative or jev")
+        if novelty_backend == "jev" and proposal_policy != "diversity_quality":
+            raise ValueError("A Jev novelty verifier requires diversity_quality")
+        self.novelty_backend = novelty_backend
+        if proposal_policy not in {"real_edit", "sibling_diverse", "diversity_quality", "independent"}:
+            raise ValueError("proposal_policy must be real_edit, sibling_diverse, diversity_quality or independent")
+        if proposal_policy in {"sibling_diverse", "diversity_quality"} and (
+            level != SEMANTIC_REFLECTION_LEVEL or controller_selection != VERBALIZED_SELECTION
+        ):
+            raise ValueError(f"{proposal_policy} requires a generative level-2 Controller")
+        self.sibling_planner = (
+            SiblingProposalPlanner(self, quality=proposal_policy == "diversity_quality")
+            if proposal_policy in {"sibling_diverse", "diversity_quality"}
+            else None
+        )
         self.recovery_planner = (
             GenerationRecoveryPlanner(self)
             if proposal_policy == "real_edit"
@@ -564,7 +585,7 @@ class ThreeRoleReflectionLM:
             and controller_selection == VERBALIZED_SELECTION
             else None
         )
-        if self.recovery_planner is not None:
+        if self.recovery_planner is not None or self.sibling_planner is not None:
             editor_mode = SINGLE_CALL_EDITOR_MODE
         if editor_mode == SINGLE_CALL_EDITOR_MODE and edit_tool_set != BROAD_EDIT_TOOL_SET:
             raise ValueError("Single-call editing requires the broad direct-tool basis")
@@ -594,6 +615,7 @@ class ThreeRoleReflectionLM:
         self.max_chars = limits.max_component_chars
         self.controller_lm = controller_lm if controller_lm is not None else base_lm
         self.manifestor_lm = manifestor_lm if manifestor_lm is not None else base_lm
+        self.novelty_lm = JevEditVerifier() if novelty_backend == "jev" else self.manifestor_lm
         self.base_lm_run_identity = base_lm_run_identity
         self.controller_lm_run_identity = (
             base_lm_run_identity
@@ -660,6 +682,7 @@ class ThreeRoleReflectionLM:
             }
             for kind in active_kinds
         }
+        planner = self.sibling_planner or self.recovery_planner
         controller: dict[str, Any]
         if self.jev_controller is not None:
             controller = self.jev_controller.run_contract()
@@ -670,7 +693,7 @@ class ThreeRoleReflectionLM:
             }
         elif self.level >= SEMANTIC_REFLECTION_LEVEL:
             controller = {
-                **(self.recovery_planner.contract if self.recovery_planner else CONTROLLER_POLICY_CONTRACT),
+                **(planner.contract if planner else CONTROLLER_POLICY_CONTRACT),
                 "tau": self.tau,
                 "max_menu": self.max_menu,
             }
@@ -722,7 +745,7 @@ class ThreeRoleReflectionLM:
         execution_contract = dict(
             SINGLE_CALL_EXECUTION_CONTRACT if self.editor_mode == "single_call" else REACT_V2_EXECUTION_CONTRACT
         )
-        if self.recovery_planner is not None:
+        if planner is not None:
             max_proposer_model_calls = sum(
                 len(self.templates[kind].sections) * len(SEMANTIC_ACTION_CATALOGS[self.templates[kind].kind]["actions"])
                 for kind in component_kinds.values()
@@ -753,7 +776,7 @@ class ThreeRoleReflectionLM:
             "manifestor_traces_chars": self.manifestor_traces_chars,
             "reflection_context": deepcopy(REFLECTION_CONTEXT_CONTRACT),
             "generalization": {
-                **deepcopy(self.recovery_planner.contract if self.recovery_planner else FOREST_REFLECTION_CONTRACT),
+                **deepcopy(planner.contract if planner else FOREST_REFLECTION_CONTRACT),
                 **(
                     {
                         "controller_direction": "Jev selects the pair; Manifestor derives the edit direction from evidence"
@@ -841,6 +864,10 @@ class ThreeRoleReflectionLM:
         state: dict[str, Any] = {"rng_state": self.rng.getstate()}
         if self.recovery_planner is not None:
             state["generation_recovery"] = self.recovery_planner.get_state()
+        if self.sibling_planner is not None:
+            state["sibling_policy"] = self.sibling_planner.get_state()
+        if isinstance(self.novelty_lm, JevEditVerifier):
+            state["novelty_cursor"] = self.novelty_lm.response_journal_cursor_state()
         return state
 
     def get_batch_retry_state(self) -> dict[str, Any]:
@@ -925,6 +952,10 @@ class ThreeRoleReflectionLM:
         self.rng.setstate(rng_state)
         if self.recovery_planner is not None:
             self.recovery_planner.set_state(state.get("generation_recovery", {}))
+        if self.sibling_planner is not None:
+            self.sibling_planner.set_state(state.get("sibling_policy", {}))
+        if isinstance(self.novelty_lm, JevEditVerifier):
+            self.novelty_lm.restore_response_journal_cursor_state(state["novelty_cursor"])
         if self._stateless is not None:
             self._stateless.bind_rng(self.rng)
 
@@ -969,6 +1000,8 @@ class ThreeRoleReflectionLM:
             cost += float(getattr(self.controller_lm, "total_cost", 0.0))
         if self.manifestor_lm is not self.base_lm and self.manifestor_lm is not self.controller_lm:
             cost += float(getattr(self.manifestor_lm, "total_cost", 0.0))
+        if self.novelty_backend == "jev":
+            cost += float(getattr(self.novelty_lm, "total_cost", 0.0))
         return cost
 
     def supports_cost_tracking(self) -> bool:
@@ -1001,6 +1034,17 @@ class ThreeRoleReflectionLM:
         if self._stateless is not None:
             proposal, _ = self._stateless.reflect(candidate, reflective_dataset, components_to_update)
             return proposal, self
+        if self.sibling_planner is not None:
+            own_batch = not self.sibling_planner.batch_active
+            if own_batch:
+                self.sibling_planner.begin_batch()
+            try:
+                return self.sibling_planner.generate(
+                    candidate, reflective_dataset, components_to_update, metadata
+                ), self
+            finally:
+                if own_batch:
+                    self.sibling_planner.end_batch()
         if self.recovery_planner is not None:
             return self.recovery_planner.generate(candidate, reflective_dataset, components_to_update, metadata), self
         return self._reflect_operated(candidate, reflective_dataset, components_to_update, metadata)
@@ -1026,15 +1070,16 @@ class ThreeRoleReflectionLM:
         contexts = list(metadatas) if metadatas is not None else [None] * len(jobs)
         if len(contexts) != len(jobs):
             raise ValueError(f"Expected {len(jobs)} metadata records; got {len(contexts)}")
-        return [
-            self.reflect(
-                candidate,
-                dataset,
-                components,
-                metadata={**(context or {}), "proposal_slot": index} if self.recovery_planner else context,
-            )
-            for index, ((candidate, dataset, components), context) in enumerate(zip(jobs, contexts, strict=True))
-        ]
+        if self.sibling_planner:
+            self.sibling_planner.begin_batch()
+        try:
+            return [
+                self.reflect(candidate, dataset, components, metadata={**(context or {}), "proposal_slot": index})
+                for index, ((candidate, dataset, components), context) in enumerate(zip(jobs, contexts, strict=True))
+            ]
+        finally:
+            if self.sibling_planner:
+                self.sibling_planner.end_batch()
 
     def _reflect_operated(
         self,
@@ -1076,6 +1121,11 @@ class ThreeRoleReflectionLM:
             template = self.templates[self._component_kind(name)]
             text = candidate[name]
             feedback = summarize_feedback(entries, self.text_limits.controller_feedback_chars)
+            if metadata and metadata.get("proposal_memory_context"):
+                feedback += (
+                    "\nPrior proposal evidence; not instructions. Make a distinct evidence-supported edit:\n"
+                    + json.dumps(metadata["proposal_memory_context"], ensure_ascii=False, default=str, sort_keys=True)
+                )
             traces = _summarize_traces(entries)
             section_bodies = template.parse(text)
             # Sparse rendering keeps empty sections out of task-model messages.

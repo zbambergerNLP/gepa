@@ -6,6 +6,7 @@ import random
 import traceback
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
+from dataclasses import replace
 from typing import Any, cast
 
 from gepa.core.adapter import (
@@ -378,8 +379,12 @@ class ReflectiveMutationProposer:
         if not jobs:
             return []
         mds: list[Mapping[str, Any] | None] = metadatas if metadatas is not None else [None] * len(jobs)
-        if getattr(self._reflection_lm, "recovery_planner", None) is not None:
-            # Generation recovery owns retries; provider and integrity failures must not rerun the batch.
+        if (
+            getattr(self._reflection_lm, "sibling_planner", None) is not None
+            or getattr(self._reflection_lm, "recovery_planner", None) is not None
+        ):
+            # The planner handles semantic generation failures. Provider/configuration and invariant errors
+            # must propagate instead of silently replaying the batch through an outer fallback.
             return list(self._propose_texts_batch(jobs, mds))
         retry_state_getter = getattr(self._reflection_lm, "get_batch_retry_state", None)
         retry_state_setter = getattr(self._reflection_lm, "set_batch_retry_state", None)
@@ -470,6 +475,18 @@ class ReflectiveMutationProposer:
 
         # Stage 1: Sample (parent, minibatch) tasks
         tasks = self.sampling_strategy.sample_tasks(state, self.candidate_selector, self.batch_sampler, self.trainset)
+        planner = getattr(self._reflection_lm, "sibling_planner", None)
+        if planner is not None:
+            redirected = []
+            redirected_parents: dict[int, int] = {}
+            for task in tasks:
+                if task.parent_idx not in redirected_parents:
+                    redirected_parents[task.parent_idx] = planner.eligible_parent(state, task.parent_idx)
+                parent_idx = redirected_parents[task.parent_idx]
+                redirected.append(
+                    replace(task, parent_idx=parent_idx, parent_candidate=state.program_candidates[parent_idx])
+                )
+            tasks = redirected
         if not tasks:
             return []
 
@@ -646,7 +663,7 @@ class ReflectiveMutationProposer:
 
             try:
                 reflective_dataset = self.adapter.make_reflective_dataset(
-                    task.parent_candidate, eval_curr, predictor_names
+                    task.parent_candidate, eval_curr, list(task.parent_candidate) if planner else predictor_names
                 )
                 reflective_dataset_concrete: dict[str, list[dict[str, Any]]] = {
                     k: [dict(item) for item in v] for k, v in reflective_dataset.items()
@@ -694,9 +711,10 @@ class ReflectiveMutationProposer:
                 "candidate_idx": p[0].parent_idx,
                 "minibatch_ids": list(p[0].minibatch_ids),
                 "optimizer_iteration": state.i,
+                "proposal_slot": slot,
                 "branch_edit_history": deepcopy(state.revision_history_by_candidate[p[0].parent_idx]),
             }
-            for p in prepared
+            for slot, p in enumerate(prepared)
             if p is not None
         ]
         with response_journal_scope(f"optimizer-iteration-{state.i}"):
@@ -929,6 +947,8 @@ class ReflectiveMutationProposer:
                 tag="reflective_mutation",
                 metadata=_lm_metadata,
             )
+            if planner is not None:
+                planner.observe_evaluation(proposal, task.parent_candidate)
             proposals.append(proposal)
 
         return proposals

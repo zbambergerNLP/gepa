@@ -640,6 +640,52 @@ class JevController:
             time.sleep(delay)
         raise AssertionError("Jev attempt loop must return or raise")
 
+    def request_choice(
+        self,
+        *,
+        state: Mapping[str, Any],
+        instructions: str,
+        criteria: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Return a validated typed-choice distribution after durable journaling.
+
+        Args:
+            state: Complete task evidence; no prompt truncation is applied.
+            instructions: Instructions governing the typed choice.
+            criteria: One through 255 named alternatives and their definitions.
+
+        Returns:
+            The raw response, normalized distribution, usage, and replay metadata.
+            This method does not sample or invent a model rationale.
+        """
+        if not 1 <= len(criteria) <= 255 or any(not isinstance(key, str) or not key for key in criteria):
+            raise JevControllerError("Jev requires 1..255 unique named choices.")
+        request = {
+            "model": JEV_MODEL,
+            "state": dict(state),
+            "questions": {"edit": {"type": "choice", "instructions": instructions, "criteria": dict(criteria)}},
+        }
+        with self._lock:
+            scope = ACTIVE_RESPONSE_JOURNAL_SCOPE.get()
+            ordinal = self._ordinals.get(scope, 0) if scope is not None else 0
+            digest = canonical_request_digest({"policy": self.run_contract(), **request})
+            payload = self._journal.load(scope, ordinal, digest) if self._journal is not None and scope else None
+            replayed = payload is not None
+            if payload is None:
+                payload = self._safe_evidence(self._live(request, set(criteria)))
+                if self._journal is not None and scope:
+                    self._journal.store(scope, ordinal, digest, payload)
+            probabilities = self._validate(payload["response"], set(criteria))
+            if scope:
+                self._ordinals[scope] = ordinal + 1
+        return {
+            **deepcopy(payload),
+            "probs": probabilities,
+            "request_sha256": digest,
+            "replayed": replayed,
+            "physical_attempts": 0 if replayed else payload["physical_attempts"],
+        }
+
     def select(
         self,
         menu: list[ControllerChoice],

@@ -234,7 +234,9 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
         self.reflective_proposer = reflective_proposer
         if run_dir is not None:
             self.reflective_proposer.evaluation_journal = EvaluationJournal(run_dir, use_cloudpickle=use_cloudpickle)
-            planner = getattr(self.reflective_proposer._reflection_lm, "recovery_planner", None)
+            planner = getattr(self.reflective_proposer._reflection_lm, "sibling_planner", None) or getattr(
+                self.reflective_proposer._reflection_lm, "recovery_planner", None
+            )
             if planner is not None:
                 planner.bind_run_dir(run_dir)
         self.merge_proposer = merge_proposer
@@ -616,6 +618,11 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
         """
         if iteration_id is None:
             iteration_id = state.current_iteration_id()
+        planner = getattr(self.reflective_proposer._reflection_lm, "sibling_planner", None)
+        sibling_proposal = None
+        if planner is not None and proposal_metadata and proposal_metadata.get("sibling_choice"):
+            sibling_proposal = CandidateProposal(new_program, parent_program_idx, metadata=dict(proposal_metadata))
+            planner.validate_children([sibling_proposal], state)
         num_metric_calls_by_discovery = state.total_num_evals
         state.increment_evals(num_actual_evals)
         state.num_full_ds_evals += 1
@@ -635,6 +642,9 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
             iteration_id=iteration_id,
             proposal_metadata=proposal_metadata,
         )
+
+        if planner is not None and sibling_proposal is not None:
+            planner.accept_child(sibling_proposal, new_program_idx, state)
 
         # ``iteration_id`` is the on-disk anchor (the same one
         # ``GEPAState._save_agent_directory`` writes the proposal dir under).
@@ -898,6 +908,10 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
                 trace_entry["proposal_accepted"] = False
             return False
 
+        planner = getattr(self.reflective_proposer._reflection_lm, "sibling_planner", None)
+        if planner is not None:
+            planner.validate_children(selected, state)
+
         # 3) Full-valset eval of the selected candidates (one batched, read-only call).
         valset_evals = self._evaluate_programs_on_valset([p.candidate for p in selected], state)
 
@@ -961,7 +975,8 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
         evaluates the seed on the valset, then iterates: save state, attempt a
         merge if one is due, propose and gate a reflective batch, and notify the
         iteration callbacks. Per-iteration exceptions are reported through
-        ``on_error`` and re-raised only when ``raise_on_exception`` is set.
+        ``on_error``. Integrity failures always abort; other errors abort when
+        ``raise_on_exception`` is set or the iteration made no progress.
 
         Returns:
             The final optimization state, after the closing save and the
@@ -1357,6 +1372,7 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
                 self.logger.log(f"Iteration {state.i + 1}: Exception during optimization: {e}")
                 self.logger.log(traceback.format_exc())
                 made_progress = state.total_num_evals > evals_before_iteration
+                # Continuing after a journal or sibling invariant failure cannot preserve exact recovery.
                 will_continue = (
                     not self.raise_on_exception and made_progress and not isinstance(e, ResponseJournalError)
                 )

@@ -1269,7 +1269,7 @@ class GEPAState(Generic[RolloutOutput, DataId]):
             Ordered user/assistant messages to append to the selected branch.
         """
         messages: list[dict[str, str]] = []
-        unevaluated_statuses = {"dropped", "generation_error"}
+        unevaluated_statuses = {"dropped", "generation_error", "duplicate_generation"}
         for source in records:
             record = deepcopy(dict(source))
             attempt_status = record.get("attempt_status")
@@ -1281,6 +1281,7 @@ class GEPAState(Generic[RolloutOutput, DataId]):
                 "rejected": "Optimizer result: rejected; the branch remains unchanged.",
                 "dropped": "Optimizer result: dropped; no candidate was produced.",
                 "generation_error": "Generation error: this attempt produced no candidate; returned to proposal planning.",
+                "duplicate_generation": "Duplicate edit: this attempt was not evaluated; returned to proposal planning.",
                 "generation_exhausted": "Generation exhausted: all remaining possibilities failed; no child was added.",
             }
             feedback = [outcome_feedback[record_outcome]]

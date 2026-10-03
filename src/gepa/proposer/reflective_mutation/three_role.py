@@ -21,8 +21,8 @@ from copy import deepcopy
 from dataclasses import replace
 from typing import Any
 
-from gepa.proposer.reflective_mutation.base import LanguageModel
-from gepa.proposer.reflective_mutation.generation_recovery import GenerationRecoveryPlanner
+from gepa.proposer.reflective_mutation.base import LanguageModel, ReflectionComponentSelector
+from gepa.proposer.reflective_mutation.generation_recovery import RECOVERY_POLICY_CONTRACT, GenerationRecoveryPlanner
 from gepa.proposer.reflective_mutation.manifestor import (
     ManifestationError,
     Manifestor,
@@ -48,6 +48,7 @@ from gepa.strategies.forest_constants import (
     VERBALIZED_SELECTION,
 )
 from gepa.strategies.intervention import (
+    CONTROLLER_COMPONENT_SELECTION_CONTRACT,
     CONTROLLER_POLICY_CONTRACT,
     SEMANTIC_ACTION_CATALOGS,
     UNIFORM_RANDOM_CONTROLLER_POLICY_CONTRACT,
@@ -577,6 +578,7 @@ class ThreeRoleReflectionLM:
         self.k = k
         self.tau = tau
         self.controller_selection = controller_selection
+        self.controller_selects_component = False
         self.jev_controller = jev_controller
         self._rng_explicit = rng is not None
         self.rng = rng if rng is not None else random.Random(0)
@@ -616,6 +618,23 @@ class ThreeRoleReflectionLM:
             if level == 0
             else None
         )
+
+    def bind_module_selector(self, module_selector: ReflectionComponentSelector | str) -> None:
+        """Let the Controller choose a component only for the explicit opt-in mode."""
+        enabled = isinstance(module_selector, str) and module_selector == "controller"
+        if enabled and (
+            self.level != SEMANTIC_REFLECTION_LEVEL or self.controller_selection not in {VERBALIZED_SELECTION, "jev"}
+        ):
+            raise ValueError("Controller component selection requires level 2 and a verbalized or Jev Controller.")
+        self.controller_selects_component = enabled
+        if self.recovery_planner is not None:
+            self.recovery_planner.contract = deepcopy(RECOVERY_POLICY_CONTRACT)
+            if enabled:
+                self.recovery_planner.contract.update(
+                    component_selection=deepcopy(CONTROLLER_COMPONENT_SELECTION_CONTRACT),
+                    recovery="remaining_joint_component_section_action_choices_without_replacement",
+                    controller_distribution="one_joint_distribution_per_opportunity",
+                )
 
     def _component_kind(self, name: str) -> str:
         """Resolve a candidate component to its role-specific template key.
@@ -689,6 +708,8 @@ class ThreeRoleReflectionLM:
                 "tau": self.tau,
                 "max_menu": self.max_menu,
             }
+        if self.controller_selects_component:
+            controller = {**controller, **deepcopy(CONTROLLER_COMPONENT_SELECTION_CONTRACT)}
         proposer_lm_identity = _language_model_run_identity(self.base_lm, self.base_lm_run_identity)
         controller_lm_identity = (
             _language_model_run_identity(self.controller_lm, self.controller_lm_run_identity)
@@ -1040,6 +1061,118 @@ class ThreeRoleReflectionLM:
             for index, ((candidate, dataset, components), context) in enumerate(zip(jobs, contexts, strict=True))
         ]
 
+    def _select_action(
+        self,
+        candidate: dict[str, str],
+        reflective_dataset: Mapping[str, Sequence[Mapping[str, Any]]],
+        components: list[str],
+    ) -> tuple[ControllerChoice, dict[str, Any], str | None]:
+        """Select one edit with the same backend for fixed or Controller-selected modules."""
+        contexts = {}
+        menu = []
+        for name in components:
+            template = self.templates[self._component_kind(name)]
+            contexts[name] = {
+                "sections": template.parse(candidate[name]),
+                "section_descriptions": dict(template.sections),
+                "training_evidence": _summarize_traces(reflective_dataset[name]),
+            }
+            menu.extend(
+                build_controller_menu(
+                    template,
+                    name,
+                    self.edit_tools,
+                    self.level,
+                    rng=self.rng,
+                    max_menu=self.max_menu,
+                    include_component=self.controller_selects_component,
+                )
+            )
+        if self.controller_selects_component and self.max_menu is not None and len(menu) > self.max_menu:
+            raise ValueError("max_menu would remove joint component/section/action choices.")
+        context = contexts[components[0]]
+        inventory = (
+            "Controller-only section inventory. [EMPTY SECTION] is metadata, not document text. "
+            "An empty region has no target bytes: assign probability 0 to its DELETE_TEXT, REPLACE_TEXT, and "
+            "MOVE_TEXT choices. Judge its INSERT_TEXT choices by their semantic fit.\n\n"
+        )
+        if self.controller_selects_component:
+            controller_candidate = inventory + json.dumps(
+                {
+                    name: {key: value for key, value in context.items() if key != "training_evidence"}
+                    for name, context in contexts.items()
+                },
+                ensure_ascii=False,
+            )
+            controller_traces = (
+                "Choose exactly one component, section and action together. Compare all components' training traces; "
+                "locate where relevant information or behavior first became missing or incorrect, identify the "
+                "component whose instructions can address it, and state the observable improvement the edit should "
+                "produce. A wrong final answer alone does not implicate the final-answer component.\n"
+                + json.dumps({name: value["training_evidence"] for name, value in contexts.items()}, ensure_ascii=False)
+            )
+        else:
+            controller_candidate = inventory + "\n\n".join(
+                f"## {section}\n{body if body else '[EMPTY SECTION]'}" for section, body in context["sections"].items()
+            )
+            controller_traces = context["training_evidence"]
+        controller_direction = None
+        if self.jev_controller is not None and self.controller_selects_component:
+            action, controller_sampling = self.jev_controller.select_components(menu, components=contexts, rng=self.rng)
+        elif self.jev_controller is not None:
+            action, controller_sampling = self.jev_controller.select(
+                menu,
+                sections=context["sections"],
+                section_descriptions=context["section_descriptions"],
+                traces=context["training_evidence"],
+                rng=self.rng,
+            )
+        elif self.controller_selection == UNIFORM_RANDOM_SELECTION:
+            action = self.rng.choice(menu)
+            controller_sampling = _uniform_controller_sampling_record(menu, action, self.level)
+        else:
+            controller = Controller(
+                menu,
+                self.controller_lm,
+                k=len(menu) if self.level >= SEMANTIC_REFLECTION_LEVEL else self.k,
+                tau=self.tau,
+                rng=self.rng,
+                require_full_support=self.level >= SEMANTIC_REFLECTION_LEVEL,
+                text_limits=self.text_limits,
+            )
+            action = controller.select(
+                1,
+                self.rng,
+                candidate=controller_candidate,
+                feedback_summary=(
+                    GENERALIZATION_GUIDANCE
+                    + "\n"
+                    + CONTROLLER_AUTHORITY_GUIDANCE
+                    + "\nYou set the direction of the edit. For each action's reasoning, identify an observable "
+                    "mismatch, the intended reusable change and its scope, and why this action can express it. "
+                    "The sampled option's rationale will be passed verbatim to the Manifestor and Editor; "
+                    "make it specific enough for them to realize your direction without choosing a new goal. "
+                    "Score semantic fit as well as tool applicability.\n\n"
+                    "## Structured training evidence\n"
+                    + clip_text(controller_traces, self.text_limits.controller_feedback_chars)
+                ),
+            )[0]
+            if self.level >= SEMANTIC_REFLECTION_LEVEL:
+                controller_sampling = _joint_controller_sampling_record(controller.history[-1])
+            else:
+                controller_sampling = _controller_sampling_record(controller.history[-1])
+            controller_direction = controller.history[-1]["sampled_reasonings"][0] or None
+        if self.controller_selects_component:
+            controller_sampling.update(
+                {
+                    "component_selection": "controller",
+                    "eligible_components": list(components),
+                    "selected_component": action.edit_target.component_name,
+                    "factorization": "P(component, region, action)",
+                }
+            )
+        return action, controller_sampling, controller_direction
+
     def _reflect_operated(
         self,
         candidate: dict[str, str],
@@ -1070,94 +1203,40 @@ class ThreeRoleReflectionLM:
         controller_failures: list[dict[str, str]] = []
         dropped: list[str] = []
 
-        for name in components_to_update:
-            entries = reflective_dataset.get(name)
-            if not entries:
+        groups = (
+            [components_to_update] if self.controller_selects_component else [[name] for name in components_to_update]
+        )
+        for group in groups:
+            names = [name for name in group if reflective_dataset.get(name)]
+            if not names:
                 if self.logger is not None:
-                    self.logger.log(f"Component '{name}' is not in reflective dataset. Skipping.")
+                    self.logger.log(f"Components {group!r} have no reflective evidence. Skipping.")
                 continue
-
+            try:
+                if selected is not None:
+                    action, controller_sampling, controller_direction = selected
+                else:
+                    action, controller_sampling, controller_direction = self._select_action(
+                        candidate,
+                        reflective_dataset,
+                        names,
+                    )
+            except IncompleteActionDistributionError as exc:
+                error = (
+                    _bounded_history_text(exc, self.text_limits.history_text_chars)
+                    or "Controller action distribution failed."
+                )
+                controller_failures.extend({"component": name, "error": error} for name in names)
+                dropped.extend(names)
+                if self.logger is not None:
+                    self.logger.log(f"Components {names!r} dropped after Controller failure: {error}")
+                continue
+            name = action.edit_target.component_name
             template = self.templates[self._component_kind(name)]
             text = candidate[name]
-            feedback = summarize_feedback(entries, self.text_limits.controller_feedback_chars)
-            traces = _summarize_traces(entries)
+            feedback = summarize_feedback(reflective_dataset[name], self.text_limits.controller_feedback_chars)
+            traces = _summarize_traces(reflective_dataset[name])
             section_bodies = template.parse(text)
-            # Sparse rendering keeps empty sections out of task-model messages.
-            # The Controller still needs their occupancy to judge which semantic
-            # actions have the text required by their coupled operators.
-            controller_candidate = (
-                "Controller-only section inventory. [EMPTY SECTION] is metadata, not document text. "
-                "An empty region has no target bytes: assign probability 0 to its DELETE_TEXT, REPLACE_TEXT, and "
-                "MOVE_TEXT choices. Judge its INSERT_TEXT choices by their semantic fit.\n\n"
-                + "\n\n".join(
-                    f"## {section}\n{body if body else '[EMPTY SECTION]'}" for section, body in section_bodies.items()
-                )
-            )
-            menu = build_controller_menu(
-                template,
-                name,
-                self.edit_tools,
-                self.level,
-                rng=self.rng,
-                max_menu=self.max_menu,
-            )
-            controller_direction = None
-            if selected is not None:
-                action, controller_sampling, controller_direction = selected
-            elif self.jev_controller is not None:
-                action, controller_sampling = self.jev_controller.select(
-                    menu,
-                    sections=section_bodies,
-                    section_descriptions=template.sections,
-                    traces=traces,
-                    rng=self.rng,
-                )
-            elif self.controller_selection == UNIFORM_RANDOM_SELECTION:
-                action = self.rng.choice(menu)
-                controller_sampling = _uniform_controller_sampling_record(menu, action, self.level)
-            else:
-                controller = Controller(
-                    menu,
-                    self.controller_lm,
-                    k=len(menu) if self.level >= SEMANTIC_REFLECTION_LEVEL else self.k,
-                    tau=self.tau,
-                    rng=self.rng,
-                    require_full_support=self.level >= SEMANTIC_REFLECTION_LEVEL,
-                    text_limits=self.text_limits,
-                )
-                try:
-                    action = controller.select(
-                        1,
-                        self.rng,
-                        candidate=controller_candidate,
-                        feedback_summary=(
-                            GENERALIZATION_GUIDANCE
-                            + "\n"
-                            + CONTROLLER_AUTHORITY_GUIDANCE
-                            + "\nYou set the direction of the edit. For each action's reasoning, identify an observable "
-                            "mismatch, the intended reusable change and its scope, and why this action can express it. "
-                            "The sampled option's rationale will be passed verbatim to the Manifestor and Editor; "
-                            "make it specific enough for them to realize your direction without choosing a new goal. "
-                            "Score semantic fit as well as tool applicability.\n\n"
-                            "## Structured training evidence\n"
-                            + clip_text(traces, self.text_limits.controller_feedback_chars)
-                        ),
-                    )[0]
-                except IncompleteActionDistributionError as exc:
-                    error = (
-                        _bounded_history_text(exc, self.text_limits.history_text_chars)
-                        or "Controller action distribution failed."
-                    )
-                    controller_failures.append({"component": name, "error": error})
-                    dropped.append(name)
-                    if self.logger is not None:
-                        self.logger.log(f"Component {name!r} dropped after Controller failure: {error}")
-                    continue
-                if self.level >= SEMANTIC_REFLECTION_LEVEL:
-                    controller_sampling = _joint_controller_sampling_record(controller.history[-1])
-                else:
-                    controller_sampling = _controller_sampling_record(controller.history[-1])
-                controller_direction = controller.history[-1]["sampled_reasonings"][0] or None
             preferred_edit_tool = action.edit_tool.value if action.edit_tool is not None else None
             semantic_action = action.semantic_action.name if action.semantic_action else None
 

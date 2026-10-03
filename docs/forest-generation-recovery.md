@@ -26,6 +26,25 @@ The first sample uses the same seeded probability mixture as independent selecti
 This is separate from Jev's existing four-attempt, one-deadline handling of invalid
 typed responses and transport failures; exhausting those retries still stops the run.
 
+With the explicit `module_selector="controller"` option, both Jev and the generative
+Controller score module, section and action jointly in one decision. The request
+includes all eligible modules' full captured training evidence and section contents.
+There is no separate module-selection call. One journaled joint distribution serves
+the entire recovery opportunity. A generation failure removes that exact triple;
+the planner samples another untried triple from the same distribution, which can
+select another eligible module. Only one changed module is returned. A missing
+generative direction is a generation error; it does not trigger a separate
+single-action scoring call in joint mode. Existing bounded malformed-response and
+transport corrections remain in effect.
+
+The joint recovery contract records this selection scope and rejects checkpoints
+from round-robin recovery. Round-robin remains the default and never switches to a
+different module during recovery. The HotPotQA CLI uses `--module-selector controller`
+and the Della workload accepts `HOTPOTQA_MODULE_SELECTOR=controller`; both public
+Python entrypoints support the same option. It requires level 2 with a Jev or
+generative Controller and does not change parent selection, training admission,
+data splits, or evaluation budgets.
+
 Only a changed candidate is evaluated. An evaluated tie or loss is never retried.
 Failed generation records never inherit that candidate's training or validation
 score. Completed recovery steps, provider responses and RNG state are journaled
@@ -33,7 +52,8 @@ for interruption replay. The run contract rejects incompatible checkpoints.
 
 All actions remain available on later opportunities, including the same parent
 and same-parent batched proposals. This feature adds no sibling exclusions,
-duplicate verifier, training-outcome memory, parent deferral or module fallback.
+duplicate verifier, training-outcome memory or parent deferral. Module choice only
+changes when the explicit joint-selection option is enabled as described above.
 Those experimental policies are reviewed separately. Existing frozen allocations
 and source identities must not be migrated to this policy.
 

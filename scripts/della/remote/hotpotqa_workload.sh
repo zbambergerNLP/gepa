@@ -10,6 +10,15 @@ HOTPOTQA_REFLECTION_MINIBATCH_SIZE="${HOTPOTQA_REFLECTION_MINIBATCH_SIZE:-3}"
 if [[ ! "${HOTPOTQA_REFLECTION_MINIBATCH_SIZE}" =~ ^[1-9][0-9]*$ ]]; then
     echo "ERROR: HOTPOTQA_REFLECTION_MINIBATCH_SIZE must be a positive integer" >&2; exit 1
 fi
+HOTPOTQA_MODULE_SELECTOR="${HOTPOTQA_MODULE_SELECTOR:-round_robin}"
+case "${HOTPOTQA_MODULE_SELECTOR}" in
+    round_robin) ;;
+    controller)
+        if [[ "${CONDITION:-}" != react_v2 ]]; then
+            echo "ERROR: Controller module selection requires FOREST" >&2; exit 1
+        fi ;;
+    *) echo "ERROR: unsupported module selector" >&2; exit 1 ;;
+esac
 case "${HOTPOTQA_CONTROLLER_SELECTION}" in
     verbalized|jev) ;;
     *) echo "ERROR: unsupported Controller selection" >&2; exit 1 ;;
@@ -265,6 +274,7 @@ echo "==> retrieval=Wiki-2017/BM25 k=7 concurrent_examples=${MAX_WORKERS} root=$
     --reflection-minibatch-size "${HOTPOTQA_REFLECTION_MINIBATCH_SIZE}" \
     --condition "${CONDITION}" \
     --controller-selection "${HOTPOTQA_CONTROLLER_SELECTION}" \
+    --module-selector "${HOTPOTQA_MODULE_SELECTOR}" \
     --editor-mode "${HOTPOTQA_EDITOR_MODE}" "${TRACKING_ARGS[@]}" \
     --text-limits "${HOTPOTQA_TEXT_LIMITS_JSON:-null}" \
     --program 2stage \

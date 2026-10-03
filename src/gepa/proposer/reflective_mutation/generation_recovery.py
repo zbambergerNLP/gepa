@@ -1,4 +1,4 @@
-"""Recover failed edit generation on the same selected component and training evidence."""
+"""Recover failed edit generation within the selected module policy and training evidence."""
 
 from __future__ import annotations
 
@@ -120,21 +120,32 @@ class GenerationRecoveryPlanner:
             self.steps[scope] = deepcopy(record)
         return result
 
-    def _score(self, menu: list[ControllerChoice], text: str, evidence: str) -> dict[str, Any]:
+    def _score(
+        self,
+        menu: list[ControllerChoice],
+        text: str,
+        evidence: str,
+        components: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         """Retain all Controller replies, including malformed distributions."""
         if self.owner.jev_controller is not None:
-            template = self.owner.templates[self.owner._component_kind(menu[0].edit_target.component_name)]
             # select() also samples; the planner owns sampling across the remaining pairs.
             scoring_rng = random.Random()
             scoring_rng.setstate(self.owner.rng.getstate())
-            _, selection = self.owner.jev_controller.select(
-                menu,
-                sections=template.parse(text),
-                section_descriptions=template.sections,
-                traces=evidence,
-                rng=scoring_rng,
-                require_edit=True,
-            )
+            if components is not None:
+                _, selection = self.owner.jev_controller.select_components(
+                    menu, components=components, rng=scoring_rng, require_edit=True
+                )
+            else:
+                template = self.owner.templates[self.owner._component_kind(menu[0].edit_target.component_name)]
+                _, selection = self.owner.jev_controller.select(
+                    menu,
+                    sections=template.parse(text),
+                    section_descriptions=template.sections,
+                    traces=evidence,
+                    rng=scoring_rng,
+                    require_edit=True,
+                )
             return {
                 "entries": {key: {"weight": weight, "direction": None} for key, weight in selection["probs"].items()},
                 "controller_sampling": selection,
@@ -180,7 +191,7 @@ class GenerationRecoveryPlanner:
         components: list[str],
         metadata: Mapping[str, Any] | None,
     ) -> ReflectionProposal:
-        """Exhaust finite pairs on the same evidence until one changed candidate exists.
+        """Exhaust finite choices on the same evidence until one changed candidate exists.
 
         Args:
             candidate: Canonically formatted parent component texts.
@@ -216,6 +227,9 @@ class GenerationRecoveryPlanner:
         menus: dict[str, list[ControllerChoice]] = {}
         plans: dict[str, Any] = {}
         records: list[dict[str, Any]] = []
+        joint = self.owner.controller_selects_component
+        contexts: dict[str, dict[str, Any]] = {}
+        joint_plan: dict[str, Any] | None = None
 
         def evidence_for(name: str) -> str:
             return json.dumps(dataset[name], ensure_ascii=False, default=str, sort_keys=True)
@@ -226,7 +240,9 @@ class GenerationRecoveryPlanner:
                 return
             template = self.owner.templates[self.owner._component_kind(name)]
             sections = template.parse(candidate[name])
-            menu = build_controller_menu(template, name, self.owner.edit_tools, 2, rng=self.owner.rng)
+            menu = build_controller_menu(
+                template, name, self.owner.edit_tools, 2, rng=self.owner.rng, include_component=joint
+            )
             available = []
             for action in menu:
                 reason = self._impossible_reason(action, sections[action.edit_target.section])
@@ -238,15 +254,48 @@ class GenerationRecoveryPlanner:
                 return
             menus[name] = available
             evidence = evidence_for(name)
-            plans[name] = self._step(
-                f"{scope}/score/{name}",
-                {"candidate": candidate, "evidence": evidence, "menu": [action.menu_id for action in available]},
-                lambda menu=available, text=candidate[name], evidence=evidence: self._score(menu, text, evidence),
-            )
+            if joint:
+                contexts[name] = {
+                    "sections": sections,
+                    "section_descriptions": dict(template.sections),
+                    "training_evidence": evidence,
+                }
+            else:
+                plans[name] = self._step(
+                    f"{scope}/score/{name}",
+                    {"candidate": candidate, "evidence": evidence, "menu": [action.menu_id for action in available]},
+                    lambda menu=available, text=candidate[name], evidence=evidence: self._score(menu, text, evidence),
+                )
 
         for name in dict.fromkeys(components):
             prepare_component(name)
         remaining = [(name, action) for name, menu in menus.items() for action in menu]
+        if joint and remaining:
+            if self.owner.max_menu is not None and len(remaining) > self.owner.max_menu:
+                raise ValueError("max_menu would remove joint component/section/action choices.")
+            joint_menu = [action for _, action in remaining]
+            text = json.dumps(
+                {
+                    name: {key: value for key, value in context.items() if key != "training_evidence"}
+                    for name, context in contexts.items()
+                },
+                ensure_ascii=False,
+            )
+            evidence = (
+                "Choose exactly one component, section and action together. Compare all components' training traces; "
+                "locate where relevant information or behavior first became missing or incorrect and choose a "
+                "component whose instructions can address it. A wrong final answer alone does not implicate the "
+                "final-answer component.\n"
+                + json.dumps(
+                    {name: context["training_evidence"] for name, context in contexts.items()}, ensure_ascii=False
+                )
+            )
+            joint_plan = self._step(
+                f"{scope}/score/joint",
+                {"candidate": candidate, "contexts": contexts, "menu": [action.menu_id for action in joint_menu]},
+                lambda: self._score(joint_menu, text, evidence, contexts),
+            )
+            plans = dict.fromkeys(menus, joint_plan)
 
         proposal = ReflectionProposal(new_texts={})
         while remaining:
@@ -283,6 +332,13 @@ class GenerationRecoveryPlanner:
                 "remaining_pair_count": len(remaining),
                 "distribution": distribution,
             }
+            if joint:
+                selection.update(
+                    component_selection="controller",
+                    eligible_components=list(menus),
+                    selected_component=name,
+                    factorization="P(component, region, action)",
+                )
 
             def execute(
                 name: str = name,
@@ -291,9 +347,10 @@ class GenerationRecoveryPlanner:
                 selection: dict[str, Any] = selection,
             ) -> dict[str, Any]:
                 if not direction and self.owner.controller_selection == VERBALIZED_SELECTION:
-                    retry = self._score([action], candidate[name], evidence_for(name))
-                    direction = retry["entries"].get(action.menu_id, {}).get("direction")
-                    selection["direction_recovery"] = retry
+                    if not joint:
+                        retry = self._score([action], candidate[name], evidence_for(name))
+                        direction = retry["entries"].get(action.menu_id, {}).get("direction")
+                        selection["direction_recovery"] = retry
                     if not direction:
                         return asdict(
                             ReflectionProposal(
@@ -349,6 +406,7 @@ class GenerationRecoveryPlanner:
                 proposal.metadata["evaluated_attempt_id"] = attempt_id
                 break
         exhausted = not proposal.new_texts
+        scoring_plans = {"joint": joint_plan} if joint_plan is not None else plans
         proposal.metadata.update(
             {
                 "proposal_policy": self.contract["identity"],
@@ -358,9 +416,9 @@ class GenerationRecoveryPlanner:
                 "attempt_records": records,
                 "three_role_actions": records,
                 "planner_exclusions": exclusions,
-                "controller_plans": plans,
+                "controller_plans": scoring_plans,
                 "generation_error_count": sum(record.get("attempt_status") == "generation_error" for record in records)
-                + sum(bool(plan.get("error")) for plan in plans.values()),
+                + sum(bool(plan.get("error")) for plan in scoring_plans.values()),
             }
         )
         return proposal

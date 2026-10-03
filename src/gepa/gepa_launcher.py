@@ -781,7 +781,7 @@ class ReflectionConfig:
     reflection_strategy: "ReflectionLM | None" = None
     batch_sampler: BatchSampler | Literal["epoch_shuffled"] = "epoch_shuffled"
     reflection_minibatch_size: int | None = None  # Default: 1 for single-instance mode, 3 otherwise
-    module_selector: ReflectionComponentSelector | Literal["round_robin", "all"] = "round_robin"
+    module_selector: ReflectionComponentSelector | Literal["round_robin", "all", "controller"] = "round_robin"
     reflection_lm: LanguageModel | str | None = "openai/gpt-5.1"
     reflection_lm_kwargs: dict[str, Any] | None = None
     """Extra keyword arguments forwarded to ``litellm.completion`` when
@@ -1632,11 +1632,12 @@ def optimize_anything(
         module_selector_cls = {
             "round_robin": RoundRobinReflectionComponentSelector,
             "all": AllReflectionComponentSelector,
+            "controller": AllReflectionComponentSelector,
         }.get(config.reflection.module_selector)
 
         assert module_selector_cls is not None, (
             f"Unknown module_selector strategy: {config.reflection.module_selector}. "
-            "Supported strategies: 'round_robin', 'all'"
+            "Supported strategies: 'round_robin', 'all', 'controller'"
         )
 
         module_selector_instance: ReflectionComponentSelector = module_selector_cls()
@@ -1760,6 +1761,14 @@ def optimize_anything(
                     "or pass template_family='generic'."
                 ) from exc
             raise
+
+    _bind_module_selector = getattr(config.reflection.reflection_strategy, "bind_module_selector", None)
+    if config.reflection.module_selector == "controller" and not callable(_bind_module_selector):
+        raise ValueError(
+            "module_selector='controller' requires a supporting strategy such as level-2 ThreeRoleReflectionLM."
+        )
+    if callable(_bind_module_selector):
+        _bind_module_selector(config.reflection.module_selector)
 
     if config.reflection.reflection_strategy is not None:
         _validate_candidate = getattr(config.reflection.reflection_strategy, "validate_candidate", None)

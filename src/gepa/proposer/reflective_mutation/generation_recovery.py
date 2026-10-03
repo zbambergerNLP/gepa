@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import random
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import asdict
@@ -18,6 +19,7 @@ from gepa.response_journal import (
 )
 from gepa.strategies.action_space import FULL_SUPPORT_EXPLORATION_EPSILON, IncompleteActionDistributionError
 from gepa.strategies.edit_tools import EditTool
+from gepa.strategies.forest_constants import UNIFORM_RANDOM_SELECTION, VERBALIZED_SELECTION
 from gepa.strategies.intervention import (
     Controller,
     ControllerChoice,
@@ -29,19 +31,22 @@ from gepa.strategies.reflection_context import REAL_EDIT_GUIDANCE
 if TYPE_CHECKING:
     from gepa.proposer.reflective_mutation.three_role import ThreeRoleReflectionLM
 
-RECOVERY_POLICY_ID = "forest-real-edit-recovery-v1"
+RECOVERY_POLICY_ID = "forest-real-edit-recovery-v2"
 RECOVERY_POLICY_CONTRACT = {
     "identity": RECOVERY_POLICY_ID,
-    "version": 1,
+    "version": 2,
     "recovery": "remaining_positive_pairs_then_executable_zero_pairs_without_replacement",
     "exhaustion": "return_no_candidate_without_changing_parent_or_component_selection",
-    "editor": "single_response_atomic_batch_with_net_change",
+    "editor": "atomic_batch_with_net_change_and_one_native_protocol_correction",
     "manifestor": "structured_ready_or_incompatible",
     "checkpoint": "rng_plus_hash_verified_recovery_journal",
     "sampling": "positive_support_uniform_mixture_without_replacement_then_uniform_zero",
     "exploration_epsilon": FULL_SUPPORT_EXPLORATION_EPSILON,
     "action_constraints": "same_full_canonical_catalog_in_all_three_roles",
     "generation_guidance": REAL_EDIT_GUIDANCE,
+    "controller_backends": ["verbalized", "jev", "uniform_random"],
+    "jev_reselection": "one_journaled_distribution_then_remaining_pairs_without_replacement",
+    "native_protocol_repair": "one_same_action_correction_for_text_without_native_calls",
 }
 
 
@@ -117,6 +122,25 @@ class GenerationRecoveryPlanner:
 
     def _score(self, menu: list[ControllerChoice], text: str, evidence: str) -> dict[str, Any]:
         """Retain all Controller replies, including malformed distributions."""
+        if self.owner.jev_controller is not None:
+            template = self.owner.templates[self.owner._component_kind(menu[0].edit_target.component_name)]
+            # select() also samples; the planner owns sampling across the remaining pairs.
+            scoring_rng = random.Random()
+            scoring_rng.setstate(self.owner.rng.getstate())
+            _, selection = self.owner.jev_controller.select(
+                menu,
+                sections=template.parse(text),
+                section_descriptions=template.sections,
+                traces=evidence,
+                rng=scoring_rng,
+                require_edit=True,
+            )
+            return {
+                "entries": {key: {"weight": weight, "direction": None} for key, weight in selection["probs"].items()},
+                "controller_sampling": selection,
+            }
+        if self.owner.controller_selection == UNIFORM_RANDOM_SELECTION:
+            return {"entries": {action.menu_id: {"weight": 1.0, "direction": None} for action in menu}}
         selector = Controller(
             menu,
             self.owner.controller_lm,
@@ -249,6 +273,8 @@ class GenerationRecoveryPlanner:
             direction = plans[name]["entries"].get(action.menu_id, {}).get("direction")
             selection = {
                 "policy": self.contract["identity"],
+                "controller_backend": self.owner.controller_selection,
+                "source_request_id": plans[name].get("controller_sampling", {}).get("request_id"),
                 "sampled": [action.menu_id],
                 "sampled_reasonings": [direction],
                 "sampled_probabilities": [sampling[index]],
@@ -264,7 +290,7 @@ class GenerationRecoveryPlanner:
                 direction: str | None = direction,
                 selection: dict[str, Any] = selection,
             ) -> dict[str, Any]:
-                if not direction:
+                if not direction and self.owner.controller_selection == VERBALIZED_SELECTION:
                     retry = self._score([action], candidate[name], evidence_for(name))
                     direction = retry["entries"].get(action.menu_id, {}).get("direction")
                     selection["direction_recovery"] = retry

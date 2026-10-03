@@ -104,7 +104,7 @@ class Roles:
         return ToolCompletion("", (NativeToolCall("edit", operator, json.dumps(args)),))
 
 
-def strategy(roles=None, *, seed=0):
+def strategy(roles=None, *, seed=0, **kwargs):
     roles = roles or Roles()
     return ThreeRoleReflectionLM(
         roles,
@@ -113,6 +113,7 @@ def strategy(roles=None, *, seed=0):
         templates={"system_prompt": TEMPLATE},
         base_lm_run_identity={"test": "roles"},
         editor_mode="single_call",
+        **kwargs,
     )
 
 
@@ -129,7 +130,7 @@ def reflect(lm, parent=0, iteration=1, candidate=None, data=None, components=Non
     )[0]
 
 
-@pytest.mark.parametrize("failure", ["finish", "empty", "invalid", "unchanged", "whitespace"])
+@pytest.mark.parametrize("failure", ["finish", "invalid", "unchanged", "whitespace"])
 def test_editor_generation_errors_replan_without_unchanged_candidate(failure):
     roles = Roles([failure])
     lm = strategy(roles)
@@ -141,6 +142,32 @@ def test_editor_generation_errors_replan_without_unchanged_candidate(failure):
     assert records[0]["action_choice"] == PAIR
     assert records[1]["controller_sampling"]["phase"] == "zero_weight_fallback"
     assert all(task["execution_traces"] == roles.editor_tasks[0]["execution_traces"] for task in roles.editor_tasks)
+
+
+@pytest.mark.parametrize("errors", [["empty"], ["empty", "empty"]])
+def test_missing_native_calls_correct_same_pair_then_replan_only_if_needed(errors):
+    roles = Roles(errors)
+    proposal = reflect(strategy(roles))
+    assert proposal.new_texts
+    first, second = roles.editor_tasks[:2]
+    assert "native_protocol_correction" in second
+    assert {key: second[key] for key in first} == first
+    records = proposal.metadata["attempt_records"]
+    assert len(records) == len(errors)
+    assert records[0]["react_iterations"] == 2
+    assert len(roles.manifestor_prompts) == len(errors)
+    assert proposal.metadata["generation_error_count"] == len(errors) - 1
+
+
+def test_random_controller_retries_no_edit_without_calling_a_generative_controller():
+    roles = Roles(["finish"])
+    lm = strategy(roles, controller_selection="uniform_random")
+    proposal = reflect(lm)
+    assert proposal.new_texts and not roles.controller_prompts
+    records = proposal.metadata["attempt_records"]
+    assert len(records) >= 2
+    assert records[0]["action_choice"] != records[1]["action_choice"]
+    assert all(r["controller_sampling"]["controller_backend"] == "uniform_random" for r in records)
 
 
 def test_direct_reflection_rejects_noncanonical_parent_before_model_calls():
@@ -471,9 +498,10 @@ def test_controller_raw_outputs_only_keep_the_current_scoring_attempts():
     assert len(controller.history) == 3
 
 
-def test_role_journal_replays_completed_manifestor_inside_interrupted_edit_step(tmp_path, monkeypatch):
+@pytest.mark.parametrize("failure", ["finish", "empty"])
+def test_role_journal_replays_completed_manifestor_inside_interrupted_edit_step(tmp_path, monkeypatch, failure):
     """Use the actual LM response journal, with a mocked provider and real role boundaries."""
-    original_roles = Roles(["finish"], interrupt_at=1)
+    original_roles = Roles([failure], interrupt_at=1)
 
     def provider_for(roles):
         def provider(**kwargs):
@@ -500,14 +528,14 @@ def test_role_journal_replays_completed_manifestor_inside_interrupted_edit_step(
     monkeypatch.setattr("litellm.completion_cost", lambda **kwargs: 0.25)
     with pytest.raises(KeyboardInterrupt):
         reflect(interrupted)
-    assert len(original_roles.manifestor_prompts) == 2
+    assert len(original_roles.manifestor_prompts) == (2 if failure == "finish" else 1)
     resumed_roles = Roles()
     monkeypatch.setattr("litellm.completion", provider_for(resumed_roles))
     resumed = strategy(journal_lm(journal_path))
     resumed.recovery_planner.bind_run_dir(str(tmp_path))
     resumed.set_state(before)
     proposal = reflect(resumed)
-    assert proposal.new_texts and proposal.metadata["generation_error_count"] == 1
+    assert proposal.new_texts and proposal.metadata["generation_error_count"] == (1 if failure == "finish" else 0)
     assert not resumed_roles.controller_prompts and not resumed_roles.manifestor_prompts
     assert len(resumed_roles.editor_tasks) == 1
-    assert resumed.total_cost == 1.25  # Five completed responses, no repeated completed work.
+    assert resumed.total_cost == (1.25 if failure == "finish" else 1.0)

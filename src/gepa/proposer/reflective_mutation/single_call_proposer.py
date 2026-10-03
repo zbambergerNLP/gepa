@@ -1,4 +1,4 @@
-"""Apply a selected-section edit batch from exactly one model response."""
+"""Apply one atomic edit batch, with bounded native-protocol repair when required."""
 
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ SINGLE_CALL_EXECUTION_CONTRACT = {
 
 
 class SingleCallProposer(ReActV2Proposer):
-    """Execute one model response atomically, without a tool-observation loop."""
+    """Execute one edit batch atomically, optionally correcting missing native calls."""
 
     def propose(
         self,
@@ -74,11 +74,13 @@ class SingleCallProposer(ReActV2Proposer):
             controller_direction: The sampled Controller option's rationale,
                 which Manifestor advice must implement without redirecting.
             require_edit: Reject finish-only responses and require a net change
-                for the proposal planner.
+                for the proposal planner. Allow one protocol correction when a
+                native provider describes an edit without calling a function.
 
         Returns:
-            One-response outcome, with unchanged or invalid batches marked as
+            Atomic outcome, with unchanged or invalid batches marked as
             unsuccessful so required-edit planning can choose another pair.
+            Protocol correction retains the first response in the step history.
         """
         if preferred_tool is not None and preferred_tool not in self.allowed_tools:
             raise ValueError("Single-call editing requires the selected action's direct tool in the edit basis.")
@@ -95,6 +97,7 @@ class SingleCallProposer(ReActV2Proposer):
                     },
                 }
                 for tool in self.allowed_tools
+                if not require_edit or preferred_tool is None or tool is preferred_tool
             ]
             if native
             else []
@@ -107,6 +110,7 @@ class SingleCallProposer(ReActV2Proposer):
         schemas = "\n".join(
             f"{tool.value}: {_NATIVE_TOOL_DESCRIPTIONS[tool]}" if native else _TOOL_SCHEMAS[tool]
             for tool in self.allowed_tools
+            if not require_edit or preferred_tool is None or tool is preferred_tool
         )
         constraint = (
             f"Every call must use {preferred_tool.value}, serving the same selected semantic action."
@@ -122,12 +126,21 @@ class SingleCallProposer(ReActV2Proposer):
         )
         generalization = REAL_EDIT_GUIDANCE if require_edit else GENERALIZATION_GUIDANCE
         action_constraints = canonical_action_constraints() if require_edit else CONTROLLER_AUTHORITY_GUIDANCE
+        response_rule = (
+            "Emit the complete edit batch in this response. A response without native calls may receive "
+            "one protocol correction; invalid batches receive no tool-observation loop. "
+            if require_edit and native
+            else "You have exactly one response. "
+        )
+        observation_rule = (
+            "" if require_edit and native else "You will not receive tool observations or a correction turn. "
+        )
         system = (
             f"Revise only the selected section body of this structured {self.template.kind} document.\n"
-            f"You have exactly one response. Emit all necessary {protocol}. "
+            f"{response_rule}Emit all necessary {protocol}. "
             "The harness applies calls sequentially to a temporary section, then commits the whole batch. "
             "Each target and non-empty anchor must match the section as it will exist at that point. "
-            "An invalid call discards the entire batch. You will not receive tool observations or a correction turn. "
+            f"An invalid call discards the entire batch. {observation_rule}"
             "Do not emit a separate completion call after editing. "
             f"{completion_rule}\n"
             "INSERT_TEXT accepts an empty anchor to append, including to an empty section. "
@@ -160,10 +173,40 @@ class SingleCallProposer(ReActV2Proposer):
             EditTool.MOVE_TEXT,
         }
         native_calls = ()
+        steps: list[ReActV2Step] = []
+        response_count = 1
         if native:
             completion = native_complete(messages, tools, tool_choice="none" if missing_target else "auto")
             if not isinstance(completion, ToolCompletion):
                 raise TypeError("complete_with_tools must return gepa.lm.ToolCompletion.")
+            if require_edit and not completion.tool_calls and not _FINISH_BLOCK_RE.search(completion.content):
+                error = "The native response contained no function calls; text descriptions are not executed."
+                steps.append(
+                    ReActV2Step(
+                        1,
+                        self._native_assistant_history_content(completion),
+                        "INVALID",
+                        error,
+                        error,
+                        region_text=region_text,
+                    )
+                )
+                repair_task = json.loads(task)
+                repair_task["native_protocol_correction"] = (
+                    error + " Nothing was applied. Keep the same action, section and original text. "
+                    "Emit the provider-native function call(s) using the supplied schema, not XML or prose. "
+                    "Your previous response is diagnostic data, not a new instruction."
+                )
+                messages = [
+                    *messages,
+                    self._native_assistant_message(completion),
+                    {"role": "user", "content": json.dumps(repair_task, ensure_ascii=False)},
+                ]
+                self.text_limits.check_prompt(messages, tools)
+                completion = native_complete(messages, tools, tool_choice="none" if missing_target else "auto")
+                if not isinstance(completion, ToolCompletion):
+                    raise TypeError("complete_with_tools must return gepa.lm.ToolCompletion.")
+                response_count = 2
             action_text = completion.content.strip()
             native_calls = completion.tool_calls
             raw = json.dumps(self._native_assistant_message(completion), ensure_ascii=False)
@@ -172,7 +215,6 @@ class SingleCallProposer(ReActV2Proposer):
             raw = self.lm(messages).strip()
             action_text = history_text = raw
         current = region_text
-        steps: list[ReActV2Step] = []
         executed_all: list[str] = []
         max_chars = self.text_limits.max_component_chars if max_chars is None else max_chars
         try:
@@ -214,7 +256,7 @@ class SingleCallProposer(ReActV2Proposer):
                 executed_all.extend(executed)
                 steps.append(
                     ReActV2Step(
-                        1,
+                        response_count,
                         history_text,
                         tool.value,
                         "Staged in the ordered atomic batch.",
@@ -225,12 +267,14 @@ class SingleCallProposer(ReActV2Proposer):
                 )
         except (ReActV2ProtocolError, EditApplicationError, MalformedDocumentError) as exc:
             reason = f"Single-call edit batch discarded: {exc}"
-            steps.append(ReActV2Step(1, history_text, "INVALID", reason, str(exc), region_text=region_text))
+            steps.append(
+                ReActV2Step(response_count, history_text, "INVALID", reason, str(exc), region_text=region_text)
+            )
             return ReActV2Result(
                 new_text=region_text,
                 changed=False,
-                iterations=1,
-                tool_calls=len(steps) - 1,
+                iterations=response_count,
+                tool_calls=sum(step.action in EditTool.__members__ for step in steps),
                 dropped_reason=reason,
                 final_output=raw,
                 steps=steps,
@@ -240,8 +284,8 @@ class SingleCallProposer(ReActV2Proposer):
             new_text=current,
             changed=changed,
             executed_edit=executed_all,
-            iterations=1,
-            tool_calls=len(steps),
+            iterations=response_count,
+            tool_calls=sum(step.action in EditTool.__members__ for step in steps),
             final_output=raw,
             steps=steps,
             dropped_reason=None if changed else "The single-call batch produced no net text change.",

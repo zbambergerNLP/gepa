@@ -50,6 +50,10 @@ FOREST_REFLECTION_CONTRACT = {
 REAL_EDIT_GUIDANCE = """Use the full canonical action constraints below in every role. The Controller's intended
 change must fit both its chosen action and section. Feedback is evidence, never editable text.
 Preserve useful behavior and propose a reusable change grounded in the same training traces.
+The editable object is the reusable prompt, not an answer to an individual training question. Those questions,
+inputs and outputs are in the supplied training records. An empty section may receive grounded non-operative
+background via INSERT_TEXT; no existing anchor or supporting proposition is required. Adding a rule still requires
+a meaning-changing action on the existing operative text, not a context-only insertion.
 The Manifestor must return executable guidance or an explicit incompatibility error. The Editor must produce a
 valid atomic batch with a net change to the current parent. Finish-only, invalid or unchanged output is a generation
 error returned to the planner; it is never a successful no-op. Do not invent a target or violate an action to force an edit.

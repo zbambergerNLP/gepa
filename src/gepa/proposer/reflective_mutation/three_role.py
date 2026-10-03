@@ -518,9 +518,9 @@ class ThreeRoleReflectionLM:
             manifestor_traces_chars: Maximum trace characters shown to the
                 Manifestor.
             editor_mode: Legacy multi-turn ``react`` or one-response ``single_call`` editing.
-            proposal_policy: ``real_edit`` retries failed generation for generative level 2;
-                ``independent`` retains historical behavior. Jev, random and lower-level
-                Controllers keep their existing behavior.
+            proposal_policy: ``real_edit`` retries failed generation for level-2
+                generative, Jev and random Controllers. ``independent`` retains
+                historical behavior; lower-level Controllers are unchanged.
             proposer_model: Model identifier persisted in the run contract.
             react_max_iterations: Maximum ReAct turns, or ``None`` for no limit.
             react_max_tool_calls: Maximum valid calls, or ``None`` for no limit.
@@ -559,9 +559,7 @@ class ThreeRoleReflectionLM:
             raise ValueError("proposal_policy must be real_edit or independent")
         self.recovery_planner = (
             GenerationRecoveryPlanner(self)
-            if proposal_policy == "real_edit"
-            and level == SEMANTIC_REFLECTION_LEVEL
-            and controller_selection == VERBALIZED_SELECTION
+            if proposal_policy == "real_edit" and level == SEMANTIC_REFLECTION_LEVEL
             else None
         )
         if self.recovery_planner is not None:
@@ -723,13 +721,17 @@ class ThreeRoleReflectionLM:
             SINGLE_CALL_EXECUTION_CONTRACT if self.editor_mode == "single_call" else REACT_V2_EXECUTION_CONTRACT
         )
         if self.recovery_planner is not None:
-            max_proposer_model_calls = sum(
+            max_proposer_model_calls = 2 * sum(
                 len(self.templates[kind].sections) * len(SEMANTIC_ACTION_CATALOGS[self.templates[kind].kind]["actions"])
                 for kind in component_kinds.values()
             )
             execution_contract.update(
+                version=2,
+                completion="atomic_batch_with_optional_native_protocol_correction",
                 unchanged_finish="generation_error_then_replan",
                 invalid_batch="atomic_rollback_then_replan_another_pair",
+                missing_native_calls="one_same_action_protocol_correction_then_replan",
+                max_responses_per_pair=2,
             )
         return {
             "schema_version": 11,
@@ -780,7 +782,9 @@ class ThreeRoleReflectionLM:
             "react_max_tool_calls": self.react_max_tool_calls,
             "react_execution": {
                 **execution_contract,
-                "max_iterations": 1 if self.editor_mode == SINGLE_CALL_EDITOR_MODE else self.react_max_iterations,
+                "max_iterations": 2
+                if self.recovery_planner is not None
+                else (1 if self.editor_mode == SINGLE_CALL_EDITOR_MODE else self.react_max_iterations),
                 "max_tool_calls": self.react_max_tool_calls,
             },
         }
@@ -1043,7 +1047,7 @@ class ThreeRoleReflectionLM:
         components_to_update: list[str],
         metadata: Mapping[str, Any] | None,
         *,
-        selected: tuple[ControllerChoice, dict[str, Any], str] | None = None,
+        selected: tuple[ControllerChoice, dict[str, Any], str | None] | None = None,
         require_edit: bool = False,
     ) -> tuple[ReflectionProposal, ThreeRoleReflectionLM]:
         """Run Controller, optional Manifestor, and ReAct V2 per component.

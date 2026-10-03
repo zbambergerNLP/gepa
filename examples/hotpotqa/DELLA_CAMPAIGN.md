@@ -563,3 +563,70 @@ that validation pass; it does not implement this experiment's stopping rule.
 Persist `budget_stopping=whole_iteration_threshold` and report the actual completed
 metric calls, including overshoot. A run stopped by the generic cap before a full
 iteration is partial evidence, not a completed ablation or a held-out result.
+
+### Offline candidate-context signal study
+
+Run the fixed plateau-escape analysis without model access:
+
+```bash
+uv run --locked --extra analysis python -m examples.hotpotqa.analyze_action_signal \
+  --manifest examples/hotpotqa/action_signal_manifest.json \
+  --output outputs/plateau-action-signal
+```
+
+The checked-in manifest identifies the verified October 2 archives and their exact
+input-file hashes. Its roots refer to sibling archive checkouts; adjust only the
+roots when relocating those files. The archives themselves are not in Git. Outputs
+must be outside every archive. The optional `analysis` extra installs NumPy and
+scikit-learn; the core package still has no required dependencies.
+
+Each manifest entry declares `id`, `root`, `kind` (`search`, `vanilla`, or `pilot`),
+`lineage`, `cohort`, and a `files` map from relative path to SHA-256. Search entries
+also declare `completed_iterations` and `standard_end_iteration`: these are counts
+of actual optimizer iterations, including perfect-batch skips, not proposal counts
+or configured budget thresholds. The optional `identity` binds the archived source,
+controller, historical action catalog, module selector, minibatch size, dataset,
+editor, and search contract. `expected_counts` makes known extraction totals into
+checked assertions. Extend this manifest to admit another compatible archive.
+
+Continuation snapshots use the same lineage and cohort. Identical iteration IDs
+within that lineage count once; contradictory copies fail the import. Separate
+proposals retain distinct IDs even when their text matches. Compatible controller
+cohorts can be compared, but different data, action catalogs, batch sizes, editor
+protocols, and search settings form separate comparison groups. The importer
+currently supports serial round-robin selection, strict training admission, full
+validation, and no merge or evaluation cache; other protocols fail explicitly.
+
+Only `action_summary.json`, `candidates.json`, `run_log.json`, `gepa_state.bin`, and
+the optional `.evaluation-journal/responses.sqlite3` are admitted for search runs.
+The journal is hash-verified as a storage artifact, then queried only for parent
+batches in optimizer-iteration scopes; held-out response rows are never queried or
+decoded. Parent training features require a matching pre-action journal row;
+missing rows stay null without changing earlier features. Post-selection trace
+score availability cannot become a predictive feature.
+Pilot inputs use their historical envelope checksum rather than the Jev mailbox
+checksum. Matched pilot opportunities remain supplementary transfer diagnostics;
+the Jev novelty-verifier pilot does not become a Jev action-controller cohort.
+
+`decisions.jsonl` contains pre-decision features, observed outcomes, missingness,
+and source links. `audit.json` records coverage, identities, hashes and deduplication;
+`lineages.json` records observed incumbent curves, ancestry and censored branch
+follow-up. `results.json` contains fold membership, predictions, calibration,
+precision-recall, log loss and implementation/dependency fingerprints. `report.html`
+is a local standalone view of that evidence. No held-out test answers are used.
+
+The four prespecified models are smoothed action success rates, regularized
+candidate/stage logistic regression, added action/section effects, and added
+candidate-action interactions. Numerical scaling, imputation, categorical encoding
+and at most five failure-pattern principal components are fitted on training data
+only. The chosen section's length enters only action-aware models. Regularization
+is fixed (`C=0.1`); there is no tuning search. Forward windows, complete-lineage
+holdouts and standard-to-expanded continuation tests are reported separately.
+
+Labels measure improvement over the incumbent immediately before each action.
+Rejected proposals have zero observed gain under admission, but their unmeasured
+validation scores remain null. Unresolved requests stay unknown. Ancestry is
+descriptive follow-up, not a second positive label or causal credit. Predictions
+concern selected actions only; they do not estimate unobserved alternative rewards
+or replay a different search tree. A fold without breakthroughs cannot establish
+breakthrough discrimination, and overlapping folds are not independent experiments.

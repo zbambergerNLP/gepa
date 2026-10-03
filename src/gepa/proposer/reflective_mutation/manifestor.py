@@ -3,9 +3,10 @@
 
 """Convert a Controller action into steering text for the proposer.
 
-Fixed-text actions require no model call. Instruction-based actions use at most
-two calls and return plain steering guidance. The Manifestor does not edit the
-candidate; ReAct V2 applies the selected operation.
+The independent policy returns fixed text directly or uses at most two calls for
+instruction-based guidance. Real-edit planning requires one structured compatibility
+decision for every action. The Manifestor does not edit the candidate; the Editor
+applies the selected operation.
 """
 
 from __future__ import annotations
@@ -16,8 +17,12 @@ from typing import Any
 
 from gepa.proposer.reflective_mutation.base import LanguageModel
 from gepa.strategies.edit_tools import EditTool
-from gepa.strategies.intervention import ControllerChoice
-from gepa.strategies.reflection_context import CONTROLLER_AUTHORITY_GUIDANCE, GENERALIZATION_GUIDANCE
+from gepa.strategies.intervention import ControllerChoice, canonical_action_constraints
+from gepa.strategies.reflection_context import (
+    CONTROLLER_AUTHORITY_GUIDANCE,
+    GENERALIZATION_GUIDANCE,
+    REAL_EDIT_GUIDANCE,
+)
 from gepa.strategies.text_limits import TextLimits, clip_text, resolve_text_limits
 
 MAX_MANIFESTATION_ATTEMPTS = 2
@@ -119,11 +124,13 @@ class Manifestor:
         traces: str,
         *,
         controller_direction: str | None = None,
+        require_edit: bool = False,
     ) -> str | None:
         """Return steering guidance for ``action`` or ``None`` when it has no spec.
 
-        Fixed text is returned without an LM call. Instruction-based actions
-        retry one empty response and apply only explicitly configured limits.
+        The independent policy returns fixed text without an LM call and retries
+        one empty instruction response. Real-edit planning instead requires a
+        structured compatibility decision from the model for every action.
 
         Args:
             action: The Controller's joint decision; only its
@@ -135,17 +142,20 @@ class Manifestor:
                 the minibatch; the only input this role bounds.
             controller_direction: Rationale for the sampled Controller option,
                 passed independently of this role's interpretation.
+            require_edit: Require structured executable guidance or raise an
+                incompatibility error for the proposal planner.
 
         Returns:
             Steering text, or ``None`` without a semantic spec.
 
         Raises:
-            ManifestationError: Steering is blank.
+            ManifestationError: Steering is blank or required-edit guidance is
+                malformed, incompatible, or incomplete.
         """
         spec = action.semantic_action
         if spec is None:
             return None
-        if spec.fixed_text is not None:
+        if spec.fixed_text is not None and not require_edit:
             if not spec.fixed_text.strip():
                 raise ManifestationError(f"SemanticActionSpec {spec.name!r} has empty fixed steering text.")
             return clip_text(spec.fixed_text, self.text_limits.manifestor_steering_chars)
@@ -158,6 +168,32 @@ class Manifestor:
             traces=traces,
         )
         tool = action.edit_tool
+        if require_edit:
+            prompt = (
+                "Validate and manifest this selected action without changing its goal or section.\n"
+                f"Selected action: {spec.name}; section: {action.edit_target.section}; tool: {tool}\n"
+                f"Binding action instruction: {spec.instruction or spec.fixed_text}\n"
+                f"Controller direction: {json.dumps(controller_direction)}\n"
+                f"{REAL_EDIT_GUIDANCE}\n{canonical_action_constraints()}\n{state}\n"
+                'Return only a JSON object. For executable guidance use {"status":"ready", '
+                '"observation":"...", "hypothesis":"...", "general_change":"...", "scope":"..."}. '
+                "If the direction conflicts with the action, lacks a real change or cannot execute, use "
+                '{"status":"incompatible", "reason":"..."}. Do not ask the Editor to finish without editing.'
+            )
+            self.text_limits.check_prompt(prompt)
+            raw = self.lm(prompt).strip()
+            try:
+                guidance = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise ManifestationError(f"Malformed manifestation: {raw}") from exc
+            fields = ("observation", "hypothesis", "general_change", "scope")
+            if (
+                not isinstance(guidance, dict)
+                or guidance.get("status") != "ready"
+                or any(not isinstance(guidance.get(field), str) or not guidance[field].strip() for field in fields)
+            ):
+                raise ManifestationError(f"Incompatible or incomplete manifestation: {raw}")
+            return "\n".join(f"{field}: {guidance[field]}" for field in fields)
         if tool is EditTool.INSERT_TEXT:
             tool_applicability = (
                 'INSERT_TEXT accepts anchor="" to append, including when the selected section is empty. '

@@ -1247,7 +1247,7 @@ class GEPAState(Generic[RolloutOutput, DataId]):
     @staticmethod
     def _attempt_records_to_chat(
         records: Sequence[Mapping[str, Any]],
-        outcome: Literal["accepted", "rejected", "dropped"],
+        outcome: Literal["accepted", "rejected", "dropped", "generation_exhausted"],
         *,
         score_before: float | None = None,
         score_after: float | None = None,
@@ -1269,15 +1269,19 @@ class GEPAState(Generic[RolloutOutput, DataId]):
             Ordered user/assistant messages to append to the selected branch.
         """
         messages: list[dict[str, str]] = []
+        unevaluated_statuses = {"dropped", "generation_error"}
         for source in records:
             record = deepcopy(dict(source))
-            record_outcome = "dropped" if record.get("attempt_status") == "dropped" else outcome
+            attempt_status = record.get("attempt_status")
+            record_outcome = attempt_status if attempt_status in unevaluated_statuses else outcome
             messages.extend(GEPAState._attempt_record_chat_messages(record))
-            include_outer_result = record_outcome != "dropped" or outcome == "dropped"
+            include_outer_result = record_outcome not in unevaluated_statuses or record_outcome == outcome
             outcome_feedback = {
                 "accepted": "Optimizer result: accepted; the branch now contains this edit.",
                 "rejected": "Optimizer result: rejected; the branch remains unchanged.",
                 "dropped": "Optimizer result: dropped; no candidate was produced.",
+                "generation_error": "Generation error: this attempt produced no candidate; returned to proposal planning.",
+                "generation_exhausted": "Generation exhausted: all remaining possibilities failed; no child was added.",
             }
             feedback = [outcome_feedback[record_outcome]]
             component = record.get("component")
@@ -1306,12 +1310,12 @@ class GEPAState(Generic[RolloutOutput, DataId]):
         candidate_idx: ProgramIdx,
         proposal_metadata: Mapping[str, Any] | None,
         *,
-        outcome: Literal["rejected", "dropped"],
+        outcome: Literal["rejected", "dropped", "generation_exhausted"],
         score_before: float | None = None,
         score_after: float | None = None,
         reason: str | None = None,
     ) -> None:
-        """Append rejected or dropped attempts only to the selected branch.
+        """Append rejected, dropped or exhausted attempts only to the selected branch.
 
         Args:
             candidate_idx: Parent branch that observed the failed attempt.

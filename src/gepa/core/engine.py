@@ -53,6 +53,7 @@ from gepa.logging.utils import log_detailed_metrics_after_discovering_new_progra
 from gepa.proposer.base import CandidateProposal
 from gepa.proposer.merge import MergeProposer
 from gepa.proposer.reflective_mutation.reflective_mutation import ReflectiveMutationProposer
+from gepa.response_journal import ResponseJournalError
 from gepa.strategies.acceptance import AcceptanceCriterion, ImprovementOrEqualAcceptance, StrictImprovementAcceptance
 from gepa.strategies.eval_policy import EvaluationPolicy, FullEvaluationPolicy
 from gepa.strategies.proposal_selection import AllImprovements, SelectionStrategy
@@ -233,6 +234,9 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
         self.reflective_proposer = reflective_proposer
         if run_dir is not None:
             self.reflective_proposer.evaluation_journal = EvaluationJournal(run_dir, use_cloudpickle=use_cloudpickle)
+            planner = getattr(self.reflective_proposer._reflection_lm, "recovery_planner", None)
+            if planner is not None:
+                planner.bind_run_dir(run_dir)
         self.merge_proposer = merge_proposer
         self.frontier_type: FrontierType = frontier_type
 
@@ -1353,6 +1357,9 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
                 self.logger.log(f"Iteration {state.i + 1}: Exception during optimization: {e}")
                 self.logger.log(traceback.format_exc())
                 made_progress = state.total_num_evals > evals_before_iteration
+                will_continue = (
+                    not self.raise_on_exception and made_progress and not isinstance(e, ResponseJournalError)
+                )
                 # Notify error callback
                 notify_callbacks(
                     self.callbacks,
@@ -1360,10 +1367,10 @@ class GEPAEngine(Generic[DataId, DataInst, Trajectory, RolloutOutput]):
                     ErrorEvent(
                         iteration=state.i + 1,
                         exception=e,
-                        will_continue=not self.raise_on_exception and made_progress,
+                        will_continue=will_continue,
                     ),
                 )
-                if self.raise_on_exception or not made_progress:
+                if not will_continue:
                     raise
                 continue
             finally:

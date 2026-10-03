@@ -107,6 +107,7 @@ def test_generalization_policy_is_part_of_resume_identity() -> None:
 @pytest.mark.parametrize("level", [1, 2])
 def test_sampled_controller_direction_reaches_downstream_roles_independently(editor_mode: str, level: int) -> None:
     """Keep the chosen option's rationale even when Manifestor advice tries to redirect it."""
+
     class DirectedLM(ThreeRoleLM):
         def __call__(self, prompt):
             """Give every option a distinct direction and conflicting Manifestor advice."""
@@ -151,7 +152,9 @@ def test_sampled_controller_direction_reaches_downstream_roles_independently(edi
 def test_random_controller_does_not_invent_a_model_direction(editor_mode: str) -> None:
     """Preserve the random ablation's missing model rationale in every downstream role."""
     reflection, lm = strategy(
-        2, controller_selection="uniform_random", editor_mode=editor_mode,
+        2,
+        controller_selection="uniform_random",
+        editor_mode=editor_mode,
         react_replies=["<finish>No supported edit for this random action.</finish>"],
     )
     proposal, _ = reflection.reflect({"sys": PROMPT}, SYS_REFLECTIVE_DATASET, ["sys"])
@@ -204,6 +207,11 @@ MINIMAL_REEXPRESS_REPLIES = [
     tool_call(EditTool.INSERT_TEXT, anchor="", where="after", text="- be kind\n- be brief"),
     "<finish>The semantic edit is complete.</finish>",
 ]
+
+
+def historical_strategy(*args, **kwargs) -> ThreeRoleReflectionLM:
+    """Keep the original independent-role contract covered alongside the new policy tests."""
+    return ThreeRoleReflectionLM(*args, **kwargs, proposal_policy="independent")
 
 
 class ThreeRoleLM:
@@ -371,7 +379,7 @@ def strategy(
         default_replies = DIRECT_REEXPRESS_REPLIES if level == 2 else BROAD_LEVEL1_REPLIES
         lm = ThreeRoleLM(list(default_replies if react_replies is None else react_replies))
     kwargs.setdefault("base_lm_run_identity", {"test_lm": "ThreeRoleLM"})
-    instance = ThreeRoleReflectionLM(lm, level=level, rng=random.Random(0), max_menu=999, **kwargs)
+    instance = historical_strategy(lm, level=level, rng=random.Random(0), max_menu=999, **kwargs)
     return instance, lm
 
 
@@ -423,7 +431,7 @@ def test_construction_rejects_invalid_configuration(kwargs: dict[str, Any]) -> N
         kwargs: Invalid constructor configuration under test.
     """
     with pytest.raises(ValueError):
-        ThreeRoleReflectionLM(ThreeRoleLM([]), **kwargs)
+        historical_strategy(ThreeRoleLM([]), **kwargs)
 
 
 def test_validate_candidate_accepts_system_user_and_skill_components() -> None:
@@ -614,7 +622,7 @@ def test_three_role_run_contract_identifies_role_lm_configuration_without_creden
         api_key="manifestor-secret",
     )
     controller_lm = LM("openai/controller-model", top_p=1.0, api_key="separate-controller-secret")
-    strat = ThreeRoleReflectionLM(base_lm, 2, controller_lm=controller_lm, manifestor_lm=manifestor_lm)
+    strat = historical_strategy(base_lm, 2, controller_lm=controller_lm, manifestor_lm=manifestor_lm)
     contract = strat.run_contract({"sys": PROMPT})
 
     assert contract["proposer_lm"]["model"] == "openai/controller-model"
@@ -652,7 +660,7 @@ def test_three_role_run_contract_normalizes_only_ephemeral_loopback_ports(tmp_pa
         """
         base_lm = LM("hosted_vllm/model", api_base=api_base)
         manifestor_lm = LM("hosted_vllm/model", api_base=api_base, temperature=0.0)
-        strategy = ThreeRoleReflectionLM(base_lm, 2, manifestor_lm=manifestor_lm)
+        strategy = historical_strategy(base_lm, 2, manifestor_lm=manifestor_lm)
         return strategy.run_contract({"sys": PROMPT})
 
     first = contract_for("http://127.0.0.1:31001/v1")
@@ -669,14 +677,14 @@ def test_three_role_run_contract_normalizes_only_ephemeral_loopback_ports(tmp_pa
 
 def test_three_role_run_contract_requires_identity_for_custom_lm() -> None:
     """Refuse resumable state when a custom callable has no stable configuration identity."""
-    strat = ThreeRoleReflectionLM(ThreeRoleLM(DIRECT_REEXPRESS_REPLIES), 2)
+    strat = historical_strategy(ThreeRoleLM(DIRECT_REEXPRESS_REPLIES), 2)
     with pytest.raises(ValueError, match="stable run identity"):
         strat.run_contract({"sys": PROMPT})
 
 
 def test_deduplicated_context_cannot_resume_with_the_preservation_policy(tmp_path: Path) -> None:
     """Reject checkpoints created with the former reflection-context transformation."""
-    strat = ThreeRoleReflectionLM(LM("hosted_vllm/test-model"), 2)
+    strat = historical_strategy(LM("hosted_vllm/test-model"), 2)
     current = strat.run_contract({"sys": PROMPT})
     previous = deepcopy(current)
     previous["reflection_context"] = {
@@ -694,8 +702,8 @@ def test_deduplicated_context_cannot_resume_with_the_preservation_policy(tmp_pat
 def test_separate_controller_sampling_is_material_to_resume(tmp_path: Path) -> None:
     """Reject a Controller-only sampling change even when editor settings match."""
     base = LM("hosted_vllm/test-model", top_p=0.95)
-    original = ThreeRoleReflectionLM(base, 2, controller_lm=LM(base.model, top_p=0.95))
-    updated = ThreeRoleReflectionLM(base, 2, controller_lm=LM(base.model, top_p=1.0))
+    original = historical_strategy(base, 2, controller_lm=LM(base.model, top_p=0.95))
+    updated = historical_strategy(base, 2, controller_lm=LM(base.model, top_p=1.0))
     ensure_reflection_run_contract(str(tmp_path), original.run_contract({"sys": PROMPT}))
     with pytest.raises(ValueError, match="different reflection strategy contract"):
         ensure_reflection_run_contract(str(tmp_path), updated.run_contract({"sys": PROMPT}))
@@ -757,16 +765,16 @@ def test_single_call_editor_preserves_three_roles_and_rejects_old_resume(tmp_pat
     """Keep the Controller and Manifestor, remove only the editor observation loop."""
     lm = ThreeRoleLM([tool_call(EditTool.REPLACE_TEXT, target="be nice", text="be kind")])
     strat, _ = strategy(2, lm=lm, editor_mode="single_call")
-    proposal, _ = strat.reflect({"sys":PROMPT}, deepcopy(SYS_REFLECTIVE_DATASET), ["sys"])
+    proposal, _ = strat.reflect({"sys": PROMPT}, deepcopy(SYS_REFLECTIVE_DATASET), ["sys"])
     assert lm.roles == ["controller", "manifestor", "react_v2"]
     assert proposal.new_texts["sys"] != PROMPT
     assert proposal.metadata["proposer_backend"] == "single_call"
     assert proposal.metadata["action_choice"] == "reexpress@Rules/REPLACE_TEXT"
     assert proposal.metadata["three_role_actions"][0]["react_iterations"] == 1
     old, _ = strategy(2)
-    ensure_reflection_run_contract(str(tmp_path), old.run_contract({"sys":PROMPT}))
+    ensure_reflection_run_contract(str(tmp_path), old.run_contract({"sys": PROMPT}))
     with pytest.raises(ValueError, match="different reflection strategy contract"):
-        ensure_reflection_run_contract(str(tmp_path), strat.run_contract({"sys":PROMPT}))
+        ensure_reflection_run_contract(str(tmp_path), strat.run_contract({"sys": PROMPT}))
 
 
 @pytest.mark.parametrize("selection", ["verbalized", "uniform_random"])
@@ -778,8 +786,7 @@ def test_default_strategy_keeps_one_controller_choice_across_ten_edits(selection
     """
     replacements = ["be nice"] + [f"be kind {index}" for index in range(10)]
     replies = [
-        tool_call(EditTool.REPLACE_TEXT, target=before, text=after)
-        for before, after in pairwise(replacements)
+        tool_call(EditTool.REPLACE_TEXT, target=before, text=after) for before, after in pairwise(replacements)
     ] + ["<finish>Done.</finish>"]
     lm = ThreeRoleLM(replies)
     strat, _ = strategy(2, lm=lm, controller_selection=selection)
@@ -817,7 +824,7 @@ def test_level2_uniform_random_controller_draws_once_from_the_complete_menu() ->
     )
     expected_action = expected_rng.choice(expected_menu)
     lm = ThreeRoleLM(list(DIRECT_REEXPRESS_REPLIES))
-    strat = ThreeRoleReflectionLM(
+    strat = historical_strategy(
         lm,
         level=2,
         controller_selection="uniform_random",
@@ -857,7 +864,7 @@ def test_uniform_random_controller_preserves_target_scoped_branch_history() -> N
         },
     ]
     lm = ThreeRoleLM(list(DIRECT_REEXPRESS_REPLIES))
-    strat = ThreeRoleReflectionLM(
+    strat = historical_strategy(
         lm,
         level=2,
         controller_selection="uniform_random",
@@ -994,7 +1001,7 @@ def test_tracking_wrapper_preserves_manifestor_user_delivery() -> None:
     """Keep user-message guidance when the proposer callable is wrapped."""
     base = ThreeRoleLM(list(DIRECT_REEXPRESS_REPLIES), model="openai/gpt-5")
     wrapped = TrackingLM(base)
-    strat = ThreeRoleReflectionLM(wrapped, level=2, rng=random.Random(0))
+    strat = historical_strategy(wrapped, level=2, rng=random.Random(0))
 
     proposal, _ = strat.reflect({"sys": PROMPT}, deepcopy(SYS_REFLECTIVE_DATASET), ["sys"])
 
@@ -1356,7 +1363,7 @@ def test_level0_remains_identical_to_stateless_vanilla_reflection() -> None:
     baseline_lm = ThreeRoleLM([])
     baseline, _ = StatelessReflectionLM(baseline_lm).reflect({"sys": PROMPT}, dataset, ["sys"])
     level0_lm = ThreeRoleLM([])
-    strat = ThreeRoleReflectionLM(level0_lm, level=0, rng=random.Random(0))
+    strat = historical_strategy(level0_lm, level=0, rng=random.Random(0))
     proposal, _ = strat.reflect({"sys": PROMPT}, dataset, ["sys"])
     assert proposal.new_texts == baseline.new_texts
     assert "reflection_level" not in proposal.metadata
@@ -1417,7 +1424,7 @@ def test_strategy_hooks_and_cost_tracking_remain_compatible() -> None:
     """Preserve seeded RNG, logger binding, and shared/separate LM accounting."""
     base = CostTrackingLM(1.25, list(DIRECT_REEXPRESS_REPLIES))
     manifestor = CostTrackingLM(0.5, [])
-    strat = ThreeRoleReflectionLM(base, level=2, manifestor_lm=manifestor)
+    strat = historical_strategy(base, level=2, manifestor_lm=manifestor)
     rng = random.Random(42)
     logger = MagicMock()
     strat.bind_rng(rng)
@@ -1427,13 +1434,13 @@ def test_strategy_hooks_and_cost_tracking_remain_compatible() -> None:
     assert strat.supports_cost_tracking() is True
     assert strat.total_cost == pytest.approx(1.75)
 
-    shared = ThreeRoleReflectionLM(base, level=2, manifestor_lm=base)
+    shared = historical_strategy(base, level=2, manifestor_lm=base)
     assert shared.total_cost == pytest.approx(1.25)
 
     controller = CostTrackingLM(0.75, [])
-    separate = ThreeRoleReflectionLM(base, level=2, controller_lm=controller, manifestor_lm=manifestor)
+    separate = historical_strategy(base, level=2, controller_lm=controller, manifestor_lm=manifestor)
     assert separate.total_cost == pytest.approx(2.5)
-    shared_guidance = ThreeRoleReflectionLM(base, level=2, controller_lm=manifestor, manifestor_lm=manifestor)
+    shared_guidance = historical_strategy(base, level=2, controller_lm=manifestor, manifestor_lm=manifestor)
     assert shared_guidance.total_cost == pytest.approx(1.75)
 
 
@@ -1441,7 +1448,7 @@ def test_explicit_strategy_rng_remains_independent_of_engine_sampling() -> None:
     """Preserve a caller-supplied Controller RNG when GEPA binds its run RNG."""
     strategy_rng = random.Random(7)
     engine_rng = random.Random(42)
-    strat = ThreeRoleReflectionLM(ThreeRoleLM([]), level=2, rng=strategy_rng)
+    strat = historical_strategy(ThreeRoleLM([]), level=2, rng=strategy_rng)
 
     strat.bind_rng(engine_rng)
 
@@ -1451,7 +1458,7 @@ def test_explicit_strategy_rng_remains_independent_of_engine_sampling() -> None:
 def test_default_strategy_rng_binds_to_engine_sampling() -> None:
     """Keep the engine RNG as the default stream when no strategy RNG is set."""
     engine_rng = random.Random(42)
-    strat = ThreeRoleReflectionLM(ThreeRoleLM([]), level=2)
+    strat = historical_strategy(ThreeRoleLM([]), level=2)
 
     strat.bind_rng(engine_rng)
 
@@ -1461,7 +1468,7 @@ def test_default_strategy_rng_binds_to_engine_sampling() -> None:
 @pytest.mark.parametrize("controller_selection", ["verbalized", "uniform_random"])
 def test_strategy_rng_checkpoint_replays_controller_choices(controller_selection: str) -> None:
     """Resume both ReAct V2 Controller policies at the exact next random choice."""
-    uninterrupted = ThreeRoleReflectionLM(
+    uninterrupted = historical_strategy(
         ThreeRoleLM([]),
         level=2,
         controller_selection=controller_selection,
@@ -1471,7 +1478,7 @@ def test_strategy_rng_checkpoint_replays_controller_choices(controller_selection
     checkpoint = uninterrupted.get_state()
     expected = uninterrupted.rng.choices(range(50), k=20)
 
-    resumed = ThreeRoleReflectionLM(
+    resumed = historical_strategy(
         ThreeRoleLM([]),
         level=2,
         controller_selection=controller_selection,

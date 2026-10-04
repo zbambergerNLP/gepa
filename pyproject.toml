@@ -53,6 +53,19 @@ confidence = [
     "litellm>=1.81.0,<1.92; python_version >= '3.14'",
 ]
 dspy = []
+decisionbench = [
+    "gepa[full]",
+    "decision-bench @ git+https://github.com/Hanno-Labs/decision-bench.git@9a6328ee066a3dec0ed94ea9e57ddd3f63c57aa9 ; python_version >= '3.12' and python_version < '3.14'",
+]
+obliqbench = [
+    "gepa[full]",
+    "numpy==2.2.6; python_version >= '3.12' and python_version < '3.14'",
+    "pytrec-eval-terrier==0.5.10; python_version >= '3.12' and python_version < '3.14'",
+    "rank-bm25==0.2.2; python_version >= '3.12' and python_version < '3.14'",
+    "sentence-transformers==6.1.0; python_version >= '3.12' and python_version < '3.14'",
+    "transformers==5.17.0; python_version >= '3.12' and python_version < '3.14'",
+    "torch==2.9.0; python_version >= '3.12' and python_version < '3.14'",
+]
 test = [
     "gepa[full,jev]",
     "pytest",

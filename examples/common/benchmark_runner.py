@@ -6,12 +6,14 @@ import argparse
 import fcntl
 import json
 import math
+import platform
 import random
 import statistics
 import time
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import replace
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
@@ -24,11 +26,16 @@ from examples.common.experiment_models import (
 from examples.common.model_settings import resolve_benchmark_lm_kwargs, validate_benchmark_model_pair
 from examples.common.pilot_checks import atomic_json, digest
 from examples.common.provider_retries import PROVIDER_RETRY_POLICY, provider_retry_kwargs
-from examples.common.react_v2 import benchmark_data_identity, build_react_v2_strategy, resolve_template_family
+from examples.common.react_v2 import (
+    benchmark_data_identity,
+    build_react_v2_strategy,
+    file_sha256,
+    resolve_template_family,
+)
 from gepa import optimize
 from gepa.core.adapter import EvaluationBatch
 from gepa.lm import LM
-from gepa.lm_constants import PROVIDER_ATTEMPT_LOG
+from gepa.lm_constants import PROVIDER_ATTEMPT_LOG, PROVIDER_RETRY_KEY
 from gepa.strategies.batch_sampler import IndependentEpochShuffledBatchSampler
 from gepa.strategies.forest_constants import (
     BROAD_EDIT_TOOL_SET,
@@ -46,6 +53,18 @@ DEFAULT_MAX_WORKERS = 1
 DEFAULT_SEED = 0
 DEFAULT_PILOT_SIZE = 3
 RUN_CONTRACT_FILENAME = "benchmark-run-contract.json"
+
+
+def implementation_identity() -> dict[str, Any]:
+    """Fingerprint the shared executable code and installed model transport."""
+    root = Path(__file__).resolve().parents[2]
+    files = sorted((root / "src" / "gepa").rglob("*.py")) + sorted((root / "examples" / "common").glob("*.py"))
+    return {
+        "source_sha256": digest([[str(path.relative_to(root)), file_sha256(path)] for path in files]),
+        "lock_sha256": file_sha256(root / "uv.lock"),
+        "python": platform.python_version(),
+        "litellm": version("litellm"),
+    }
 
 
 def build_parser(
@@ -105,7 +124,10 @@ def resolve_models(args: argparse.Namespace) -> BenchmarkModels:
         proposer_model=args.reflection_model,
         solver_api_base=solver_base,
         proposer_api_base=proposer_base,
-        solver_kwargs=resolve_benchmark_lm_kwargs(args.model, solver_base, role=SOLVER_ROLE),
+        solver_kwargs={
+            **resolve_benchmark_lm_kwargs(args.model, solver_base, role=SOLVER_ROLE),
+            **provider_retry_kwargs(args.run_dir / PROVIDER_ATTEMPT_LOG, SOLVER_ROLE),
+        },
         proposer_kwargs=resolve_benchmark_lm_kwargs(args.reflection_model, proposer_base, role=OPTIMIZER_ROLE),
     )
 
@@ -403,6 +425,23 @@ def _run_condition(
     identity: dict[str, Any],
     condition: str,
 ) -> dict[str, Any]:
+    """Hold one exclusive writer lock for each resumable optimization directory."""
+    args.run_dir.mkdir(parents=True, exist_ok=True)
+    with (args.run_dir / f".{condition}.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError(f"Another process is running {condition} in {args.run_dir}.") from exc
+        return _run_condition_locked(definition, models, args, identity, condition)
+
+
+def _run_condition_locked(
+    definition: BenchmarkDefinition,
+    models: BenchmarkModels,
+    args: argparse.Namespace,
+    identity: dict[str, Any],
+    condition: str,
+) -> dict[str, Any]:
     """Freeze a validation winner before evaluating it and its shared baseline."""
     directory = args.run_dir / condition
     component_kinds = definition.component_kinds or dict.fromkeys(definition.seed_candidate, "system_prompt")
@@ -588,8 +627,12 @@ def run_cli(
         valset=definition.valset[: args.val_limit],
         testset=definition.testset[: args.test_limit],
     )
+    solver_identity_kwargs = deepcopy(models.solver_kwargs)
+    if PROVIDER_RETRY_KEY in solver_identity_kwargs:
+        solver_identity_kwargs[PROVIDER_RETRY_KEY]["log_path"] = None
     identity = {
         "benchmark": definition.name,
+        "implementation": implementation_identity(),
         "seed_candidate": definition.seed_candidate,
         "full_data": full_identity,
         "data": benchmark_data_identity(
@@ -601,7 +644,7 @@ def run_cli(
         "solver": {
             "model": models.solver_model,
             "revision": experiment_model_version(models.solver_model),
-            "kwargs": models.solver_kwargs,
+            "kwargs": solver_identity_kwargs,
         },
         "provider_retry_policy": PROVIDER_RETRY_POLICY,
     }

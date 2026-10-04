@@ -1,5 +1,6 @@
 """Exercise shared benchmark execution with a real optimizer and local task adapter."""
 
+import fcntl
 import json
 from dataclasses import replace
 
@@ -218,3 +219,14 @@ def test_benchmark_role_budgets_reach_builder_and_saved_contract(tmp_path):
     contract = json.loads((tmp_path / "run" / "pilot" / "evaluation-contract.json").read_text())
     assert seen[0].solver_kwargs["max_tokens"] == 32_768
     assert contract["identity"]["solver"]["kwargs"]["max_tokens"] == 32_768
+
+
+def test_duplicate_optimizer_writer_is_rejected_before_model_work(tmp_path):
+    benchmark = definition(tmp_path)
+    parser = runner.build_parser("local", lambda parser: None)
+    args = parser.parse_args(["--run-dir", str(tmp_path)])
+    with (tmp_path / ".vanilla.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(RuntimeError, match="Another process"):
+            runner._run_condition(benchmark, runner.resolve_models(args), args, {}, "vanilla")
+    assert benchmark.adapter.calls == []

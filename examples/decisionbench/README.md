@@ -108,19 +108,15 @@ Pilot calibration uses training rows only.
 Use Python 3.12 or 3.13. The optional DecisionBench dependency is pinned to
 `decision-bench @ git+https://github.com/Hanno-Labs/decision-bench.git@9a6328ee066a3dec0ed94ea9e57ddd3f63c57aa9`.
 Its upstream requirements include `pyarrow>=21,<22` and `transformers>=5.17,<6`;
-Python 3.14 is not supported by this integration. For a standalone development
-checkout before the suite dependency extra is merged:
+Python 3.14 is not supported by this integration. Install the pinned extra:
 
 ```bash
-uv sync --locked --extra dev --python 3.13
-uv pip install --python .venv/bin/python \
-  'decision-bench @ git+https://github.com/Hanno-Labs/decision-bench.git@9a6328ee066a3dec0ed94ea9e57ddd3f63c57aa9'
-uv run --no-sync pytest -q tests/test_decisionbench.py
+uv sync --locked --extra dev --extra decisionbench --python 3.12
+uv run --no-sync python -m pytest -q tests/test_decisionbench.py
 uv run --no-sync python -m examples.decisionbench.main --help
 ```
 
-After the shared runner is present, a training-only latency pilot against the
-configured solver server is:
+A training-only latency pilot against the configured solver server is:
 
 ```bash
 uv run --no-sync python -m examples.decisionbench.main \

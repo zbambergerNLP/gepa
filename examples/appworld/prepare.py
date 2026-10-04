@@ -45,7 +45,7 @@ def main(argv: list[str] | None = None) -> None:
         "APPWORLD_CACHE": str(root / ".cache"),
         "PYTHONDONTWRITEBYTECODE": "1",
     }
-    command = ["uv", "run", "--no-project", "--python", str(python)]
+    command = ["uv", "run", "--no-project", "--python", str(python), "python"]
     subprocess.run([*command, "-m", "appworld.cli", "install"], env=environment, check=True)
     if not (root / "data").exists():
         with tempfile.TemporaryDirectory(dir=root) as temporary:

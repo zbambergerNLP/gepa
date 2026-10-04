@@ -10,7 +10,7 @@ from typing import Any
 
 from examples.taubench.benchmark_settings import TEST_REPETITIONS, TRIAL_SEED
 from examples.taubench.utils import digest
-from gepa.core.adapter import EvaluationBatch
+from gepa.core.adapter import EvaluationBatch, ProposalFn
 
 NORMAL_ENDINGS = {"agent_stop", "user_stop"}
 FAILED_ENDINGS = {"max_steps", "timeout", "too_many_errors", "agent_error", "user_error", "context_window_exceeded"}
@@ -36,9 +36,19 @@ def validate_outputs(records: list[dict], outputs: Any, candidate_sha256: str, t
         ):
             raise ValueError("tau output identity or repetition mismatch")
         elapsed, reward = output.get("elapsed_seconds"), output.get("reward")
-        if type(elapsed) not in (int, float) or not math.isfinite(elapsed) or elapsed <= 0:
+        if (
+            isinstance(elapsed, bool)
+            or not isinstance(elapsed, int | float)
+            or not math.isfinite(elapsed)
+            or elapsed <= 0
+        ):
             raise ValueError("Invalid episode wall time")
-        if type(reward) not in (int, float) or not math.isfinite(reward) or reward not in (0, 1):
+        if (
+            isinstance(reward, bool)
+            or not isinstance(reward, int | float)
+            or not math.isfinite(reward)
+            or reward not in (0, 1)
+        ):
             raise ValueError("Invalid official reward")
         reason = output.get("termination_reason")
         if reason not in NORMAL_ENDINGS | FAILED_ENDINGS:
@@ -54,7 +64,7 @@ def validate_outputs(records: list[dict], outputs: Any, candidate_sha256: str, t
 class TauBankingAdapter:
     """Expose one agent system prompt while the simulator and grading stay fixed."""
 
-    propose_new_texts = None
+    propose_new_texts: ProposalFn | None = None
 
     def __init__(self, runtime, manifest: dict, max_workers: int = 1):
         if max_workers < 1:
@@ -87,8 +97,10 @@ class TauBankingAdapter:
             return EvaluationBatch(outputs=[], scores=[], trajectories=[] if capture_traces else None)
         if any(self.records.get(record.get("id")) != record for record in batch):
             raise ValueError("Unknown or changed tau record")
-        if len({record["id"] for record in batch}) != len(batch) or len({record["split"] for record in batch}) != 1:
-            raise ValueError("Duplicate tasks or mixed data splits")
+        if len({record["split"] for record in batch}) != 1:
+            raise ValueError("Cannot evaluate mixed data splits")
+        if batch[0]["split"] != "train" and len({record["id"] for record in batch}) != len(batch):
+            raise ValueError("Duplicate validation or test tasks")
         if capture_traces and batch[0]["split"] == "test":
             raise ValueError("Held-out traces cannot be requested for optimization")
         if self._split is not None and self._split != batch[0]["split"]:
@@ -97,13 +109,13 @@ class TauBankingAdapter:
         chunks = [batch[i :: self.max_workers] for i in range(min(self.max_workers, len(batch)))]
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             results = list(executor.map(lambda rows: self.runtime.run(rows, candidate, trial), chunks))
-        by_id = {}
-        for records, result in zip(chunks, results, strict=True):
+        # GEPA pads training minibatches with repeated IDs; each position owns a rollout.
+        outputs: list[dict] = [{} for _ in batch]
+        for chunk_index, (records, result) in enumerate(zip(chunks, results, strict=True)):
             if result.get("manifest_sha256") != self.manifest_sha256:
                 raise ValueError("Worker ran another tau source or data revision")
             validate_outputs(records, result.get("outputs"), digest(candidate), trial)
-            by_id.update({output["id"]: output for output in result["outputs"]})
-        outputs = [by_id[record["id"]] for record in batch]
+            outputs[chunk_index :: self.max_workers] = result["outputs"]
         trajectories = (
             [
                 {

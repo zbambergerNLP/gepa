@@ -70,6 +70,9 @@ upstream family label. This prevents explicit customer/variant overlap across
 splits; it does not claim that all semantically similar banking workflows are
 separate. The shared knowledge base is intentionally available to all splits.
 Optimizer settings and CLI prefix limits never resample these groups.
+When GEPA pads a training minibatch with repeated task IDs, each occurrence runs
+as a separate episode with its own artifact, preserving sampled order even with
+multiple workers. Validation and test batches still require unique task IDs.
 
 Training and validation use trial 0. Held-out winners and the shared starting
 baseline each use **four** independent trial seeds, drawn with upstream's

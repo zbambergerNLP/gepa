@@ -1,7 +1,9 @@
 """Contract tests at the external tau worker boundary; no paid calls."""
 
 import json
+from collections import Counter
 from copy import deepcopy
+from itertools import count
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,6 +14,8 @@ from examples.taubench.benchmark_settings import MANIFEST_PATH, UPSTREAM_REVISIO
 from examples.taubench.runtime import TauRuntime, worker_command
 from examples.taubench.utils import digest, load_data, task_groups
 from gepa.core.adapter import EvaluationBatch
+from gepa.core.data_loader import ListDataLoader
+from gepa.strategies.batch_sampler import IndependentEpochShuffledBatchSampler
 
 
 @pytest.fixture
@@ -107,6 +111,76 @@ def test_every_candidate_reaches_runtime_and_reflection_uses_only_actual_trainin
     batch.trajectories[0]["id"] = test[0]["id"]
     with pytest.raises(ValueError, match="cannot enter reflection"):
         adapter.make_reflective_dataset(candidate, batch, ["system_prompt"])
+
+
+@pytest.mark.parametrize("train_size,minibatch_size,max_workers", [(4, 3, 2), (57, 8, 3)])
+def test_padded_training_sampler_keeps_every_attempt(manifest, tmp_path, train_size, minibatch_size, max_workers):
+    train = [record for record in manifest["records"] if record["split"] == "train"][:train_size]
+    loader = ListDataLoader(train)
+    sampler = IndependentEpochShuffledBatchSampler(minibatch_size=minibatch_size, seed=0)
+    for iteration in range((train_size + minibatch_size - 1) // minibatch_size):
+        ids = sampler.next_minibatch_ids(loader, SimpleNamespace(i=iteration))
+    assert len(set(ids)) < len(ids)
+    batch = loader.fetch(ids)
+    original = deepcopy(batch)
+    attempts = count()
+    runtime = FakeRuntime(manifest)
+    ordinary_run = runtime.run
+
+    def run(records, candidate, trial):
+        result = ordinary_run(records, candidate, trial)
+        for output in result["outputs"]:
+            attempt = next(attempts)
+            path = tmp_path / f"attempt-{attempt}.json"
+            output.update(
+                {
+                    "simulation_path": str(path),
+                    "elapsed_seconds": attempt + 1.0,
+                    "reward": float(attempt % 2),
+                    "messages": [{"role": "assistant", "content": f"Attempt {attempt}"}],
+                }
+            )
+            path.write_text(json.dumps(output))
+        return result
+
+    runtime.run = run
+    adapter = TauBankingAdapter(runtime, manifest, max_workers=max_workers)
+    candidate = {"system_prompt": "Run each sampled occurrence"}
+    evaluated = adapter.evaluate(batch, candidate, capture_traces=True)
+    assert batch == original
+    assert len(runtime.calls) == max_workers
+    assert Counter(record["id"] for records, _, _ in runtime.calls for record in records) == Counter(
+        record["id"] for record in batch
+    )
+    assert [output["id"] for output in evaluated.outputs] == [record["id"] for record in batch]
+    assert len({output["simulation_path"] for output in evaluated.outputs}) == minibatch_size
+    assert len({id(output) for output in evaluated.outputs}) == minibatch_size
+    assert len(list(tmp_path.glob("attempt-*.json"))) == minibatch_size
+    for output, score, trace in zip(evaluated.outputs, evaluated.scores, evaluated.trajectories, strict=True):
+        assert json.loads(Path(output["simulation_path"]).read_text()) == output
+        assert score == output["reward"] == trace["reward"]
+        assert trace["messages"] == output["messages"]
+    reflection = adapter.make_reflective_dataset(candidate, evaluated, ["system_prompt"])
+    assert len(reflection["system_prompt"]) == minibatch_size
+
+
+@pytest.mark.parametrize("split", ["val", "test"])
+def test_duplicate_evaluation_tasks_still_fail_before_runtime(manifest, split):
+    runtime = FakeRuntime(manifest)
+    adapter = TauBankingAdapter(runtime, manifest, max_workers=2)
+    record = next(record for record in manifest["records"] if record["split"] == split)
+    with pytest.raises(ValueError, match="Duplicate"):
+        adapter.evaluate([record, record], {"system_prompt": "a"})
+    assert runtime.calls == []
+
+
+def test_mixed_splits_still_fail_before_runtime(manifest):
+    runtime = FakeRuntime(manifest)
+    adapter = TauBankingAdapter(runtime, manifest, max_workers=2)
+    records = [next(record for record in manifest["records"] if record["split"] == split) for split in ("train", "val")]
+    with pytest.raises(ValueError, match="mixed data splits"):
+        adapter.evaluate(records, {"system_prompt": "a"})
+    assert runtime.calls == []
 
 
 def test_repetition_context_is_explicit_and_resumable(manifest):

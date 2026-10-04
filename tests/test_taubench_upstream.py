@@ -52,10 +52,10 @@ def offline_provider(monkeypatch):
         reason = "stop"
         if kwargs["model"] == USER_MODEL:
             calls["user"] += 1
-            message["content"] = "I need help choosing a cash back credit card." if calls["user"] == 1 else STOP
+            message["content"] = "I need help choosing a cash back credit card." if calls["user"] % 2 else STOP
         elif kwargs["model"] == QWEN3_8_27B_MODEL:
             calls["solver"] += 1
-            if calls["solver"] == 1:
+            if calls["solver"] % 2:
                 message = {
                     "role": "assistant",
                     "content": None,
@@ -91,6 +91,58 @@ def test_pinned_data_and_seed_equal_official_runtime(source):
     assert "KB_search" in {tool.name for tool in env.get_tools()}
     assert "shell" not in {tool.name for tool in env.get_tools()}
     assert sum(map(len, splits.values())) == 97 and manifest["knowledge"]["count"] == 698
+
+
+def test_repeated_training_task_runs_twice_with_distinct_artifacts(source, tmp_path, offline_provider):
+    splits, _ = load_data(source)
+    record = next(record for record in splits["train"] if record["task_id"] == "task_001")
+    candidate = {"system_prompt": "Run every training occurrence"}
+    result = run_request(
+        {
+            "mode": "run",
+            "source": str(source),
+            "artifacts": str(tmp_path),
+            "records": [record, record],
+            "candidate": candidate,
+            "trial": 0,
+            "solver_model": QWEN3_8_27B_MODEL,
+            "solver_api_base": None,
+            "solver_kwargs": {"timeout": 3600},
+        }
+    )
+    outputs = result["outputs"]
+    assert len(outputs) == 2
+    assert [output["id"] for output in outputs] == [record["id"], record["id"]]
+    assert len({output["simulation_path"] for output in outputs}) == 2
+    simulations = [json.loads(Path(output["simulation_path"]).read_text()) for output in outputs]
+    assert len({simulation["id"] for simulation in simulations}) == 2
+    assert all(simulation["info"]["gepa_candidate"] == candidate for simulation in simulations)
+    assert all(output["elapsed_seconds"] > 0 and output["error"] is None for output in outputs)
+    assert sum(request["model"] == QWEN3_8_27B_MODEL for request in offline_provider) == 4
+    assert sum(request["model"] == USER_MODEL for request in offline_provider) == 4
+    attempts = [json.loads(line) for line in (tmp_path / "provider-attempts.jsonl").read_text().splitlines()]
+    assert len(attempts) == 8 and len({attempt["request_id"] for attempt in attempts}) == 8
+
+
+@pytest.mark.parametrize("split", ["val", "test"])
+def test_worker_rejects_duplicate_evaluation_records(source, tmp_path, offline_provider, split):
+    splits, _ = load_data(source)
+    record = splits[split][0]
+    with pytest.raises(ValueError, match="Duplicate"):
+        run_request(
+            {
+                "mode": "run",
+                "source": str(source),
+                "artifacts": str(tmp_path),
+                "records": [record, record],
+                "candidate": {"system_prompt": "a"},
+                "trial": 0,
+                "solver_model": QWEN3_8_27B_MODEL,
+                "solver_api_base": None,
+                "solver_kwargs": {},
+            }
+        )
+    assert offline_provider == []
 
 
 @pytest.mark.parametrize("prompt", ["First actual candidate system prompt", "Changed candidate system prompt"])

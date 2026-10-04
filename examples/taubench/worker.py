@@ -160,6 +160,8 @@ def run_request(request: dict) -> dict:
         raise ValueError("Unknown or modified task record")
     if len({row["split"] for row in records}) != 1:
         raise ValueError("Do not combine optimization and held-out tasks")
+    if records[0]["split"] != "train" and len({row["id"] for row in records}) != len(records):
+        raise ValueError("Duplicate validation or test tasks")
     if records[0]["split"] != "test" and trial != 0:
         raise ValueError("Optimization uses one fixed trial")
     artifacts = Path(request["artifacts"])

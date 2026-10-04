@@ -335,15 +335,56 @@ def test_native_harbor_path_uses_cache_and_setup_preserves_original_curl(tmp_pat
     assert delegated.stdout == uncached.read_bytes()
 
 
-def test_windows_ownership_fix_preserves_task_configuration_and_other_tasks():
+def test_windows_log_reset_preserves_task_configuration_and_other_tasks():
     spec = json.loads(resources.SPEC_PATH.read_text())
-    command = "chown 0:0 /var/log/nginx /var/log/nginx/access.log /var/log/nginx/error.log"
     windows = resources.resource_recipe_commands(
         "terminal-bench/install-windows-3.11", spec["tasks"]["terminal-bench/install-windows-3.11"]["task_ref"]
     )
-    assert command in windows
+    assert resources.WINDOWS_LOG_RESET in windows
     nginx = resources.resource_recipe_commands(
         "terminal-bench/nginx-request-logging", spec["tasks"]["terminal-bench/nginx-request-logging"]["task_ref"]
     )
-    assert command not in nginx
+    assert resources.WINDOWS_LOG_RESET not in nginx
     assert not any(re.search(r"(?m)^\s*sed\s", entry) or "chmod 777" in entry for entry in windows)
+
+
+def _windows_log_reset_for(log_dir):
+    # macOS find lacks -printf; the production image contains GNU find.
+    return resources.WINDOWS_LOG_RESET.replace("-printf '.'", "-exec printf '.' \\;").replace(
+        "/var/log/nginx", str(log_dir)
+    )
+
+
+def test_windows_log_reset_recreates_only_empty_logs_with_original_modes(tmp_path):
+    log_dir = tmp_path / "nginx"
+    log_dir.mkdir()
+    for name in ("access.log", "error.log"):
+        (log_dir / name).touch()
+    _run_shell([_windows_log_reset_for(log_dir)])
+    assert log_dir.stat().st_mode & 0o777 == 0o755
+    assert {path.name for path in log_dir.iterdir()} == {"access.log", "error.log"}
+    for path in log_dir.iterdir():
+        assert path.read_bytes() == b""
+        assert path.stat().st_mode & 0o777 == 0o640
+
+
+@pytest.mark.parametrize("unexpected", ["nonempty", "symlink", "extra"])
+def test_windows_log_reset_rejects_unexpected_files_before_mutating(tmp_path, unexpected):
+    log_dir = tmp_path / "nginx"
+    log_dir.mkdir()
+    for name in ("access.log", "error.log"):
+        (log_dir / name).touch()
+    sentinel = tmp_path / "sentinel"
+    sentinel.write_text("preserve original contents")
+    if unexpected == "nonempty":
+        (log_dir / "error.log").write_text("preserve original log")
+    elif unexpected == "symlink":
+        (log_dir / "error.log").unlink()
+        (log_dir / "error.log").symlink_to(sentinel)
+    else:
+        (log_dir / "extra.log").write_text("preserve extra log")
+    before = {path.name: path.lstat().st_ino for path in log_dir.iterdir()}
+    result = _run_shell([_windows_log_reset_for(log_dir)], check=False)
+    assert result.returncode != 0
+    assert before == {path.name: path.lstat().st_ino for path in log_dir.iterdir()}
+    assert sentinel.read_text() == "preserve original contents"

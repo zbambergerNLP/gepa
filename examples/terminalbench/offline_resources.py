@@ -179,6 +179,23 @@ if __name__ == "__main__":
     sys.exit(main())
 """
 
+WINDOWS_LOG_RESET = r"""(
+set -eu
+test -d /var/log/nginx
+test ! -L /var/log/nginx
+test "$(find /var/log/nginx -mindepth 1 -maxdepth 1 -printf '.')" = '..'
+for harbor_nginx_log in /var/log/nginx/access.log /var/log/nginx/error.log; do
+    test -f "$harbor_nginx_log"
+    test ! -L "$harbor_nginx_log"
+    test ! -s "$harbor_nginx_log"
+done
+rm /var/log/nginx/access.log /var/log/nginx/error.log
+rmdir /var/log/nginx
+mkdir -m 0755 /var/log/nginx
+(umask 027; : > /var/log/nginx/access.log; : > /var/log/nginx/error.log)
+)
+"""
+
 WINDOWS_STARTUP = r"""# Sourced only by noninteractive bash inside the prepared task image.
 if [ "${BASH_EXECUTION_STRING-}" = 'exec /staging/bootstrap.sh "$@"' ] &&
    [ "${2-}" = /staging/_hbexec.py ] &&
@@ -655,9 +672,9 @@ def resource_recipe_commands(task_id: str, task_ref: str) -> list[str]:
         )
         commands += [
             "apt-get install -y --no-install-recommends util-linux",
-            # These www-data/adm-owned image files become unmapped IDs in
-            # Della's single-UID namespace; its virtual root cannot bypass DAC.
-            "chown 0:0 /var/log/nginx /var/log/nginx/access.log /var/log/nginx/error.log",
+            # Original www-data/adm IDs survive fakeroot chown and prevent
+            # writable-tmpfs copy-up. New inodes drop that inherited metadata.
+            WINDOWS_LOG_RESET,
             _write(f"{ROOT}/windows-startup.sh", WINDOWS_STARTUP),
             _write(f"{ROOT}/resource-env.sh", f"export BASH_ENV={ROOT}/windows-startup.sh", append=True),
         ]

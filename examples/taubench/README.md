@@ -122,7 +122,16 @@ can select another checkout, but its revision and file fingerprints must match.
 
 A real pilot requires the configured Qwen solver endpoint and an OpenAI key for
 the fixed simulator. Optimization additionally requires the DeepSeek proposer
-endpoint. These commands make model calls:
+endpoint.
+
+On Della, use the normal allocated-job network and load `proxy/default` for the
+fixed simulator and judge. Princeton's [approved proxy services](https://researchcomputing.princeton.edu/support/knowledge-base/ports-and-proxydefault)
+include `api.openai.com`. Include local solver/proposer hostnames in `NO_PROXY`
+so their requests stay within the cluster. Tau requires this external API route;
+the fully isolated network launcher used for offline Terminal-Bench cannot
+provide it.
+
+These commands make model calls:
 
 ```sh
 uv run python -m examples.taubench.main --mode pilot --run-dir outputs/tau-pilot \

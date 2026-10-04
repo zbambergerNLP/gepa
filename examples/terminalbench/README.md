@@ -83,10 +83,11 @@ The bundle records every task file, recipe, and prepared image by SHA-256. The
 runner checks these bytes before evaluation and includes the runtime hashes in
 its resume identity. Changed artifacts and missing tasks fail before execution.
 Each task is sealed only after its installer replay and dependency imports pass
-with isolated home/tmp mounts, offline package managers, and blocked network
-proxies. `--resume` verifies completed parts against the current recipe and probe
-before reuse. It can continue an interrupted build after an unbuilt task's
-recipe is repaired; changing an already sealed task requires a new bundle.
+with Harbor's command search order, isolated home/tmp mounts, offline package
+managers, and blocked network proxies. `--resume` verifies completed parts against
+the current recipe and probe before reuse. It can continue an interrupted build
+after an unbuilt task's recipe is repaired; changing an already sealed task
+requires a new bundle.
 A full campaign requires the completed 89-task bundle. A recipe inventory or a
 two-task pilot alone does not prove that all environments have been built.
 
@@ -111,10 +112,12 @@ namespace. Full Della jobs should start both local model servers and Harbor
 inside `scripts/della/remote/with_private_network.sh`; its private loopback
 supports the Windows task's port 80 without changing the host's network policy.
 The Windows prepared image also starts its published `supervisord` command,
-which Docker would normally start automatically. This mode has no external
-network route, so complete offline staging is required. For an online
-Apptainer host, `--singularity-image-cache PATH` remains available without an
-offline task bundle.
+which Docker would normally start automatically. Its empty nginx logs are
+recreated during image preparation for the root-mapped runtime user; the service
+configuration and log paths remain unchanged.
+This mode has no external network route, so complete offline staging is required.
+For an online Apptainer host, `--singularity-image-cache PATH` remains available
+without an offline task bundle.
 
 After the pinned model servers and Harbor runtime are prepared:
 

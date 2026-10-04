@@ -29,6 +29,7 @@ from gepa.adapters.terminal_bench_adapter.documents import (
     validate_documents,
     write_document_bundle,
 )
+from gepa.adapters.terminal_bench_adapter.staging import load_offline_task_bundle
 from gepa.adapters.terminal_bench_adapter.text_scope import TerminalBenchTextScope
 from gepa.core.adapter import EvaluationBatch, GEPAAdapter
 from gepa.strategies.text_limits import TextLimits, clip_text, resolve_text_limits, validate_char_limit
@@ -583,6 +584,7 @@ class HarborCLI:
         docker_executable: str = "docker",
         container_runtime: str = "docker",
         singularity_image_cache_dir: str | Path | None = None,
+        offline_task_bundle: str | Path | None = None,
         student_api_base: str | None = None,
         student_agent_kwargs: Mapping[str, Any] | None = None,
         process_timeout_sec: float | None = None,
@@ -601,6 +603,7 @@ class HarborCLI:
             docker_executable: Docker CLI name or explicit path.
             container_runtime: Official Harbor Docker or Singularity/Apptainer backend.
             singularity_image_cache_dir: Persistent cache for converted task images.
+            offline_task_bundle: Sealed local task packages and prepared Singularity images.
             student_api_base: Optional LiteLLM endpoint for the student model.
             student_agent_kwargs: Additional Terminus settings that do not
                 override fixed harness behavior.
@@ -617,6 +620,8 @@ class HarborCLI:
             raise ValueError(f"n_concurrent must be at least 1; got {n_concurrent}")
         if container_runtime not in {"docker", "singularity"}:
             raise ValueError("container_runtime must be docker or singularity")
+        if offline_task_bundle is not None and container_runtime != "singularity":
+            raise ValueError("offline_task_bundle requires container_runtime singularity")
         if process_timeout_sec is not None and process_timeout_sec <= 0:
             raise ValueError("process_timeout_sec must be positive when provided")
         extra_kwargs = dict(student_agent_kwargs or {})
@@ -648,11 +653,19 @@ class HarborCLI:
         self.harbor_executable = harbor_executable
         self.docker_executable = docker_executable
         self.container_runtime = container_runtime
+        self.offline_task_bundle = (
+            load_offline_task_bundle(offline_task_bundle, manifest) if offline_task_bundle is not None else None
+        )
         self.singularity_image_cache_dir = (
             Path(singularity_image_cache_dir).expanduser().resolve()
             if singularity_image_cache_dir is not None
             else self.work_dir / "singularity-images"
         )
+        if self.offline_task_bundle is not None:
+            bundled_cache = self.offline_task_bundle.image_cache_dir
+            if singularity_image_cache_dir is not None and self.singularity_image_cache_dir != bundled_cache:
+                raise ValueError("singularity_image_cache_dir must match the offline task bundle")
+            self.singularity_image_cache_dir = bundled_cache
         self.student_api_base = student_api_base
         self.student_agent_kwargs = extra_kwargs
         self.process_timeout_sec = process_timeout_sec
@@ -786,13 +799,16 @@ class HarborCLI:
             config["environment"]["kwargs"] = {
                 "singularity_image_cache_dir": str(self.singularity_image_cache_dir),
             }
-        config["datasets"] = [
-            {
-                "name": self.manifest.dataset["identifier"],
-                "ref": self.manifest.dataset["registry_content_hash"],
-                "task_names": list(task_ids),
-            }
-        ]
+        if self.offline_task_bundle is not None:
+            config["tasks"] = self.offline_task_bundle.task_configs(task_ids)
+        else:
+            config["datasets"] = [
+                {
+                    "name": self.manifest.dataset["identifier"],
+                    "ref": self.manifest.dataset["registry_content_hash"],
+                    "task_names": list(task_ids),
+                }
+            ]
         return config
 
     def run(self, task_ids: Sequence[str], candidate: Mapping[str, str]) -> HarborEvaluation:
@@ -851,6 +867,9 @@ class HarborCLI:
         env = os.environ.copy()
         existing_pythonpath = env.get("PYTHONPATH")
         pythonpath_parts = [str(self.agent_python_path)]
+        source_path = self.agent_python_path / "src"
+        if source_path.is_dir():
+            pythonpath_parts.append(str(source_path))
         if existing_pythonpath:
             pythonpath_parts.append(existing_pythonpath)
         env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)

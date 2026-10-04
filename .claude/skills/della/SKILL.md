@@ -44,11 +44,15 @@ Qwen3.8-27B solver and DeepSeek-V4.1-Flash proposer. Terminal-Bench also require
 pinned Harbor and current records from `examples.terminalbench.runtime`. Princeton
 does not allow Docker on its clusters; use the official Harbor `singularity`
 backend with Apptainer on Della. Prepare it on the visualization host with
-`scripts/della/remote/setup_terminalbench.sh`. This installs the CLI only; Harbor
-also fetches images and in-container bootstrap dependencies. Verify compute-node
-egress or stage those dependencies before testing a training task on an allocated
-compute node. An offline bootstrap has not been verified. Docker remains
-available on separate Docker-capable hosts.
+`scripts/della/remote/setup_terminalbench.sh`, then use
+`examples.terminalbench.prepare_offline` on that host to stage the supported
+training tasks, container images, and in-container dependencies. Pass its sealed
+`bundle.json` to the shared runner with `--offline-task-bundle`. See the
+Terminal-Bench README for supported task coverage; the runner rejects missing
+tasks or changed bytes. A reference-solution trial has verified the offline
+bootstrap and official verifier on allocated Della CPU resources. Model pilots
+still require their own completion evidence. Docker remains available on
+separate Docker-capable hosts.
 
 Measure latency with the shared `--mode pilot`, which uses training data only.
 Run vanilla GEPA and FOREST through `--condition both`. Keep the ordered data,

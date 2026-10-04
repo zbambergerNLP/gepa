@@ -43,6 +43,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--singularity-image-cache", type=Path, help="Persistent Apptainer/Singularity task-image cache"
     )
+    parser.add_argument("--offline-task-bundle", type=Path, help="Verified local task packages and prepared SIF images")
     parser.add_argument("--harbor-process-timeout-sec", type=float, default=None)
 
 
@@ -105,6 +106,7 @@ def build_benchmark(args: argparse.Namespace, models: BenchmarkModels) -> Benchm
         docker_executable=args.docker_executable,
         container_runtime=args.container_runtime,
         singularity_image_cache_dir=args.singularity_image_cache,
+        offline_task_bundle=args.offline_task_bundle,
         student_agent_kwargs={
             "token_limits": terminalbench_limits(models.solver_model),
             "model_info": terminalbench_model_info(models.solver_model),
@@ -112,6 +114,15 @@ def build_benchmark(args: argparse.Namespace, models: BenchmarkModels) -> Benchm
         },
         process_timeout_sec=args.harbor_process_timeout_sec,
     )
+    if harbor.offline_task_bundle is not None:
+        selected = {split: records[split][: getattr(args, f"{split}_limit")] for split in records}
+        if args.mode in {"pilot", "optimizer-pilot"}:
+            required = selected["train"][: args.pilot_size]
+        elif args.mode == "baseline":
+            required = selected["test"]
+        else:
+            required = [record for split in selected.values() for record in split]
+        harbor.offline_task_bundle.require_tasks([record["task_id"] for record in required])
     harbor.check_requirements()
     selected_train_count = min(args.train_limit or len(records["train"]), len(records["train"]))
     minibatch_size = min(args.reflection_minibatch_size, selected_train_count)
@@ -136,6 +147,7 @@ def build_benchmark(args: argparse.Namespace, models: BenchmarkModels) -> Benchm
             "harness": "terminalbench-shared-v1",
             "adapter": TERMINUS_ADAPTER_CONTRACT,
             "container_runtime": args.container_runtime,
+            **({"offline_task_bundle": harbor.offline_task_bundle.contract()} if harbor.offline_task_bundle else {}),
             "execution_runtime": {"student": runtime["student"]},
             "optimization_scope": scope.contract(),
             "document_bundle_version": BUNDLE_VERSION,

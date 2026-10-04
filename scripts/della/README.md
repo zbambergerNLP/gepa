@@ -20,6 +20,11 @@ Keep secrets and the local `.env` out of Git.
 | `verify_deepseek_serving.sh` | Exercise the pinned DeepSeek server and tool protocol on allocated GPUs |
 | `remote/setup_terminalbench.sh` | Install isolated Harbor and expose the cluster Apptainer runtime on the visualization host |
 
+Terminal-Bench also needs [offline task preparation](../../examples/terminalbench/README.md)
+on the visualization host. The shared runner verifies the sealed task packages
+and prepared SIF images before running on compute nodes. CLI installation and an
+empty container cache alone are insufficient.
+
 `build_env.sh` starts detached downloads; its exit is not proof that they finished.
 Wait for `MODELS_DONE` in the printed log and verify the checkpoint manifests.
 `remote/setup_env.sh` records installed environment manifests, and

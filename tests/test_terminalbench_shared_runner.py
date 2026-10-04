@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from copy import deepcopy
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ from unittest.mock import Mock
 
 import pytest
 from benchmark_model_fixtures import install_proposer
+from terminalbench_staging_fixtures import make_offline_bundle
 
 from examples.common.benchmark_runner import build_parser, resolve_models, validate_definition
 from examples.common.experiment_models import DEFAULT_PROPOSER_MODEL, DEFAULT_SOLVER_MODEL
@@ -278,6 +280,56 @@ def test_container_backend_changes_run_identity_without_changing_tasks_or_models
     with pytest.raises(ValueError, match="configuration or data changed"):
         terminalbench.main([*argv, "--container-runtime", "singularity"])
     assert len(external_boundaries[0]) == calls
+
+
+@pytest.mark.parametrize("mode", ["pilot", "optimizer-pilot"])
+def test_partial_offline_bundle_covers_only_requested_training_prefix(tmp_path, external_boundaries, monkeypatch, mode):
+    manifest, path, _ = make_offline_bundle(tmp_path)
+    monkeypatch.setattr(terminalbench, "load_terminalbench_manifest", lambda _path: manifest)
+    _, args, _ = definition(
+        tmp_path, "--mode", mode, "--pilot-size", "1", "--container-runtime", "singularity",
+        "--offline-task-bundle", str(path),
+    )
+    assert args.pilot_size == 1
+    with pytest.raises(ValueError, match="requested tasks"):
+        definition(
+            tmp_path, "--mode", mode, "--pilot-size", "3", "--container-runtime", "singularity",
+            "--offline-task-bundle", str(path),
+        )
+    assert not external_boundaries[0]
+
+
+def test_offline_runtime_change_rejects_pilot_resume_before_reusing_results(tmp_path, external_boundaries, monkeypatch):
+    manifest, path, payload = make_offline_bundle(tmp_path)
+    monkeypatch.setattr(terminalbench, "load_terminalbench_manifest", lambda _path: manifest)
+    argv = [
+        "--mode", "pilot", "--pilot-size", "1", "--runtime-record", str(tmp_path / "solver.json"),
+        "--run-dir", str(tmp_path / "run"), "--container-runtime", "singularity", "--offline-task-bundle", str(path),
+    ]
+    assert terminalbench.main(argv) == 0
+    calls = len(external_boundaries[0])
+    assert terminalbench.main(argv) == 0
+    assert len(external_boundaries[0]) == calls
+    contract_path = tmp_path / "run" / "pilot" / "evaluation-contract.json"
+    contract = json.loads(contract_path.read_text())
+    assert contract["identity"]["runtime"]["offline_task_bundle"]["tasks"]
+    task = next(iter(payload["tasks"].values()))
+    recipe = path.parent / task["recipe"]["path"]
+    recipe.write_text("Different runtime preparation")
+    task["recipe"]["sha256"] = hashlib.sha256(recipe.read_bytes()).hexdigest()
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="configuration or data changed"):
+        terminalbench.main(argv)
+    assert len(external_boundaries[0]) == calls
+
+
+def test_offline_campaign_requires_all_selected_splits_before_harbor_calls(tmp_path, external_boundaries, monkeypatch):
+    manifest, path, _ = make_offline_bundle(tmp_path)
+    monkeypatch.setattr(terminalbench, "load_terminalbench_manifest", lambda _path: manifest)
+    with pytest.raises(ValueError, match="requested tasks"):
+        definition(tmp_path, "--container-runtime", "singularity", "--offline-task-bundle", str(path))
+    assert not external_boundaries[0]
+    external_boundaries[2].assert_not_called()
 
 
 @pytest.mark.parametrize(

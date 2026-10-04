@@ -37,9 +37,9 @@ singularity --version
 "${UV}" pip check --python "${RUNTIME_DIR}/venv/bin/python"
 "${UV}" pip freeze --python "${RUNTIME_DIR}/venv/bin/python" > "${RUNTIME_DIR}/installed-requirements.txt"
 printf 'Harbor %s CLI is installed; container execution is not yet verified.\n' "${HARBOR_VERSION}"
-printf '%s\n' 'Before a compute trial, verify image and bootstrap dependency availability; see examples/terminalbench/README.md.'
+printf '%s\n' 'Next: stage a sealed offline bundle with examples.terminalbench.prepare_offline; see examples/terminalbench/README.md.'
 printf '%s\n' 'Use on allocated compute nodes:'
 printf 'export PATH=%q:%q:$PATH\n' "${RUNTIME_DIR}/bin" "${RUNTIME_DIR}/venv/bin"
 printf 'export APPTAINER_CACHEDIR=%q\n' "${APPTAINER_CACHEDIR}"
 printf '%s\n' '--container-runtime singularity'
-printf '%s %q\n' '--singularity-image-cache' "${SCRATCH_BASE}/.cache/terminalbench/sif"
+printf '%s\n' '--offline-task-bundle /path/to/prepared/bundle.json'

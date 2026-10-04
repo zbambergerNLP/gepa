@@ -52,28 +52,58 @@ GEPA directory. It installs an isolated Harbor environment, exposes Apptainer
 under the `singularity` command required by Harbor, and prints the compute-job
 PATH and persistent image-cache arguments.
 
-This helper installs the CLI only. Harbor pulls uncached task images and installs
-its server dependencies inside each fresh container. Della's preparation flow
-uses the visualization host for internet access, so empty cache directories do
-not make compute-node execution ready. Before submitting a trial, verify compute
-egress or stage both the task images and the dependencies needed by Harbor's
-bootstrap and the task. An offline bootstrap has not been verified on Della.
-
-On the allocated compute node, add these arguments to the shared entrypoint:
+Compute nodes cannot fetch the required Debian, Python, container, and task
+packages. Prepare a sealed offline bundle on the visualization host, from the
+synced checkout, before submitting a job:
 
 ```sh
---container-runtime singularity \
---singularity-image-cache "$SCRATCH_BASE/.cache/terminalbench/sif"
+export PYTHONPATH="$PWD/src:$PWD"
+export APPTAINER_CACHEDIR="$SCRATCH_BASE/.cache/terminalbench/apptainer"
+export APPTAINER_TMPDIR="$(mktemp -d /tmp/terminalbench-build.XXXXXX)"
+"$SCRATCH_BASE/.tools/uv-0.9.13/uv" run --no-project \
+  --python "$SCRATCH_BASE/.venv/bin/python" python \
+  -m examples.terminalbench.prepare_offline \
+  --bundle-dir "$SCRATCH_BASE/terminalbench-offline/pilot-v1" \
+  --image-cache "$SCRATCH_BASE/.cache/terminalbench/sif" \
+  --harbor-executable "$SCRATCH_BASE/.tools/terminalbench-harbor-0.22.0/venv/bin/harbor"
 ```
 
-The explicit backend is part of the run contract, so Docker and Apptainer cannot
-reuse each other's results. Task packages, images, verifier, prompts, model
-settings and budgets remain pinned. The native backend requires each task's
-published `docker_image`; it imports that image as a SIF and uses Apptainer's
-`--fakeroot` and writable temporary filesystem. CLI installation alone does not
-prove those kernel capabilities work on a particular compute node. Verify an
-official training task before a campaign, and allocate the task's requested CPU
-and memory through Slurm. Keep one concurrent task during the initial check.
+The preparer supports the first two tasks in the existing training order:
+`fix-ocaml-gc` and `log-summary-date-ranges`. It downloads their exact registry
+refs, derives SIF images from their published containers, installs Harbor's
+server dependencies, and warms the unchanged verifier's uv/Python/pytest cache.
+OCaml also receives a shallow mirror containing only its original broken source
+revision for the verifier's clone. No solution, task instruction, or scoring
+file is changed. The verifier's redundant network bootstrap calls may still
+print warnings; installed tools and the offline cache satisfy its dependencies.
+
+The bundle records every task file, recipe, and prepared image by SHA-256. The
+runner checks these bytes before evaluation and includes the runtime hashes in
+its resume identity. Changed artifacts and missing tasks fail before execution.
+Use a fresh bundle directory when preparing a new runtime. A two-task bundle
+supports the training pilot; it does not establish offline support for all 89
+tasks. Additional tasks need their own dependency and external-data preparation
+before a complete campaign can run on disconnected nodes.
+
+On an allocated compute node with the pinned Qwen server running:
+
+```sh
+uv run --no-sync python -m examples.terminalbench.main --mode pilot \
+  --pilot-size 2 --max-workers 1 \
+  --container-runtime singularity \
+  --offline-task-bundle "$SCRATCH_BASE/terminalbench-offline/pilot-v1/bundle.json" \
+  --runtime-record /path/to/solver-runtime.json \
+  --solver-api-base http://localhost:8000/v1 \
+  --run-dir outputs/terminalbench-offline-pilot
+```
+
+The explicit backend and prepared image hashes are part of the run contract, so
+Docker, raw Apptainer images, and prepared offline images cannot reuse each
+other's results. The native backend uses Apptainer's `--fakeroot` and writable
+temporary filesystem; allocate the task's requested CPU and memory through
+Slurm. Keep one concurrent task during the initial check. For an online
+Apptainer host, `--singularity-image-cache PATH` remains available without an
+offline task bundle.
 
 After the pinned model servers and Harbor runtime are prepared:
 
@@ -116,7 +146,8 @@ reports latency mean/median/p95 separately from measured batch throughput.
 ```sh
 uv run --no-sync python -m pytest -q tests/test_terminalbench_shared_runner.py \
   tests/test_terminalbench_runtime.py tests/test_terminal_bench_adapter.py \
-  tests/test_benchmark_runner.py
+  tests/test_benchmark_runner.py tests/test_terminalbench_staging.py \
+  tests/test_terminalbench_prepare_offline.py
 ```
 
 The new route tests replace only external serving/Harbor boundaries and execute
@@ -132,5 +163,7 @@ which records `finished_at` after stopping the environment. Existing adapter
 documentation describes its maintained GEPA/Harbor port and benchmark source
 pins. The official Docker runtime completed the pinned training task
 `log-summary-date-ranges` with its reference solution and verifier reward 1.0.
-That checks container execution and verification; model-backed Terminal-Bench
-pilots and Della container execution remain unverified.
+The prepared offline Apptainer image also completed that official reference
+solution on Della's CPU partition, with reward 1.0 and no trial errors (job
+14986165, `COMPLETED`, exit 0). This checks offline container execution and
+verification; it is not a model quality or Qwen latency measurement.

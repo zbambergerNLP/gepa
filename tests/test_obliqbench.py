@@ -7,6 +7,7 @@ import json
 import math
 import sys
 from collections import Counter
+from contextlib import contextmanager
 from copy import deepcopy
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -21,7 +22,8 @@ sys.path.insert(0, str(Path(__file__).parents[1]))
 from examples.common.benchmark_runner import build_parser, evaluate_candidate, resolve_models
 from examples.common.benchmark_types import BenchmarkDefinition
 from examples.common.experiment_models import DEEPSEEK_V4_1_FLASH_MODEL, QWEN3_8_27B_MODEL
-from examples.obliqbench import retrieval, utils
+from examples.obliqbench import embedding_runtime, retrieval, utils
+from examples.obliqbench import prepare as obliq_prepare
 from examples.obliqbench.adapter import COMPONENT, MALFORMED_REWRITE, ObliqAdapter, parse_rewrite, score_ranking
 from examples.obliqbench.benchmark_settings import (
     EMBEDDING_DIMENSION,
@@ -428,6 +430,86 @@ def test_loader_rejects_changed_data_before_using_manifest(pinned_data):
         load_data(pinned_data, ["twitter"])
 
 
+@pytest.mark.usefixtures("obliq_runtime")
+def test_prepare_builds_all_collection_indexes_reused_by_full_benchmark(pinned_data, monkeypatch, capsys):
+    """Exercise complete default collection loading, offline indexing and runtime cache reuse."""
+    from examples.obliqbench import main as obliq_main
+
+    for package in ("sentence-transformers", "transformers", "torch"):
+        try:
+            if version(package) != RUNTIME_PINS[package]:
+                pytest.skip(f"Install the pinned OBLIQ runtime: {package}")
+        except PackageNotFoundError:
+            pytest.skip(f"Install the pinned OBLIQ runtime: {package}")
+    source = utils.load_sources()
+    for subset, relative in SUBSETS.items():
+        if subset == "twitter":
+            continue
+        directory = pinned_data / relative
+        for part in ("queries+qrels/queries.jsonl", "corpus/corpus.jsonl"):
+            path = directory / part
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                "".join(json.dumps({"_id": str(i), "text": f"{subset} record {i}"}) + "\n" for i in range(9))
+            )
+        qrels = ["qrels.tsv", "qrels_pool.tsv"] if subset in utils.POOLED_SUBSETS else ["qrels.tsv"]
+        for name in qrels:
+            (directory / "queries+qrels" / name).write_text(
+                "query-id\tcorpus-id\tscore\n" + "".join(f"{i}\t{i}\t2\n" for i in range(9))
+            )
+        if subset in utils.EXCLUSION_SUBSETS:
+            (directory / "queries+qrels/per_query_excluded_ids.json").write_text(
+                json.dumps({str(i): [] for i in range(9)})
+            )
+        for path in directory.rglob("*"):
+            if path.is_file():
+                source["files"][str(path.relative_to(pinned_data))] = {
+                    "size": path.stat().st_size,
+                    "algorithm": "sha256",
+                    "digest": hashlib.sha256(path.read_bytes()).hexdigest(),
+                }
+        monkeypatch.setitem(utils.QUERY_COUNTS, subset, 9)
+        monkeypatch.setitem(utils.CORPUS_COUNTS, subset, 9)
+    utils.SOURCE_PATH.write_text(json.dumps(source))
+    all_records = [row for subset in SUBSETS for row in split_records(utils.load_records(pinned_data, subset))]
+    utils.RECORD_PATH.write_text(
+        "".join(
+            json.dumps({"id": row["id"], "sha256": digest(row), "split": row["split"], "group_id": row["group_id"]})
+            + "\n"
+            for row in all_records
+        )
+    )
+    encoder = EncoderBoundary()
+    monkeypatch.setattr(embedding_runtime, "QwenEncoder", lambda _, **kwargs: encoder)
+    index_dir = pinned_data / "indexes"
+    argv = ["--data-dir", str(pinned_data), "--index-dir", str(index_dir)]
+    obliq_prepare.main([*argv, "--build-index"])
+    report = json.loads(capsys.readouterr().out)
+    assert report["subsets"] == list(SUBSETS)
+    assert sum(report["split_counts"].values()) == 45
+    assert set(report["indexes"]) == set(SUBSETS)
+    assert all(item["documents"] == 9 and Path(item["index_path"]).is_file() for item in report["indexes"].values())
+    assert sum(len(texts) for texts, _ in encoder.calls) == 45
+    assert all(not query for _, query in encoder.calls)
+    before = len(encoder.calls)
+    monkeypatch.setattr(obliq_main, "QwenEncoder", lambda _, **kwargs: encoder)
+    args = build_parser("obliqbench", add_arguments).parse_args(argv)
+    definition = build_benchmark(args, resolve_models(args))
+    assert set(definition.adapter.retrievers) == set(SUBSETS)
+    assert (args.train_limit, args.val_limit, args.test_limit) == (None, None, None)
+    assert sum(map(len, (definition.trainset, definition.valset, definition.testset))) == 45
+    assert len(encoder.calls) == before
+    obliq_prepare.main([*argv, "--build-index"])
+    assert len(encoder.calls) == before
+
+
+@pytest.mark.parametrize("extra", [["--metadata-only", "--build-index"], ["--embedding-batch-size", "0"]])
+def test_invalid_preparation_options_fail_before_download(monkeypatch, extra):
+    monkeypatch.setattr(obliq_prepare, "prepare_data", lambda *_args, **_kwargs: pytest.fail("Unexpected download"))
+    with pytest.raises(SystemExit, match="2"):
+        obliq_prepare.main(extra)
+
+
 @pytest.mark.smoke
 def test_live_math_data_integrity():
     """Use only already-downloaded official files; never implicitly fetch data or models."""
@@ -496,8 +578,15 @@ def test_original_query_cannot_be_optimized():
         build_benchmark(args, resolve_models(args))
 
 
-def test_qwen_embedding_boundary_uses_exact_pinned_checkpoint(monkeypatch):
+@pytest.mark.parametrize("device,attention,dtype", [("cpu", "eager", "float32"), ("cuda", "sdpa", "bfloat16")])
+def test_qwen_embedding_boundary_uses_exact_pinned_checkpoint(monkeypatch, device, attention, dtype):
     calls = []
+    kernels = []
+
+    @contextmanager
+    def fused_kernels(backends):
+        kernels.append(backends)
+        yield
 
     class ExternalModel:
         def __init__(self, *args, **kwargs):
@@ -512,22 +601,51 @@ def test_qwen_embedding_boundary_uses_exact_pinned_checkpoint(monkeypatch):
 
     def import_external(name):
         if name == "torch":
-            return SimpleNamespace(float32="float32")
+            return SimpleNamespace(float32="float32", bfloat16="bfloat16")
+        if name == "torch.nn.attention":
+            return SimpleNamespace(
+                sdpa_kernel=fused_kernels,
+                SDPBackend=SimpleNamespace(
+                    FLASH_ATTENTION="flash", EFFICIENT_ATTENTION="efficient", CUDNN_ATTENTION="cudnn"
+                ),
+            )
         if name == "sentence_transformers":
             return SimpleNamespace(SentenceTransformer=ExternalModel)
         return original_import(name)
 
     monkeypatch.setattr(retrieval.importlib, "import_module", import_external)
-    encoder = retrieval.QwenEncoder("cpu")
+    encoder = embedding_runtime.QwenEncoder(device, attention=attention, dtype=dtype)
     assert calls[0][0] == (EMBEDDING_MODEL,)
     assert calls[0][1]["revision"] == EMBEDDING_REVISION
     assert calls[0][1]["trust_remote_code"] is False
     assert calls[0][1]["processor_kwargs"] == {"padding_side": "left"}
+    assert calls[0][1]["model_kwargs"] == {"dtype": dtype, "attn_implementation": attention}
     assert encoder.model.max_seq_length == 32768
     encoder.encode(["document"], query=False)
     assert calls[-1][1]["prompt"] == ""
     encoder.encode(["question"], query=True)
     assert calls[-1][1]["prompt_name"] == "query"
+    assert kernels == ([["flash", "efficient", "cudnn"]] * 2 if attention == "sdpa" else [])
+
+
+def test_explicit_embedding_runtime_has_a_distinct_index_while_legacy_cache_reuses(corpus, tmp_path, monkeypatch):
+    monkeypatch.setattr(retrieval, "require_version", lambda package: RUNTIME_PINS[package])
+    legacy = retrieval.retrieval_contract("qwen", "cuda", 8)
+    default = embedding_runtime.retrieval_contract("qwen", "cuda", 8)
+    efficient = embedding_runtime.retrieval_contract("qwen", "cuda", 8, attention="sdpa", dtype="bfloat16")
+    assert default == legacy
+    assert efficient["settings"]["max_sequence_length"] == default["settings"]["max_sequence_length"] == 32768
+    assert efficient["settings"]["cuda_sdpa_policy"] == "fused_only_no_math_fallback"
+    encoder = EncoderBoundary()
+    DenseRetriever(corpus, encoder, tmp_path / "index", legacy, 8)
+    calls = len(encoder.calls)
+    DenseRetriever(corpus, encoder, tmp_path / "index", default, 8)
+    assert len(encoder.calls) == calls
+    DenseRetriever(corpus, encoder, tmp_path / "index", efficient, 8)
+    assert len(encoder.calls) > calls
+    assert len(list((tmp_path / "index").glob("*.npy"))) == 2
+    with pytest.raises(ValueError, match="qwen retriever"):
+        embedding_runtime.retrieval_contract("bm25", "cuda", 8, attention="sdpa", dtype="bfloat16")
 
 
 @pytest.mark.parametrize("condition", ["vanilla", "random", "action", "react_v2_random", "react_v2"])
@@ -555,7 +673,7 @@ def test_optimizer_pilot_runs_dense_retrieval_and_real_optimizer_on_training_onl
 
     monkeypatch.setattr(litellm, "completion", completion)
     encoder = EncoderBoundary()
-    monkeypatch.setattr(obliq_main, "QwenEncoder", lambda device: encoder)
+    monkeypatch.setattr(obliq_main, "QwenEncoder", lambda device, **kwargs: encoder)
     proposers = install_proposer(monkeypatch)
     root = tmp_path / "optimizer-run"
     argv = [

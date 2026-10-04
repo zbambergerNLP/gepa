@@ -115,6 +115,32 @@ uv run --no-project python -m examples.obliqbench.prepare
 uv run --no-project python -m examples.obliqbench.prepare --metadata-only
 ```
 
+Prepare corpus embeddings separately from solver inference on an allocated CUDA
+GPU, after staging the complete data and pinned embedding checkpoint:
+
+```bash
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 uv run --no-sync python -m examples.obliqbench.prepare \
+  --data-dir /path/to/obliqbench/data --build-index --index-dir /path/to/obliqbench/index \
+  --embedding-device cuda --embedding-attention sdpa --embedding-dtype bfloat16 \
+  --embedding-batch-size 1
+```
+
+Use these same embedding flags and index directory for benchmark runs. SDPA uses
+PyTorch's fused CUDA attention kernels; unsupported fused configurations fail
+instead of silently falling back to quadratic-memory attention. The checkpoint,
+32,768-token limit, pooling, prompts and normalized cosine retrieval are unchanged.
+BF16 can introduce numerical differences, so its dtype and attention settings are
+part of the index and experiment identity. Eager/float32 and batch size eight remain
+the defaults, and existing eager/float32 indexes keep their cache identities.
+Changing device, batch size, dtype or attention requires its own verified index.
+
+The full suite contains 807,398 documents; float32 stored vectors occupy about
+3.31 GB before metadata. Completed collection indexes are reused after interruption.
+An interrupted collection is rebuilt from its first document. Start with batch size
+one for long documents and verify resource use before choosing a larger batch.
+The [pinned Qwen model card](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B/blob/97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3/README.md)
+recommends memory-efficient attention and left padding.
+
 After installing the pinned dependencies and starting the exact shared solver
 and proposer models, a training-only latency pilot and a comparison use:
 

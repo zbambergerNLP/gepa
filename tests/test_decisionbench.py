@@ -474,7 +474,7 @@ def test_real_optimizer_pilot_scores_changed_prompt_using_training_only(monkeypa
 
 
 @pytest.mark.smoke
-def test_pinned_canonical_parquet_and_real_builder_without_inference():
+def test_pinned_canonical_parquet_and_real_builder_without_inference(tmp_path, monkeypatch):
     path = os.environ.get("DECISIONBENCH_DATA_FILE")
     if not path:
         pytest.skip("Set DECISIONBENCH_DATA_FILE to the pinned local Parquet; this test never calls a model")
@@ -492,3 +492,37 @@ def test_pinned_canonical_parquet_and_real_builder_without_inference():
     assert not keys["train"] & keys["test"]
     assert not keys["val"] & keys["test"]
     assert Path(args.data_file).is_file()
+    received = []
+
+    def capture_full_population(definition, models, arguments, identity, condition):
+        received.append(condition)
+        assert identity["data"] == identity["full_data"]
+        assert definition.trainset == benchmark.trainset
+        assert definition.valset == benchmark.valset
+        assert definition.testset == benchmark.testset
+        return {"validated_full_population": True}
+
+    monkeypatch.setattr(benchmark_runner, "_run_condition", capture_full_population)
+    assert (
+        benchmark_runner.run_cli(
+            benchmark_name="decisionbench",
+            build_benchmark=lambda *_: benchmark,
+            add_arguments=entrypoint.add_arguments,
+            argv=[
+                "--condition",
+                "all",
+                "--train-limit",
+                "14331",
+                "--val-limit",
+                "4752",
+                "--test-limit",
+                "4817",
+                "--data-file",
+                path,
+                "--run-dir",
+                str(tmp_path / "full-population"),
+            ],
+        )
+        == 0
+    )
+    assert received == ["vanilla", "random", "action", "react_v2_random", "react_v2"]

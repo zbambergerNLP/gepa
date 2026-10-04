@@ -276,7 +276,7 @@ def test_worker_rejects_empty_tracker_success():
 
 
 def test_builder_uses_shared_model_roles_and_keeps_full_data_before_limits(corpus, monkeypatch):
-    root, _ = corpus
+    root, records = corpus
     monkeypatch.setattr("examples.appworld.main.inspect_runtime", lambda *_: {"fixture": True})
     args = build_parser("appworld", add_arguments).parse_args(
         ["--appworld-root", str(root), "--train-limit", "1", "--val-limit", "1", "--test-limit", "1"]
@@ -292,6 +292,28 @@ def test_builder_uses_shared_model_roles_and_keeps_full_data_before_limits(corpu
     assert len(definition.trainset) == 3 and len(definition.valset) == 3 and len(definition.testset) == 6
     assert definition.test_repetitions == 1
     assert definition.component_kinds == {COMPONENT: "system_prompt"}
+    assert definition.testset == records["test_normal"] + records["test_challenge"]
+    received = []
+
+    def capture_full_population(selected, models, arguments, identity, condition):
+        received.append(condition)
+        assert identity["data"] == identity["full_data"]
+        assert selected.trainset == records["train"]
+        assert selected.valset == records["dev"]
+        assert selected.testset == records["test_normal"] + records["test_challenge"]
+        return {"validated_full_population": True}
+
+    monkeypatch.setattr(benchmark_runner, "_run_condition", capture_full_population)
+    assert (
+        benchmark_runner.run_cli(
+            benchmark_name="appworld",
+            build_benchmark=build_benchmark,
+            add_arguments=add_arguments,
+            argv=["--appworld-root", str(root), "--condition", "all", "--run-dir", str(root / "full-population")],
+        )
+        == 0
+    )
+    assert received == ["vanilla", "random", "action", "react_v2_random", "react_v2"]
 
 
 @pytest.mark.parametrize("condition", ["vanilla", "random", "action", "react_v2_random", "react_v2"])

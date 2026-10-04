@@ -11,7 +11,8 @@ from examples.common.provider_retries import provider_retry_kwargs
 from examples.common.react_v2 import resolve_template_family, structured_prompt
 from examples.obliqbench.adapter import COMPONENT, ObliqAdapter
 from examples.obliqbench.benchmark_settings import HARNESS_VERSION, METRIC_NAME, RETRIEVAL_K, SEED_INSTRUCTION, SUBSETS
-from examples.obliqbench.retrieval import BM25Retriever, DenseRetriever, QwenEncoder, file_sha256, retrieval_contract
+from examples.obliqbench.embedding_runtime import QwenEncoder, retrieval_contract
+from examples.obliqbench.retrieval import BM25Retriever, DenseRetriever, file_sha256
 from examples.obliqbench.utils import load_data
 from gepa.lm import LM
 from gepa.lm_constants import PROVIDER_ATTEMPT_LOG
@@ -26,6 +27,8 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--retriever", choices=("qwen", "bm25"), default="qwen")
     parser.add_argument("--embedding-device", default="cpu")
     parser.add_argument("--embedding-batch-size", type=int, default=8)
+    parser.add_argument("--embedding-attention", choices=("eager", "sdpa"), default="eager")
+    parser.add_argument("--embedding-dtype", choices=("float32", "bfloat16"), default="float32")
     parser.add_argument(
         "--original-query-reference",
         action="store_true",
@@ -40,8 +43,9 @@ def build_benchmark(args: argparse.Namespace, models: BenchmarkModels) -> Benchm
     if args.max_workers != 1:
         raise ValueError("OBLIQ currently runs sequential episodes; use --max-workers 1")
     data = load_data(args.data_dir, args.subsets)
-    retrieval = retrieval_contract(args.retriever, args.embedding_device, args.embedding_batch_size)
-    encoder = QwenEncoder(args.embedding_device) if args.retriever == "qwen" else None
+    encoder_settings = {"attention": args.embedding_attention, "dtype": args.embedding_dtype}
+    retrieval = retrieval_contract(args.retriever, args.embedding_device, args.embedding_batch_size, **encoder_settings)
+    encoder = QwenEncoder(args.embedding_device, **encoder_settings) if args.retriever == "qwen" else None
     retrievers = {
         name: DenseRetriever(corpus, encoder, args.index_dir, retrieval, args.embedding_batch_size)
         if encoder is not None

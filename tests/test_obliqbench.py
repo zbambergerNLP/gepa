@@ -8,6 +8,7 @@ import math
 import sys
 from collections import Counter
 from copy import deepcopy
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,21 +17,37 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
-from examples.common.benchmark_runner import build_parser, resolve_models
+from examples.common.benchmark_runner import build_parser, evaluate_candidate, resolve_models
+from examples.common.benchmark_types import BenchmarkDefinition
 from examples.common.experiment_models import DEEPSEEK_V4_1_FLASH_MODEL, QWEN3_8_27B_MODEL
 from examples.obliqbench import retrieval, utils
-from examples.obliqbench.adapter import COMPONENT, ObliqAdapter, parse_rewrite, score_ranking
+from examples.obliqbench.adapter import COMPONENT, MALFORMED_REWRITE, ObliqAdapter, parse_rewrite, score_ranking
 from examples.obliqbench.benchmark_settings import (
     EMBEDDING_DIMENSION,
     EMBEDDING_MODEL,
     EMBEDDING_REVISION,
     QUERY_COUNTS,
     RETRIEVAL_K,
+    RUNTIME_PINS,
     SUBSETS,
 )
 from examples.obliqbench.main import add_arguments, build_benchmark
 from examples.obliqbench.retrieval import BM25Retriever, DenseRetriever, ranked_results
 from examples.obliqbench.utils import Corpus, digest, load_data, read_qrels, split_records, verify_file
+
+
+@pytest.fixture
+def obliq_runtime():
+    """Skip optional runtime tests explicitly while retaining data/schema tests in base CI."""
+    pytest.importorskip("pytrec_eval", reason="Install the obliqbench extra for retrieval metric tests")
+    pytest.importorskip("rank_bm25", reason="Install the obliqbench extra for lexical retrieval tests")
+    for package in ("numpy", "pytrec-eval-terrier", "rank-bm25"):
+        try:
+            installed = version(package)
+        except PackageNotFoundError:
+            pytest.skip(f"OBLIQ runtime tests require {package}; install the pinned extra")
+        if installed != RUNTIME_PINS[package]:
+            pytest.skip(f"OBLIQ runtime tests require {package}=={RUNTIME_PINS[package]}; install the pinned extra")
 
 
 def query_record(query_id="q0", **changes):
@@ -115,6 +132,7 @@ def test_incomplete_index_fails_closed(corpus, tmp_path):
         DenseRetriever(corpus, EncoderBoundary(), tmp_path / "index", {}, batch_size=2)
 
 
+@pytest.mark.usefixtures("obliq_runtime")
 def test_graded_official_metrics_and_pooled_denominator():
     record = query_record()
     metrics = score_ranking(record, [("d2", 0.9), ("d1", 0.8), ("d4", 0.1)])
@@ -130,6 +148,7 @@ def test_graded_official_metrics_and_pooled_denominator():
     }
 
 
+@pytest.mark.usefixtures("obliq_runtime")
 def test_actual_candidate_prompt_and_rewrite_reach_real_retrieval_without_gold(corpus):
     requests = []
 
@@ -166,23 +185,38 @@ def test_actual_candidate_prompt_and_rewrite_reach_real_retrieval_without_gold(c
         "<think>unfinished",
     ],
 )
-def test_malformed_rewrites_fail_before_retrieval(corpus, output):
-    adapter = ObliqAdapter(lambda messages: output, {"twitter": BM25Retriever(corpus)})
-    result = adapter.evaluate([query_record()], {COMPONENT: "rewrite"})
+@pytest.mark.parametrize("split", ["train", "val", "test"])
+@pytest.mark.usefixtures("obliq_runtime")
+def test_malformed_rewrites_score_zero_without_retrieval(corpus, output, split, monkeypatch):
+    def forbidden_search(*args):
+        raise AssertionError("Malformed rewrites must not reach retrieval")
+
+    retriever = BM25Retriever(corpus)
+    monkeypatch.setattr(retriever, "search", forbidden_search)
+    adapter = ObliqAdapter(lambda messages: output, {"twitter": retriever})
+    record = query_record(split=split)
+    result = adapter.evaluate([record], {COMPONENT: "rewrite"})
     assert result.scores == [0.0]
-    assert result.outputs[0]["error"]
-    assert "ranking" not in result.outputs[0]
-    with pytest.raises(ValueError, match="Failed OBLIQ"):
-        adapter.summarize_evaluation([query_record()], [result])
+    assert result.outputs[0]["error"] == MALFORMED_REWRITE
+    assert result.outputs[0]["ranking"] == []
+    assert set(result.outputs[0]["metrics"].values()) == {0.0}
+    summary = adapter.summarize_evaluation([record], [result])
+    assert summary["query_mean_gold_ndcg_at_10"] == 0.0
+    assert summary["query_count"] == summary["malformed_rewrite_count"] == 1
 
 
-def test_heldout_traces_cannot_enter_reflection(corpus):
+@pytest.mark.parametrize("split", ["val", "test", "unknown", None])
+@pytest.mark.usefixtures("obliq_runtime")
+def test_only_training_traces_can_enter_reflection(corpus, split):
     adapter = ObliqAdapter(lambda messages: '{"query": "blue bird"}', {"twitter": BM25Retriever(corpus)})
-    result = adapter.evaluate([query_record(split="test")], {COMPONENT: "rewrite"}, capture_traces=True)
-    with pytest.raises(ValueError, match="Held-out"):
+    result = adapter.evaluate([query_record(split=split)], {COMPONENT: "rewrite"}, capture_traces=True)
+    assert result.outputs[0]["error"] is None
+    assert result.trajectories
+    with pytest.raises(ValueError, match="Only OBLIQ training traces"):
         adapter.make_reflective_dataset({COMPONENT: "rewrite"}, result, [COMPONENT])
 
 
+@pytest.mark.usefixtures("obliq_runtime")
 def test_original_query_reference_has_no_model_call_and_summary_requires_all_records(corpus):
     def forbidden_solver(messages):
         raise AssertionError("Original-query reference must not call an LLM")
@@ -195,6 +229,82 @@ def test_original_query_reference_has_no_model_call_and_summary_requires_all_rec
     assert summary["per_subset"]["twitter"]["gold_recall_at_10"] == 1.0
     result.outputs = []
     with pytest.raises(ValueError, match="Incomplete or reordered"):
+        adapter.summarize_evaluation(records, [result])
+
+
+@pytest.mark.usefixtures("obliq_runtime")
+def test_shared_heldout_summary_keeps_model_format_misses_and_replays_them(corpus, tmp_path):
+    responses = iter(["invalid model JSON", '{"query": "blue bird"}'])
+    adapter = ObliqAdapter(lambda messages: next(responses), {"twitter": BM25Retriever(corpus)})
+    records = [query_record("q0", split="test"), query_record("q1", split="test")]
+    candidate = {COMPONENT: "rewrite"}
+    definition = BenchmarkDefinition(
+        name="obliqbench",
+        adapter=adapter,
+        seed_candidate=candidate,
+        trainset=[],
+        valset=[],
+        testset=records,
+        source={},
+        runtime={},
+        metric_name="gold_ndcg_at_10",
+    )
+    kwargs = {"split": "test", "repetitions": 1, "seed": 0}
+    summary = evaluate_candidate(definition, candidate, records, tmp_path / "heldout", {}, **kwargs)
+    payload = json.loads((tmp_path / "heldout/repetition-000.json").read_text())["payload"]
+    assert payload["scores"][0] == 0
+    assert payload["scores"][1] > 0
+    assert summary["mean_score"] == pytest.approx(payload["scores"][1] / 2)
+    assert summary["timing"]["failed_attempts"] == 1
+    assert summary["metrics"]["malformed_rewrite_count"] == 1
+    assert (tmp_path / "heldout/summary.json").is_file()
+    assert evaluate_candidate(definition, candidate, records, tmp_path / "heldout", {}, **kwargs) == summary
+
+
+@pytest.mark.parametrize("damage", ["incomplete", "duplicate", "unknown", "excluded", "nonfinite"])
+@pytest.mark.usefixtures("obliq_runtime")
+def test_invalid_retrieval_results_abort_instead_of_scoring_zero(corpus, monkeypatch, damage):
+    retriever = BM25Retriever(corpus)
+    results = [("d1", 4.0), ("d2", 3.0), ("d3", 2.0), ("d4", 1.0)]
+    if damage == "incomplete":
+        results.pop()
+    elif damage == "duplicate":
+        results[-1] = ("d1", 1.0)
+    elif damage == "unknown":
+        results[-1] = ("missing", 1.0)
+    elif damage == "excluded":
+        results[-1] = ("self", 1.0)
+    else:
+        results[-1] = ("d4", math.nan)
+    monkeypatch.setattr(retriever, "search", lambda query, excluded, k: results)
+    adapter = ObliqAdapter(lambda messages: '{"query": "blue bird"}', {"twitter": retriever})
+    with pytest.raises(ValueError, match="retrieval"):
+        adapter.evaluate([query_record(split="test")], {COMPONENT: "rewrite"})
+
+
+@pytest.mark.parametrize("boundary", ["provider", "retriever"])
+@pytest.mark.parametrize("exception", [ValueError, TimeoutError])
+@pytest.mark.usefixtures("obliq_runtime")
+def test_infrastructure_errors_propagate(corpus, monkeypatch, boundary, exception):
+    def unavailable(*args, **kwargs):
+        raise exception("infrastructure unavailable")
+
+    retriever = BM25Retriever(corpus)
+    solver = unavailable if boundary == "provider" else lambda messages: '{"query": "blue bird"}'
+    if boundary == "retriever":
+        monkeypatch.setattr(retriever, "search", unavailable)
+    adapter = ObliqAdapter(solver, {"twitter": retriever})
+    with pytest.raises(exception, match="infrastructure unavailable"):
+        adapter.evaluate([query_record()], {COMPONENT: "rewrite"})
+
+
+@pytest.mark.usefixtures("obliq_runtime")
+def test_summary_rejects_cached_infrastructure_failures(corpus):
+    adapter = ObliqAdapter(lambda messages: '{"query": "blue bird"}', {"twitter": BM25Retriever(corpus)})
+    records = [query_record()]
+    result = adapter.evaluate(records, {COMPONENT: "rewrite"})
+    result.outputs[0]["error"] = "retriever unavailable"
+    with pytest.raises(ValueError, match="infrastructure-failed"):
         adapter.summarize_evaluation(records, [result])
 
 
@@ -345,6 +455,7 @@ def test_duplicate_json_fields_are_not_silently_accepted():
         parse_rewrite('{"query": "one", "query": "two"}')
 
 
+@pytest.mark.usefixtures("obliq_runtime")
 def test_build_uses_shared_models_budgets_and_real_retriever(pinned_data):
     args = build_parser("obliqbench", add_arguments).parse_args(
         [

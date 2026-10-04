@@ -2,7 +2,7 @@
 
 DATASET = "dianetc/OBLIQ-Bench"
 DATASET_REVISION = "4ebee29f68ceeb62ca00bd73d5478acdd3cd7764"
-HARNESS_VERSION = "obliq-single-rewrite-v1"
+HARNESS_VERSION = "obliq-single-rewrite-v2"
 SUBSETS = {
     "math": "analogues/math",
     "writing": "analogues/writing",

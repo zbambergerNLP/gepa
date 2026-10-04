@@ -39,6 +39,7 @@ from gepa.strategies.forest_constants import (
 )
 from gepa.strategies.proposal_sampling import SingleMutationSampling
 from gepa.strategies.proposal_selection import AllImprovements
+from gepa.utils.stop_condition import MaxCandidateProposalsStopper
 
 DEFAULT_MAX_METRIC_CALLS = 6_871
 DEFAULT_MAX_WORKERS = 1
@@ -126,6 +127,10 @@ def validate_definition(definition: BenchmarkDefinition) -> None:
         raise ValueError("Each editable seed component must contain its actual harness instructions.")
     if not isinstance(definition.test_repetitions, int) or definition.test_repetitions < 1:
         raise ValueError("Test repetitions must be a positive integer.")
+    if definition.max_candidate_proposals is not None and (
+        type(definition.max_candidate_proposals) is not int or definition.max_candidate_proposals < 1
+    ):
+        raise ValueError("The candidate proposal budget must be a positive integer.")
     seen: set[str] = set()
     for name, records in (("train", definition.trainset), ("val", definition.valset), ("test", definition.testset)):
         if not records:
@@ -414,6 +419,7 @@ def _run_condition(
         },
         "optimizer": {
             "max_metric_calls": args.max_metric_calls,
+            "max_candidate_proposals": definition.max_candidate_proposals,
             "reflection_minibatch_size": batch_size,
             "module_selector": "round_robin",
             "candidate_selection": "pareto",
@@ -473,6 +479,11 @@ def _run_condition(
             acceptance_criterion="strict_improvement",
             use_merge=False,
             max_metric_calls=args.max_metric_calls,
+            stop_callbacks=(
+                MaxCandidateProposalsStopper(definition.max_candidate_proposals)
+                if definition.max_candidate_proposals is not None
+                else None
+            ),
             run_dir=str(directory),
             seed=args.seed,
             raise_on_exception=True,
@@ -532,6 +543,7 @@ def run_cli(
     build_benchmark: BenchmarkBuilder,
     add_arguments: Callable[[argparse.ArgumentParser], None],
     argv: list[str] | None = None,
+    configure_models: Callable[[argparse.Namespace, BenchmarkModels], BenchmarkModels] | None = None,
 ) -> int:
     """Execute a benchmark using shared model, split and held-out conventions.
 
@@ -540,6 +552,7 @@ def run_cli(
         build_benchmark: Builder for the official adapter and pinned data.
         add_arguments: Callback adding benchmark-specific CLI flags.
         argv: Explicit arguments for tests; None reads the process arguments.
+        configure_models: Optional benchmark-specific role budget configuration.
 
     Returns:
         Zero after all requested stages finish and verified results are saved.
@@ -559,8 +572,13 @@ def run_cli(
         if value is not None and value < 1:
             parser.error(f"--{key.replace('_', '-')} must be positive")
     models = resolve_models(args)
+    if configure_models is not None:
+        models = configure_models(args, models)
+        validate_benchmark_model_pair(models.solver_model, models.proposer_model)
     definition = build_benchmark(args, models)
     validate_definition(definition)
+    if args.mode == "optimize" and args.max_metric_calls is None and definition.max_candidate_proposals is None:
+        parser.error("Optimization requires a metric-call or candidate-proposal budget")
     full_identity = benchmark_data_identity(
         source=definition.source, trainset=definition.trainset, valset=definition.valset, testset=definition.testset
     )

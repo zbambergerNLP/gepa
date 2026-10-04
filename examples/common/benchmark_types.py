@@ -43,6 +43,7 @@ class BenchmarkDefinition:
     metric_name: str
     test_repetitions: int = 1
     component_kinds: dict[str, str] = field(default_factory=dict)
+    max_candidate_proposals: int | None = None
 
 
 BenchmarkBuilder = Callable[[Namespace, BenchmarkModels], BenchmarkDefinition]

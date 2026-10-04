@@ -54,7 +54,8 @@ def definition(root):
     )
 
 
-def test_real_optimizer_freezes_validation_winner_and_reuses_evidence(tmp_path, monkeypatch):
+@pytest.mark.parametrize("budget_kind", ["metric_calls", "candidate_proposals"])
+def test_real_optimizer_freezes_validation_winner_and_reuses_evidence(tmp_path, monkeypatch, budget_kind):
     benchmark = definition(tmp_path / "run")
     improved = structured_prompt("Use improved instructions.", template_family="alibaba")
     monkeypatch.setattr(runner, "LM", lambda *args, **kwargs: lambda messages: f"```\n{improved}\n```")
@@ -68,10 +69,19 @@ def test_real_optimizer_freezes_validation_winner_and_reuses_evidence(tmp_path, 
         "--reflection-minibatch-size",
         "1",
     ]
+    if budget_kind == "candidate_proposals":
+        benchmark = replace(benchmark, max_candidate_proposals=1)
+        start = argv.index("--max-metric-calls")
+        del argv[start : start + 2]
+
+    def add_arguments(parser):
+        if budget_kind == "candidate_proposals":
+            parser.set_defaults(max_metric_calls=None)
+
     kwargs = {
         "benchmark_name": "local",
         "build_benchmark": lambda args, models: benchmark,
-        "add_arguments": lambda parser: None,
+        "add_arguments": add_arguments,
         "argv": argv,
     }
     assert runner.run_cli(**kwargs) == 0
@@ -186,3 +196,25 @@ def test_pilot_uses_only_training_data(tmp_path):
     )
     assert benchmark.adapter.calls[0][0] == ["train1"]
     assert len(benchmark.adapter.calls) == 1
+
+
+def test_benchmark_role_budgets_reach_builder_and_saved_contract(tmp_path):
+    seen = []
+
+    def configure(args, models):
+        return replace(models, solver_kwargs={**models.solver_kwargs, "max_tokens": 32_768})
+
+    def build(args, models):
+        seen.append(models)
+        return definition(tmp_path)
+
+    runner.run_cli(
+        benchmark_name="local",
+        build_benchmark=build,
+        add_arguments=lambda parser: None,
+        configure_models=configure,
+        argv=["--run-dir", str(tmp_path / "run"), "--mode", "pilot"],
+    )
+    contract = json.loads((tmp_path / "run" / "pilot" / "evaluation-contract.json").read_text())
+    assert seen[0].solver_kwargs["max_tokens"] == 32_768
+    assert contract["identity"]["solver"]["kwargs"]["max_tokens"] == 32_768

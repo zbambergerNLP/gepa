@@ -51,6 +51,28 @@ class SharedTerminusAdapter:
             raise ValueError("Terminal-Bench task or immutable ref drift.")
         if self.split is not None and any(record["split"] != self.split for record in batch):
             raise ValueError("Terminal-Bench task does not belong to the requested evaluation split.")
+        if len({record["task_id"] for record in batch}) != len(batch):
+            if any(record["split"] != "train" for record in batch):
+                raise ValueError("Duplicate Terminal-Bench tasks are permitted only for padded training batches.")
+            # Harbor keys trials by task ID. Partition at each repeated ID so
+            # sampler padding creates fresh attempts without changing order.
+            chunks: list[list[dict[str, Any]]] = [[]]
+            seen: set[str] = set()
+            for record in batch:
+                if record["task_id"] in seen:
+                    chunks.append([])
+                    seen.clear()
+                chunks[-1].append(record)
+                seen.add(record["task_id"])
+            attempts = [self.evaluate(chunk, candidate, capture_traces) for chunk in chunks]
+            return EvaluationBatch(
+                outputs=[output for attempt in attempts for output in attempt.outputs],
+                scores=[score for attempt in attempts for score in attempt.scores],
+                trajectories=[trace for attempt in attempts for trace in (attempt.trajectories or [])]
+                if capture_traces
+                else None,
+                num_metric_calls=len(batch),
+            )
         result = self.adapter.evaluate(
             [TerminalBenchTask(record["task_id"]) for record in batch], candidate, capture_traces=True
         )

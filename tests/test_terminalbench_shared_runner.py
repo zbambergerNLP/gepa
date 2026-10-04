@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -19,7 +20,9 @@ from gepa.adapters.terminal_bench_adapter.terminal_bench_adapter import (
     HarborTrialResult,
 )
 from gepa.core.adapter import EvaluationBatch
+from gepa.core.data_loader import ListDataLoader
 from gepa.lm_constants import PROVIDER_RETRY_KEY
+from gepa.strategies.batch_sampler import IndependentEpochShuffledBatchSampler
 
 
 @pytest.fixture
@@ -237,3 +240,44 @@ def test_runtime_validation_is_required_before_any_harbor_trial(tmp_path, monkey
     with pytest.raises(ValueError, match="stale serving runtime"):
         definition(tmp_path)
     launch.assert_not_called()
+
+
+@pytest.mark.parametrize("train_size,minibatch_size", [(4, 3), (30, 4)])
+def test_actual_epoch_padding_executes_every_training_occurrence(
+    tmp_path, external_boundaries, train_size, minibatch_size
+):
+    benchmark, _, _ = definition(
+        tmp_path, "--train-limit", str(train_size), "--reflection-minibatch-size", str(minibatch_size)
+    )
+    loader = ListDataLoader(benchmark.trainset[:train_size])
+    sampler = IndependentEpochShuffledBatchSampler(minibatch_size=minibatch_size, seed=0)
+    benchmark.adapter.set_evaluation_context(split="train", repetition=0, seed=0)
+    expected, outputs, saw_padding = [], [], False
+    for iteration in range((train_size + minibatch_size - 1) // minibatch_size):
+        ids = sampler.next_minibatch_ids(loader, SimpleNamespace(i=iteration))
+        batch = loader.fetch(ids)
+        saw_padding |= len(set(ids)) != len(ids)
+        expected.extend(record["task_id"] for record in batch)
+        result = benchmark.adapter.evaluate(batch, benchmark.seed_candidate, capture_traces=True)
+        outputs.extend(result.outputs)
+        assert result.num_metric_calls == len(batch)
+        assert [output["task_id"] for output in result.outputs] == [record["task_id"] for record in batch]
+        assert [trace["task_id"] for trace in result.trajectories] == [record["task_id"] for record in batch]
+        feedback = benchmark.adapter.make_reflective_dataset(benchmark.seed_candidate, result, ["instruction_prompt"])
+        assert len(feedback["instruction_prompt"]) == len(batch)
+    calls = external_boundaries[0]
+    assert saw_padding
+    assert len(expected) > train_size
+    assert [task_id for call in calls for task_id in call["tasks"]] == expected
+    assert all(len(set(call["tasks"])) == len(call["tasks"]) for call in calls)
+    assert len({(output["task_id"], output["evaluation_id"]) for output in outputs}) == len(expected)
+    assert len({output["trial_dir"] for output in outputs}) == len(expected)
+
+
+@pytest.mark.parametrize("split", ["val", "test"])
+def test_validation_and_test_duplicates_fail_before_harbor(tmp_path, external_boundaries, split):
+    benchmark, _, _ = definition(tmp_path)
+    record = (benchmark.valset if split == "val" else benchmark.testset)[0]
+    with pytest.raises(ValueError, match="only for padded training"):
+        benchmark.adapter.evaluate([record, record], benchmark.seed_candidate)
+    assert not external_boundaries[0]

@@ -310,7 +310,11 @@ def _prepare_task(
     partial = prepared_image.with_suffix(".partial.sif")
     if partial.exists():
         partial.unlink()
-    subprocess.run([apptainer, "build", "--fakeroot", str(partial), str(recipe_path)], check=True, env=env)
+    subprocess.run(
+        [apptainer, "build", "--fakeroot", "--mksquashfs-args", "-processors 2", str(partial), str(recipe_path)],
+        check=True,
+        env=env,
+    )
     prefix = [apptainer, "exec"] + PROBE_CONTRACT["flags"] + [str(partial), "env"] + PROBE_CONTRACT["environment"]
     probe_commands = [
         prefix + dependency_probe_argv(spec),
@@ -507,9 +511,7 @@ def main() -> None:
     selection.add_argument(
         "--task-id", action="append", dest="task_ids", help="Prepare a canonical pinned task; repeat to select more"
     )
-    parser.add_argument(
-        "--resume", action="store_true", help="Resume by reusing task parts with matching recipe bytes"
-    )
+    parser.add_argument("--resume", action="store_true", help="Resume by reusing task parts with matching recipe bytes")
     args = parser.parse_args()
     path = prepare_bundle(**vars(args))
     print(f"Verified offline task bundle: {path}")

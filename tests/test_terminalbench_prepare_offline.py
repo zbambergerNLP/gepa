@@ -61,7 +61,7 @@ def preparation(tmp_path, monkeypatch):
         elif command[1] == "pull":
             Path(command[2]).write_bytes(b"raw image bytes")
         elif command[1:3] == ["build", "--fakeroot"]:
-            Path(command[3]).write_bytes(b"prepared image bytes")
+            Path(command[-2]).write_bytes(b"prepared image bytes")
         elif command[1] == "exec":
             assert (
                 command[2 : 2 + len(prepare_offline.PROBE_CONTRACT["flags"])] == prepare_offline.PROBE_CONTRACT["flags"]
@@ -96,6 +96,9 @@ def test_preparation_seals_real_loader_validated_packages_in_training_order(tmp_
     pulls = [command for command, _ in calls if command[1] == "pull"]
     assert len(pulls) == 1
     assert pulls[0][-1] == "docker://alexgshaw/log-summary-date-ranges:20251031"
+    builds = [command for command, _ in calls if command[1] == "build"]
+    assert len(builds) == 2
+    assert all(command[3:5] == ["--mksquashfs-args", "-processors 2"] for command in builds)
     for _, kwargs in calls:
         assert isinstance(kwargs["check"], bool)
         assert all(key not in kwargs["env"] for key in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"))
@@ -263,8 +266,8 @@ def test_resume_reuses_verified_parts_after_a_later_build_fails(tmp_path, monkey
     target, cache = tmp_path / "bundle", tmp_path / "cache"
 
     def fail_second_build(command, **kwargs):
-        if command[1] == "build" and "log-summary-date-ranges" in command[3]:
-            Path(command[3]).write_bytes(b"interrupted build")
+        if command[1] == "build" and "log-summary-date-ranges" in command[-2]:
+            Path(command[-2]).write_bytes(b"interrupted build")
             raise subprocess.CalledProcessError(1, command)
         return real_run(command, **kwargs)
 

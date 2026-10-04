@@ -172,11 +172,12 @@ AppWorld outputs are ignored here. When using custom roots or tracking services,
 keep their artifacts private too. No corpus or protected evaluator code is
 vendored by this integration.
 
-The local engine and scoring boundary have been exercised with both the free
-environment check and a training-only Qwen pilot. Pilot scores are calibration
-evidence, not held-out benchmark results. Linux is the intended cluster platform;
-the real environment check and pilot client were run on macOS with Qwen hosted
-on Linux. Windows is not supported by this subprocess/timeout setup.
+The engine and scoring boundary pass the free environment check on macOS and
+on an allocated Della Linux node with external network access disabled. A fresh
+Linux installation also verifies the full corpus and pinned runtime. The
+training-only Qwen pilot used a macOS client with Qwen hosted on Della; its
+scores are calibration evidence, not held-out benchmark results. Windows is not
+supported by this subprocess/timeout setup.
 
 ## Primary sources
 

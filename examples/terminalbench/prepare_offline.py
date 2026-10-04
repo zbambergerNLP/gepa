@@ -26,7 +26,7 @@ SUPPORTED_IMAGES = {
     "terminal-bench/log-summary-date-ranges": "alexgshaw/log-summary-date-ranges:20251031",
 }
 PROBE_CONTRACT = {
-    "version": 2,
+    "version": 3,
     "flags": [
         "--cleanenv",
         "--fakeroot",
@@ -49,6 +49,12 @@ PROBE_CONTRACT = {
         "HTTPS_PROXY=http://127.0.0.1:9",
         "NO_PROXY=",
         "no_proxy=",
+    ],
+    "harbor_exec": [
+        "/bin/bash",
+        "-c",
+        'PATH="/usr/bin:/usr/local/bin:${PATH:-/bin}" exec "$@"',
+        "harbor-offline-probe",
     ],
 }
 
@@ -315,7 +321,13 @@ def _prepare_task(
         check=True,
         env=env,
     )
-    prefix = [apptainer, "exec"] + PROBE_CONTRACT["flags"] + [str(partial), "env"] + PROBE_CONTRACT["environment"]
+    prefix = (
+        [apptainer, "exec"]
+        + PROBE_CONTRACT["flags"]
+        + [str(partial), "env"]
+        + PROBE_CONTRACT["environment"]
+        + PROBE_CONTRACT["harbor_exec"]
+    )
     probe_commands = [
         prefix + dependency_probe_argv(spec),
         prefix

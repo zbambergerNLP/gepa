@@ -68,7 +68,7 @@ import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
-REAL_CURL = "/usr/bin/curl"
+REAL_CURL = "/opt/harbor-offline/original-curl"
 URL_MAP = "/opt/harbor-offline/resource-urls.json"
 
 
@@ -228,8 +228,13 @@ def _common_commands() -> list[str]:
     return [
         f"mkdir -p {ROOT}/resource-bin {ROOT}/resources {ROOT}/wheels",
         f"test -f {ROOT}/resource-urls.json || printf '{{}}\\n' > {ROOT}/resource-urls.json",
+        f"test -f {ROOT}/original-curl || cp -p /usr/bin/curl {ROOT}/original-curl",
         _write(f"{ROOT}/resource-bin/curl", CURL_WRAPPER),
         f"chmod 755 {ROOT}/resource-bin/curl",
+        # Harbor prepends /usr/bin to every agent/verifier command's PATH.
+        # Both entrypoints must use the same cache while the original remains
+        # untouched across the installer's and task's repeated setup calls.
+        f"cp {ROOT}/resource-bin/curl /usr/bin/curl",
         _write(
             f"{ROOT}/resource-env.sh",
             f"export PATH={ROOT}/resource-bin:$PATH\n"
@@ -273,7 +278,7 @@ record = {data!r}
 path = Path(record["path"])
 path.parent.mkdir(parents=True, exist_ok=True)
 temporary = path.with_name(path.name + ".partial")
-subprocess.run(["/usr/bin/curl", "--fail", "--location", "--silent", "--show-error",
+subprocess.run(["{ROOT}/original-curl", "--fail", "--location", "--silent", "--show-error",
                 "--retry", "3", record["url"], "--output", str(temporary)], check=True)
 digests = {{name: hashlib.new(name) for name in ("sha256", "md5")}}
 with temporary.open("rb") as stream:
@@ -650,6 +655,9 @@ def resource_recipe_commands(task_id: str, task_ref: str) -> list[str]:
         )
         commands += [
             "apt-get install -y --no-install-recommends util-linux",
+            # These www-data/adm-owned image files become unmapped IDs in
+            # Della's single-UID namespace; its virtual root cannot bypass DAC.
+            "chown 0:0 /var/log/nginx /var/log/nginx/access.log /var/log/nginx/error.log",
             _write(f"{ROOT}/windows-startup.sh", WINDOWS_STARTUP),
             _write(f"{ROOT}/resource-env.sh", f"export BASH_ENV={ROOT}/windows-startup.sh", append=True),
         ]

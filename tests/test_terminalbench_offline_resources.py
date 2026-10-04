@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -39,7 +40,7 @@ def curl_cache(tmp_path):
     script = tmp_path / "cached-curl.py"
     script.write_text(
         resources.CURL_WRAPPER.replace('"/opt/harbor-offline/resource-urls.json"', repr(str(mapping))).replace(
-            '"/usr/bin/curl"', repr(shutil.which("curl"))
+            '"/opt/harbor-offline/original-curl"', repr(shutil.which("curl"))
         )
     )
 
@@ -173,6 +174,7 @@ def test_fetch_records_real_bytes_and_checks_expected_hash(tmp_path, monkeypatch
     stage = tmp_path / "cache"
     stage.mkdir()
     (stage / "resource-urls.json").write_text("{}")
+    (stage / "original-curl").symlink_to(shutil.which("curl"))
     monkeypatch.setattr(resources, "ROOT", str(stage))
     source = tmp_path / "asset.txt"
     source.write_text("complete original source")
@@ -287,3 +289,61 @@ def test_windows_startup_does_not_run_for_build_or_ordinary_shell(tmp_path, comm
     env = {**os.environ, "BASH_ENV": str(script), "PATH": str(tmp_path) + ":" + os.environ["PATH"]}
     subprocess.run(["bash", "-c", command], capture_output=True, env=env)
     assert not log.exists()
+
+
+def test_native_harbor_path_uses_cache_and_setup_preserves_original_curl(tmp_path, monkeypatch):
+    stage = tmp_path / "offline"
+    system_bin = tmp_path / "usr/bin"
+    system_bin.mkdir(parents=True)
+    real_curl = Path(shutil.which("curl"))
+    system_curl = system_bin / "curl"
+    # macOS refuses to execute relocated platform-signed binaries. This
+    # entrypoint still delegates every byte and error to the genuine binary.
+    system_curl.write_text("#!/bin/sh\nexec " + shlex.quote(str(real_curl)) + ' "$@"\n')
+    system_curl.chmod(0o755)
+    original_digest = hashlib.sha256(system_curl.read_bytes()).hexdigest()
+    monkeypatch.setattr(resources, "ROOT", str(stage))
+    monkeypatch.setattr(
+        resources,
+        "CURL_WRAPPER",
+        resources.CURL_WRAPPER.replace("#!/usr/bin/python3", "#!" + sys.executable).replace(
+            "/opt/harbor-offline", str(stage)
+        ),
+    )
+    setup = [command.replace("/usr/bin/curl", str(system_curl)) for command in resources._common_commands()]
+    _run_shell(setup)
+    _run_shell(setup)
+    assert hashlib.sha256((stage / "original-curl").read_bytes()).hexdigest() == original_digest
+    cached = stage / "resources/public.txt"
+    cached.write_text("complete cached public bytes")
+    url = "https://public.example/pinned/public.txt"
+    (stage / "resource-urls.json").write_text(
+        json.dumps({url: {"path": str(cached), "sha256": hashlib.sha256(cached.read_bytes()).hexdigest()}})
+    )
+    # Match Harbor's /usr/bin:/usr/local/bin:<inherited PATH> ordering.
+    env = {
+        **os.environ,
+        "PATH": str(system_bin) + ":/usr/local/bin:" + str(stage / "resource-bin") + ":" + os.environ["PATH"],
+    }
+    result = subprocess.run(["curl", "-fsSL", url], env=env, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == cached.read_bytes()
+    uncached = tmp_path / "uncached.txt"
+    uncached.write_text("genuine curl delegation")
+    delegated = subprocess.run(["curl", "-fsSL", uncached.as_uri()], env=env, capture_output=True)
+    assert delegated.returncode == 0, delegated.stderr
+    assert delegated.stdout == uncached.read_bytes()
+
+
+def test_windows_ownership_fix_preserves_task_configuration_and_other_tasks():
+    spec = json.loads(resources.SPEC_PATH.read_text())
+    command = "chown 0:0 /var/log/nginx /var/log/nginx/access.log /var/log/nginx/error.log"
+    windows = resources.resource_recipe_commands(
+        "terminal-bench/install-windows-3.11", spec["tasks"]["terminal-bench/install-windows-3.11"]["task_ref"]
+    )
+    assert command in windows
+    nginx = resources.resource_recipe_commands(
+        "terminal-bench/nginx-request-logging", spec["tasks"]["terminal-bench/nginx-request-logging"]["task_ref"]
+    )
+    assert command not in nginx
+    assert not any(re.search(r"(?m)^\s*sed\s", entry) or "chmod 777" in entry for entry in windows)

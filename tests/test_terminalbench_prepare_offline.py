@@ -68,6 +68,13 @@ def preparation(tmp_path, monkeypatch):
             )
             if "/opt/harbor-server/bin/python3" not in command:
                 assert "UV_OFFLINE=1" in command and "PIP_NO_INDEX=1" in command
+            shell_index = command.index("/bin/bash")
+            assert command[shell_index : shell_index + 4] == [
+                "/bin/bash",
+                "-c",
+                'PATH="/usr/bin:/usr/local/bin:${PATH:-/bin}" exec "$@"',
+                "harbor-offline-probe",
+            ]
             assert "/tests/" not in " ".join(command)
             return subprocess.CompletedProcess(command, 0, stdout="offline dependency probe passed\n", stderr="")
         else:
@@ -186,6 +193,18 @@ def test_resource_recipe_preserves_heredoc_syntax_and_runtime_environment(tmp_pa
     subprocess.run(["sh", "-n"], input=post, text=True, check=True)
     assert heredoc in recipe
     assert ". /opt/harbor-offline/resource-env.sh" in recipe
+
+
+def test_probe_applies_native_harbor_path_precedence_before_executing():
+    result = subprocess.run(
+        prepare_offline.PROBE_CONTRACT["harbor_exec"] + ["/bin/sh", "-c", 'printf %s "$PATH"'],
+        env={"PATH": "/opt/harbor-offline/resource-bin:/prepared-bin"},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout == "/usr/bin:/usr/local/bin:/opt/harbor-offline/resource-bin:/prepared-bin"
+    assert prepare_offline.PROBE_CONTRACT["version"] == 3
 
 
 @pytest.mark.parametrize("task_id", list(prepare_offline.SUPPORTED_IMAGES))

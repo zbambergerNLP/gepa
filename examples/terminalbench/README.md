@@ -130,6 +130,7 @@ Official timing semantics were checked against Harbor 0.22.0's
 and [trial finalization](https://github.com/harbor-framework/harbor/blob/v0.22.0/src/harbor/trial/trial.py),
 which records `finished_at` after stopping the environment. Existing adapter
 documentation describes its maintained GEPA/Harbor port and benchmark source
-pins. This migration adds no dependencies and does not change the official
-execution/evaluation engine. No Docker trial or model-backed campaign was run
-as part of this migration.
+pins. The official Docker runtime completed the pinned training task
+`log-summary-date-ranges` with its reference solution and verifier reward 1.0.
+That checks container execution and verification; model-backed Terminal-Bench
+pilots and Della container execution remain unverified.

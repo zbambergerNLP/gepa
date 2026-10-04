@@ -655,6 +655,12 @@ def resource_recipe_commands(task_id: str, task_ref: str) -> list[str]:
         commands += _hf_snapshots(
             [{"repo_id": "BAAI/bge-small-zh-v1.5", "revision": "7999e1d3359715c523056ef9478215996d62a620"}]
         )
+        # MTEB 1.36.8 imports AutoModelForVision2Seq, removed in Transformers 5.
+        # Apply the same constraint during cache warming and unchanged verifier commands.
+        commands += [
+            _write(f"{ROOT}/verifier-constraints.txt", "transformers<5"),
+            _write(f"{ROOT}/resource-env.sh", f"export UV_CONSTRAINT={ROOT}/verifier-constraints.txt", append=True),
+        ]
     elif kind == "mteb_results":
         commands += _mteb_results()
     elif kind == "rstan":

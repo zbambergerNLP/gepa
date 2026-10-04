@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from examples.terminalbench import offline_resources as resources
+from examples.terminalbench import prepare_offline
 
 
 def _run_shell(commands, *, env=None, cwd=None, check=True):
@@ -276,6 +277,46 @@ def test_resource_recipes_preserve_task_solution_boundaries():
     assert "pip install pyknotid" not in scripts["terminal-bench/build-cython-ext"]
     assert "model.safetensors" in scripts["terminal-bench/count-dataset-tokens"]
     assert "ignore_patterns" not in scripts["terminal-bench/mteb-leaderboard"]
+
+
+def test_mteb_compatibility_constraint_reaches_warm_and_runtime_without_changing_verifier(tmp_path, monkeypatch):
+    stage = tmp_path / "offline"
+    stage.mkdir()
+    monkeypatch.setattr(resources, "ROOT", str(stage))
+    manifest = prepare_offline.load_terminalbench_manifest(prepare_offline.MANIFEST_PATH)
+    specs = prepare_offline.load_recipe_spec(manifest)
+    task_id = "terminal-bench/mteb-retrieve"
+    spec = specs[task_id]
+    commands = resources.resource_recipe_commands(task_id, spec["task_ref"])
+    constraint_commands = [command for command in commands if "verifier-constraints.txt" in command]
+    assert len(constraint_commands) == 2
+    result = _run_shell(
+        [*constraint_commands, f". {stage}/resource-env.sh", 'cat "$UV_CONSTRAINT"'], env={"PATH": os.environ["PATH"]}
+    )
+    assert result.stdout == "transformers<5\n"
+    assert spec["warm_argv"] == [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "mteb==1.36.8",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version",
+    ]
+    recipe = prepare_offline.render_recipe(task_id, spec["task_ref"], tmp_path / "base.sif", spec, commands, [])
+    post, environment = recipe.split("%post\n", 1)[1].split("%environment\n", 1)
+    assert post.index(". /opt/harbor-offline/resource-env.sh") < post.index(shlex.join(spec["warm_argv"]))
+    assert ". /opt/harbor-offline/resource-env.sh" in environment
+    assert str(stage / "verifier-constraints.txt") in post
+    for other_id, other_spec in specs.items():
+        if other_id != task_id:
+            assert "UV_CONSTRAINT" not in "\n".join(
+                resources.resource_recipe_commands(other_id, other_spec["task_ref"])
+            )
 
 
 @pytest.mark.parametrize("command", ["true", "echo ordinary-agent-command", 'exec /staging/bootstrap.sh "$@"'])

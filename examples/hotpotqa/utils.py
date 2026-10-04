@@ -22,30 +22,16 @@ from examples.hotpotqa.benchmark_settings import (
     TRAIN_VALIDATION_SIZE,
     VALIDATION_SIZE,
 )
-from gepa.strategies.forest_constants import OPTIMIZER_ROLE, SOLVER_ROLE
+from gepa.strategies.forest_constants import SOLVER_ROLE
 
 try:
     import dspy  # type: ignore[import-not-found]
 except ImportError:
     dspy = None  # type: ignore[assignment]
 
-from examples.common.experiment_models import (
-    EXPERIMENT_MODELS,
-    EXPERIMENT_NUM_RETRIES,
-    QWEN3_8_27B_MODEL,
-    experiment_decoding,
-    experiment_request_overrides,
-)
-from examples.common.provider_retries import provider_retry_kwargs
+from examples.common.experiment_models import QWEN3_8_27B_MODEL
+from examples.common.model_settings import resolve_benchmark_lm_kwargs
 from examples.common.wikipedia import WikipediaPassage, WikipediaRetriever
-from examples.hotpotqa.model_settings import (
-    HOTPOTQA_OPTIMIZER_MAX_TOKENS,
-    HOTPOTQA_OPTIMIZER_THINKING_TOKENS,
-    HOTPOTQA_REQUEST_TIMEOUT_SECONDS,
-    HOTPOTQA_SCIENTIFIC_REQUEST_SEED,
-    HOTPOTQA_SOLVER_MAX_TOKENS,
-    HOTPOTQA_SOLVER_THINKING_TOKENS,
-)
 
 DEFAULT_DATA_PATH = os.path.join(
     os.path.dirname(__file__),
@@ -184,31 +170,7 @@ def resolve_hotpotqa_lm_kwargs(
     Returns:
         Independent LM keyword arguments for the requested local runtime.
     """
-    if role not in {SOLVER_ROLE, OPTIMIZER_ROLE}:
-        raise ValueError(f"Unknown HotPotQA model role: {role!r}")
-    kwargs: dict[str, object] = {
-        "num_retries": EXPERIMENT_NUM_RETRIES,
-        "timeout": HOTPOTQA_REQUEST_TIMEOUT_SECONDS,
-        **provider_retry_kwargs(role=role),
-        **experiment_decoding(model, agentic=False),
-        **experiment_request_overrides(model, explicit_reasoning=True),
-    }
-    if model in EXPERIMENT_MODELS:
-        kwargs["max_tokens"] = (
-            HOTPOTQA_SOLVER_MAX_TOKENS if role == SOLVER_ROLE else HOTPOTQA_OPTIMIZER_MAX_TOKENS[model]
-        )
-        kwargs["seed"] = HOTPOTQA_SCIENTIFIC_REQUEST_SEED
-        extra_body = kwargs["extra_body"]
-        assert isinstance(extra_body, dict)
-        # Native reasoning termination reserves final-answer space within the
-        # existing output ceiling, including on a runaway reasoning attempt.
-        thinking_budget = (
-            HOTPOTQA_SOLVER_THINKING_TOKENS if role == SOLVER_ROLE else HOTPOTQA_OPTIMIZER_THINKING_TOKENS[model]
-        )
-        kwargs["extra_body"] = {**extra_body, "thinking_token_budget": thinking_budget}
-    if api_base is not None:
-        kwargs["api_base"] = api_base
-    return kwargs
+    return resolve_benchmark_lm_kwargs(model, api_base, role=role)
 
 
 def build_hotpotqa_task_lm(

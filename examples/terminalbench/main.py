@@ -114,16 +114,17 @@ def build_benchmark(args: argparse.Namespace, models: BenchmarkModels) -> Benchm
         },
         process_timeout_sec=args.harbor_process_timeout_sec,
     )
+    selected = {split: records[split][: getattr(args, f"{split}_limit")] for split in records}
+    if args.mode in {"pilot", "optimizer-pilot"}:
+        required = selected["train"][: args.pilot_size]
+    elif args.mode == "baseline":
+        required = selected["test"]
+    else:
+        required = [record for split in selected.values() for record in split]
+    required_task_ids = [record["task_id"] for record in required]
     if harbor.offline_task_bundle is not None:
-        selected = {split: records[split][: getattr(args, f"{split}_limit")] for split in records}
-        if args.mode in {"pilot", "optimizer-pilot"}:
-            required = selected["train"][: args.pilot_size]
-        elif args.mode == "baseline":
-            required = selected["test"]
-        else:
-            required = [record for split in selected.values() for record in split]
-        harbor.offline_task_bundle.require_tasks([record["task_id"] for record in required])
-    harbor.check_requirements()
+        harbor.offline_task_bundle.require_tasks(required_task_ids)
+    harbor.check_requirements(required_task_ids)
     selected_train_count = min(args.train_limit or len(records["train"]), len(records["train"]))
     minibatch_size = min(args.reflection_minibatch_size, selected_train_count)
     iterations_per_epoch = (selected_train_count + minibatch_size - 1) // minibatch_size

@@ -119,6 +119,22 @@ This mode has no external network route, so complete offline staging is required
 For an online Apptainer host, `--singularity-image-cache PATH` remains available
 without an offline task bundle.
 
+`terminal-bench/mailman` requires real nonroot service users. When that task is
+selected, Singularity preflight checks the staged image's kernel UID/GID mappings
+and real identity changes before any model calls. Della's current one-ID mapping
+cannot run this task, with or without the private-network wrapper; libfakeroot's
+simulated identity changes do not satisfy the requirement. A sealed image alone
+does not establish Mailman runtime readiness. Use administrator-configured
+[Apptainer subordinate UID/GID mappings](https://apptainer.org/docs/user/1.5/fakeroot.html)
+with a launcher that preserves them and passes this check. The current
+`with_private_network.sh --map-root-user` wrapper maps only one UID/GID; assigning
+subordinate ranges alone does not make that launcher compatible. Alternatively,
+use a separate approved Linux Docker host with colocated, attested model servers.
+The current runner requires local Linux PID/socket attestation, so a macOS Docker
+engine with tunneled Della model endpoints is not a supported replacement. Docker
+is not permitted on Princeton clusters. Task users, ownership, permissions and
+grading remain unchanged; training-only pilots that exclude Mailman are unaffected.
+
 After the pinned model servers and Harbor runtime are prepared:
 
 ```sh

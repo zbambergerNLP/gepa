@@ -286,7 +286,7 @@ def test_harbor_child_imports_prompted_agent_without_inherited_pythonpath(tmp_pa
     manifest = load_terminalbench_manifest(root / "examples/terminalbench/terminalbench-v2.1-manifest.json")
     runner = HarborCLI(manifest=manifest, student_model="fixture", work_dir=tmp_path, agent_python_path=root)
     monkeypatch.delenv("PYTHONPATH", raising=False)
-    monkeypatch.setattr(runner, "check_requirements", lambda: ("harbor", "singularity"))
+    monkeypatch.setattr(runner, "check_requirements", lambda task_ids=(): ("harbor", "singularity"))
     child_env = {}
 
     def capture(_command, **kwargs):

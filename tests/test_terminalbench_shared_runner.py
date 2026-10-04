@@ -16,7 +16,7 @@ from examples.common.benchmark_runner import build_parser, resolve_models, valid
 from examples.common.experiment_models import DEFAULT_PROPOSER_MODEL, DEFAULT_SOLVER_MODEL
 from examples.terminalbench import main as terminalbench
 from examples.terminalbench.shared_adapter import SharedTerminusAdapter, trial_elapsed_seconds
-from gepa.adapters.terminal_bench_adapter import HarborExecutionError
+from gepa.adapters.terminal_bench_adapter import HarborExecutionError, HarborRequirementError
 from gepa.adapters.terminal_bench_adapter.terminal_bench_adapter import (
     HarborEvaluation,
     HarborTrialResult,
@@ -330,6 +330,63 @@ def test_offline_campaign_requires_all_selected_splits_before_harbor_calls(tmp_p
         definition(tmp_path, "--container-runtime", "singularity", "--offline-task-bundle", str(path))
     assert not external_boundaries[0]
     external_boundaries[2].assert_not_called()
+
+
+@pytest.mark.parametrize("mode", ["optimize", "baseline"])
+def test_selected_heldout_mailman_blocks_before_any_model_evaluation(tmp_path, external_boundaries, mode):
+    """Check held-out infrastructure before spending optimization or baseline calls."""
+    observed, _, requirements = external_boundaries
+
+    def unsupported(task_ids):
+        assert "terminal-bench/mailman" in task_ids
+        raise HarborRequirementError("Mailman needs real nonroot UID/GID mappings")
+
+    requirements.side_effect = unsupported
+    with pytest.raises(HarborRequirementError, match="real nonroot UID/GID"):
+        terminalbench.main(
+            [
+                "--mode",
+                mode,
+                "--container-runtime",
+                "singularity",
+                "--runtime-record",
+                str(tmp_path / "solver.json"),
+                "--proposer-runtime-record",
+                str(tmp_path / "proposer.json"),
+                "--run-dir",
+                str(tmp_path / "run"),
+            ]
+        )
+    assert not observed
+
+
+@pytest.mark.parametrize("mode", ["pilot", "optimizer-pilot", "optimize", "baseline"])
+def test_task_preflight_uses_only_the_exact_selected_mode_prefix(tmp_path, external_boundaries, mode):
+    """Keep training pilots and explicit held-out prefixes independent of unselected Mailman."""
+    benchmark, _, _ = definition(
+        tmp_path,
+        "--mode",
+        mode,
+        "--container-runtime",
+        "singularity",
+        "--pilot-size",
+        "1",
+        "--train-limit",
+        "2",
+        "--val-limit",
+        "3",
+        "--test-limit",
+        "37",
+    )
+    expected = (
+        benchmark.trainset[:1]
+        if mode in {"pilot", "optimizer-pilot"}
+        else benchmark.testset[:37]
+        if mode == "baseline"
+        else [*benchmark.trainset[:2], *benchmark.valset[:3], *benchmark.testset[:37]]
+    )
+    assert all(record["task_id"] != "terminal-bench/mailman" for record in expected)
+    external_boundaries[2].assert_called_once_with([record["task_id"] for record in expected])
 
 
 @pytest.mark.parametrize(

@@ -29,7 +29,7 @@ from gepa.adapters.terminal_bench_adapter.documents import (
     validate_documents,
     write_document_bundle,
 )
-from gepa.adapters.terminal_bench_adapter.staging import load_offline_task_bundle
+from gepa.adapters.terminal_bench_adapter.staging import load_offline_task_bundle, singularity_image_filename
 from gepa.adapters.terminal_bench_adapter.text_scope import TerminalBenchTextScope
 from gepa.core.adapter import EvaluationBatch, GEPAAdapter
 from gepa.strategies.text_limits import TextLimits, clip_text, resolve_text_limits, validate_char_limit
@@ -89,6 +89,29 @@ FAILURE_POLICY_CONTRACT = {
 
 
 HARBOR_METADATA_TIMEOUT_SECONDS = 30
+MAILMAN_TASK_ID = "terminal-bench/mailman"
+MAILMAN_IMAGE = "alexgshaw/mailman:20251031"
+MAILMAN_NAMESPACE_PROBE = """import json, os, pwd, sys
+from pathlib import Path
+
+user = pwd.getpwnam(sys.argv[1])
+maps = {}
+for kind, identifier in (("uid", user.pw_uid), ("gid", user.pw_gid)):
+    maps[kind] = Path("/proc/self/" + kind + "_map").read_text()
+    ranges = [tuple(map(int, line.split())) for line in maps[kind].splitlines()]
+    if not any(start <= identifier < start + count for start, outside, count in ranges):
+        raise RuntimeError("Unmapped " + kind + " " + str(identifier) + " for " + user.pw_name)
+os.setgroups([])
+os.setgid(user.pw_gid)
+os.setuid(user.pw_uid)
+status = dict(line.split(":", 1) for line in Path("/proc/self/status").read_text().splitlines())
+for field, identifier in (("Uid", user.pw_uid), ("Gid", user.pw_gid)):
+    if any(int(value) != identifier for value in status[field].split()):
+        raise RuntimeError("Kernel " + field + " did not change for " + user.pw_name)
+if status["Groups"].split():
+    raise RuntimeError("Kernel supplementary groups did not clear")
+print(json.dumps({"user": user.pw_name, "uid": user.pw_uid, "gid": user.pw_gid, "maps": maps}))
+"""
 
 
 class TerminalBenchOutput(TypedDict):
@@ -690,8 +713,11 @@ class HarborCLI:
             raise HarborRequirementError(f"{label} executable {executable!r} was not found on PATH")
         return resolved
 
-    def check_requirements(self) -> tuple[str, str]:
-        """Require Harbor 0.22.0 and the selected container backend.
+    def check_requirements(self, task_ids: Sequence[str] = ()) -> tuple[str, str]:
+        """Require Harbor, the backend, and selected tasks' known kernel prerequisites.
+
+        Args:
+            task_ids: Every task the planned run can execute, before model calls.
 
         Returns:
             Resolved Harbor and container executable paths.
@@ -738,7 +764,63 @@ class HarborCLI:
         if container_info.returncode != 0:
             detail = container_info.stderr.strip() or container_info.stdout.strip()
             raise HarborRequirementError(f"{self.container_runtime} container runtime is unavailable: {detail}")
+        if self.container_runtime == "singularity" and MAILMAN_TASK_ID in task_ids:
+            self._check_mailman_namespace(container)
         return harbor, container
+
+    def _check_mailman_namespace(self, container: str) -> None:
+        """Reject emulated service identities without changing task users or permissions."""
+        image_name = MAILMAN_IMAGE
+        if self.offline_task_bundle is not None:
+            self.offline_task_bundle.validate([MAILMAN_TASK_ID])
+            image_name = self.offline_task_bundle.payload["tasks"][MAILMAN_TASK_ID]["docker_image"]
+        image = self.singularity_image_cache_dir / singularity_image_filename(image_name)
+        if not image.is_file():
+            raise HarborRequirementError(
+                f"{MAILMAN_TASK_ID} requires a staged image for its kernel user-namespace preflight: {image}. "
+                "Stage its published image in --singularity-image-cache or provide --offline-task-bundle."
+            )
+        for user in ("list", "postfix"):
+            # Match Harbor's namespace flags, but bypass libfakeroot's simulated
+            # setuid success and verify the resulting identities through /proc.
+            command = [
+                container,
+                "exec",
+                "--fakeroot",
+                "--writable-tmpfs",
+                "--containall",
+                "--pid",
+                "--no-mount",
+                "home,tmp,bind-paths",
+                "--pwd",
+                "/app",
+                str(image),
+                "env",
+                "-u",
+                "LD_PRELOAD",
+                "-u",
+                "FAKEROOTKEY",
+                "/usr/bin/python3",
+                "-c",
+                MAILMAN_NAMESPACE_PROBE,
+                user,
+            ]
+            try:
+                result = subprocess.run(
+                    command, check=False, capture_output=True, text=True, timeout=HARBOR_METADATA_TIMEOUT_SECONDS
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise HarborRequirementError(f"{MAILMAN_TASK_ID} kernel user-namespace probe failed: {exc}") from exc
+            if result.returncode != 0:
+                detail = result.stderr.strip() or result.stdout.strip()
+                raise HarborRequirementError(
+                    f"{MAILMAN_TASK_ID} requires real nonroot UID/GID changes for {user}; "
+                    f"this Singularity runtime cannot provide them: {detail}. "
+                    "Ask the cluster administrator for supported subordinate UID/GID mappings and a launcher "
+                    "that preserves them; the current private-network launcher maps only one UID/GID. "
+                    "Alternatively, use a separate approved Linux Docker host with colocated, attested model "
+                    "servers. Docker is not permitted on Princeton clusters."
+                )
 
     def build_job_config(
         self,
@@ -836,7 +918,7 @@ class HarborCLI:
         if len(set(task_ids)) != len(task_ids):
             raise ValueError("task_ids must be unique within one Harbor job")
         self.manifest.validate_candidate(candidate)
-        harbor, _container = self.check_requirements()
+        harbor, _container = self.check_requirements(task_ids)
 
         candidate_digest = self.manifest.candidate_digest(candidate)
         evaluation_id = f"{candidate_digest[:12]}-{uuid.uuid4().hex}"

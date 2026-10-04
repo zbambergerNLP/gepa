@@ -11,7 +11,7 @@ from terminalbench_pilot_helpers import write_pilot_fixture
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
-from examples.terminalbench import main as cli
+from examples.terminalbench import legacy_main as cli
 from gepa.adapters.terminal_bench_adapter.documents import (
     COMPONENT_KINDS,
     CONTEXT_FIELDS,

@@ -8,7 +8,7 @@ from terminalbench_pilot_helpers import offline_runtime as offline_runtime
 from terminalbench_pilot_helpers import write_pilot_fixture
 
 from examples.common.pilot_checks import METHODS, CycleEvidence, load_cycle
-from examples.terminalbench import main as benchmark
+from examples.terminalbench import legacy_main as benchmark
 from examples.terminalbench.optimizer_pilot import main as run_pilots
 from gepa.adapters.terminal_bench_adapter import load_terminalbench_manifest
 

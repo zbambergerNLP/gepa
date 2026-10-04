@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).parents[1]))
 
 from examples.common.experiment_models import DEEPSEEK_V4_1_FLASH_MODEL, QWEN3_8_27B_MODEL
 from examples.terminalbench import evaluate
-from examples.terminalbench.main import (
+from examples.terminalbench.legacy_main import (
     EXPERIMENT_MANIFESTS,
     RUN_CONTRACT_FILENAME,
     SCOPE_CAMPAIGN_CELLS,

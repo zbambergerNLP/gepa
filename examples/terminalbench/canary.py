@@ -13,7 +13,7 @@ from examples.common.experiment_models import (
     experiment_request_overrides,
 )
 from examples.common.provider_retries import PROVIDER_RETRY_POLICY
-from examples.terminalbench.main import EXPERIMENT_MANIFESTS, REPO_ROOT, seed_candidate
+from examples.terminalbench.legacy_main import EXPERIMENT_MANIFESTS, REPO_ROOT, seed_candidate
 from examples.terminalbench.model_settings import (
     terminalbench_decoding,
     terminalbench_limits,

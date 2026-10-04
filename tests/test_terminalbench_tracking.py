@@ -13,7 +13,7 @@ from test_terminalbench_evaluation import _fake_runner, _write_run
 
 from examples.common.recovery import file_digest
 from examples.terminalbench import evaluate
-from examples.terminalbench import main as campaign
+from examples.terminalbench import legacy_main as campaign
 from examples.terminalbench.tracking import TerminalbenchWandb, report_completed
 
 

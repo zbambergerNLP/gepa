@@ -15,8 +15,8 @@ sys.path.insert(0, str(Path(__file__).parents[1]))
 
 from examples.common.experiment_models import EXPERIMENT_MODELS
 from examples.terminalbench import evaluate, run_ablations
-from examples.terminalbench import main as campaign
-from examples.terminalbench.main import REPO_ROOT, build_parser
+from examples.terminalbench import legacy_main as campaign
+from examples.terminalbench.legacy_main import REPO_ROOT, build_parser
 from gepa.adapters.terminal_bench_adapter import load_terminalbench_manifest
 from gepa.core.state import GEPAState, ValsetEvaluation
 
@@ -64,7 +64,7 @@ def test_campaign_runs_prompt_only_first_and_forwards_shared_settings(
     commands = [shlex.split(line) for line in capsys.readouterr().out.splitlines()]
     assert len(commands) == 12
     assert all(
-        command[:6] == ["uv", "run", "--no-sync", "python", "-m", "examples.terminalbench.main"] for command in commands
+        command[:6] == ["uv", "run", "--no-sync", "python", "-m", "examples.terminalbench.legacy_main"] for command in commands
     )
     cells = [build_parser().parse_args(command[6:]) for command in commands]
     assert [cell.optimization_scope for cell in cells] == ["system_prompt"] * 6 + ["all_text"] * 6

@@ -1,5 +1,10 @@
 ### Terminal-Bench 2.1
 
+New benchmark-suite runs use `python -m examples.terminalbench.main` and the
+[shared runner entrypoint](../../../../examples/terminalbench/README.md).
+The campaign commands below explicitly preserve the historical workflow via
+`legacy_main`, including full-text and controller/action ablations.
+
 Terminal-Bench 2.1 is the sole Terminal-Bench target. The optimization and training
 pilot commands default to `--experiment tb2.1`. Each model arm compares two
 editable scopes with identical initial model input, skill files, task splits,
@@ -546,7 +551,7 @@ attempts across both models. The common initial harness is tested once per model
 (three repetitions); each ablation still gets its own three fresh repetitions,
 even if its validation winner equals the initial harness.
 
-`examples.terminalbench.main` tests automatically after optimization. For
+`examples.terminalbench.legacy_main` tests automatically after optimization. For
 individually launched cells, pass the same `--test-output-dir` for all of that
 model's ablations; it defaults to `RUN_DIR/heldout` for a standalone run. The
 campaign launcher supplies `RUN_ROOT/test` automatically. To resume testing a
@@ -672,7 +677,9 @@ with Docker and the same model endpoint available:
 uv sync --extra dev
 uv tool install --python 3.12 harbor==0.22.0
 
-uv run python -m examples.terminalbench.main \
+uv run python -m examples.terminalbench.legacy_main \
+  --student-model hosted_vllm/Qwen/Qwen3.8-27B \
+  --proposer-model hosted_vllm/Qwen/Qwen3.8-27B \
   --experiment tb2.1 \
   --optimization-scope system_prompt \
   --condition vanilla \
@@ -691,7 +698,9 @@ The command above defaults to `--budget standard` (four epochs).
 Launch each larger-budget run in its own fresh directory, for example:
 
 ```bash
-uv run python -m examples.terminalbench.main \
+uv run python -m examples.terminalbench.legacy_main \
+  --student-model hosted_vllm/Qwen/Qwen3.8-27B \
+  --proposer-model hosted_vllm/Qwen/Qwen3.8-27B \
   --experiment tb2.1 \
   --optimization-scope system_prompt \
   --condition vanilla --budget double \
@@ -742,8 +751,8 @@ Use a separate `--run-root runs/tb2.1/deepseek` with both DeepSeek model flags
 and its endpoints for that model's campaign. Every model's campaign starts
 with system-prompt optimization.
 
-The campaign supports two separate model arms: Qwen3.8-27B with Qwen3.8-27B
-(the model default), and DeepSeek V4.1 Flash with DeepSeek V4.1 Flash. Student,
+The historical campaign supports two explicitly selected model arms: Qwen3.8-27B
+with Qwen3.8-27B, and DeepSeek V4.1 Flash with DeepSeek V4.1 Flash. Student,
 proposer, and Controller use the same model within an arm. Both are served through
 local vLLM. DeepSeek uses revision `dba1be0a40aa45a94ad051997016db3960a90277`,
 numeric effort 75 (provider medium equivalent), and native `deepseek_v41` tokenizer/parsers on the exact
@@ -754,7 +763,7 @@ For the DeepSeek arm, point both roles at the prepared endpoint and use separate
 output directories:
 
 ```bash
-uv run python -m examples.terminalbench.main \
+uv run python -m examples.terminalbench.legacy_main \
   --experiment tb2.1 \
   --condition vanilla \
   --student-model hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash \

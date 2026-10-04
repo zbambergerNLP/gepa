@@ -23,8 +23,8 @@ from examples.common.experiment_models import (
 )
 from examples.common.provider_retries import install_provider_retries
 from examples.terminalbench import evaluate as terminalbench_evaluate
-from examples.terminalbench import main as terminalbench_main
-from examples.terminalbench.main import (
+from examples.terminalbench import legacy_main as terminalbench_main
+from examples.terminalbench.legacy_main import (
     EXPERIMENT_MANIFESTS,
     build_parser,
     build_run_contract,

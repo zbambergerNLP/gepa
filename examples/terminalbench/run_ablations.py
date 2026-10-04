@@ -5,7 +5,7 @@ import shlex
 import subprocess
 from pathlib import Path
 
-from examples.terminalbench.main import REPO_ROOT, SCOPE_CAMPAIGN_CELLS, build_parser
+from examples.terminalbench.legacy_main import REPO_ROOT, SCOPE_CAMPAIGN_CELLS, build_parser
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -19,7 +19,7 @@ def main(argv: list[str] | None = None) -> None:
     """
     parser = argparse.ArgumentParser(
         description=__doc__,
-        epilog="Other options are forwarded to examples.terminalbench.main for every cell.",
+        epilog="Other options are forwarded to examples.terminalbench.legacy_main for every cell.",
         allow_abbrev=False,
     )
     parser.add_argument("--run-root", type=Path, required=True, help="One model's campaign directory")
@@ -51,7 +51,7 @@ def main(argv: list[str] | None = None) -> None:
         cell_args = build_parser().parse_args(options)
         if cell_args.train_limit is not None or cell_args.val_limit is not None:
             parser.error("Campaign ablations must use the complete, identical pinned splits; no split limits")
-        commands.append(["uv", "run", "--no-sync", "python", "-m", "examples.terminalbench.main", *options])
+        commands.append(["uv", "run", "--no-sync", "python", "-m", "examples.terminalbench.legacy_main", *options])
     for command in commands:
         print(shlex.join(command), flush=True)
         if not args.dry_run:

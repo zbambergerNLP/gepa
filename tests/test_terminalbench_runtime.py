@@ -14,7 +14,7 @@ from terminalbench_pilot_helpers import runtime_fixture, write_pilot_fixture
 from examples.common import model_snapshot
 from examples.common.experiment_models import EXPERIMENT_MODELS
 from examples.terminalbench import canary, evaluate, runtime
-from examples.terminalbench import main as campaign
+from examples.terminalbench import legacy_main as campaign
 from examples.terminalbench.pilot import validate_review
 from gepa.adapters.terminal_bench_adapter import load_terminalbench_manifest
 
@@ -280,6 +280,10 @@ def test_campaign_resume_rechecks_runtime_and_allows_equivalent_node(tmp_path, m
             "main",
             "--condition",
             "vanilla",
+            "--student-model",
+            model,
+            "--proposer-model",
+            model,
             "--train-limit",
             "1",
             "--val-limit",

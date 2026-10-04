@@ -224,7 +224,7 @@ def report_completed(
         _validate_repetition,
         freeze_comparison,
     )
-    from examples.terminalbench.main import RUN_CONTRACT_FILENAME
+    from examples.terminalbench.legacy_main import RUN_CONTRACT_FILENAME
 
     manifest, expected = freeze_comparison({cell: directory})
     frozen_path, summary_path = heldout / FROZEN_COMPARISON_FILENAME, heldout / "summary.json"

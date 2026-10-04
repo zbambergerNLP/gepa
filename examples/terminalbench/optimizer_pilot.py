@@ -5,7 +5,7 @@ from pathlib import Path
 
 from examples.common.pilot_checks import METHODS
 from examples.common.recovery import run_guarded
-from examples.terminalbench.main import main as run_check
+from examples.terminalbench.legacy_main import main as run_check
 
 
 def main(argv: list[str] | None = None) -> None:

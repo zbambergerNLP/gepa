@@ -12,7 +12,7 @@ from terminalbench_pilot_helpers import runtime_fixture, write_pilot_fixture
 
 from examples.common.experiment_models import EXPERIMENT_MODELS
 from examples.terminalbench import canary
-from examples.terminalbench import main as campaign
+from examples.terminalbench import legacy_main as campaign
 from examples.terminalbench.pilot import load_completed_pilot, review_pilot, validate_review
 from examples.terminalbench.token_usage import record_usage
 from gepa.adapters.terminal_bench_adapter import load_terminalbench_manifest

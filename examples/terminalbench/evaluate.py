@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from examples.common.recovery import run_guarded, seal_progress
-from examples.terminalbench.main import (
+from examples.terminalbench.legacy_main import (
     EVALUATION_PROTOCOL,
     EXPERIMENT_MANIFESTS,
     FOREST_CONDITIONS,

@@ -8,7 +8,7 @@ scoring, and benchmark-specific constants.
 | Benchmark | Entry module | Default task harness | Editable components |
 |---|---|---|---|
 | [HotPotQA](hotpotqa/) | `examples.hotpotqa.main` | Existing two-stage DSPy program and frozen Wiki-2017 BM25 retrieval | Existing program instruction modules |
-| [Terminal-Bench 2.1](terminalbench/) | `examples.terminalbench.main` | Official Harbor/Terminus harness and pinned 89-task manifest | Unified initial instruction prompt |
+| [Terminal-Bench 2.1](terminalbench/) | `examples.terminalbench.main` | Official Harbor/Terminus; 89 pinned tasks, 88 on Singularity/Della (Mailman excluded) | Unified initial instruction prompt |
 | [OBLIQ-Bench](obliqbench/README.md) | `examples.obliqbench.main` | One query rewrite, fixed Qwen embedding retriever, top 1,000 | Query-rewriting system prompt |
 | [DecisionBench](decisionbench/README.md) | `examples.decisionbench.main` | Official structured decision/probability-vector protocol | System prompt |
 | [AppWorld](appworld/README.md) | `examples.appworld.main` | Published ReAct code-agent pattern and official state evaluator | System prompt |

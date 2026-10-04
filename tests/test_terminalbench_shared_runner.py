@@ -16,7 +16,7 @@ from examples.common.benchmark_runner import build_parser, resolve_models, valid
 from examples.common.experiment_models import DEFAULT_PROPOSER_MODEL, DEFAULT_SOLVER_MODEL
 from examples.terminalbench import main as terminalbench
 from examples.terminalbench.shared_adapter import SharedTerminusAdapter, trial_elapsed_seconds
-from gepa.adapters.terminal_bench_adapter import HarborExecutionError, HarborRequirementError
+from gepa.adapters.terminal_bench_adapter import HarborExecutionError
 from gepa.adapters.terminal_bench_adapter.terminal_bench_adapter import (
     HarborEvaluation,
     HarborTrialResult,
@@ -257,12 +257,17 @@ def test_actual_edited_prompt_and_per_trial_latency_reach_shared_outputs(tmp_pat
         benchmark.adapter.evaluate(benchmark.testset[:1], candidate)
 
 
-def test_container_backend_changes_run_identity_without_changing_tasks_or_models(tmp_path, external_boundaries):
+def test_singularity_excludes_only_mailman_preserving_splits_models_and_resume_isolation(tmp_path, external_boundaries):
     """Prevent Docker and Apptainer results from sharing an incompatible pilot checkpoint."""
     docker, _, models = definition(tmp_path)
     singularity, _, other_models = definition(tmp_path, "--container-runtime", "singularity")
-    assert docker.source == singularity.source
+    assert singularity.source == {**docker.source, "task_exclusions": terminalbench.SINGULARITY_TASK_EXCLUSIONS}
     assert docker.trainset == singularity.trainset
+    assert docker.valset == singularity.valset
+    assert singularity.testset == [record for record in docker.testset if record["task_id"] != "terminal-bench/mailman"]
+    assert (len(singularity.trainset), len(singularity.valset), len(singularity.testset)) == (30, 19, 39)
+    assert len(docker.testset) == 40
+    assert len(singularity.source["task_refs"]) == 89
     assert models == other_models
     assert singularity.runtime == {**docker.runtime, "container_runtime": "singularity"}
     argv = [
@@ -333,31 +338,45 @@ def test_offline_campaign_requires_all_selected_splits_before_harbor_calls(tmp_p
 
 
 @pytest.mark.parametrize("mode", ["optimize", "baseline"])
-def test_selected_heldout_mailman_blocks_before_any_model_evaluation(tmp_path, external_boundaries, mode):
-    """Check held-out infrastructure before spending optimization or baseline calls."""
-    observed, _, requirements = external_boundaries
+def test_singularity_campaign_preflight_omits_mailman(tmp_path, external_boundaries, mode):
+    """Require infrastructure only for tasks included in the evaluation subset."""
+    benchmark, _, _ = definition(tmp_path, "--mode", mode, "--container-runtime", "singularity")
+    required = benchmark.testset if mode == "baseline" else [*benchmark.trainset, *benchmark.valset, *benchmark.testset]
+    task_ids = [record["task_id"] for record in required]
+    assert "terminal-bench/mailman" not in task_ids
+    external_boundaries[2].assert_called_once_with(task_ids)
 
-    def unsupported(task_ids):
-        assert "terminal-bench/mailman" in task_ids
-        raise HarborRequirementError("Mailman needs real nonroot UID/GID mappings")
 
-    requirements.side_effect = unsupported
-    with pytest.raises(HarborRequirementError, match="real nonroot UID/GID"):
-        terminalbench.main(
-            [
-                "--mode",
-                mode,
-                "--container-runtime",
-                "singularity",
-                "--runtime-record",
-                str(tmp_path / "solver.json"),
-                "--proposer-runtime-record",
-                str(tmp_path / "proposer.json"),
-                "--run-dir",
-                str(tmp_path / "run"),
-            ]
-        )
-    assert not observed
+def test_singularity_baseline_scores_39_tasks_and_cannot_reuse_full_set(tmp_path, external_boundaries, monkeypatch):
+    """Record the exclusion and keep subset denominators and baseline caches separate."""
+    argv = [
+        "--mode",
+        "baseline",
+        "--container-runtime",
+        "singularity",
+        "--runtime-record",
+        str(tmp_path / "solver.json"),
+        "--run-dir",
+        str(tmp_path / "run"),
+    ]
+    assert terminalbench.main(argv) == 0
+    root = tmp_path / "benchmark-baselines" / "terminalbench"
+    summary = json.loads(next(root.glob("*/summary.json")).read_text())
+    contract = json.loads(next(root.glob("*/evaluation-contract.json")).read_text())
+    assert summary["example_count"] == summary["metrics"]["tasks_per_repetition"] == 39
+    assert summary["metrics"]["pass_at_1"] == pytest.approx(20 / 39)
+    assert contract["identity"]["data"]["source"]["task_exclusions"] == terminalbench.SINGULARITY_TASK_EXCLUSIONS
+    assert contract["identity"]["full_data"]["splits"]["test"]["count"] == 39
+    assert "terminalbench:terminal-bench/mailman" not in contract["ids"]
+    assert len(external_boundaries[0]) == 3
+    assert all(len(call["tasks"]) == 39 for call in external_boundaries[0])
+    assert terminalbench.main(argv) == 0
+    assert len(external_boundaries[0]) == 3
+    monkeypatch.setattr(terminalbench, "SINGULARITY_TASK_EXCLUSIONS", {})
+    assert terminalbench.main(argv) == 0
+    assert len(external_boundaries[0]) == 6
+    assert len(list(root.glob("*/evaluation-contract.json"))) == 2
+    assert all(len(call["tasks"]) == 40 for call in external_boundaries[0][3:])
 
 
 @pytest.mark.parametrize("mode", ["pilot", "optimizer-pilot", "optimize", "baseline"])

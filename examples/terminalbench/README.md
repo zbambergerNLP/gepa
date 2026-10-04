@@ -16,6 +16,10 @@ contracts. The benchmark supplies its adapter and scientific defaults:
   This is the existing documented deterministic research split, not an official
   upstream training/validation assignment. Task package hashes and the complete
   manifest are included in the shared data identity before any prefix limits.
+  The Singularity/Della profile excludes Mailman: **88 tasks, split 30/19/39**.
+  Remaining task order and split membership are unchanged. Report these results
+  as **Terminal-Bench 2.1 (88-task subset, excluding Mailman)**. Docker retains
+  the complete 89-task manifest.
 - Default solver/proposer are the shared `QWEN3_8_27B_MODEL` and
   `DEEPSEEK_V4_1_FLASH_MODEL`, with their pinned revisions and shared retry policy.
 - Both roles retain Terminal-Bench's combined **32768-token** output cap.
@@ -88,8 +92,9 @@ managers, and blocked network proxies. `--resume` verifies completed parts again
 the current recipe and probe before reuse. It can continue an interrupted build
 after an unbuilt task's recipe is repaired; changing an already sealed task
 requires a new bundle.
-A full campaign requires the completed 89-task bundle. A recipe inventory or a
-two-task pilot alone does not prove that all environments have been built.
+A Della campaign requires a verified bundle covering all 88 included tasks; a
+complete 89-task bundle is also accepted. A recipe inventory or a two-task pilot
+alone does not prove that all included environments have been built.
 
 On an allocated compute node with the pinned Qwen server running:
 
@@ -119,21 +124,16 @@ This mode has no external network route, so complete offline staging is required
 For an online Apptainer host, `--singularity-image-cache PATH` remains available
 without an offline task bundle.
 
-`terminal-bench/mailman` requires real nonroot service users. When that task is
-selected, Singularity preflight checks the staged image's kernel UID/GID mappings
-and real identity changes before any model calls. Della's current one-ID mapping
-cannot run this task, with or without the private-network wrapper; libfakeroot's
-simulated identity changes do not satisfy the requirement. A sealed image alone
-does not establish Mailman runtime readiness. Use administrator-configured
-[Apptainer subordinate UID/GID mappings](https://apptainer.org/docs/user/1.5/fakeroot.html)
-with a launcher that preserves them and passes this check. The current
-`with_private_network.sh --map-root-user` wrapper maps only one UID/GID; assigning
-subordinate ranges alone does not make that launcher compatible. Alternatively,
-use a separate approved Linux Docker host with colocated, attested model servers.
-The current runner requires local Linux PID/socket attestation, so a macOS Docker
-engine with tunneled Della model endpoints is not a supported replacement. Docker
-is not permitted on Princeton clusters. Task users, ownership, permissions and
-grading remain unchanged; training-only pilots that exclude Mailman are unaffected.
+`terminal-bench/mailman` is excluded automatically by `--container-runtime singularity`.
+Its real service-user UID/GID changes are unsupported by Della's current one-ID
+mapping; libfakeroot cannot supply them. This is the only task confirmed to fail
+that requirement. Its exclusion is an infrastructure decision, independent of
+model scores. The task ID and reason are stored in the shared data identity,
+preventing baseline or checkpoint reuse across the full and reduced sets.
+All methods use the same remaining ordered tasks, and held-out scoring uses 39
+tasks per repetition. The upstream manifest, task files, and official verifiers
+remain unchanged. This exclusion does not certify the remaining environments;
+their preparation and runtime checks are still required.
 
 After the pinned model servers and Harbor runtime are prepared:
 

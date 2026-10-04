@@ -5,3 +5,8 @@ from pathlib import Path
 MANIFEST_PATH = Path(__file__).with_name("terminalbench-v2.1-manifest.json")
 TRAINING_EPOCHS_BY_BUDGET = {"standard": 4, "double": 8}
 TEST_REPETITIONS = 3
+SINGULARITY_TASK_EXCLUSIONS = {
+    "terminal-bench/mailman": (
+        "Della's root-mapped Apptainer runtime cannot provide Mailman's real nonroot service UID/GID changes."
+    ),
+}

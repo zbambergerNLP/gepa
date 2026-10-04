@@ -12,7 +12,12 @@ from typing import Any
 from examples.common.benchmark_runner import run_cli
 from examples.common.benchmark_types import BenchmarkDefinition, BenchmarkModels
 from examples.common.react_v2 import resolve_template_family
-from examples.terminalbench.benchmark_settings import MANIFEST_PATH, TEST_REPETITIONS, TRAINING_EPOCHS_BY_BUDGET
+from examples.terminalbench.benchmark_settings import (
+    MANIFEST_PATH,
+    SINGULARITY_TASK_EXCLUSIONS,
+    TEST_REPETITIONS,
+    TRAINING_EPOCHS_BY_BUDGET,
+)
 from examples.terminalbench.model_settings import terminalbench_decoding, terminalbench_limits, terminalbench_model_info
 from examples.terminalbench.runtime import load_role_runtimes
 from examples.terminalbench.shared_adapter import SharedTerminusAdapter
@@ -67,6 +72,7 @@ def configure_models(args: argparse.Namespace, models: BenchmarkModels) -> Bench
 def build_benchmark(args: argparse.Namespace, models: BenchmarkModels) -> BenchmarkDefinition:
     """Bind fixed data, actual prompt editing, official Harbor rewards, and runtime identity."""
     manifest = load_terminalbench_manifest(MANIFEST_PATH)
+    task_exclusions = SINGULARITY_TASK_EXCLUSIONS if args.container_runtime == "singularity" else {}
     records = {
         split: [
             {
@@ -77,6 +83,7 @@ def build_benchmark(args: argparse.Namespace, models: BenchmarkModels) -> Benchm
                 "dataset": manifest.dataset["reference"],
             }
             for task_id in task_ids
+            if task_id not in task_exclusions
         ]
         for split, task_ids in manifest.splits.items()
     }
@@ -143,6 +150,7 @@ def build_benchmark(args: argparse.Namespace, models: BenchmarkModels) -> Benchm
             "dataset": manifest.dataset,
             "split_policy": manifest.split_policy,
             "task_refs": manifest.task_refs,
+            **({"task_exclusions": dict(task_exclusions)} if task_exclusions else {}),
         },
         runtime={
             "harness": "terminalbench-shared-v1",

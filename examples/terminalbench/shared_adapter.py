@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Any
 
 from gepa.adapters.terminal_bench_adapter import HarborExecutionError, TerminalBenchTask, TerminusAdapter
-from gepa.core.adapter import EvaluationBatch
+from gepa.core.adapter import EvaluationBatch, ProposalFn
 
 
 def trial_elapsed_seconds(result: dict[str, Any]) -> float:
@@ -28,6 +28,8 @@ def trial_elapsed_seconds(result: dict[str, Any]) -> float:
 
 class SharedTerminusAdapter:
     """Preserve official rewards and prompt execution while adding record IDs and latency."""
+
+    propose_new_texts: ProposalFn | None = None
 
     def __init__(self, adapter: TerminusAdapter, records: list[dict[str, Any]]):
         self.adapter = adapter

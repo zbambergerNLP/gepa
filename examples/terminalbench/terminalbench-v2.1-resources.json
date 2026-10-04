@@ -138,9 +138,20 @@
     },
     "terminal-bench/configure-git-webserver": {
       "base_resource_policy": "Original task Docker image supplies audited base assets; verifier dependencies are warmed by the separate bootstrap recipe.",
-      "recipe": "base_and_verifier_only",
+      "recipe": "git_server",
       "scope": "Public prerequisites only; no solver outputs, grader inputs, rankings, or selected answers.",
-      "solver_dependency_requests": [],
+      "solver_dependency_requests": [
+        {
+          "cache_policy": "Cache Debian packages and dependencies only; server configuration, users, repositories, hooks, and HTTP service remain solver work.",
+          "kind": "system_package",
+          "packages": [
+            "git",
+            "openssh-client",
+            "openssh-server"
+          ],
+          "request": "Git server transport and client prerequisites are absent from the pinned base image."
+        }
+      ],
       "task_ref": "sha256:e3dc712acfecdb1338a889f86c97b37422c3778351253f9aca4236e895fdb36e"
     },
     "terminal-bench/constraints-scheduling": {

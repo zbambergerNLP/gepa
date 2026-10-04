@@ -388,3 +388,48 @@ def test_windows_log_reset_rejects_unexpected_files_before_mutating(tmp_path, un
     assert result.returncode != 0
     assert before == {path.name: path.lstat().st_ino for path in log_dir.iterdir()}
     assert sentinel.read_text() == "preserve original contents"
+
+
+def test_git_server_caches_missing_transport_without_configuring_server():
+    spec = json.loads(resources.SPEC_PATH.read_text())
+    entry = spec["tasks"]["terminal-bench/configure-git-webserver"]
+    commands = resources.resource_recipe_commands("terminal-bench/configure-git-webserver", entry["task_ref"])
+    assert "apt-get --download-only install -y --no-install-recommends git openssh-client openssh-server" in commands
+    assert not any("git init" in command or "useradd" in command or "sshd_config" in command for command in commands)
+
+
+@pytest.mark.parametrize("limit", [2, 4])
+def test_native_harbor_path_preserves_original_task_nproc_bytes(tmp_path, monkeypatch, limit):
+    system_bin = tmp_path / "usr/bin"
+    task_bin = tmp_path / "usr/local/bin"
+    stage = tmp_path / "offline"
+    for path in (system_bin, task_bin, stage):
+        path.mkdir(parents=True)
+    system_nproc = system_bin / "nproc"
+    system_nproc.write_text("#!/bin/sh\necho 80\n")
+    system_nproc.chmod(0o755)
+    task_nproc = task_bin / "nproc"
+    task_nproc.write_text(f"#!/bin/sh\necho {limit}\n")
+    task_nproc.chmod(0o755)
+    original = system_nproc.read_bytes()
+    monkeypatch.setattr(resources, "ROOT", str(stage))
+    commands = [
+        command.replace("/usr/local/bin/nproc", str(task_nproc)).replace("/usr/bin/nproc", str(system_nproc))
+        for command in resources._preserve_nproc_wrapper(limit)
+    ]
+    _run_shell(commands)
+    env = {**os.environ, "PATH": str(system_bin) + ":" + str(task_bin) + ":" + os.environ["PATH"]}
+    result = subprocess.run(["nproc"], env=env, capture_output=True, text=True, check=True)
+    assert result.stdout.strip() == str(limit)
+    assert system_nproc.read_bytes() == task_nproc.read_bytes()
+    assert (stage / "original-nproc").read_bytes() == original
+
+
+def test_nproc_preservation_is_limited_to_tasks_with_official_wrappers():
+    spec = json.loads(resources.SPEC_PATH.read_text())
+    affected = {
+        task
+        for task, entry in spec["tasks"].items()
+        if any("original-nproc" in command for command in resources.resource_recipe_commands(task, entry["task_ref"]))
+    }
+    assert affected == {"terminal-bench/caffe-cifar-10", "terminal-bench/compile-compcert"}

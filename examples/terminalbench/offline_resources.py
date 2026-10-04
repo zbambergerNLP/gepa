@@ -374,6 +374,15 @@ def _apt_cache(packages: list[str]) -> list[str]:
     ]
 
 
+def _preserve_nproc_wrapper(expected: int) -> list[str]:
+    # Harbor puts /usr/bin ahead of the task's deliberate /usr/local/bin limit.
+    return [
+        f'test "$(/usr/local/bin/nproc)" = {expected}',
+        f"cp -p /usr/bin/nproc {ROOT}/original-nproc",
+        "cp -p /usr/local/bin/nproc /usr/bin/nproc",
+    ]
+
+
 def _python_cache(packages: list[str]) -> list[str]:
     target = f"{ROOT}/solver-dependencies"
     return [
@@ -566,6 +575,7 @@ def resource_recipe_commands(task_id: str, task_ref: str) -> list[str]:
                 revision="Official-2.2",
             )
     elif kind == "caffe":
+        commands += _preserve_nproc_wrapper(4)
         commands += _git_mirror(
             "caffe",
             "https://github.com/BVLC/caffe.git",
@@ -601,6 +611,7 @@ def resource_recipe_commands(task_id: str, task_ref: str) -> list[str]:
             ),
         )
     elif kind == "compcert":
+        commands += _preserve_nproc_wrapper(2)
         commands += _git_mirror(
             "compcert",
             "https://github.com/AbsInt/CompCert.git",
@@ -663,6 +674,8 @@ def resource_recipe_commands(task_id: str, task_ref: str) -> list[str]:
         commands += _apt_cache(["r-base", "r-base-dev"])
     elif kind == "nginx":
         commands += _apt_cache(["nginx"])
+    elif kind == "git_server":
+        commands += _apt_cache(["git", "openssh-client", "openssh-server"])
     elif kind == "windows":
         commands += _apt_cache(["qemu-system-x86"])
         commands += _fetch(

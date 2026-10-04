@@ -740,7 +740,8 @@
       "probe_modules": [
         "pytest",
         "pandas"
-      ]
+      ],
+      "promote_uv_to_system": true
     },
     "terminal-bench/fix-code-vulnerability": {
       "task_ref": "sha256:d31348aa16b533a15f013420e4d9726dc529e6086adc7d6d48067d22cc18fe71",

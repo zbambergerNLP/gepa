@@ -238,12 +238,15 @@ def test_curated_dependency_specs_cover_all_pins_and_preserve_runtime_exceptions
     assert recipes["terminal-bench/train-fasttext"]["python"] == "3.11"
     assert recipes["terminal-bench/kv-store-grpc"]["mode"] == "pip"
     assert "pytest==8.4.2" in recipes["terminal-bench/kv-store-grpc"]["packages"]
+    assert [task_id for task_id, spec in recipes.items() if spec.get("promote_uv_to_system")] == [
+        "terminal-bench/financial-document-processor"
+    ]
     for recipe in recipes.values():
         assert recipe["probe_modules"]
         assert "/tests/" not in " ".join(prepare_offline.dependency_probe_argv(recipe))
 
 
-@pytest.mark.parametrize("tampering", ["task_ref", "mode", "uv_version", "python", "missing"])
+@pytest.mark.parametrize("tampering", ["task_ref", "mode", "uv_version", "python", "promote_uv_to_system", "missing"])
 def test_curated_dependency_spec_rejects_drift(tmp_path, monkeypatch, tampering):
     manifest = prepare_offline.load_terminalbench_manifest(prepare_offline.MANIFEST_PATH)
     document = json.loads(prepare_offline.RECIPE_SPEC_PATH.read_text())
@@ -257,6 +260,22 @@ def test_curated_dependency_spec_rejects_drift(tmp_path, monkeypatch, tampering)
     monkeypatch.setattr(prepare_offline, "RECIPE_SPEC_PATH", altered)
     with pytest.raises(ValueError):
         prepare_offline.load_recipe_spec(manifest)
+
+
+def test_financial_recipe_uses_installed_pinned_uv_for_native_system_path(tmp_path):
+    manifest = prepare_offline.load_terminalbench_manifest(prepare_offline.MANIFEST_PATH)
+    specs = prepare_offline.load_recipe_spec(manifest)
+    for task_id, spec in specs.items():
+        recipe = prepare_offline.render_recipe(task_id, spec["task_ref"], tmp_path / "base.sif", spec, [], [])
+        promotion = "install -m 0755 /opt/harbor-offline/home/.local/bin/uv /usr/bin/uv"
+        if task_id == "terminal-bench/financial-document-processor":
+            assert promotion in recipe
+            assert "install -m 0755 /opt/harbor-offline/home/.local/bin/uvx /usr/bin/uvx" in recipe
+            assert recipe.index("sh /opt/harbor-offline/install-uv.sh") < recipe.index(promotion)
+            assert recipe.index(promotion) < recipe.index("    uv venv ")
+            assert "original-system-uv-sha256.txt" in recipe
+        else:
+            assert promotion not in recipe
 
 
 def test_all_tasks_seals_every_split_in_manifest_order_without_grader_execution(tmp_path, preparation):

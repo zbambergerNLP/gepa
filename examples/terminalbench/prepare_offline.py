@@ -78,6 +78,7 @@ def load_recipe_spec(manifest) -> dict:
             or recipe.get("mode") not in ("uvx", "uv_venv", "pip")
             or recipe.get("uv_version") not in (None, "0.8.15", "0.9.5")
             or recipe.get("python") not in ("image_default", "3.11", "3.12", "3.13")
+            or type(recipe.get("promote_uv_to_system", False)) is not bool
         ):
             raise ValueError(f"No matching verified dependency recipe for {task_id}")
     return recipes
@@ -137,6 +138,14 @@ def render_recipe(
         )
     )
     uv_version = spec.get("uv_version") or "0.9.5"
+    # Native Harbor prepends /usr/bin even after the image's PATH is configured.
+    system_uv_install = (
+        "    sha256sum /usr/bin/uv /usr/bin/uvx > /opt/harbor-offline/original-system-uv-sha256.txt\n"
+        "    install -m 0755 /opt/harbor-offline/home/.local/bin/uv /usr/bin/uv\n"
+        "    install -m 0755 /opt/harbor-offline/home/.local/bin/uvx /usr/bin/uvx\n"
+        if spec.get("promote_uv_to_system", False)
+        else ""
+    )
     mode = spec["mode"]
     if mode == "uvx":
         command = spec["warm_argv"]
@@ -188,7 +197,7 @@ From: {base_image}
 {installer}
     curl --fail --location --silent --show-error https://astral.sh/uv/{uv_version}/install.sh -o /opt/harbor-offline/install-uv.sh
     UV_INSTALL_DIR=/opt/harbor-offline/home/.local/bin sh /opt/harbor-offline/install-uv.sh
-    export PATH=/opt/harbor-offline/home/.local/bin:$PATH
+{system_uv_install}    export PATH=/opt/harbor-offline/home/.local/bin:$PATH
     export UV_CACHE_DIR=/opt/harbor-offline/uv-cache
     export UV_PYTHON_INSTALL_DIR=/opt/harbor-offline/python
     uv venv --managed-python -p 3.13 /opt/harbor-server

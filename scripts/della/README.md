@@ -18,6 +18,7 @@ Keep secrets and the local `.env` out of Git.
 | `lock_serving_env.sh` | Regenerate serving dependency locks from their source requirements |
 | `submit_deepseek_smoke.sh` | Submit and retrieve the independent serving diagnostic |
 | `verify_deepseek_serving.sh` | Exercise the pinned DeepSeek server and tool protocol on allocated GPUs |
+| `remote/setup_terminalbench.sh` | Install isolated Harbor and expose the cluster Apptainer runtime on the visualization host |
 
 `build_env.sh` starts detached downloads; its exit is not proof that they finished.
 Wait for `MODELS_DONE` in the printed log and verify the checkpoint manifests.

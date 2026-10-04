@@ -39,6 +39,10 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--harbor-work-dir", type=Path, help="Defaults to RUN_DIR/harbor")
     parser.add_argument("--harbor-executable", default="harbor")
     parser.add_argument("--docker-executable", default="docker")
+    parser.add_argument("--container-runtime", choices=("docker", "singularity"), default="docker")
+    parser.add_argument(
+        "--singularity-image-cache", type=Path, help="Persistent Apptainer/Singularity task-image cache"
+    )
     parser.add_argument("--harbor-process-timeout-sec", type=float, default=None)
 
 
@@ -99,6 +103,8 @@ def build_benchmark(args: argparse.Namespace, models: BenchmarkModels) -> Benchm
         n_concurrent=args.max_workers,
         harbor_executable=args.harbor_executable,
         docker_executable=args.docker_executable,
+        container_runtime=args.container_runtime,
+        singularity_image_cache_dir=args.singularity_image_cache,
         student_agent_kwargs={
             "token_limits": terminalbench_limits(models.solver_model),
             "model_info": terminalbench_model_info(models.solver_model),
@@ -129,6 +135,7 @@ def build_benchmark(args: argparse.Namespace, models: BenchmarkModels) -> Benchm
         runtime={
             "harness": "terminalbench-shared-v1",
             "adapter": TERMINUS_ADAPTER_CONTRACT,
+            "container_runtime": args.container_runtime,
             "execution_runtime": {"student": runtime["student"]},
             "optimization_scope": scope.contract(),
             "document_bundle_version": BUNDLE_VERSION,

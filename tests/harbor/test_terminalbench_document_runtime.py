@@ -216,6 +216,29 @@ def test_job_config_is_accepted_by_pinned_harbor(runtime: tuple) -> None:
     assert len(parsed.tasks) + len(parsed.datasets) == 1
 
 
+def test_singularity_config_is_accepted_by_pinned_harbor(tmp_path: Path) -> None:
+    """Keep the cluster backend on Harbor's actual supported job schema."""
+    root = Path(__file__).parents[2]
+    manifest = load_terminalbench_manifest(root / "examples/terminalbench/terminalbench-v2.1-manifest.json")
+    runner = HarborCLI(
+        manifest=manifest,
+        student_model="openai/gpt-4o-mini",
+        work_dir=tmp_path,
+        agent_python_path=tmp_path,
+        container_runtime="singularity",
+    )
+    config = runner.build_job_config(
+        manifest.splits["train"][:1],
+        prompt_path=tmp_path / "prompt.txt",
+        bundle_path=tmp_path / "bundle.json",
+        jobs_dir=tmp_path / "jobs",
+        job_name="cluster",
+    )
+    parsed = JobConfig.model_validate(config)
+    assert parsed.environment.type.value == "singularity"
+    assert parsed.environment.kwargs == {"singularity_image_cache_dir": str(tmp_path / "singularity-images")}
+
+
 def test_real_agent_loop_discovers_then_reads_skills_and_repairs_json(
     runtime: tuple, monkeypatch: pytest.MonkeyPatch
 ) -> None:

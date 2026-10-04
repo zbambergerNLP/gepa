@@ -32,8 +32,9 @@ uv sync --locked --python 3.12 --extra full --extra decisionbench --extra obliqb
 ```
 
 HotPotQA additionally needs its existing `wiki17` extra and prepared frozen index.
-Terminal-Bench needs its pinned Harbor/Docker setup and verified serving-runtime
-records. Follow their benchmark preparation instructions before running.
+Terminal-Bench needs pinned Harbor, Docker (or its official Singularity/Apptainer
+backend on Della), and verified serving-runtime records. Follow the benchmark
+preparation instructions before running.
 
 OBLIQ corpora require explicit preparation; corpus embedding/indexing is a separate
 preprocessing step. AppWorld and Tau run official environments in separate pinned

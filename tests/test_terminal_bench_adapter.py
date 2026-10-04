@@ -501,6 +501,63 @@ def test_requirements_enforce_exact_harbor_and_running_docker(tmp_path: Path, mo
     ]
 
 
+@pytest.mark.parametrize("available", [True, False])
+def test_singularity_preflight_needs_no_docker_daemon(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, available: bool):
+    """Select the HPC runtime explicitly and fail closed when its CLI is unavailable."""
+    runner = HarborCLI(work_dir=tmp_path, container_runtime="singularity", **_RUNNER_OPTIONS)
+    lookups = []
+
+    def lookup(name):
+        lookups.append(name)
+        return f"/mock/{name}" if name == "harbor" or available else None
+
+    monkeypatch.setattr(terminalbench_module.shutil, "which", lookup)
+    run = Mock(
+        side_effect=[
+            subprocess.CompletedProcess([], 0, stdout="0.22.0\n", stderr=""),
+            subprocess.CompletedProcess([], 0, stdout="apptainer version 1.4.2\n", stderr=""),
+        ]
+    )
+    monkeypatch.setattr(terminalbench_module.subprocess, "run", run)
+    if available:
+        assert runner.check_requirements() == ("/mock/harbor", "/mock/singularity")
+        assert [call.args[0] for call in run.call_args_list] == [
+            ["/mock/harbor", "--version"],
+            ["/mock/singularity", "--version"],
+        ]
+    else:
+        with pytest.raises(HarborRequirementError, match="Singularity/Apptainer"):
+            runner.check_requirements()
+        run.assert_not_called()
+    assert lookups == ["harbor", "singularity"]
+
+
+def test_singularity_job_preserves_the_pinned_benchmark_protocol(tmp_path: Path):
+    """Change only the container backend and persistent image cache in an official job."""
+    options = {
+        "task_ids": ["terminal-bench/log-summary-date-ranges"],
+        "prompt_path": tmp_path / "prompt.txt",
+        "bundle_path": tmp_path / "bundle.json",
+        "jobs_dir": tmp_path / "jobs",
+        "job_name": "candidate",
+    }
+    docker = HarborCLI(work_dir=tmp_path, **_RUNNER_OPTIONS).build_job_config(**options)
+    singularity = HarborCLI(
+        work_dir=tmp_path,
+        container_runtime="singularity",
+        singularity_image_cache_dir=tmp_path / "images",
+        **_RUNNER_OPTIONS,
+    ).build_job_config(**options)
+    assert singularity.pop("environment") == {
+        "type": "singularity",
+        "force_build": False,
+        "delete": True,
+        "kwargs": {"singularity_image_cache_dir": str(tmp_path / "images")},
+    }
+    docker.pop("environment")
+    assert singularity == docker
+
+
 def test_runner_isolates_candidates_and_adapter_maps_complete_evidence_by_task_id(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -255,6 +255,31 @@ def test_actual_edited_prompt_and_per_trial_latency_reach_shared_outputs(tmp_pat
         benchmark.adapter.evaluate(benchmark.testset[:1], candidate)
 
 
+def test_container_backend_changes_run_identity_without_changing_tasks_or_models(tmp_path, external_boundaries):
+    """Prevent Docker and Apptainer results from sharing an incompatible pilot checkpoint."""
+    docker, _, models = definition(tmp_path)
+    singularity, _, other_models = definition(tmp_path, "--container-runtime", "singularity")
+    assert docker.source == singularity.source
+    assert docker.trainset == singularity.trainset
+    assert models == other_models
+    assert singularity.runtime == {**docker.runtime, "container_runtime": "singularity"}
+    argv = [
+        "--mode",
+        "pilot",
+        "--pilot-size",
+        "1",
+        "--runtime-record",
+        str(tmp_path / "solver.json"),
+        "--run-dir",
+        str(tmp_path / "run"),
+    ]
+    assert terminalbench.main(argv) == 0
+    calls = len(external_boundaries[0])
+    with pytest.raises(ValueError, match="configuration or data changed"):
+        terminalbench.main([*argv, "--container-runtime", "singularity"])
+    assert len(external_boundaries[0]) == calls
+
+
 @pytest.mark.parametrize(
     "result",
     [

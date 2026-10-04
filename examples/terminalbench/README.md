@@ -35,6 +35,46 @@ methods and budgets reuse the same starting baseline.
 
 ## Run
 
+Install the pinned Harbor CLI in its own environment, then start the Docker
+daemon on a Docker-capable host:
+
+```sh
+uv tool install --python 3.12 harbor==0.22.0
+harbor --version
+docker info
+```
+
+Princeton's clusters [do not permit Docker](https://researchcomputing.princeton.edu/get-started/guide-princeton-clusters/2-software).
+On Della, use Harbor 0.22.0's official `singularity` backend with the cluster's
+Apptainer installation. Run `scripts/della/remote/setup_terminalbench.sh` from a
+synced checkout on the visualization host with `SCRATCH_BASE` set to the existing
+GEPA directory. It installs an isolated Harbor environment, exposes Apptainer
+under the `singularity` command required by Harbor, and prints the compute-job
+PATH and persistent image-cache arguments.
+
+This helper installs the CLI only. Harbor pulls uncached task images and installs
+its server dependencies inside each fresh container. Della's preparation flow
+uses the visualization host for internet access, so empty cache directories do
+not make compute-node execution ready. Before submitting a trial, verify compute
+egress or stage both the task images and the dependencies needed by Harbor's
+bootstrap and the task. An offline bootstrap has not been verified on Della.
+
+On the allocated compute node, add these arguments to the shared entrypoint:
+
+```sh
+--container-runtime singularity \
+--singularity-image-cache "$SCRATCH_BASE/.cache/terminalbench/sif"
+```
+
+The explicit backend is part of the run contract, so Docker and Apptainer cannot
+reuse each other's results. Task packages, images, verifier, prompts, model
+settings and budgets remain pinned. The native backend requires each task's
+published `docker_image`; it imports that image as a SIF and uses Apptainer's
+`--fakeroot` and writable temporary filesystem. CLI installation alone does not
+prove those kernel capabilities work on a particular compute node. Verify an
+official training task before a campaign, and allocate the task's requested CPU
+and memory through Slurm. Keep one concurrent task during the initial check.
+
 After the pinned model servers and Harbor runtime are prepared:
 
 ```sh
@@ -53,8 +93,9 @@ uv run --no-sync python -m examples.terminalbench.main --condition both \
 
 The primary route preserves `load_role_runtimes` checks for model bytes,
 revisions, serving software, live process identity, and local endpoint ownership.
-It also checks the exact Harbor version and Docker daemon availability before
-evaluation. These checks are not replaced by unchecked URL or model-name inputs.
+It also checks the exact Harbor version and selected container CLI before
+evaluation. Docker additionally requires a reachable daemon. These checks are
+not replaced by unchecked URL or model-name inputs.
 Pilot and baseline modes validate only the solver because they do not use the
 proposer. The optimizer's runtime is kept in its own run contract so a matching
 standalone seed baseline is reused during optimization.

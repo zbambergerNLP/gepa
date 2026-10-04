@@ -12,6 +12,7 @@ from typing import Any
 from examples.common.benchmark_runner import run_cli
 from examples.common.benchmark_types import BenchmarkDefinition, BenchmarkModels
 from examples.common.react_v2 import resolve_template_family
+from examples.terminalbench.benchmark_settings import MANIFEST_PATH, TEST_REPETITIONS, TRAINING_EPOCHS_BY_BUDGET
 from examples.terminalbench.model_settings import terminalbench_decoding, terminalbench_limits, terminalbench_model_info
 from examples.terminalbench.runtime import load_role_runtimes
 from examples.terminalbench.shared_adapter import SharedTerminusAdapter
@@ -27,9 +28,6 @@ from gepa.adapters.terminal_bench_adapter.terminal_bench_adapter import FAILURE_
 from gepa.adapters.terminal_bench_adapter.text_scope import TerminalBenchTextScope
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-MANIFEST_PATH = Path(__file__).with_name("terminalbench-v2.1-manifest.json")
-TRAINING_EPOCHS_BY_BUDGET = {"standard": 4, "double": 8}
-TEST_REPETITIONS = 3
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:

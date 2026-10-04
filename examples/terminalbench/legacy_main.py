@@ -38,6 +38,7 @@ from examples.common.pilot_checks import OPTIMIZER_PILOT_PROTOCOL, CycleEvidence
 from examples.common.provider_retries import PROVIDER_RETRY_POLICY, provider_retry_kwargs
 from examples.common.react_v2 import build_react_v2_strategy, resolve_template_family
 from examples.common.recovery import RecoveryCallback, run_guarded
+from examples.terminalbench.benchmark_settings import TEST_REPETITIONS, TRAINING_EPOCHS_BY_BUDGET
 from examples.terminalbench.model_settings import (
     terminalbench_decoding,
     terminalbench_limits,
@@ -114,7 +115,6 @@ CONDITIONS_BY_BUDGET = {
     "standard": ("vanilla", "react_v2", "react_v2_random", "action"),
     "double": ("vanilla", "react_v2"),
 }
-TRAINING_EPOCHS_BY_BUDGET = {"standard": 4, "double": 8}
 CAMPAIGN_CELLS = {
     f"{condition}{'_2x' if budget == 'double' else ''}": (condition, budget)
     for budget, conditions in CONDITIONS_BY_BUDGET.items()
@@ -126,7 +126,6 @@ SCOPE_CAMPAIGN_CELLS = {
     for cell, (condition, budget) in CAMPAIGN_CELLS.items()
 }
 FOREST_CONDITIONS = {"react_v2", "react_v2_random"}
-TEST_REPETITIONS = 3
 EVALUATION_PROTOCOL = {
     "optimization_runs_per_configuration": 1,
     "test_repetitions": TEST_REPETITIONS,

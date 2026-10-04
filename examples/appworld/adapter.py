@@ -8,13 +8,13 @@ import time
 from collections.abc import Callable
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from examples.appworld.benchmark_settings import COMPONENT, DEFAULT_MAX_STEPS
 from examples.appworld.prompts import extract_code, initial_messages
 from examples.appworld.runtime import AppWorldRuntimeError
 from examples.appworld.utils import scenario_members, tree_digest
-from gepa.core.adapter import EvaluationBatch
+from gepa.core.adapter import EvaluationBatch, ProposalFn
 
 
 def validate_evaluation(result: dict[str, Any], task_id: str) -> bool:
@@ -22,7 +22,7 @@ def validate_evaluation(result: dict[str, Any], task_id: str) -> bool:
     counts = [result.get(key) for key in ("num_tests", "passed", "failed")]
     if any(type(value) is not int or value < 0 for value in counts):
         raise AppWorldRuntimeError("Malformed official evaluator counts.")
-    total, passed, failed = counts
+    total, passed, failed = cast(list[int], counts)
     if total == 0 or total != passed + failed or type(result.get("success")) is not bool:
         raise AppWorldRuntimeError("Incomplete official evaluator result.")
     if result["success"] != (total == passed) or result.get("task_id") != task_id:
@@ -38,6 +38,8 @@ def validate_evaluation(result: dict[str, Any], task_id: str) -> bool:
 
 class AppWorldAdapter:
     """Expose one real system prompt to both GEPA and FOREST with identical execution."""
+
+    propose_new_texts: ProposalFn | None = None
 
     def __init__(
         self,

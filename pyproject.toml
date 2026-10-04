@@ -55,7 +55,7 @@ confidence = [
 dspy = []
 decisionbench = [
     "gepa[full]",
-    "decision-bench @ git+https://github.com/Hanno-Labs/decision-bench.git@9a6328ee066a3dec0ed94ea9e57ddd3f63c57aa9 ; python_version >= '3.12' and python_version < '3.14'",
+    "decision-bench==0.1.0; python_version >= '3.12' and python_version < '3.14'",
 ]
 obliqbench = [
     "gepa[full]",
@@ -115,6 +115,7 @@ hotpotqa-task-program = [
 
 [tool.uv.sources]
 dspy = { git = "https://github.com/gepa-ai/dspy.git", rev = "62dc3b634d7dc0c4889abcf905cb4c391ea6b396" }
+decision-bench = { git = "https://github.com/Hanno-Labs/decision-bench.git", rev = "9a6328ee066a3dec0ed94ea9e57ddd3f63c57aa9" }
 
 [project.urls]
 "Homepage" = "https://github.com/gepa-ai/gepa"

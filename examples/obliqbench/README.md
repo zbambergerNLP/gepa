@@ -90,18 +90,14 @@ best-of sampling. Test traces are rejected by the reflection interface.
 
 ## Run
 
-Run from the repository root using Python 3.12. The shared project dependency
-group must include `numpy==2.2.6`, `pytrec-eval-terrier==0.5.10`,
-`rank-bm25==0.2.2`, `sentence-transformers==6.1.0`, `transformers==5.17.0`, and
-`torch==2.9.0`. Exact retriever/evaluator versions are checked at startup.
-Until that group is installed, the following isolated lexical check needs no
-embedding weights or model endpoint:
+Run from the repository root using Python 3.12. The `obliqbench` extra pins the
+retriever/evaluator dependencies; exact versions are checked at startup.
+The lexical reference below needs no embedding weights or model endpoint:
 
 ```bash
+uv sync --locked --python 3.12 --extra dev --extra obliqbench
 uv run --no-project python -m examples.obliqbench.prepare --subsets math
-uv run --frozen --extra dev \
-  --with numpy==2.2.6 --with pytrec-eval-terrier==0.5.10 --with rank-bm25==0.2.2 \
-  python -m examples.obliqbench.baseline \
+uv run --no-sync python -m examples.obliqbench.baseline \
   --subsets math --retriever bm25 --original-query-reference \
   --run-dir outputs/obliqbench-original-math
 ```
@@ -123,11 +119,11 @@ After installing the pinned dependencies and starting the exact shared solver
 and proposer models, a training-only latency pilot and a comparison use:
 
 ```bash
-uv run python -m examples.obliqbench.pilot \
+uv run --no-sync python -m examples.obliqbench.pilot \
   --solver-api-base http://localhost:8000/v1 \
   --reflection-api-base http://localhost:8001/v1 \
   --embedding-device cuda --run-dir outputs/obliqbench
-uv run python -m examples.obliqbench.main \
+uv run --no-sync python -m examples.obliqbench.main \
   --condition both --solver-api-base http://localhost:8000/v1 \
   --reflection-api-base http://localhost:8001/v1 \
   --embedding-device cuda --run-dir outputs/obliqbench
@@ -146,9 +142,7 @@ mapped cache rejects incomplete indexes and runtime changes.
 ## Verification and limits
 
 ```bash
-uv run --frozen --extra dev \
-  --with numpy==2.2.6 --with pytrec-eval-terrier==0.5.10 --with rank-bm25==0.2.2 \
-  python -m pytest -q tests/test_obliqbench.py tests/test_benchmark_runner.py
+uv run --no-sync python -m pytest -q tests/test_obliqbench.py tests/test_benchmark_runner.py
 ```
 
 Contract tests execute the real lexical/dense-ranking and trec_eval code,

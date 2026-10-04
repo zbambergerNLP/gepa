@@ -68,6 +68,7 @@ def dummy_lm():
     )
 
 
+@pytest.mark.skipif(utils.dspy is None, reason="Requires the pinned hotpotqa-task-program group")
 def test_real_dspy_program_executes_all_edited_components_and_keeps_gold_out():
     retriever = FixtureRetriever()
     adapter = HotPotQAAdapter(model_settings(), retriever, training_ids={"question-0"})
@@ -95,6 +96,7 @@ def test_real_dspy_program_executes_all_edited_components_and_keeps_gold_out():
         adapter.make_reflective_dataset(candidate, result, ["final_answer"])
 
 
+@pytest.mark.skipif(utils.dspy is None, reason="Requires the pinned hotpotqa-task-program group")
 def test_malformed_dspy_output_is_zero_but_systemic_failures_abort():
     adapter = HotPotQAAdapter(model_settings(), FixtureRetriever(), training_ids={"question-0"})
     lm = dummy_lm()
@@ -152,6 +154,7 @@ def test_shared_primary_cli_runs_a_training_pilot_and_retains_full_data_identity
     assert len(solver.history) == 4
 
 
+@pytest.mark.skipif(utils.dspy is None, reason="Requires the pinned hotpotqa-task-program group")
 def test_builder_uses_shared_models_and_ignores_optimizer_seed_for_data(tmp_path, monkeypatch):
     data = tmp_path / "data.jsonl"
     data.write_text("".join(json.dumps(example(index)) + "\n" for index in range(20)))

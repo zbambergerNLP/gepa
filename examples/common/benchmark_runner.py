@@ -15,8 +15,14 @@ from copy import deepcopy
 from dataclasses import replace
 from importlib.metadata import version
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
+from examples.common.benchmark_settings import (
+    DEFAULT_MAX_METRIC_CALLS,
+    DEFAULT_MAX_WORKERS,
+    DEFAULT_PILOT_SIZE,
+    DEFAULT_SEED,
+)
 from examples.common.benchmark_types import BenchmarkBuilder, BenchmarkDefinition, BenchmarkModels
 from examples.common.experiment_models import (
     DEFAULT_PROPOSER_MODEL,
@@ -33,7 +39,7 @@ from examples.common.react_v2 import (
     resolve_template_family,
 )
 from gepa import optimize
-from gepa.core.adapter import EvaluationBatch
+from gepa.core.adapter import EvaluationBatch, ProposalFn
 from gepa.lm import LM
 from gepa.lm_constants import PROVIDER_ATTEMPT_LOG, PROVIDER_RETRY_KEY
 from gepa.strategies.batch_sampler import IndependentEpochShuffledBatchSampler
@@ -48,17 +54,18 @@ from gepa.strategies.proposal_sampling import SingleMutationSampling
 from gepa.strategies.proposal_selection import AllImprovements
 from gepa.utils.stop_condition import MaxCandidateProposalsStopper
 
-DEFAULT_MAX_METRIC_CALLS = 6_871
-DEFAULT_MAX_WORKERS = 1
-DEFAULT_SEED = 0
-DEFAULT_PILOT_SIZE = 3
 RUN_CONTRACT_FILENAME = "benchmark-run-contract.json"
+TemplateFamily = Literal["generic", "openai", "anthropic", "google", "alibaba"]
 
 
-def implementation_identity() -> dict[str, Any]:
-    """Fingerprint the shared executable code and installed model transport."""
+def implementation_identity(benchmark_name: str) -> dict[str, Any]:
+    """Fingerprint the shared engine, benchmark harness and installed model transport."""
     root = Path(__file__).resolve().parents[2]
-    files = sorted((root / "src" / "gepa").rglob("*.py")) + sorted((root / "examples" / "common").glob("*.py"))
+    files = (
+        sorted((root / "src" / "gepa").rglob("*.py"))
+        + sorted((root / "examples" / "common").glob("*.py"))
+        + sorted((root / "examples" / benchmark_name).glob("*.py"))
+    )
     return {
         "source_sha256": digest([[str(path.relative_to(root)), file_sha256(path)] for path in files]),
         "lock_sha256": file_sha256(root / "uv.lock"),
@@ -223,7 +230,7 @@ class RecordedAdapter:
         self.seed = seed
         self.repetition = 0
         self.phase: str | None = None
-        self.propose_new_texts = None
+        self.propose_new_texts: ProposalFn | None = None
         self._train_ids = {str(row["id"]) for row in definition.trainset}
         self._val_ids = {str(row["id"]) for row in definition.valset}
 
@@ -445,7 +452,7 @@ def _run_condition_locked(
     """Freeze a validation winner before evaluating it and its shared baseline."""
     directory = args.run_dir / condition
     component_kinds = definition.component_kinds or dict.fromkeys(definition.seed_candidate, "system_prompt")
-    template_family = resolve_template_family(args.template_family, models.solver_model)
+    template_family = cast(TemplateFamily, resolve_template_family(args.template_family, models.solver_model))
     batch_size = min(args.reflection_minibatch_size, len(definition.trainset))
     contract = {
         "schema_version": 1,
@@ -632,7 +639,7 @@ def run_cli(
         solver_identity_kwargs[PROVIDER_RETRY_KEY]["log_path"] = None
     identity = {
         "benchmark": definition.name,
-        "implementation": implementation_identity(),
+        "implementation": implementation_identity(benchmark_name),
         "seed_candidate": definition.seed_candidate,
         "full_data": full_identity,
         "data": benchmark_data_identity(

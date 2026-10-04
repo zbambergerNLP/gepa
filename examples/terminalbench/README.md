@@ -40,9 +40,7 @@ After the pinned model servers and Harbor runtime are prepared:
 ```sh
 uv run --no-sync python -m examples.terminalbench.main --mode pilot \
   --runtime-record /path/to/solver-runtime.json \
-  --proposer-runtime-record /path/to/proposer-runtime.json \
   --solver-api-base http://localhost:8000/v1 \
-  --reflection-api-base http://localhost:8001/v1 \
   --run-dir outputs/terminalbench-pilot
 
 uv run --no-sync python -m examples.terminalbench.main --condition both \
@@ -57,8 +55,13 @@ The primary route preserves `load_role_runtimes` checks for model bytes,
 revisions, serving software, live process identity, and local endpoint ownership.
 It also checks the exact Harbor version and Docker daemon availability before
 evaluation. These checks are not replaced by unchecked URL or model-name inputs.
-Pilot mode evaluates only training tasks. No benchmark or paid model run is
-launched by the test suite.
+Pilot and baseline modes validate only the solver because they do not use the
+proposer. The optimizer's runtime is kept in its own run contract so a matching
+standalone seed baseline is reused during optimization.
+`--mode optimizer-pilot --condition all --pilot-size 1 --pilot-proposals 1`
+exercises all five optimizer conditions on training tasks only, requires both
+live servers, and writes no held-out result. The test suite replaces external
+model and Docker I/O while executing those real optimizer and adapter paths.
 
 The shared `--max-workers` controls Harbor's concurrent trials. Every output uses
 its own official `TrialResult.finished_at - started_at` duration, including

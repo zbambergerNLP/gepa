@@ -30,6 +30,8 @@ class BenchmarkDefinition:
     aggregate benchmark-specific metrics across the repeated evaluation batches.
     Optional ``set_evaluation_context(split, repetition, seed)`` receives the
     split and fixed trial seed before execution, including held-out repetitions.
+    Optimizer-only runtime metadata belongs in ``optimizer_runtime`` so seed
+    baselines can be reused while optimizer resumes still reject runtime drift.
     """
 
     name: str
@@ -44,6 +46,7 @@ class BenchmarkDefinition:
     test_repetitions: int = 1
     component_kinds: dict[str, str] = field(default_factory=dict)
     max_candidate_proposals: int | None = None
+    optimizer_runtime: dict[str, Any] = field(default_factory=dict)
 
 
 BenchmarkBuilder = Callable[[Namespace, BenchmarkModels], BenchmarkDefinition]

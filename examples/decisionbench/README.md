@@ -131,6 +131,21 @@ it does not determine split membership. The local server must support the strict
 JSON-schema response format without dropping it. Transport and actual model
 performance require a live model pilot; the offline tests do not demonstrate them.
 
+To exercise all five optimizer variants with a bounded training-only pilot:
+
+```bash
+uv run --no-sync python -m examples.decisionbench.main \
+  --mode optimizer-pilot --condition all --pilot-size 1 --pilot-proposals 1 \
+  --solver-api-base http://SOLVER_HOST:PORT/v1 \
+  --reflection-api-base http://PROPOSER_HOST:PORT/v1 \
+  --run-dir outputs/decisionbench-optimizer-pilot
+```
+
+The `vanilla`, `random`, `action`, `react_v2_random`, and `react_v2` conditions
+share the same adapter and selected training prefix. Selection also uses that
+training prefix, and `pilot-winner.json` reports a training score. This mode
+does not evaluate validation or held-out rows or create the held-out baseline.
+
 `--data-file /path/to/eval.parquet` accepts an offline copy only if its bytes match
 the pinned hash. Otherwise the loader downloads only the approximately 54 MiB
 canonical Parquet, never models. `--dataset-cache` selects an optional HF cache.

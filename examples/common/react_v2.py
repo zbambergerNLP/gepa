@@ -144,6 +144,9 @@ def build_react_v2_strategy(
     component_kinds: dict[str, str] | None = None,
     controller_selection: str = VERBALIZED_SELECTION,
     editor_mode: str = REACT_EDITOR_MODE,
+    proposal_policy: str = "real_edit",
+    react_max_iterations: int | None = None,
+    react_max_tool_calls: int | None = None,
     rng: random.Random | None = None,
     manifestor_traces_chars: int | None = None,
     manifestor_temperature: float = 0.0,
@@ -165,6 +168,9 @@ def build_react_v2_strategy(
         component_kinds: Optional message role for each optimized component.
         controller_selection: ``"verbalized"``, ``"uniform_random"``, or ``"jev"``.
         editor_mode: Multi-turn ``react`` or one-response ``single_call`` editing.
+        proposal_policy: Required real edits with generation recovery, or independent historical proposals.
+        react_max_iterations: Optional bound on observation-loop editor responses.
+        react_max_tool_calls: Optional bound on observation-loop edit calls.
         rng: Optional Controller RNG kept separate from GEPA's engine RNG.
         manifestor_traces_chars: Trace character cap, or ``None`` to rely on
             the configured model's context window.
@@ -228,6 +234,9 @@ def build_react_v2_strategy(
         controller_selection=controller_selection,
         jev_controller=jev_controller,
         editor_mode=editor_mode,
+        proposal_policy=proposal_policy,
+        react_max_iterations=react_max_iterations,
+        react_max_tool_calls=react_max_tool_calls,
         controller_lm=LM(reflection_model, **controller_kwargs) if separate_controller else None,
         manifestor_lm=LM(reflection_model, **manifestor_kwargs),
         proposer_model=proposer_model or reflection_model,

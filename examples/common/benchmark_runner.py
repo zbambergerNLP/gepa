@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from examples.common.artifacts import atomic_json, digest
+from examples.common.benchmark_pilot import OptimizerPilotEvidence
 from examples.common.benchmark_settings import (
     DEFAULT_MAX_METRIC_CALLS,
     DEFAULT_MAX_WORKERS,
@@ -25,6 +26,14 @@ from examples.common.benchmark_settings import (
     DEFAULT_SEED,
 )
 from examples.common.benchmark_types import BenchmarkBuilder, BenchmarkDefinition, BenchmarkModels
+from examples.common.benchmark_variants import (
+    FOREST_CONDITIONS,
+    add_variant_arguments,
+    optimizer_budget,
+    proposal_strategies,
+    selected_conditions,
+    variant_settings,
+)
 from examples.common.experiment_models import (
     DEFAULT_PROPOSER_MODEL,
     DEFAULT_SOLVER_MODEL,
@@ -40,18 +49,24 @@ from examples.common.react_v2 import (
 )
 from gepa import optimize
 from gepa.core.adapter import EvaluationBatch, ProposalFn
+from gepa.core.callbacks import GEPACallback
 from gepa.lm import LM
 from gepa.lm_constants import PROVIDER_ATTEMPT_LOG, PROVIDER_RETRY_KEY
+from gepa.strategies.action_space import (
+    ActionSelector,
+    RandomActionSelector,
+    VerbalizedActionSelector,
+    stateless_selector_policy_contract,
+)
 from gepa.strategies.batch_sampler import IndependentEpochShuffledBatchSampler
+from gepa.strategies.document_template import TEMPLATE_FAMILIES
 from gepa.strategies.forest_constants import (
     BROAD_EDIT_TOOL_SET,
-    DEFAULT_REFLECTION_LEVEL,
     DEFAULT_REFLECTION_MINIBATCH_SIZE,
     OPTIMIZER_ROLE,
     SOLVER_ROLE,
 )
-from gepa.strategies.proposal_sampling import SingleMutationSampling
-from gepa.strategies.proposal_selection import AllImprovements
+from gepa.strategies.intervention import SEMANTIC_ACTIONS, StatelessActionConstraint
 from gepa.utils.stop_condition import MaxCandidateProposalsStopper
 
 RUN_CONTRACT_FILENAME = "benchmark-run-contract.json"
@@ -95,8 +110,8 @@ def build_parser(
     parser.add_argument("--solver-api-base", default=None)
     parser.add_argument("--reflection-api-base", default=None)
     parser.add_argument("--run-dir", type=Path, default=Path("outputs") / benchmark_name)
-    parser.add_argument("--condition", choices=("vanilla", "react_v2", "both"), default="both")
-    parser.add_argument("--mode", choices=("optimize", "pilot", "baseline"), default="optimize")
+    add_variant_arguments(parser)
+    parser.add_argument("--mode", choices=("optimize", "pilot", "optimizer-pilot", "baseline"), default="optimize")
     parser.add_argument("--max-metric-calls", type=int, default=DEFAULT_MAX_METRIC_CALLS)
     parser.add_argument("--reflection-minibatch-size", type=int, default=DEFAULT_REFLECTION_MINIBATCH_SIZE)
     parser.add_argument("--max-workers", type=int, default=DEFAULT_MAX_WORKERS)
@@ -105,6 +120,7 @@ def build_parser(
     parser.add_argument("--val-limit", type=int, default=None)
     parser.add_argument("--test-limit", type=int, default=None)
     parser.add_argument("--pilot-size", type=int, default=DEFAULT_PILOT_SIZE)
+    parser.add_argument("--pilot-proposals", type=int, default=1, help="Training-only optimizer-pilot iteration limit")
     parser.add_argument(
         "--template-family", default="auto", choices=("auto", "generic", "openai", "anthropic", "google", "alibaba")
     )
@@ -170,7 +186,10 @@ def validate_definition(definition: BenchmarkDefinition) -> None:
         seen.update(ids)
     if definition.component_kinds and set(definition.component_kinds) != set(definition.seed_candidate):
         raise ValueError("Component kinds must cover the exact editable prompt components.")
-    json.dumps({"source": definition.source, "runtime": definition.runtime}, allow_nan=False)
+    json.dumps(
+        {"source": definition.source, "runtime": definition.runtime, "optimizer_runtime": definition.optimizer_runtime},
+        allow_nan=False,
+    )
 
 
 def ensure_contract(directory: Path, filename: str, contract: dict[str, Any]) -> None:
@@ -433,8 +452,9 @@ def _run_condition(
     condition: str,
 ) -> dict[str, Any]:
     """Hold one exclusive writer lock for each resumable optimization directory."""
-    args.run_dir.mkdir(parents=True, exist_ok=True)
-    with (args.run_dir / f".{condition}.lock").open("a") as lock:
+    root = args.run_dir / "optimizer-pilot" if args.mode == "optimizer-pilot" else args.run_dir
+    root.mkdir(parents=True, exist_ok=True)
+    with (root / f".{condition}.lock").open("a") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
@@ -449,44 +469,65 @@ def _run_condition_locked(
     identity: dict[str, Any],
     condition: str,
 ) -> dict[str, Any]:
-    """Freeze a validation winner before evaluating it and its shared baseline."""
-    directory = args.run_dir / condition
+    """Freeze the selected winner, withholding all held-out work from optimizer pilots."""
+    pilot = args.mode == "optimizer-pilot"
+    directory = args.run_dir / "optimizer-pilot" / condition if pilot else args.run_dir / condition
     component_kinds = definition.component_kinds or dict.fromkeys(definition.seed_candidate, "system_prompt")
     template_family = cast(TemplateFamily, resolve_template_family(args.template_family, models.solver_model))
-    batch_size = min(args.reflection_minibatch_size, len(definition.trainset))
+    settings = variant_settings(args, condition)
+    trainset = definition.trainset[: args.pilot_size] if pilot else definition.trainset
+    selection_set = trainset if pilot else definition.valset
+    batch_size = min(args.reflection_minibatch_size, len(trainset))
+    budget = optimizer_budget(args, definition.max_candidate_proposals)
     contract = {
-        "schema_version": 1,
+        "schema_version": 2,
         "identity": identity,
         "condition": condition,
+        "mode": args.mode,
+        "selection_split": "train" if pilot else "val",
+        "optimization_data": {
+            "train_ids": [str(row["id"]) for row in trainset],
+            "selection_ids": [str(row["id"]) for row in selection_set],
+        },
         "proposer": {
             "model": models.proposer_model,
             "revision": experiment_model_version(models.proposer_model),
             "kwargs": models.proposer_kwargs,
+            "runtime": definition.optimizer_runtime,
         },
         "optimizer": {
-            "max_metric_calls": args.max_metric_calls,
-            "max_candidate_proposals": definition.max_candidate_proposals,
+            **settings,
+            **budget,
             "reflection_minibatch_size": batch_size,
-            "module_selector": "round_robin",
-            "candidate_selection": "pareto",
-            "acceptance": "strict_improvement",
-            "proposal_selection": "all_improvements",
-            "merge": False,
+            "skip_perfect_score": not pilot,
             "seed": args.seed,
             "template_family": template_family,
-            "reflection_level": DEFAULT_REFLECTION_LEVEL if condition == "react_v2" else 0,
-            "edit_tool_set": BROAD_EDIT_TOOL_SET,
             "component_kinds": component_kinds,
+            "stateless_selector_policy": (
+                stateless_selector_policy_contract(settings["stateless_action_selection"])
+                if settings["stateless_action_selection"]
+                else None
+            ),
         },
     }
     ensure_contract(directory, RUN_CONTRACT_FILENAME, contract)
-    winner_path = directory / "frozen-winner.json"
+    pilot_evidence_path = directory / "optimizer-pilot-evidence.json"
+    pilot_observer = OptimizerPilotEvidence(digest(contract)) if pilot else None
+    winner_path = directory / ("pilot-winner.json" if pilot else "frozen-winner.json")
     if winner_path.exists():
         winner = json.loads(winner_path.read_text())
         if winner.get("contract_sha256") != digest(contract) or winner.get("candidate_sha256") != digest(
             winner.get("candidate")
         ):
             raise ValueError("Frozen validation winner no longer matches its run contract.")
+        if pilot:
+            evidence = json.loads(pilot_evidence_path.read_text())
+            if (
+                evidence.get("contract_sha256") != digest(contract)
+                or not evidence.get("completed_cycles")
+                or winner.get("pilot_evidence_sha256") != digest(evidence)
+            ):
+                raise ValueError("Optimizer pilot completion evidence no longer matches its winner and run contract")
         candidate = winner["candidate"]
     else:
         adapter = RecordedAdapter(definition, directory, args.seed)
@@ -496,38 +537,69 @@ def _run_condition_locked(
             "response_journal_path": str(directory / "responses.sqlite"),
             "response_journal_namespace": OPTIMIZER_ROLE,
         }
-        strategy = None
-        if condition == "react_v2":
+        strategy, action_selector = None, None
+        if condition in FOREST_CONDITIONS:
             strategy, _ = build_react_v2_strategy(
                 reflection_model=models.proposer_model,
                 task_model=models.solver_model,
                 lm_kwargs=proposer_kwargs,
-                level=DEFAULT_REFLECTION_LEVEL,
-                edit_tool_set=BROAD_EDIT_TOOL_SET,
+                level=settings["reflection_level"],
+                edit_tool_set=settings["edit_tool_set"] or BROAD_EDIT_TOOL_SET,
+                controller_selection=settings["controller_selection"] or "verbalized",
+                editor_mode=settings["editor_mode"] or "react",
+                proposal_policy=settings["proposal_policy"] or "independent",
+                react_max_iterations=settings["react_max_iterations"],
+                react_max_tool_calls=settings["react_max_tool_calls"],
                 template_family=template_family,
                 component_kinds=component_kinds,
                 rng=random.Random(args.seed),
                 manifestor_temperature=float(proposer_kwargs["temperature"]),
             )
+        if settings["stateless_action_selection"]:
+            kinds = set(component_kinds.values())
+            if len(kinds) != 1:
+                raise ValueError("Stateless action conditions require one shared component template kind")
+            template = TEMPLATE_FAMILIES[template_family][next(iter(kinds))]
+            actions = [
+                StatelessActionConstraint(spec, section, template)
+                for section in template.sections
+                for spec in SEMANTIC_ACTIONS
+            ]
+            if condition == "random":
+                action_selector = RandomActionSelector(actions, rng=random.Random(args.seed))
+            else:
+                action_selector = VerbalizedActionSelector(
+                    actions,
+                    lm=LM(
+                        models.proposer_model,
+                        **{**proposer_kwargs, "response_journal_namespace": "stateless-controller"},
+                    ),
+                    rng=random.Random(args.seed),
+                )
+        sampling, selection = proposal_strategies(args)
         result = optimize(
             seed_candidate=deepcopy(definition.seed_candidate),
-            trainset=definition.trainset,
-            valset=definition.valset,
+            trainset=trainset,
+            valset=selection_set,
             adapter=adapter,
+            callbacks=[cast(GEPACallback, pilot_observer)] if pilot_observer is not None else None,
             reflection_lm=LM(models.proposer_model, **proposer_kwargs),
             reflection_strategy=strategy,
-            candidate_selection_strategy="pareto",
-            frontier_type="instance",
-            module_selector="round_robin",
+            action_selector=cast(ActionSelector[StatelessActionConstraint] | None, action_selector),
+            candidate_selection_strategy=settings["candidate_selection"],
+            frontier_type=settings["frontier_type"],
+            module_selector=settings["module_selector"],
             batch_sampler=IndependentEpochShuffledBatchSampler(minibatch_size=batch_size, seed=args.seed),
-            sampling_strategy=SingleMutationSampling(),
-            selection_strategy=AllImprovements(),
-            acceptance_criterion="strict_improvement",
-            use_merge=False,
-            max_metric_calls=args.max_metric_calls,
+            sampling_strategy=sampling,
+            selection_strategy=selection,
+            acceptance_criterion=settings["acceptance"],
+            use_merge=settings["merge"],
+            max_merge_invocations=settings["max_merge_invocations"],
+            skip_perfect_score=not pilot,
+            max_metric_calls=budget["max_metric_calls"],
             stop_callbacks=(
-                MaxCandidateProposalsStopper(definition.max_candidate_proposals)
-                if definition.max_candidate_proposals is not None
+                MaxCandidateProposalsStopper(budget["max_optimizer_iterations"])
+                if budget["max_optimizer_iterations"] is not None
                 else None
             ),
             run_dir=str(directory),
@@ -551,16 +623,25 @@ def _run_condition_locked(
         candidate = result.best_candidate
         if not isinstance(candidate, dict) or set(candidate) != set(definition.seed_candidate):
             raise ValueError("GEPA returned an invalid benchmark harness candidate.")
+        evidence = pilot_observer.completion_evidence() if pilot_observer is not None else None
         winner = {
             "contract_sha256": digest(contract),
             "candidate": candidate,
             "candidate_sha256": digest(candidate),
-            "validation_score": result.best_score,
+            "training_score" if pilot else "validation_score": result.best_score,
+            "selection_split": "train" if pilot else "val",
             "best_idx": result.best_idx,
             "total_metric_calls": result.total_metric_calls,
         }
+        if evidence is not None:
+            atomic_json(pilot_evidence_path, evidence)
+            winner["pilot_evidence_sha256"] = digest(evidence)
         atomic_json(directory / "candidates.json", result.to_dict())
         atomic_json(winner_path, winner)
+    if pilot:
+        summary = {"condition": condition, "mode": "optimizer-pilot", "winner": winner}
+        atomic_json(directory / "summary.json", summary)
+        return summary
     test = evaluate_candidate(
         definition,
         candidate,
@@ -610,6 +691,12 @@ def run_cli(
         "reflection_minibatch_size",
         "max_workers",
         "pilot_size",
+        "pilot_proposals",
+        "proposal_count",
+        "parent_count",
+        "proposal_top_k",
+        "react_max_iterations",
+        "react_max_tool_calls",
         "train_limit",
         "val_limit",
         "test_limit",
@@ -617,12 +704,31 @@ def run_cli(
         value = getattr(args, key)
         if value is not None and value < 1:
             parser.error(f"--{key.replace('_', '-')} must be positive")
+    conditions = selected_conditions(args)
+    if args.mode in {"optimize", "optimizer-pilot"}:
+        try:
+            for condition in conditions:
+                variant_settings(args, condition)
+        except ValueError as exc:
+            parser.error(str(exc))
     models = resolve_models(args)
     if configure_models is not None:
         models = configure_models(args, models)
         validate_benchmark_model_pair(models.solver_model, models.proposer_model)
     definition = build_benchmark(args, models)
     validate_definition(definition)
+    if args.mode in {"optimize", "optimizer-pilot"} and {"random", "action"}.intersection(conditions):
+        if args.module_selector == "all" and len(definition.seed_candidate) > 1:
+            parser.error(
+                "Stateless random/action conditions require one module per proposal; use --module-selector round_robin"
+            )
+        if len(set(definition.component_kinds.values())) > 1:
+            parser.error("Stateless random/action conditions require one shared component template kind")
+    if args.mode in {"optimize", "optimizer-pilot"}:
+        try:
+            optimizer_budget(args, definition.max_candidate_proposals)
+        except ValueError as exc:
+            parser.error(str(exc))
     if args.mode == "optimize" and args.max_metric_calls is None and definition.max_candidate_proposals is None:
         parser.error("Optimization requires a metric-call or candidate-proposal budget")
     full_identity = benchmark_data_identity(
@@ -669,7 +775,6 @@ def run_cli(
     elif args.mode == "baseline":
         summary = _starting_baseline(definition, args.run_dir, identity, args.seed)
     else:
-        conditions = ("vanilla", "react_v2") if args.condition == "both" else (args.condition,)
         summary = {condition: _run_condition(definition, models, args, identity, condition) for condition in conditions}
     print(json.dumps(summary, indent=2, allow_nan=False))
     return 0

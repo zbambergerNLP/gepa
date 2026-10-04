@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 
 import pytest
+from benchmark_model_fixtures import install_proposer
 
 if os.environ.get("TAU_BANKING_OFFLINE_CHECKS") != "1":
     pytest.skip("Run explicitly inside the pinned tau environment", allow_module_level=True)
@@ -282,3 +283,68 @@ def test_required_nl_assertion_uses_fixed_judge_and_rejects_empty_grades(source,
     assert not list(tmp_path.glob("task_102*.json"))
     failed = json.loads(next(tmp_path.glob("unscored-task_102-*.json")).read_text())
     assert failed["scored"] is False and failed["elapsed_seconds"] > 0
+
+
+@pytest.mark.parametrize("condition", ["vanilla", "random", "action", "react_v2_random", "react_v2"])
+def test_optimizer_pilot_uses_actual_tau_runtime_and_training_only(
+    source, tmp_path, monkeypatch, offline_provider, condition
+):
+    """Exercise real optimization, simulation and grading with only model responses scripted."""
+    from examples.taubench import main
+    from examples.taubench.runtime import TauRuntime
+
+    requests = []
+
+    def invoke(runtime, payload):
+        requests.append(payload)
+        registry._agent_factories.pop(AGENT_NAME, None)
+        return run_request({**payload, "source": str(runtime.source), "artifacts": str(runtime.artifacts)})
+
+    monkeypatch.setattr(TauRuntime, "invoke", invoke)
+    proposers = install_proposer(monkeypatch)
+    root = tmp_path / "optimizer-run"
+    argv = [
+        "--mode",
+        "optimizer-pilot",
+        "--condition",
+        condition,
+        "--pilot-size",
+        "1",
+        "--pilot-proposals",
+        "1",
+        "--tau-source",
+        str(source),
+        "--run-dir",
+        str(root),
+    ]
+    assert main.main(argv) == 0
+    directory = root / "optimizer-pilot" / condition
+    winner = json.loads((directory / "pilot-winner.json").read_text())
+    summary = json.loads((directory / "summary.json").read_text())
+    assert winner["selection_split"] == "train"
+    assert winner["training_score"] == 0
+    assert not {"test", "baseline"} & summary.keys()
+    train_id = load_data(source)[0]["train"][0]["id"]
+    assert len(requests) >= 3
+    assert all(request["trial"] == 0 for request in requests)
+    assert {record["id"] for request in requests for record in request["records"]} == {train_id}
+    assert all(record["split"] == "train" for request in requests for record in request["records"])
+    seed_prompt = requests[0]["candidate"]["system_prompt"]
+    assert [line for line in seed_prompt.splitlines() if line.startswith("## ")] == ["## Objective"]
+    assert "### Rho-Bank Customer Service Policy" in seed_prompt
+    assert "#### Guidelines" in seed_prompt and "##### Authenticating Users" in seed_prompt
+    assert [line.lstrip("#").strip() for line in seed_prompt.splitlines()[1:] if line.strip()] == [
+        line.lstrip("#").strip() for line in upstream_system_prompt(source).splitlines() if line.strip()
+    ]
+    assert any("improved" in request["candidate"]["system_prompt"] for request in requests)
+    solver_calls = [request for request in offline_provider if request["model"] == QWEN3_8_27B_MODEL]
+    assert any("improved" in request["messages"][0]["content"] for request in solver_calls)
+    assert any(instance.calls for instance in proposers)
+    simulations = [json.loads(path.read_text()) for path in (root / "tau-episodes").glob("task_*.json")]
+    assert len(simulations) == len(requests)
+    assert all(simulation["reward_info"]["reward"] == 0 for simulation in simulations)
+    assert any(message["role"] == "tool" for simulation in simulations for message in simulation["messages"])
+    assert not list(root.rglob("heldout")) and not list(root.rglob("frozen-winner.json"))
+    call_count = len(requests)
+    assert main.main(argv) == 0
+    assert len(requests) == call_count

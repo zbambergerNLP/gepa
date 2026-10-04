@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 from examples.common.benchmark_types import BenchmarkDefinition, BenchmarkModels
@@ -41,7 +42,10 @@ def build_benchmark(args: argparse.Namespace, models: BenchmarkModels) -> Benchm
         source, Path(args.run_dir) / "tau-episodes", models.solver_model, models.solver_api_base, models.solver_kwargs
     )
     family = resolve_template_family(args.template_family, models.solver_model)
-    seed = {"system_prompt": structured_prompt(upstream_system_prompt(source), family)}
+    upstream_prompt = upstream_system_prompt(source)
+    # Upstream Markdown headings must stay inside the shared template section.
+    nested_prompt = re.sub(r"(?m)^(#{1,4})(?= )", r"##\1", upstream_prompt)
+    seed = {"system_prompt": structured_prompt(nested_prompt, family)}
     return BenchmarkDefinition(
         name="taubench",
         adapter=TauBankingAdapter(runtime, manifest, args.max_workers),
@@ -72,7 +76,8 @@ def build_benchmark(args: argparse.Namespace, models: BenchmarkModels) -> Benchm
             "optimization_trial": 0,
             "test_repetitions": TEST_REPETITIONS,
             "trajectory_retries": 0,
-            "upstream_prompt_sha256": digest(upstream_system_prompt(source)),
+            "upstream_prompt_sha256": digest(upstream_prompt),
+            "seed_formatting": "shared_template_with_upstream_markdown_headings_nested_two_levels",
             "template_family": family,
             "manifest_sha256": digest(manifest),
             "max_workers": args.max_workers,

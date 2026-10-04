@@ -12,16 +12,18 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from benchmark_model_fixtures import install_proposer
 
 from examples.appworld import utils
 from examples.appworld.adapter import AppWorldAdapter, validate_evaluation
 from examples.appworld.benchmark_settings import APPWORLD_REVISION, COMPONENT, OFFICIAL_SPLITS
 from examples.appworld.main import add_arguments, build_benchmark
-from examples.common.experiment_models import DEFAULT_PROPOSER_MODEL, DEFAULT_SOLVER_MODEL
 from examples.appworld.prompts import extract_code, initial_messages, seed_candidate
 from examples.appworld.runtime import AppWorldRuntimeError, OfficialAppWorld, inspect_runtime
 from examples.appworld.worker import dispatch, tracker_result
+from examples.common import benchmark_runner
 from examples.common.benchmark_runner import build_parser, resolve_models, validate_definition
+from examples.common.experiment_models import DEFAULT_PROPOSER_MODEL, DEFAULT_SOLVER_MODEL
 from gepa.core.adapter import EvaluationBatch
 
 PUBLIC_CONTEXT = {
@@ -290,6 +292,66 @@ def test_builder_uses_shared_model_roles_and_keeps_full_data_before_limits(corpu
     assert len(definition.trainset) == 3 and len(definition.valset) == 3 and len(definition.testset) == 6
     assert definition.test_repetitions == 1
     assert definition.component_kinds == {COMPONENT: "system_prompt"}
+
+
+@pytest.mark.parametrize("condition", ["vanilla", "random", "action", "react_v2_random", "react_v2"])
+def test_real_optimizer_pilot_changes_executed_prompt_using_training_only(corpus, monkeypatch, tmp_path, condition):
+    """Exercise every real optimizer variant with fixtures only at model/world I/O."""
+    root, records = corpus
+    initialized = []
+    prompts = []
+    initial = seed_candidate("alibaba")[COMPONENT]
+
+    class PilotWorld(FakeWorld):
+        def initialize(self, record):
+            initialized.append(record)
+            return super().initialize(record)
+
+        def request(self, operation, **payload):
+            if operation == "execute":
+                self.success = "changed" in payload["code"]
+            return super().request(operation, **payload)
+
+    def solver(messages):
+        prompt = messages[0]["content"]
+        prompts.append(prompt)
+        return f"```python\nprint({('changed' if prompt != initial else 'initial')!r})\n```"
+
+    proposers = install_proposer(monkeypatch)
+    monkeypatch.setattr("examples.appworld.main.LM", lambda *_, **__: solver)
+    monkeypatch.setattr("examples.appworld.main.OfficialAppWorld", lambda *_: PilotWorld())
+    monkeypatch.setattr("examples.appworld.main.inspect_runtime", lambda *_: {"fixture": "external runtime boundary"})
+    run_dir = tmp_path / "run"
+    assert (
+        benchmark_runner.run_cli(
+            benchmark_name="appworld",
+            build_benchmark=build_benchmark,
+            add_arguments=add_arguments,
+            argv=[
+                "--mode",
+                "optimizer-pilot",
+                "--condition",
+                condition,
+                "--pilot-size",
+                "1",
+                "--pilot-proposals",
+                "1",
+                "--appworld-root",
+                str(root),
+                "--run-dir",
+                str(run_dir),
+            ],
+        )
+        == 0
+    )
+    summary = json.loads((run_dir / "optimizer-pilot" / condition / "summary.json").read_text())
+    assert summary["winner"]["selection_split"] == "train"
+    assert summary["winner"]["training_score"] == 1.0
+    assert initial in prompts and any(prompt != initial for prompt in prompts)
+    assert initialized and all(record == records["train"][0] for record in initialized)
+    assert any(proposer.calls for proposer in proposers)
+    assert "test" not in summary and "baseline" not in summary
+    assert not list(run_dir.rglob("heldout"))
 
 
 def test_worker_rejects_changed_tracker_file_before_official_aggregation(tmp_path, monkeypatch):

@@ -99,6 +99,21 @@ training tasks only. Benchmark-specific options are `--appworld-root`,
 `--appworld-python`, and `--appworld-max-steps` (default 100). Run `--help` for
 shared limits, optimization budgets, model endpoints, and tracking options.
 
+A bounded optimizer pilot exercises every variant on training tasks only:
+
+```sh
+uv run --no-sync python -m examples.appworld.main --mode optimizer-pilot \
+  --condition all --pilot-size 1 --pilot-proposals 1 \
+  --solver-api-base http://SOLVER_HOST:PORT/v1 \
+  --reflection-api-base http://PROPOSER_HOST:PORT/v1 \
+  --run-dir outputs/appworld-optimizer-pilot
+```
+
+This runs `vanilla`, `random`, `action`, `react_v2_random`, and `react_v2`
+through the same adapter. Both candidate selection and scoring use
+the selected training prefix. The resulting `pilot-winner.json` records a
+training score; it is not a validation-selected winner or held-out result.
+
 ## Splits, evaluation, and resumption
 
 The official ordered assignments are retained in full before shared runner
@@ -157,10 +172,11 @@ AppWorld outputs are ignored here. When using custom roots or tracking services,
 keep their artifacts private too. No corpus or protected evaluator code is
 vendored by this integration.
 
-The local engine and scoring boundary have been exercised without model calls.
-No paid pilot, optimization campaign, or Slurm job has been run. Linux is the
-intended cluster platform; the real environment check was performed on macOS.
-Windows is not supported by this subprocess/timeout setup.
+The local engine and scoring boundary have been exercised with both the free
+environment check and a training-only Qwen pilot. Pilot scores are calibration
+evidence, not held-out benchmark results. Linux is the intended cluster platform;
+the real environment check and pilot client were run on macOS with Qwen hosted
+on Linux. Windows is not supported by this subprocess/timeout setup.
 
 ## Primary sources
 

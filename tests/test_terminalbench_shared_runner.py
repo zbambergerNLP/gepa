@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from benchmark_model_fixtures import install_proposer
 
 from examples.common.benchmark_runner import build_parser, resolve_models, validate_definition
 from examples.common.experiment_models import DEFAULT_PROPOSER_MODEL, DEFAULT_SOLVER_MODEL
@@ -28,7 +29,12 @@ from gepa.strategies.batch_sampler import IndependentEpochShuffledBatchSampler
 def external_boundaries(monkeypatch, tmp_path):
     """Replace only serving discovery and Harbor's external process boundary."""
     observed = []
-    runtime = Mock(return_value={"student": {"fixture": "solver"}, "proposer": {"fixture": "proposer"}})
+    runtime = Mock(
+        side_effect=lambda _args, include_proposer: {
+            "student": {"fixture": "solver"},
+            **({"proposer": {"fixture": "proposer"}} if include_proposer else {}),
+        }
+    )
     monkeypatch.setattr(terminalbench, "load_role_runtimes", runtime)
     requirements = Mock(return_value=("harbor", "docker"))
     monkeypatch.setattr(terminalbench.HarborCLI, "check_requirements", requirements)
@@ -105,6 +111,46 @@ def test_primary_entrypoint_is_a_direct_shared_route(monkeypatch):
     )
 
 
+@pytest.mark.parametrize("condition", ["vanilla", "random", "action", "react_v2_random", "react_v2"])
+def test_optimizer_pilot_changes_actual_harbor_documents_using_training_only(
+    tmp_path, external_boundaries, monkeypatch, condition
+):
+    """Run every optimizer arm through the maintained adapter and Harbor document boundary."""
+    proposers = install_proposer(monkeypatch)
+    run_dir = tmp_path / "run"
+    assert (
+        terminalbench.main(
+            [
+                "--runtime-record",
+                str(tmp_path / "solver.json"),
+                "--run-dir",
+                str(run_dir),
+                "--mode",
+                "optimizer-pilot",
+                "--condition",
+                condition,
+                "--pilot-size",
+                "1",
+                "--pilot-proposals",
+                "1",
+            ]
+        )
+        == 0
+    )
+    directory = run_dir / "optimizer-pilot" / condition
+    summary = json.loads((directory / "summary.json").read_text())
+    contract = json.loads((directory / "benchmark-run-contract.json").read_text())
+    assert summary["winner"]["selection_split"] == "train"
+    training_id = contract["optimization_data"]["train_ids"][0].removeprefix("terminalbench:")
+    calls = external_boundaries[0]
+    assert calls and all(call["tasks"] == [training_id] for call in calls)
+    initial = calls[0]["documents"]["instruction_prompt"]
+    assert any(call["documents"]["instruction_prompt"] != initial for call in calls)
+    assert any(proposer.calls for proposer in proposers)
+    assert "test" not in summary and "baseline" not in summary
+    assert not list(run_dir.rglob("heldout"))
+
+
 def test_shared_model_profile_preserves_combined_budget_without_mutating_defaults(tmp_path):
     args = parsed(tmp_path)
     original = resolve_models(args)
@@ -136,7 +182,51 @@ def test_definition_uses_pinned_full_data_epochs_and_official_adapter(tmp_path, 
     assert runtime.call_count == requirements.call_count == 1
     assert runtime.call_args.args[0].student_model == DEFAULT_SOLVER_MODEL
     assert runtime.call_args.args[0].proposer_model == DEFAULT_PROPOSER_MODEL
+    assert runtime.call_args.kwargs == {"include_proposer": True}
     assert benchmark.adapter.adapter.harbor.student_agent_kwargs["model_info"]["max_output_tokens"] == 32768
+
+
+@pytest.mark.parametrize("mode", ["pilot", "baseline"])
+def test_seed_only_modes_validate_only_solver_runtime(tmp_path, external_boundaries, mode):
+    """Avoid allocating the unused proposer server for seed prompt evaluation."""
+    definition(tmp_path, "--mode", mode)
+    assert external_boundaries[1].call_args.kwargs == {"include_proposer": False}
+
+
+def test_standalone_baseline_is_reused_and_optimizer_runtime_drift_is_rejected(
+    tmp_path, external_boundaries, monkeypatch
+):
+    """Keep solver baseline identity independent of the unused optimizer server."""
+    install_proposer(monkeypatch)
+    base = [
+        "--runtime-record",
+        str(tmp_path / "solver.json"),
+        "--run-dir",
+        str(tmp_path / "run"),
+        "--test-limit",
+        "2",
+        "--val-limit",
+        "1",
+        "--condition",
+        "vanilla",
+        "--max-metric-calls",
+        "1",
+    ]
+    assert terminalbench.main([*base, "--mode", "baseline"]) == 0
+    assert len(external_boundaries[0]) == 3
+    assert terminalbench.main([*base, "--mode", "optimize"]) == 0
+    # Three winner repetitions and one initial validation, with the baseline reused.
+    assert len(external_boundaries[0]) == 7
+    contract = json.loads((tmp_path / "run/vanilla/benchmark-run-contract.json").read_text())
+    assert contract["proposer"]["runtime"] == {"fixture": "proposer"}
+    assert contract["identity"]["runtime"]["execution_runtime"] == {"student": {"fixture": "solver"}}
+    external_boundaries[1].side_effect = lambda _args, include_proposer: {
+        "student": {"fixture": "solver"},
+        "proposer": {"fixture": "changed optimizer runtime"},
+    }
+    with pytest.raises(ValueError, match="configuration or data changed"):
+        terminalbench.main([*base, "--mode", "optimize"])
+    assert len(external_boundaries[0]) == 7
 
 
 def test_full_identity_does_not_change_with_budget_or_training_prefix(tmp_path, external_boundaries):

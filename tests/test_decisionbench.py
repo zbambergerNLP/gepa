@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from benchmark_model_fixtures import install_proposer
 
 pytest.importorskip("decision_bench")
 
@@ -17,6 +18,7 @@ import litellm
 from decision_bench.prompt import SYSTEM_PROMPT, render_user_prompt
 from decision_bench.schemas import DecisionExample
 
+from examples.common import benchmark_runner
 from examples.common.benchmark_runner import build_parser, evaluate_candidate, resolve_models, validate_definition
 from examples.common.experiment_models import DEEPSEEK_V4_1_FLASH_MODEL, QWEN3_8_27B_MODEL
 from examples.common.provider_retries import ProviderRequestError, provider_retry_kwargs
@@ -414,6 +416,61 @@ def test_shared_evaluator_reuses_verified_results_and_rejects_prompt_drift(monke
     assert timing["tasks_per_hour"] == pytest.approx(7200 / timing["recorded_batch_seconds"])
     with pytest.raises(ValueError, match="configuration or data changed"):
         evaluate_candidate(**{**kwargs, "candidate": {COMPONENT: "different"}})
+
+
+@pytest.mark.parametrize("condition", ["vanilla", "random", "action", "react_v2_random", "react_v2"])
+def test_real_optimizer_pilot_scores_changed_prompt_using_training_only(monkeypatch, tmp_path, condition):
+    """Run every real optimizer variant through official decision rendering and scoring."""
+    splits = partition_records([decode_record(stored_row(i)) for i in range(100)])
+    monkeypatch.setattr(entrypoint, "load_decisionbench", lambda *_: (splits, {"fixture": "dataset I/O boundary"}))
+    requests = []
+    seeds = []
+
+    def build(args, resolved):
+        benchmark = entrypoint.build_benchmark(args, resolved)
+        initial = benchmark.seed_candidate[COMPONENT]
+        seeds.append(initial)
+
+        def send(**kwargs):
+            requests.append(kwargs)
+            changed = kwargs["messages"][0]["content"] != initial
+            return response((0.1, 0.8, 0.1) if changed else (0.8, 0.1, 0.1))
+
+        benchmark.adapter.completion = send
+        return benchmark
+
+    proposers = install_proposer(monkeypatch)
+    run_dir = tmp_path / "run"
+    assert (
+        benchmark_runner.run_cli(
+            benchmark_name="decisionbench",
+            build_benchmark=build,
+            add_arguments=entrypoint.add_arguments,
+            argv=[
+                "--mode",
+                "optimizer-pilot",
+                "--condition",
+                condition,
+                "--pilot-size",
+                "1",
+                "--pilot-proposals",
+                "1",
+                "--run-dir",
+                str(run_dir),
+            ],
+        )
+        == 0
+    )
+    summary = json.loads((run_dir / "optimizer-pilot" / condition / "summary.json").read_text())
+    expected_user = render_user_prompt(DecisionExample.model_validate(splits["train"][0]["example"]))
+    assert summary["winner"]["selection_split"] == "train"
+    assert summary["winner"]["training_score"] == 1.0
+    assert requests and all(request["messages"][1]["content"] == expected_user for request in requests)
+    assert any(request["messages"][0]["content"] != seeds[0] for request in requests)
+    assert all(request["response_format"]["json_schema"]["strict"] for request in requests)
+    assert any(proposer.calls for proposer in proposers)
+    assert "test" not in summary and "baseline" not in summary
+    assert not list(run_dir.rglob("heldout"))
 
 
 @pytest.mark.smoke

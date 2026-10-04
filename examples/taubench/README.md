@@ -31,9 +31,12 @@ leaderboard default.
 The small integration changes are explicit:
 
 - The shipped BM25 system prompt is wrapped with the shared provider-specific
-  `structured_prompt` formatting. Both optimization methods and their unoptimized
-  starting baseline receive exactly the same resulting text. A subclass overrides
-  only `LLMAgent.system_prompt`; upstream handles every turn and tool call.
+  `structured_prompt` formatting. Its existing Markdown headings are nested two
+  levels beneath the wrapper, preserving their wording and hierarchy so FOREST
+  does not misread policy headings as editable template sections. Both optimization
+  methods and their unoptimized starting baseline receive exactly the same
+  resulting text. A subclass overrides only `LLMAgent.system_prompt`; upstream
+  handles every turn and tool call.
 - Corpus documents are inserted in ascending document-ID order before upstream
   BM25 indexing. This makes equal-score ordering independent of filesystem order.
 - Provider-level retry limits/logging come from `examples.common.provider_retries`;

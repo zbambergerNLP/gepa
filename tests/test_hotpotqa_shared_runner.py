@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+from itertools import cycle
 
 import pytest
+from benchmark_model_fixtures import install_proposer
 
 from examples.common.benchmark_runner import build_parser, resolve_models
 from examples.common.experiment_models import DEEPSEEK_V4_1_FLASH_MODEL, QWEN3_8_27B_MODEL
@@ -151,6 +153,56 @@ def test_shared_primary_cli_runs_a_training_pilot_and_retains_full_data_identity
     assert identity["runtime"]["program"] == "2stage"
     assert len(identity["seed_candidate"]) == 4
     assert len(solver.history) == 4
+
+
+@pytest.mark.parametrize("condition", ["vanilla", "random", "action", "react_v2_random", "react_v2"])
+def test_optimizer_pilot_edits_real_dspy_program_using_training_only(tmp_path, monkeypatch, condition):
+    """Exercise all optimizer arms through DSPy while replacing external model and index I/O."""
+    data = tmp_path / "data.jsonl"
+    data.write_text("".join(json.dumps(example(index)) + "\n" for index in range(20)))
+    solver = dummy_lm()
+    solver.answers = cycle(
+        [
+            {"reasoning": "First summary reasoning", "summary": "First summary"},
+            {"reasoning": "Query reasoning", "query": "Second retrieval query"},
+            {"reasoning": "Second summary reasoning", "summary": "Second summary"},
+            {"reasoning": "Final reasoning", "answer": "The final gold secret!"},
+        ]
+    )
+    monkeypatch.setattr(main, "Wiki17BM25Retriever", FixtureRetriever)
+    monkeypatch.setattr(adapter_module, "build_hotpotqa_task_lm", lambda *_: solver)
+    proposers = install_proposer(monkeypatch)
+    run_dir = tmp_path / "run"
+    assert (
+        main.main(
+            [
+                "--mode",
+                "optimizer-pilot",
+                "--condition",
+                condition,
+                "--pilot-size",
+                "1",
+                "--pilot-proposals",
+                "1",
+                "--data-path",
+                str(data),
+                "--run-dir",
+                str(run_dir),
+            ]
+        )
+        == 0
+    )
+    directory = run_dir / "optimizer-pilot" / condition
+    summary = json.loads((directory / "summary.json").read_text())
+    contract = json.loads((directory / "benchmark-run-contract.json").read_text())
+    assert summary["winner"]["selection_split"] == "train"
+    assert contract["optimization_data"]["train_ids"] == contract["optimization_data"]["selection_ids"]
+    assert len(contract["optimization_data"]["train_ids"]) == 1
+    first_prompt = solver.history[0]["messages"][0]["content"]
+    assert any(row["messages"][0]["content"] != first_prompt for row in solver.history[4::4])
+    assert any(proposer.calls for proposer in proposers)
+    assert "test" not in summary and "baseline" not in summary
+    assert not list(run_dir.rglob("heldout"))
 
 
 @pytest.mark.skipif(utils.dspy is None, reason="Requires the pinned hotpotqa-task-program group")

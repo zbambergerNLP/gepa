@@ -102,6 +102,24 @@ def test_separate_optimizer_server_requires_its_own_current_record(tmp_path, ser
         runtime.load_role_runtimes(args)
 
 
+def test_seed_only_evaluation_does_not_require_an_unused_proposer(tmp_path, server):
+    """Require only the live solver for pilots and unoptimized baseline evaluation."""
+    model = EXPERIMENT_MODELS[0]
+    identity = runtime_fixture(model)
+    task = write_record(tmp_path / "task.json", identity, server)
+    args = argparse.Namespace(
+        runtime_record=task,
+        student_model=model,
+        student_api_base="http://localhost:8000/v1",
+        proposer_runtime_record=tmp_path / "not-running.json",
+        proposer_model=EXPERIMENT_MODELS[1],
+        proposer_api_base=None,
+    )
+    assert runtime.load_role_runtimes(args, include_proposer=False) == {"student": identity}
+    with pytest.raises(FileNotFoundError):
+        runtime.load_role_runtimes(args)
+
+
 @pytest.mark.parametrize(
     "flag", ["--api-key=secret", "--api_key=secret", "--api-k=secret", "--model=other", "--chat-template=untracked"]
 )

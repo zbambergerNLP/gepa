@@ -174,14 +174,16 @@ def load_runtime_record(path: Path | None, model: str, api_base: str | None) -> 
     return deepcopy(identity)
 
 
-def load_role_runtimes(args: argparse.Namespace) -> dict[str, Any]:
-    """Validate task and optimizer servers, sharing one record when appropriate."""
-    return {
+def load_role_runtimes(args: argparse.Namespace, *, include_proposer: bool = True) -> dict[str, Any]:
+    """Validate live servers for the model roles that the requested run executes."""
+    result = {
         "student": load_runtime_record(args.runtime_record, args.student_model, args.student_api_base),
-        "proposer": load_runtime_record(
-            args.proposer_runtime_record or args.runtime_record, args.proposer_model, args.proposer_api_base
-        ),
     }
+    if include_proposer:
+        result["proposer"] = load_runtime_record(
+            args.proposer_runtime_record or args.runtime_record, args.proposer_model, args.proposer_api_base
+        )
+    return result
 
 
 def collect_identity(model: str, model_path: Path, arguments: list[str], options: argparse.Namespace) -> dict[str, Any]:

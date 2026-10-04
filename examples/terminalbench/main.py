@@ -83,7 +83,8 @@ def build_benchmark(args: argparse.Namespace, models: BenchmarkModels) -> Benchm
             proposer_model=models.proposer_model,
             student_api_base=models.solver_api_base,
             proposer_api_base=models.proposer_api_base,
-        )
+        ),
+        include_proposer=args.mode in {"optimize", "optimizer-pilot"},
     )
     scope = TerminalBenchTextScope("system_prompt", resolve_template_family(args.template_family, models.solver_model))
     solver_kwargs = deepcopy(models.solver_kwargs)
@@ -128,7 +129,7 @@ def build_benchmark(args: argparse.Namespace, models: BenchmarkModels) -> Benchm
         runtime={
             "harness": "terminalbench-shared-v1",
             "adapter": TERMINUS_ADAPTER_CONTRACT,
-            "execution_runtime": runtime,
+            "execution_runtime": {"student": runtime["student"]},
             "optimization_scope": scope.contract(),
             "document_bundle_version": BUNDLE_VERSION,
             "seed_document_digest": manifest.candidate_digest(scope.materialize(scope.seed_candidate())),
@@ -146,6 +147,7 @@ def build_benchmark(args: argparse.Namespace, models: BenchmarkModels) -> Benchm
         test_repetitions=TEST_REPETITIONS,
         component_kinds=scope.component_kinds,
         max_candidate_proposals=TRAINING_EPOCHS_BY_BUDGET[args.budget] * iterations_per_epoch,
+        optimizer_runtime=runtime.get("proposer", {}),
     )
 
 

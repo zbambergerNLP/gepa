@@ -65,6 +65,12 @@ uv run --no-sync python -m examples.hotpotqa.main \
   --run-dir outputs/hotpotqa
 ```
 
+Use `--mode optimizer-pilot --condition all --pilot-size 1 --pilot-proposals 1`
+to exercise the five optimizer conditions using only training examples and
+training selection. This mode requires both model endpoints and writes no
+held-out result. The [shared suite guide](../BENCHMARKS.md) lists the supported
+FOREST levels, controllers, editors, and GEPA search settings.
+
 Use `--mode optimize --condition both` for the paired methods or `--mode baseline`
 for the shared seed baseline. Offline tests exercise the actual pinned DSPy
 program with fixture completions and retrieval; model quality, server transport

@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from benchmark_model_fixtures import install_proposer
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
@@ -527,3 +528,70 @@ def test_qwen_embedding_boundary_uses_exact_pinned_checkpoint(monkeypatch):
     assert calls[-1][1]["prompt"] == ""
     encoder.encode(["question"], query=True)
     assert calls[-1][1]["prompt_name"] == "query"
+
+
+@pytest.mark.parametrize("condition", ["vanilla", "random", "action", "react_v2_random", "react_v2"])
+def test_optimizer_pilot_runs_dense_retrieval_and_real_optimizer_on_training_only(
+    pinned_data, obliq_runtime, tmp_path, monkeypatch, condition
+):
+    """Replace model responses while retaining loading, dense ranking, scoring and optimization."""
+    import litellm
+
+    from examples.obliqbench import main as obliq_main
+
+    solver_requests = []
+
+    def completion(**kwargs):
+        solver_requests.append(deepcopy(kwargs))
+        assert kwargs["model"] == QWEN3_8_27B_MODEL
+        messages = kwargs["messages"]
+        query = json.loads(messages[-1]["content"])["query"]
+        content = json.dumps({"query": query}) if "improved" in messages[0]["content"] else "malformed rewrite"
+        return litellm.ModelResponse(
+            model=kwargs["model"],
+            choices=[{"message": {"role": "assistant", "content": content}, "finish_reason": "stop"}],
+            usage={"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+        )
+
+    monkeypatch.setattr(litellm, "completion", completion)
+    encoder = EncoderBoundary()
+    monkeypatch.setattr(obliq_main, "QwenEncoder", lambda device: encoder)
+    proposers = install_proposer(monkeypatch)
+    root = tmp_path / "optimizer-run"
+    argv = [
+        "--mode",
+        "optimizer-pilot",
+        "--condition",
+        condition,
+        "--pilot-size",
+        "1",
+        "--pilot-proposals",
+        "1",
+        "--subsets",
+        "twitter",
+        "--data-dir",
+        str(pinned_data),
+        "--index-dir",
+        str(tmp_path / "index"),
+        "--run-dir",
+        str(root),
+    ]
+    assert obliq_main.main(argv) == 0
+    directory = root / "optimizer-pilot" / condition
+    winner = json.loads((directory / "pilot-winner.json").read_text())
+    summary = json.loads((directory / "summary.json").read_text())
+    assert winner["selection_split"] == "train"
+    assert winner["training_score"] > 0
+    assert "improved" in winner["candidate"][COMPONENT]
+    assert not {"test", "baseline"} & summary.keys()
+    timings = [json.loads(line) for line in (directory / "task-timings.jsonl").read_text().splitlines()]
+    train_id = load_data(pinned_data, ["twitter"]).splits["train"][0]["id"]
+    assert len(timings) >= 4 and {row["id"] for row in timings} == {train_id}
+    assert all(row["split"] == "train" for row in timings)
+    assert any(row["score"] == 0 for row in timings) and any(row["score"] > 0 for row in timings)
+    assert any(instance.calls for instance in proposers)
+    assert any(query for _, query in encoder.calls) and any(not query for _, query in encoder.calls)
+    assert not list(root.rglob("heldout")) and not list(root.rglob("frozen-winner.json"))
+    call_count = len(solver_requests)
+    assert obliq_main.main(argv) == 0
+    assert len(solver_requests) == call_count

@@ -180,15 +180,46 @@ def test_fetch_records_real_bytes_and_checks_expected_hash(tmp_path, monkeypatch
     source = tmp_path / "asset.txt"
     source.write_text("complete original source")
     digest = hashlib.sha256(source.read_bytes()).hexdigest()
-    _run_shell(resources._fetch(source.as_uri(), "public/asset.txt", revision="v1", sha256=digest))
+    aliases = ("ftp://public.example/v1/asset.txt", "https://public.example/v1/asset.txt")
+    _run_shell(resources._fetch(source.as_uri(), "public/asset.txt", revision="v1", sha256=digest, aliases=aliases))
     records = json.loads((stage / "resource-urls.json").read_text())
     assert records[source.as_uri()]["sha256"] == digest
     assert Path(records[source.as_uri()]["path"]).read_bytes() == source.read_bytes()
+    assert all(records[url] == records[source.as_uri()] for url in aliases)
     failed = _run_shell(
-        resources._fetch(source.as_uri(), "public/bad.txt", revision="v1", sha256="0" * 64), check=False
+        resources._fetch(source.as_uri(), "public/asset.txt", revision="v1", sha256="0" * 64, aliases=aliases),
+        check=False,
     )
     assert failed.returncode != 0
     assert "Pinned public resource hash mismatch" in failed.stderr
+    assert json.loads((stage / "resource-urls.json").read_text()) == records
+    assert (stage / "resources/public/asset.txt").read_bytes() == source.read_bytes()
+
+
+def test_povray_uses_pinned_official_ftp_and_retains_https_cache_aliases():
+    manifest = prepare_offline.load_terminalbench_manifest(prepare_offline.MANIFEST_PATH)
+    task_id = "terminal-bench/build-pov-ray"
+    commands = resources.resource_recipe_commands(task_id, manifest.task_refs[task_id])
+    records = [
+        ast.literal_eval(line.removeprefix("record = "))
+        for command in commands
+        for line in command.splitlines()
+        if line.startswith("record = ")
+    ]
+    assert {Path(record["path"]).name for record in records} == {
+        "POVSRC.ZIP",
+        "POVDOC.ZIP",
+        "POVSCN.ZIP",
+        "README2.2",
+        "POVINF.DOC",
+        "KNOWNBUGS.DOC",
+    }
+    for record in records:
+        filename = Path(record["path"]).name
+        assert record["url"] == "ftp://ftp.povray.org/pub/povray/Old-Versions/Official-2.2/" + filename
+        assert record["aliases"] == ["https://www.povray.org/ftp/pub/povray/Old-Versions/Official-2.2/" + filename]
+        assert re.fullmatch(r"[0-9a-f]{64}", record["sha256"])
+        assert record["revision"] == "Official-2.2"
 
 
 def _git_fixture(path):

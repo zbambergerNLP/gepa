@@ -57,6 +57,14 @@ UV_ASSETS = {
         "uv-x86_64-unknown-linux-gnu.tar.gz.sha256": "2899367da565333b4cbd4a98e602e5c8af215a8d3728a0fd72a3a448dafa2700",
     },
 }
+POVRAY_2_2_ASSETS = {
+    "POVSRC.ZIP": "a1b8c5bf0896333918cb0f8bc1f30982c8b7033805d1849dc8db7dfc45afba91",
+    "POVDOC.ZIP": "dfce19df76728b46895b555f5d9563ae26489d32a7b4ea7a07adf8772c2472ff",
+    "POVSCN.ZIP": "80c8a11c375df9d87650f74d7afa04a8a98ef611278c9bb15cbdf6525e57da66",
+    "README2.2": "7a2750c8b0d3a6cc9fe774a6bd571add5494a2f29d59f2912a1d2db4ad4f6e1a",
+    "POVINF.DOC": "020ed94eb413cccfc01872dc7eec36095b0b6bdbacf9e2cdbf808e54dfaa4798",
+    "KNOWNBUGS.DOC": "e74ed493f476c36df14553430869a9d70f4f16080e9f28918720b2a9a58ab104",
+}
 
 # Keep this executable compatible with the base image's Python 3.9. The managed
 # Harbor environment does not exist yet when its genuine uv installer runs.
@@ -568,11 +576,15 @@ def resource_recipe_commands(task_id: str, task_ref: str) -> list[str]:
             )
     elif kind == "povray":
         commands += _apt_cache(["build-essential", "unzip"])
-        for filename in ("POVSRC.ZIP", "POVDOC.ZIP", "POVSCN.ZIP", "README2.2", "POVINF.DOC", "KNOWNBUGS.DOC"):
+        # The HTTPS mirror challenges automated downloads; the project's public
+        # FTP endpoint still serves these original, byte-pinned release files.
+        for filename, digest in POVRAY_2_2_ASSETS.items():
             commands += _fetch(
-                "https://www.povray.org/ftp/pub/povray/Old-Versions/Official-2.2/" + filename,
+                "ftp://ftp.povray.org/pub/povray/Old-Versions/Official-2.2/" + filename,
                 "povray-2.2/" + filename,
                 revision="Official-2.2",
+                sha256=digest,
+                aliases=("https://www.povray.org/ftp/pub/povray/Old-Versions/Official-2.2/" + filename,),
             )
     elif kind == "caffe":
         commands += _preserve_nproc_wrapper(4)

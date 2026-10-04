@@ -4,7 +4,7 @@ from copy import deepcopy
 
 import pytest
 
-from examples.hotpotqa.main import TEACHER_RUNTIME_KEYS
+from examples.hotpotqa.legacy_main import TEACHER_RUNTIME_KEYS
 from examples.hotpotqa.paired_runtime import combine_runtimes, split_devices
 
 

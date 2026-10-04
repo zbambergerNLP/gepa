@@ -27,7 +27,7 @@ from examples.common.react_v2 import benchmark_data_identity, resolve_template_f
 from examples.common.recovery import RecoveryCallback, run_guarded, seal_progress
 from examples.common.wiki17_bm25 import Wiki17BM25Retriever
 from examples.hotpotqa.benchmark_settings import TRAIN_SIZE
-from examples.hotpotqa.main import (
+from examples.hotpotqa.legacy_main import (
     _validate_scientific_data_identity,
     _verify_scientific_retriever_integrity,
     build_config,

@@ -265,7 +265,7 @@ echo "==> solver=${SOLVER_MODEL} local_api_base=${SOLVER_API_BASE}"
 echo "==> reflection=${REFLECTION_MODEL} local_api_base=${REFLECTION_API_BASE}"
 echo "==> retrieval=Wiki-2017/BM25 k=7 concurrent_examples=${MAX_WORKERS} root=${WIKI17_DIR}"
 
-"${PY}" -m examples.hotpotqa.main \
+"${PY}" -m examples.hotpotqa.legacy_main \
     --solver-model "${SOLVER_MODEL}" \
     --reflection-model "${REFLECTION_MODEL}" \
     "${SOLVER_API_ARG[@]}" \

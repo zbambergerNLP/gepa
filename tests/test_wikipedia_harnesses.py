@@ -25,8 +25,9 @@ from examples.common.experiment_models import (
     experiment_decoding,
     experiment_request_overrides,
 )
+from examples.common.model_settings import SCIENTIFIC_REQUEST_SEED
 from examples.common.wikipedia import WikipediaClient, WikipediaPassage
-from examples.hotpotqa import main as hotpot_main
+from examples.hotpotqa import legacy_main as hotpot_main
 from examples.hotpotqa import utils as hotpot_utils
 
 REPO_ROOT = Path(__file__).parents[1]
@@ -98,7 +99,7 @@ def test_hotpot_lm_uses_local_campaign_decoding(monkeypatch, model: str) -> None
         **experiment_request_overrides(model, explicit_reasoning=True),
         "max_tokens": 65_536,
     }
-    expected_request["seed"] = hotpot_utils.HOTPOTQA_SCIENTIFIC_REQUEST_SEED
+    expected_request["seed"] = SCIENTIFIC_REQUEST_SEED
     expected_request["extra_body"]["thinking_token_budget"] = 32_768
     assert 3599 < calls[0]["timeout"] <= 3600
     assert {key: value for key, value in calls[0].items() if key not in {"model", "messages", "timeout"}} == {
@@ -605,7 +606,7 @@ def test_hotpot_dspy_lm_uses_the_standard_local_deepseek_client(monkeypatch) -> 
     assert result is lm_constructor.return_value
     lm_constructor.assert_called_once()
     assert lm_constructor.call_args.kwargs["api_base"] == "http://127.0.0.1:8000/v1"
-    assert lm_constructor.call_args.kwargs["seed"] == hotpot_utils.HOTPOTQA_SCIENTIFIC_REQUEST_SEED
+    assert lm_constructor.call_args.kwargs["seed"] == SCIENTIFIC_REQUEST_SEED
 
 
 def test_hotpot_smoke_conversion_retains_gold_context_for_feedback() -> None:
@@ -900,22 +901,13 @@ def test_hotpot_metric_preserves_normalized_em(prediction, gold, expected) -> No
     assert "F1" not in feedback
 
 
-@pytest.mark.parametrize("benchmark", ["hotpotqa"])
-def test_wikipedia_python_defaults_use_the_qwen_experiment_pair(benchmark: str) -> None:
-    """Default both Python model roles to the Qwen3.8-27B condition.
+def test_hotpotqa_legacy_defaults_use_shared_solver_and_proposer() -> None:
+    """Keep the explicit legacy CLI on the shared Qwen solver and DeepSeek proposer."""
+    args = hotpot_main.build_parser().parse_args([])
 
-    Args:
-        benchmark: Wikipedia benchmark whose Python entrypoint is inspected.
-    """
-    source = (REPO_ROOT / "examples" / benchmark / "main.py").read_text()
-
-    assert source.count("default=QWEN3_8_27B_MODEL") == 2
-    validator = (
-        "_validate_hotpotqa_model_pair(args.solver_model, args.reflection_model)"
-        if benchmark == "hotpotqa"
-        else "validate_experiment_model_pair(args.solver_model, args.reflection_model)"
-    )
-    assert validator in source
+    assert args.solver_model == QWEN3_8_27B_MODEL
+    assert args.reflection_model == DEEPSEEK_V4_1_FLASH_MODEL
+    hotpot_main._validate_hotpotqa_model_pair(args.solver_model, args.reflection_model)
 
 
 @pytest.mark.parametrize("benchmark", ["hotpotqa"])
@@ -1004,7 +996,7 @@ def test_hotpotqa_sbatch_limits_nested_cpu_threads_after_vllm_starts() -> None:
     assert "source scripts/della/remote/hotpotqa_workload.sh" in script
     script += (REPO_ROOT / "scripts/della/remote/hotpotqa_workload.sh").read_text()
     vllm_start = script.index('"${VLLM_BIN}" serve "${SOLVER_MODEL_PATH}"')
-    evaluator_start = script.index(f'"${{PY}}" -m examples.{benchmark}.main')
+    evaluator_start = script.index(f'"${{PY}}" -m examples.{benchmark}.legacy_main')
 
     for variable, default in (
         ("OMP_NUM_THREADS", "1"),

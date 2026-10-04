@@ -10,7 +10,7 @@ import pytest
 from test_wikipedia_react_v2_config import _hotpot_args
 
 from examples.common.experiment_models import DEEPSEEK_V4_1_FLASH_MODEL
-from examples.hotpotqa.main import _run_key, build_config, build_parser, build_run_contract
+from examples.hotpotqa.legacy_main import _run_key, build_config, build_parser, build_run_contract
 from gepa.core.data_loader import ListDataLoader
 from gepa.strategies.batch_sampler import IndependentEpochShuffledBatchSampler
 
@@ -74,7 +74,7 @@ def test_default_three_keeps_existing_contract_and_cli():
 def test_workload_forwards_minibatch_to_experiment(size):
     """Execute the launch command with a recording client to check the actual CLI."""
     source = (ROOT / "scripts/della/remote/hotpotqa_workload.sh").read_text()
-    block = source[source.index('"${PY}" -m examples.hotpotqa.main') :]
+    block = source[source.index('"${PY}" -m examples.hotpotqa.legacy_main') :]
     env = {
         **os.environ,
         **dict.fromkeys(re.findall(r"\$\{([A-Z][A-Z_0-9]*)", block), "fixture"),

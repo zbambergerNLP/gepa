@@ -17,7 +17,7 @@ from examples.common.experiment_models import (
     QWEN3_8_27B_PROFILE,
 )
 from examples.common.pilot_checks import atomic_json
-from examples.hotpotqa.main import TEACHER_RUNTIME_KEYS
+from examples.hotpotqa.legacy_main import TEACHER_RUNTIME_KEYS
 
 QWEN_GPU_COUNT = 1
 DEEPSEEK_GPU_COUNT = 4

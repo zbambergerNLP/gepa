@@ -6,7 +6,7 @@ import pytest
 
 from examples.common.pilot_checks import METHODS, CycleEvidence, atomic_json, load_cycle, require_contract
 from examples.common.recovery import RecoveryCallback, snapshot
-from examples.hotpotqa import main as hotpotqa_main
+from examples.hotpotqa import legacy_main as hotpotqa_main
 from examples.hotpotqa import pilot
 from examples.hotpotqa.pilot import run_calibration, strict_evaluator, validate_calibration
 from examples.hotpotqa.pilot_report import overlap_seconds, report, request_intervals

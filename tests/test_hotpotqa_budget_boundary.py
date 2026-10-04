@@ -2,7 +2,7 @@
 
 from collections import Counter
 
-from examples.hotpotqa.main import EngineConfig, GEPAConfig, ReflectionConfig, run_condition
+from examples.hotpotqa.legacy_main import EngineConfig, GEPAConfig, ReflectionConfig, run_condition
 
 
 def test_crossing_budget_finishes_validation_and_preserves_the_winner(tmp_path):

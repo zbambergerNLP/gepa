@@ -13,7 +13,7 @@ from test_jev_controller import setup_controller as _setup_controller
 from test_three_role import PROMPT, ThreeRoleLM, strategy, tool_call
 from test_wikipedia_react_v2_config import _hotpot_args
 
-from examples.hotpotqa.main import _run_key, build_config, build_parser, build_run_contract
+from examples.hotpotqa.legacy_main import _run_key, build_config, build_parser, build_run_contract
 from gepa import optimize
 from gepa.core.adapter import EvaluationBatch
 from gepa.gepa_launcher import EngineConfig, GEPAConfig, ReflectionConfig, optimize_anything

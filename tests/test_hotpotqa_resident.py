@@ -16,7 +16,7 @@ from test_wikipedia_react_v2_config import (
 )
 
 from examples.common.experiment_models import DEEPSEEK_V4_1_FLASH_MODEL
-from examples.hotpotqa.main import TEACHER_RUNTIME_KEYS, build_run_contract
+from examples.hotpotqa.legacy_main import TEACHER_RUNTIME_KEYS, build_run_contract
 
 ROOT = Path(__file__).parents[1]
 

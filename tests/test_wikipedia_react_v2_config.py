@@ -34,28 +34,28 @@ from examples.common.react_v2 import (
     resolve_template_family,
     structured_prompt,
 )
-from examples.hotpotqa.main import (
+from examples.hotpotqa.legacy_main import (
     _SCIENTIFIC_CONDITIONS_BY_BUDGET,
     _validate_scientific_contract,
     _validate_scientific_data_identity,
     _verify_scientific_retriever_integrity,
 )
-from examples.hotpotqa.main import (
+from examples.hotpotqa.legacy_main import (
     _run_key as hotpotqa_run_key,
 )
-from examples.hotpotqa.main import (
+from examples.hotpotqa.legacy_main import (
     build_config as build_hotpotqa_config,
 )
-from examples.hotpotqa.main import (
+from examples.hotpotqa.legacy_main import (
     build_run_contract as build_hotpotqa_run_contract,
 )
-from examples.hotpotqa.main import (
+from examples.hotpotqa.legacy_main import (
     dump_candidates as dump_hotpotqa_candidates,
 )
-from examples.hotpotqa.main import (
+from examples.hotpotqa.legacy_main import (
     run_condition as run_hotpotqa_condition,
 )
-from examples.hotpotqa.main import (
+from examples.hotpotqa.legacy_main import (
     seed_candidate as hotpotqa_seed_candidate,
 )
 from examples.hotpotqa.utils import HOTPOTQA_HF_REVISION, HOTPOTQA_SCIENTIFIC_SPLIT_SHA256, resolve_hotpotqa_lm_kwargs
@@ -1430,7 +1430,7 @@ def test_deepseek_serving_environment_is_material_to_contract_and_run_key(monkey
 )
 def test_hotpot_teacher_student_all_roles_and_separate_runtime(monkeypatch, tmp_path, condition, budget):
     """Route all optimizer roles to DeepSeek and keep the original Qwen task prompts."""
-    from examples.hotpotqa.main import TEACHER_RUNTIME_KEYS
+    from examples.hotpotqa.legacy_main import TEACHER_RUNTIME_KEYS
 
     for name, value in QWEN_SCIENTIFIC_RUNTIME.items():
         monkeypatch.setenv(name, value)

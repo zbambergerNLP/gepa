@@ -12,7 +12,7 @@ from test_three_role import PROMPT, SYS_REFLECTIVE_DATASET, make_reflective_prop
 from test_wikipedia_react_v2_config import _hotpot_args
 from typesafe_sdk import RetryPolicy, TypeSafeClient
 
-from examples.hotpotqa.main import _run_key, build_config, build_parser, build_run_contract
+from examples.hotpotqa.legacy_main import _run_key, build_config, build_parser, build_run_contract
 from gepa.lm import LMRequestExhaustedError
 from gepa.proposer.reflective_mutation.three_role import ThreeRoleReflectionLM, ensure_reflection_run_contract
 from gepa.response_journal import ResponseJournalError, response_journal_scope

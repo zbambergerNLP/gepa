@@ -16,11 +16,19 @@ import litellm  # type: ignore[import-not-found]
 from examples.hotpotqa.benchmark_settings import (
     DATASET_SAMPLE_SEED,
     DATASET_SIZE,
+    DEFAULT_DATA_PATH,
+    FINAL_RESPONSE_MARKER,
+    HOTPOTQA_DSPY_COMMIT,
+    HOTPOTQA_DSPY_VERSION,
+    HOTPOTQA_HF_REVISION,
     RETRIEVAL_K,
     TEST_SIZE,
     TRAIN_SIZE,
     TRAIN_VALIDATION_SIZE,
     VALIDATION_SIZE,
+)
+from examples.hotpotqa.benchmark_settings import (
+    HOTPOTQA_SCIENTIFIC_SPLIT_SHA256 as HOTPOTQA_SCIENTIFIC_SPLIT_SHA256,
 )
 from gepa.strategies.forest_constants import SOLVER_ROLE
 
@@ -32,23 +40,6 @@ except ImportError:
 from examples.common.experiment_models import QWEN3_8_27B_MODEL
 from examples.common.model_settings import resolve_benchmark_lm_kwargs
 from examples.common.wikipedia import WikipediaPassage, WikipediaRetriever
-
-DEFAULT_DATA_PATH = os.path.join(
-    os.path.dirname(__file__),
-    "data",
-    "hotpotqa_distractor_sample.jsonl",
-)
-
-FINAL_RESPONSE_MARKER = "Final Response:"
-HOTPOTQA_DSPY_VERSION = "2.6.23"
-HOTPOTQA_DSPY_COMMIT = "62dc3b634d7dc0c4889abcf905cb4c391ea6b396"
-HOTPOTQA_HF_REVISION = "1908d6afbbead072334abe2965f91bd2709910ab"
-HOTPOTQA_SCIENTIFIC_SPLIT_SHA256 = {
-    "train": "0287a62f31caa939df13d9e176436293a5c071164728bcb3cfcbf8dd40a7918e",
-    "val": "c6d794b172724eb87e8087d671b74e94725040b79c9a63980cb45dcb53146408",
-    "test": "55cd1c7a999476ea4c7ec67f964ad4fa0ae662a2b9f7ade59c64108e659add31",
-}
-
 
 if dspy is not None:
 

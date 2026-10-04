@@ -22,7 +22,7 @@ from examples.common.react_v2 import benchmark_data_identity, resolve_template_f
 from examples.common.wiki17_bm25 import Wiki17BM25Retriever
 from examples.common.wikipedia import WikipediaPassage
 from examples.hotpotqa.benchmark_settings import DEFAULT_MAX_WORKERS
-from examples.hotpotqa.main import (
+from examples.hotpotqa.legacy_main import (
     _validate_scientific_data_identity,
     _verify_scientific_retriever_integrity,
     build_config,

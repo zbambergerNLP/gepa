@@ -13,7 +13,7 @@ from test_wikipedia_react_v2_config import _hotpot_args
 
 from examples.common.experiment_models import EXPERIMENT_MODELS, QWEN3_8_27B_MODEL
 from examples.common.react_v2 import benchmark_data_identity
-from examples.hotpotqa import main as hotpot
+from examples.hotpotqa import legacy_main as hotpot
 from examples.hotpotqa.baseline import BASELINE_CONTRACT_FILENAME, baseline_directory, build_baseline_contract
 from gepa.core.result import GEPAResult
 from gepa.core.state import GEPAState, ValsetEvaluation

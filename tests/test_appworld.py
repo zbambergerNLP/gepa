@@ -17,7 +17,7 @@ from examples.appworld import utils
 from examples.appworld.adapter import AppWorldAdapter, validate_evaluation
 from examples.appworld.benchmark_settings import APPWORLD_REVISION, COMPONENT, OFFICIAL_SPLITS
 from examples.appworld.main import add_arguments, build_benchmark
-from examples.appworld.model_settings import DEFAULT_PROPOSER_MODEL, DEFAULT_SOLVER_MODEL
+from examples.common.experiment_models import DEFAULT_PROPOSER_MODEL, DEFAULT_SOLVER_MODEL
 from examples.appworld.prompts import extract_code, initial_messages, seed_candidate
 from examples.appworld.runtime import AppWorldRuntimeError, OfficialAppWorld, inspect_runtime
 from examples.appworld.worker import dispatch, tracker_result

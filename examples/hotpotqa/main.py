@@ -1,7 +1,4 @@
-"""Run the pinned HotPotQA program through the shared benchmark lifecycle.
-
-The historical campaign CLI and artifacts remain in ``examples.hotpotqa.legacy_main``.
-"""
+"""Run the pinned HotPotQA program through the shared benchmark lifecycle."""
 
 from __future__ import annotations
 
@@ -38,7 +35,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
 
 def load_benchmark_data(data_path: Path | None) -> tuple[list[dict], list[dict], list[dict], dict]:
     """Freeze the artifact split independently of optimization seed and prefix limits."""
-    train, val, test = load_hotpotqa_dataset(data_path=str(data_path) if data_path else None, seed=0)
+    train, val, test = load_hotpotqa_dataset(data_path=str(data_path) if data_path else None)
     splits = {"train": train, "val": val, "test": test}
     seen_ids, seen_questions = set(), set()
     for name, rows in splits.items():

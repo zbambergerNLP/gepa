@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 
 import pytest
 
@@ -188,16 +187,18 @@ def test_canonical_data_drift_fails_before_retrieval(monkeypatch):
         main.load_benchmark_data(None)
 
 
-def test_primary_and_legacy_entrypoints_are_explicit():
-    from examples.hotpotqa import legacy_main
-
-    assert main.main is not legacy_main.main
-    assert main.build_benchmark.__module__ == "examples.hotpotqa.main"
-    parser = build_parser("hotpotqa", main.add_arguments)
-    assert parser.parse_args([]).condition == "both"
-    assert legacy_main.build_parser().parse_args([]).program == "2stage"
-    workload = Path("scripts/della/remote/hotpotqa_workload.sh").read_text()
-    assert '"${PY}" -m examples.hotpotqa.legacy_main' in workload
+def test_primary_entrypoint_uses_shared_runner(monkeypatch):
+    calls = []
+    monkeypatch.setattr(main, "run_cli", lambda **kwargs: calls.append(kwargs) or 0)
+    assert main.main(["--mode", "pilot"]) == 0
+    assert calls == [
+        {
+            "benchmark_name": "hotpotqa",
+            "build_benchmark": main.build_benchmark,
+            "add_arguments": main.add_arguments,
+            "argv": ["--mode", "pilot"],
+        }
+    ]
 
 
 @pytest.mark.smoke

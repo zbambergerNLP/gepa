@@ -17,6 +17,7 @@ from importlib.metadata import version
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from examples.common.artifacts import atomic_json, digest
 from examples.common.benchmark_settings import (
     DEFAULT_MAX_METRIC_CALLS,
     DEFAULT_MAX_WORKERS,
@@ -30,7 +31,6 @@ from examples.common.experiment_models import (
     experiment_model_version,
 )
 from examples.common.model_settings import resolve_benchmark_lm_kwargs, validate_benchmark_model_pair
-from examples.common.pilot_checks import atomic_json, digest
 from examples.common.provider_retries import PROVIDER_RETRY_POLICY, provider_retry_kwargs
 from examples.common.react_v2 import (
     benchmark_data_identity,

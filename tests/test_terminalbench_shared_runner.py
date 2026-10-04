@@ -11,7 +11,6 @@ import pytest
 
 from examples.common.benchmark_runner import build_parser, resolve_models, validate_definition
 from examples.common.experiment_models import DEFAULT_PROPOSER_MODEL, DEFAULT_SOLVER_MODEL
-from examples.terminalbench import legacy_main
 from examples.terminalbench import main as terminalbench
 from examples.terminalbench.shared_adapter import SharedTerminusAdapter, trial_elapsed_seconds
 from gepa.adapters.terminal_bench_adapter import HarborExecutionError
@@ -96,7 +95,6 @@ def definition(tmp_path, *options):
 def test_primary_entrypoint_is_a_direct_shared_route(monkeypatch):
     runner = Mock(return_value=0)
     monkeypatch.setattr(terminalbench, "run_cli", runner)
-    monkeypatch.setattr(legacy_main, "main", Mock(side_effect=AssertionError("legacy dispatch")))
     assert terminalbench.main(["--mode", "pilot"]) == 0
     runner.assert_called_once_with(
         benchmark_name="terminalbench",
@@ -131,7 +129,7 @@ def test_definition_uses_pinned_full_data_epochs_and_official_adapter(tmp_path, 
     assert benchmark.max_candidate_proposals == cap
     assert args.max_metric_calls is None
     assert benchmark.test_repetitions == 3
-    assert benchmark.seed_candidate == legacy_main.seed_candidate(models.solver_model, "auto", "tb2.1")[0]
+    assert benchmark.seed_candidate == benchmark.adapter.adapter.text_scope.seed_candidate()
     assert benchmark.component_kinds == {"instruction_prompt": "user_prompt"}
     observed, runtime, requirements = external_boundaries
     assert not observed

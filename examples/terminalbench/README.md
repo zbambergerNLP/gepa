@@ -38,14 +38,14 @@ methods and budgets reuse the same starting baseline.
 After the pinned model servers and Harbor runtime are prepared:
 
 ```sh
-uv run python -m examples.terminalbench.main --mode pilot \
+uv run --no-sync python -m examples.terminalbench.main --mode pilot \
   --runtime-record /path/to/solver-runtime.json \
   --proposer-runtime-record /path/to/proposer-runtime.json \
   --solver-api-base http://localhost:8000/v1 \
   --reflection-api-base http://localhost:8001/v1 \
   --run-dir outputs/terminalbench-pilot
 
-uv run python -m examples.terminalbench.main --condition both \
+uv run --no-sync python -m examples.terminalbench.main --condition both \
   --runtime-record /path/to/solver-runtime.json \
   --proposer-runtime-record /path/to/proposer-runtime.json \
   --solver-api-base http://localhost:8000/v1 \
@@ -67,27 +67,11 @@ teardown. Missing, malformed, or incomplete timing evidence is an error; batch
 wall time is never divided by task count to fabricate latency. The shared runner
 reports latency mean/median/p95 separately from measured batch throughput.
 
-## Historical campaign compatibility
-
-The previous full campaign remains in
-`python -m examples.terminalbench.legacy_main`. `run_ablations`, `optimizer_pilot`,
-the historical canary/pilot review helpers, and the frozen-checkpoint evaluator
-explicitly use that entrypoint. They preserve the older action/random-controller
-ablations, all-text scope, calibration review, and historical artifact schemas.
-Use these only to reproduce or resume that existing campaign. New suite runs
-use the primary shared entrypoint and its shared artifact lifecycle.
-
-The primary route deliberately does not reuse historical run directories or
-the old pilot-review schema. The shared runner's `--mode pilot` supplies its
-training-only calibration path. Existing full-text campaign configurations and
-frozen artifacts remain available through the legacy commands.
-
 ## Verification and source
 
 ```sh
-uv run python -m pytest -q tests/test_terminalbench_shared_runner.py \
-  tests/test_terminalbench_cli.py tests/test_terminalbench_ablations.py \
-  tests/test_terminalbench_evaluation.py tests/test_terminal_bench_adapter.py \
+uv run --no-sync python -m pytest -q tests/test_terminalbench_shared_runner.py \
+  tests/test_terminalbench_runtime.py tests/test_terminal_bench_adapter.py \
   tests/test_benchmark_runner.py
 ```
 
@@ -95,8 +79,7 @@ The new route tests replace only external serving/Harbor boundaries and execute
 the actual shared runner, adapter, candidate materialization, and reports. They
 check real propagation of edited prompts, different per-task durations,
 seed/repetition handling, failure on incomplete evidence, retained 4/8 epochs,
-full-data identity, and required preflight. The existing historical harness tests
-continue to exercise `legacy_main`.
+full-data identity, and required preflight.
 
 Official timing semantics were checked against Harbor 0.22.0's
 [TrialResult schema](https://github.com/harbor-framework/harbor/blob/v0.22.0/src/harbor/models/trial/result.py)

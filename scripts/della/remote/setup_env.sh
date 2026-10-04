@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build the GEPA venv and one hash-locked vLLM serving venv per model on della-vis1.
 # Run from the synced checkout with SCRATCH_BASE set (scripts/della/build_env.sh does
-# both). Each venv is frozen into a manifest that submit_hotpotqa.sh and the sbatch verify.
+# both). Each venv is frozen into a manifest for serving-runtime verification.
 set -euo pipefail
 export PYTHONPATH="${PWD}/src:${PWD}"
 

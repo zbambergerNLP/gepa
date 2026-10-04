@@ -1,7 +1,7 @@
 # Optional character limits
 
-HotPotQA and Terminal-Bench 2.1 use the same `TextLimits`
-configuration. Every field defaults to `None` in Python or `null` in JSON,
+The GEPA library exposes a `TextLimits` configuration. The shared benchmark
+runner uses its unlimited defaults. Every field defaults to `None` in Python or `null` in JSON,
 meaning **unlimited**. These settings are separate from model output-token
 budgets and context capacity.
 
@@ -25,38 +25,6 @@ Unicode preserved for structured messages and tool definitions. It never cuts a
 complete request to make it fit. Document caps count actual component text and
 candidate sums, without JSON serialization overhead.
 
-Both experiment CLIs accept a JSON object; omitted fields remain unlimited:
-
-```sh
---text-limits '{"max_component_chars":10000,"selector_target_chars":8000,"manifestor_steering_chars":1200}'
-```
-
-For the Della launcher, set `HOTPOTQA_TEXT_LIMITS_JSON` to the same JSON object.
-The launcher validates it and passes it to every campaign cell. All resolved
-values enter run contracts and run identity. Changing any value requires a fresh
-run directory; final comparisons require matching shared settings.
-
-The Python API accepts the same configuration:
-
-```python
-from gepa.strategies.text_limits import TextLimits
-
-limits = TextLimits(max_component_chars=10000, selector_target_chars=8000)
-# gepa.optimize(..., text_limits=limits)
-# ReflectionConfig(..., text_limits=limits)
-# ThreeRoleReflectionLM(..., text_limits=limits)
-```
-
-Direct Controller, Manifestor, stateless-reflector, and ReAct constructors also
-accept `text_limits`. The shared experiment strategy builder forwards it to all
-roles. Existing explicit `max_chars` and `manifestor_traces_chars` arguments on
-the three-role strategy override their corresponding settings. An injected
-strategy and an explicit front-door configuration must agree. The optional
-per-evaluation refiner uses `RefinerConfig(text_limits=limits)` for its prompt,
-proposed text, and saved-output fields.
-
-Positive integers enable limits. Zero, negative numbers, booleans, non-integers,
-and unknown field names are rejected. With no configuration, all supplied text
-remains complete, including repeated passages, feedback, and log lines. No
-context deduplication is applied. Conciseness instructions remain guidance,
-without a numerical character target.
+Library integrations can pass a `TextLimits` instance to the optimizer and
+reflection strategy. The shared benchmark CLI keeps the standard unlimited
+profile; it does not expose a separate text-limits override.

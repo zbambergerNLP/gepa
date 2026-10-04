@@ -1,5 +1,5 @@
 #!/bin/bash
-# Steps 1-4 of examples/hotpotqa/DELLA_CAMPAIGN.md as one check: local
+# Check the preparation prerequisites in scripts/della/README.md: local
 # prerequisites, exact source commit and clean tree, scripts/della/.env,
 # non-interactive SSH to both Della hosts, and the serving prerequisites
 # (CUDA module, model storage, serving venv vs. lock) on the visualization

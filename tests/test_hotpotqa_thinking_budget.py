@@ -10,14 +10,14 @@ import pytest
 from examples.common.experiment_models import DEEPSEEK_V4_1_FLASH_MODEL, QWEN3_8_27B_MODEL
 from examples.hotpotqa import verify_thinking_budget as probe
 from examples.hotpotqa.serving import safe_thinking_budget as repair
-from examples.hotpotqa.utils import resolve_hotpotqa_lm_kwargs
+from examples.common.model_settings import resolve_benchmark_lm_kwargs
 
 
 @pytest.mark.parametrize("model", [DEEPSEEK_V4_1_FLASH_MODEL, QWEN3_8_27B_MODEL])
 def test_reasoning_budget_reserves_final_output_for_every_role(model):
     """Reserve answer/tool space while retaining the original total output ceiling."""
-    solver = resolve_hotpotqa_lm_kwargs(model, None)
-    optimizer = resolve_hotpotqa_lm_kwargs(model, None, role="optimizer")
+    solver = resolve_benchmark_lm_kwargs(model, None)
+    optimizer = resolve_benchmark_lm_kwargs(model, None, role="optimizer")
     assert solver["extra_body"]["thinking_token_budget"] == 32_768
     assert optimizer["extra_body"]["thinking_token_budget"] == (
         98_304 if model == DEEPSEEK_V4_1_FLASH_MODEL else 24_576

@@ -66,19 +66,9 @@ uv run --no-sync python -m examples.hotpotqa.main \
 ```
 
 Use `--mode optimize --condition both` for the paired methods or `--mode baseline`
-for the shared seed baseline. A new run directory is required when moving from
-the historical campaign format. Offline tests exercise the actual pinned DSPy
+for the shared seed baseline. Offline tests exercise the actual pinned DSPy
 program with fixture completions and retrieval; model quality, server transport
 and the full Wiki-2017 index still require a live pilot.
-
-## Historical campaigns
-
-The previous campaign CLI is explicitly available as
-`python -m examples.hotpotqa.legacy_main`. Its existing scientific contracts,
-resident runtime, one-stage ablation, campaign variants and artifact formats
-remain there. The dedicated Della workload, paired runtime and older pilot
-helpers now import or invoke this legacy module. The primary `main` entrypoint
-does not silently fall back to the legacy campaign runner.
 
 ## Sources
 

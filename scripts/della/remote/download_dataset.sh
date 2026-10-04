@@ -19,4 +19,4 @@ echo "==> Wiki-2017 BM25 index at ${WIKI17_DIR}"
 .venv/bin/python -m examples.common.wiki17_bm25 verify --deep --root "${WIKI17_DIR}"
 echo "==> HotpotQA fullwiki split"
 .venv/bin/python -c 'from examples.hotpotqa.utils import load_hotpotqa_dataset as load
-print("%d train / %d val / %d test" % tuple(map(len, load(seed=0))))'
+print("%d train / %d val / %d test" % tuple(map(len, load())))'

@@ -8,8 +8,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from typing import Any, cast
 
+from examples.common.artifacts import digest
 from examples.common.benchmark_types import BenchmarkModels
-from examples.common.pilot_checks import digest
 from examples.common.wikipedia import WikipediaPassage, WikipediaRetriever
 from examples.hotpotqa.benchmark_settings import RETRIEVAL_K, SEED_CANDIDATE
 from examples.hotpotqa.utils import artifact_component_records, build_hotpotqa_task_lm, hotpotqa_metric, run_two_stage

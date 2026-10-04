@@ -9,10 +9,8 @@ import httpx2
 import pytest
 from test_generation_recovery import Roles
 from test_three_role import PROMPT, SYS_REFLECTIVE_DATASET, make_reflective_proposer, strategy
-from test_wikipedia_react_v2_config import _hotpot_args
 from typesafe_sdk import RetryPolicy, TypeSafeClient
 
-from examples.hotpotqa.legacy_main import _run_key, build_config, build_parser, build_run_contract
 from gepa.lm import LMRequestExhaustedError
 from gepa.proposer.reflective_mutation.three_role import ThreeRoleReflectionLM, ensure_reflection_run_contract
 from gepa.response_journal import ResponseJournalError, response_journal_scope
@@ -611,34 +609,6 @@ def test_failure_bodies_and_unknown_usage_are_retained_without_credentials(setup
     final = json.loads(log.splitlines()[-1])
     assert final["response"]["message"] == "[REDACTED]"
     assert final["usage"] is None
-
-
-def test_hotpot_wiring_has_distinct_identity_and_separate_attempt_ledger(tmp_path):
-    """Give Jev distinct run and journal identities while retaining the campaign guard."""
-    args = _hotpot_args(condition="react_v2", controller_selection="jev", retrieval_provenance={"test": True})
-    original_args = _hotpot_args(condition="react_v2", retrieval_provenance={"test": True})
-    assert _run_key("react_v2", args) != _run_key("react_v2", original_args)
-    contract = build_run_contract("react_v2", args)
-    assert contract["optimizer"]["semantic_controller_policy"]["model"] == JEV_MODEL
-    assert contract["models"]["reflection_role_decoding"]["controller"]["provider"] == "typesafe"
-    config, _ = build_config("react_v2", args, {}, run_dir=str(tmp_path))
-    reflection = config.reflection.reflection_strategy
-    assert reflection.controller_selection == "jev"
-    assert reflection.jev_controller._attempt_log == tmp_path / "jev-provider-attempts.jsonl"
-    assert reflection.jev_controller._journal.namespace == "jev-controller"
-    assert reflection.base_lm._response_journal.namespace == "proposer"
-    assert build_parser().parse_args(["--controller-selection", "jev"]).controller_selection == "jev"
-    args.enforce_scientific_contract = True
-    with pytest.raises(ValueError, match="Jev"):
-        build_run_contract("react_v2", args)
-
-
-@pytest.mark.parametrize("condition,level", [("vanilla", 2), ("react_v2_random", 2), ("react_v2", 1)])
-def test_jev_cannot_silently_change_other_conditions(condition, level):
-    """Reject Jev outside the supported level-2 FOREST condition."""
-    args = _hotpot_args(controller_selection="jev", reflection_level=level)
-    with pytest.raises(ValueError, match="Jev requires"):
-        build_run_contract(condition, args)
 
 
 def test_strategy_uses_jev_then_manifestor_and_editor_and_restores_batch_state(setup_controller, tmp_path):

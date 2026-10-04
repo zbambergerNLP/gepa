@@ -117,8 +117,8 @@ def test_parser_exposes_react_v2_condition_and_ablation_axes() -> None:
     assert "--template-family" in help_text
 
 
-def test_parser_defaults_both_roles_to_qwen3_8_27b(tmp_path: Path) -> None:
-    """Use the homogeneous Qwen condition when model flags are omitted.
+def test_parser_defaults_to_qwen_solver_and_deepseek_proposer(tmp_path: Path) -> None:
+    """Use the shared Qwen solver and DeepSeek proposer by default.
 
     Args:
         tmp_path: Pytest directory used for required CLI paths.
@@ -139,7 +139,7 @@ def test_parser_defaults_both_roles_to_qwen3_8_27b(tmp_path: Path) -> None:
     )
 
     assert args.student_model == QWEN3_8_27B_MODEL
-    assert args.proposer_model == QWEN3_8_27B_MODEL
+    assert args.proposer_model == DEEPSEEK_V4_1_FLASH_MODEL
     assert args.optimization_scope == "system_prompt"
 
 
@@ -253,10 +253,10 @@ def test_generated_run_contract_records_metric_call_budget(tmp_path: Path) -> No
     assert contract["component_kinds"] == {"instruction_prompt": "user_prompt"}
     assert contract["runtime_component_kinds"] == COMPONENT_KINDS
     assert contract["student_model"] == QWEN3_8_27B_MODEL
-    assert contract["proposer_model"] == QWEN3_8_27B_MODEL
+    assert contract["proposer_model"] == DEEPSEEK_V4_1_FLASH_MODEL
     assert contract["student_decoding"] == terminalbench_decoding(QWEN3_8_27B_MODEL)
     assert contract["student_model_info"] == terminalbench_model_info(QWEN3_8_27B_MODEL)
-    assert contract["proposer_decoding"] == terminalbench_decoding(QWEN3_8_27B_MODEL, agentic=False)
+    assert contract["proposer_decoding"] == terminalbench_decoding(DEEPSEEK_V4_1_FLASH_MODEL, agentic=False)
     assert contract["student_num_retries"] == EXPERIMENT_NUM_RETRIES
     assert contract["proposer_num_retries"] == EXPERIMENT_NUM_RETRIES
     assert contract["semantic_action_space"] == SEMANTIC_ACTION_CATALOGS
@@ -737,8 +737,8 @@ def test_double_budget_rejects_extra_ablation_cells_before_harbor(
     assert not (tmp_path / "run").exists()
 
 
-def test_run_contract_rejects_a_cross_model_pair(tmp_path: Path) -> None:
-    """Reject a Qwen student paired with the DeepSeek proposer.
+def test_run_contract_accepts_shared_cross_model_pair(tmp_path: Path) -> None:
+    """Record Qwen solving and DeepSeek reflection independently.
 
     Args:
         tmp_path: Pytest directory used for parsed output paths.
@@ -746,15 +746,16 @@ def test_run_contract_rejects_a_cross_model_pair(tmp_path: Path) -> None:
     args = _model_args(tmp_path, QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL)
     manifest = load_terminalbench_manifest(MANIFEST_PATH)
 
-    with pytest.raises(ValueError, match="same model"):
-        build_run_contract(
-            args,
-            manifest,
-            manifest.tasks("train", 1),
-            manifest.tasks("val", 1),
-            "react_v2",
-            "alibaba",
-        )
+    contract = build_run_contract(
+        args,
+        manifest,
+        manifest.tasks("train", 1),
+        manifest.tasks("val", 1),
+        "react_v2",
+        "alibaba",
+    )
+    assert contract["student_model"] == QWEN3_8_27B_MODEL
+    assert contract["proposer_model"] == DEEPSEEK_V4_1_FLASH_MODEL
 
 
 def test_run_contract_rejects_an_unknown_model_pair(tmp_path: Path) -> None:

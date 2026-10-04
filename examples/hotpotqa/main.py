@@ -36,17 +36,18 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from examples.common.experiment_models import (
+    DEFAULT_PROPOSER_MODEL,
+    DEFAULT_SOLVER_MODEL,
     DEEPSEEK_V4_1_FLASH_MODEL,
     EXPERIMENT_CONTEXT_TOKENS,
-    EXPERIMENT_MODELS,
     EXPERIMENT_NUM_RETRIES,
     QWEN3_8_27B_MODEL,
     experiment_decoding,
     experiment_model_version,
     experiment_request_overrides,
-    validate_experiment_model_pair,
     validate_experiment_vllm_version,
 )
+from examples.common.model_settings import validate_benchmark_model_pair
 from examples.common.provider_retries import PROVIDER_RETRY_KEY, PROVIDER_RETRY_POLICY, provider_retry_kwargs
 from examples.common.react_v2 import (
     benchmark_data_identity,
@@ -202,11 +203,7 @@ def _validate_hotpotqa_model_pair(student_model: str, proposer_model: str) -> No
     Raises:
         ValueError: The roles use an unsupported direction or model.
     """
-    if (student_model, proposer_model) != (QWEN3_8_27B_MODEL, DEEPSEEK_V4_1_FLASH_MODEL):
-        validate_experiment_model_pair(student_model, proposer_model)
-    if student_model not in EXPERIMENT_MODELS:
-        supported = ", ".join(EXPERIMENT_MODELS)
-        raise ValueError(f"Unsupported HotPotQA campaign model {student_model!r}; expected one of: {supported}")
+    validate_benchmark_model_pair(student_model, proposer_model)
 
 
 TEACHER_RUNTIME_KEYS = (
@@ -1614,15 +1611,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--solver-model",
+        "--model",
         type=str,
-        default=QWEN3_8_27B_MODEL,
-        help="Student model; use the same supported model as --reflection-model",
+        default=DEFAULT_SOLVER_MODEL,
+        help="Task solver; defaults to the shared Qwen profile",
     )
     parser.add_argument(
         "--reflection-model",
+        "--proposer-model",
         type=str,
-        default=QWEN3_8_27B_MODEL,
-        help="Proposer model; use the same supported model as --solver-model",
+        default=DEFAULT_PROPOSER_MODEL,
+        help="Prompt proposer; defaults to the shared DeepSeek profile",
     )
     parser.add_argument(
         "--api-base",

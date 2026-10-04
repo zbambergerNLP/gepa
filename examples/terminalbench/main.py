@@ -25,12 +25,13 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from examples.common.experiment_models import (
+    DEFAULT_PROPOSER_MODEL,
+    DEFAULT_SOLVER_MODEL,
     EXPERIMENT_NUM_RETRIES,
-    QWEN3_8_27B_MODEL,
     experiment_model_version,
     experiment_request_overrides,
-    validate_experiment_model_pair,
 )
+from examples.common.model_settings import validate_benchmark_model_pair
 from examples.common.pilot_checks import OPTIMIZER_PILOT_PROTOCOL, CycleEvidence
 from examples.common.provider_retries import PROVIDER_RETRY_POLICY, provider_retry_kwargs
 from examples.common.react_v2 import build_react_v2_strategy, resolve_template_family
@@ -231,16 +232,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--student-model",
-        default=QWEN3_8_27B_MODEL,
-        help="Terminus model; use the same supported model as --proposer-model",
+        "--solver-model",
+        "--model",
+        default=DEFAULT_SOLVER_MODEL,
+        help="Terminus solver; defaults to the shared Qwen profile",
     )
     parser.add_argument(
         "--proposer-model",
-        default=QWEN3_8_27B_MODEL,
-        help="GEPA proposer; use the same supported model as --student-model",
+        "--reflection-model",
+        default=DEFAULT_PROPOSER_MODEL,
+        help="GEPA proposer; defaults to the shared DeepSeek profile",
     )
-    parser.add_argument("--student-api-base", default=None)
-    parser.add_argument("--proposer-api-base", default=None)
+    parser.add_argument("--student-api-base", "--solver-api-base", default=None)
+    parser.add_argument("--proposer-api-base", "--reflection-api-base", default=None)
     parser.add_argument(
         "--runtime-record", type=Path, help="Current local task-server record from the runtime launcher"
     )
@@ -256,7 +260,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional early-stop cap on task evaluations, in addition to the selected epoch budget",
     )
     parser.add_argument("--reflection-minibatch-size", type=int, default=DEFAULT_REFLECTION_MINIBATCH_SIZE)
-    parser.add_argument("--n-concurrent", type=int, default=1)
+    parser.add_argument("--n-concurrent", "--max-workers", type=int, default=1)
     parser.add_argument(
         "--reviewed-pilot",
         type=Path,
@@ -323,7 +327,7 @@ def build_run_contract(
     Returns:
         JSON-serializable run contract including exact task identities.
     """
-    validate_experiment_model_pair(args.student_model, args.proposer_model)
+    validate_benchmark_model_pair(args.student_model, args.proposer_model)
     if manifest.experiment != args.experiment:
         raise ValueError("--manifest must match the selected --experiment")
     pinned_manifest = load_terminalbench_manifest(EXPERIMENT_MANIFESTS[args.experiment])
@@ -488,7 +492,7 @@ def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        validate_experiment_model_pair(args.student_model, args.proposer_model)
+        validate_benchmark_model_pair(args.student_model, args.proposer_model)
     except ValueError as exc:
         parser.error(str(exc))
     manifest_path = args.manifest or EXPERIMENT_MANIFESTS[args.experiment]

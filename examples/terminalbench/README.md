@@ -68,22 +68,27 @@ export APPTAINER_TMPDIR="$(mktemp -d /tmp/terminalbench-build.XXXXXX)"
   --harbor-executable "$SCRATCH_BASE/.tools/terminalbench-harbor-0.22.0/venv/bin/harbor"
 ```
 
-The preparer supports the first two tasks in the existing training order:
-`fix-ocaml-gc` and `log-summary-date-ranges`. It downloads their exact registry
-refs, derives SIF images from their published containers, installs Harbor's
-server dependencies, and warms the unchanged verifier's uv/Python/pytest cache.
-OCaml also receives a shallow mirror containing only its original broken source
-revision for the verifier's clone. No solution, task instruction, or scoring
-file is changed. The verifier's redundant network bootstrap calls may still
-print warnings; installed tools and the offline cache satisfy its dependencies.
+The default prepares the first two training tasks, `fix-ocaml-gc` and
+`log-summary-date-ranges`. Add `--all-tasks` to prepare the complete pinned set
+of 89 tasks. For an infrastructure check, repeat `--task-id terminal-bench/NAME`
+to select particular environments; preparation never runs their solvers or graders.
+The checked-in recipes identify each verifier's Python version, package pins,
+system dependencies, and public external inputs. Authentic uv installers and
+declared download URLs use a hash-checked local cache. Git mirrors, model and
+dataset snapshots, and source archives retain their public provenance. The
+historical MTEB cache includes every model's relevant results and metadata.
+No solution, task instruction, or scoring file is changed.
 
 The bundle records every task file, recipe, and prepared image by SHA-256. The
 runner checks these bytes before evaluation and includes the runtime hashes in
 its resume identity. Changed artifacts and missing tasks fail before execution.
-Use a fresh bundle directory when preparing a new runtime. A two-task bundle
-supports the training pilot; it does not establish offline support for all 89
-tasks. Additional tasks need their own dependency and external-data preparation
-before a complete campaign can run on disconnected nodes.
+Each task is sealed only after its installer replay and dependency imports pass
+with isolated home/tmp mounts, offline package managers, and blocked network
+proxies. `--resume` verifies completed parts against the current recipe and probe
+before reuse. It can continue an interrupted build after an unbuilt task's
+recipe is repaired; changing an already sealed task requires a new bundle.
+A full campaign requires the completed 89-task bundle. A recipe inventory or a
+two-task pilot alone does not prove that all environments have been built.
 
 On an allocated compute node with the pinned Qwen server running:
 
@@ -101,7 +106,13 @@ The explicit backend and prepared image hashes are part of the run contract, so
 Docker, raw Apptainer images, and prepared offline images cannot reuse each
 other's results. The native backend uses Apptainer's `--fakeroot` and writable
 temporary filesystem; allocate the task's requested CPU and memory through
-Slurm. Keep one concurrent task during the initial check. For an online
+Slurm. Run one task at a time because native Harbor shares the job's network
+namespace. Full Della jobs should start both local model servers and Harbor
+inside `scripts/della/remote/with_private_network.sh`; its private loopback
+supports the Windows task's port 80 without changing the host's network policy.
+The Windows prepared image also starts its published `supervisord` command,
+which Docker would normally start automatically. This mode has no external
+network route, so complete offline staging is required. For an online
 Apptainer host, `--singularity-image-cache PATH` remains available without an
 offline task bundle.
 

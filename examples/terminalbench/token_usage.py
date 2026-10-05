@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
-import os
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -22,74 +19,6 @@ TOKEN_USAGE_POLICY = {
     "journal_replays": "excluded",
     "raw_text": False,
 }
-
-
-def _field(value: Any, key: str, default: Any = None) -> Any:
-    """Read a provider field from either dictionary or object responses."""
-    return value.get(key, default) if isinstance(value, dict) else getattr(value, key, default)
-
-
-def record_usage(
-    path: Path, role: str, model: str, limits: dict[str, Any], response: Any = None, error: BaseException | None = None
-) -> None:
-    """Durably append usage before a caller parses or salvages a model response.
-
-    Args:
-        path: Run- or trial-local JSONL destination.
-        role: Model role; task-agent records include its summarization calls.
-        model: Requested model identity.
-        limits: Effective context and output policy.
-        response: Raw provider completion, when available.
-        error: Provider exception, recorded by type without its potentially private message.
-    """
-    usage = _field(response, "usage")
-    prompt = _field(usage, "prompt_tokens")
-    output = _field(usage, "completion_tokens")
-    reasoning = _field(_field(usage, "completion_tokens_details"), "reasoning_tokens")
-    reasons = [_field(choice, "finish_reason") for choice in _field(response, "choices", [])]
-    record = {
-        "schema_version": 1,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "role": role,
-        "requested_model": model,
-        "response_model": _field(response, "model"),
-        "response_id": _field(response, "id"),
-        "prompt_tokens": prompt,
-        "completion_tokens": output,
-        "reasoning_tokens": reasoning,
-        "finish_reasons": reasons,
-        "length_finish": "length" in reasons if any(reason is not None for reason in reasons) else None,
-        "output_cap_reached": output >= limits["max_output_tokens"] if output is not None else None,
-        "context_cap_reached": (
-            prompt + output >= limits["context_tokens"] if prompt is not None and output is not None else None
-        ),
-        "error_type": type(error).__name__ if error is not None else None,
-        "limits": limits,
-    }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as stream:
-        fcntl.flock(stream, fcntl.LOCK_EX)
-        stream.write(json.dumps(record, sort_keys=True, allow_nan=False) + "\n")
-        stream.flush()
-        os.fsync(stream.fileno())
-
-
-def observe_optimizer(lm: Any, path: Path, role: str, limits: dict[str, Any]) -> Any:
-    """Record every optimizer transport attempt while preserving journal replay.
-
-    Args:
-        lm: Existing GEPA LM; shared role clients must be attached only once.
-        path: Run-local usage log.
-        role: Stable role label.
-        limits: Serving and generation limits for the model arm.
-
-    Returns:
-        The same client with the approved retry and raw-usage policy.
-    """
-    settings = provider_retry_kwargs(path.with_name(PROVIDER_ATTEMPT_LOG), role)
-    settings[PROVIDER_RETRY_KEY].update(token_usage_log=str(path), token_limits=limits)
-    lm.completion_kwargs.update(settings)
-    return lm
 
 
 def observe_harbor(llm: Any, path: Path, limits: dict[str, Any]) -> None:

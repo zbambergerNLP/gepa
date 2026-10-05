@@ -44,8 +44,6 @@ _TASK_SECTIONS = {
     },
 }
 
-WIKIPEDIA_RUN_CONTRACT_FILENAME = "wikipedia-run-contract.json"
-
 
 def resolve_template_family(requested: str, task_model: str) -> str:
     """Resolve an explicit or model-inferred prompt-template family.
@@ -87,40 +85,6 @@ def structured_prompt(task_sentence: str, template_family: str, component_kind: 
         raise ValueError(f"structured_prompt requires a system_prompt or user_prompt; got {component_kind!r}.")
     template = TEMPLATE_FAMILIES[template_family][component_kind]
     return template.render({_TASK_SECTIONS[component_kind][template_family]: task_sentence})
-
-
-def experiment_run_key(
-    *,
-    condition: str,
-    template_family: str,
-    reflection_level: int,
-    edit_tool_set: str,
-    settings: Mapping[str, Any],
-) -> str:
-    """Return a readable, stable key that prevents incompatible run resumption.
-
-    Args:
-        condition: Experiment condition represented by the key.
-        template_family: Provider template family used for the run.
-        reflection_level: Controller reflection level.
-        edit_tool_set: Configured edit-operator set.
-        settings: Remaining material run settings to fingerprint.
-
-    Returns:
-        Human-readable axes followed by a stable settings digest.
-    """
-    payload = {
-        "condition": condition,
-        "template_family": template_family,
-        "reflection_level": reflection_level,
-        "edit_tool_set": edit_tool_set,
-        **settings,
-    }
-    digest = hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:10]
-    axes = template_family
-    if condition in {"react_v2", "react_v2_random"}:
-        axes = f"{axes}-l{reflection_level}-{edit_tool_set}"
-    return f"{axes}-{digest}"
 
 
 def benchmark_data_identity(
@@ -168,37 +132,6 @@ def file_sha256(path: str | Path) -> str:
     return digest.hexdigest()
 
 
-def ensure_wikipedia_run_contract(run_dir: str | Path, contract: Mapping[str, Any]) -> Path:
-    """Persist an exact run contract and reject incompatible resume state.
-
-    Args:
-        run_dir: Experiment directory that owns the resumable state.
-        contract: Complete material configuration for the requested run.
-
-    Returns:
-        Path to the existing or newly written contract file.
-
-    Raises:
-        ValueError: Existing state has a different contract, or legacy GEPA
-            state has no contract to validate.
-    """
-    directory = Path(run_dir)
-    path = directory / WIKIPEDIA_RUN_CONTRACT_FILENAME
-    normalized = json.loads(json.dumps(dict(contract), sort_keys=True, default=str))
-    if path.exists():
-        existing = json.loads(path.read_text())
-        if existing != normalized:
-            raise ValueError(f"Run directory {directory} contains a different Wikipedia benchmark configuration.")
-        return path
-    if (directory / "gepa_state.bin").exists():
-        raise ValueError(
-            f"Run directory {directory} has GEPA state but no {WIKIPEDIA_RUN_CONTRACT_FILENAME}; choose a clean directory."
-        )
-    directory.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(normalized, indent=2, sort_keys=True) + "\n")
-    return path
-
-
 def build_react_v2_strategy(
     *,
     reflection_model: str,
@@ -211,6 +144,9 @@ def build_react_v2_strategy(
     component_kinds: dict[str, str] | None = None,
     controller_selection: str = VERBALIZED_SELECTION,
     editor_mode: str = REACT_EDITOR_MODE,
+    proposal_policy: str = "real_edit",
+    react_max_iterations: int | None = None,
+    react_max_tool_calls: int | None = None,
     rng: random.Random | None = None,
     manifestor_traces_chars: int | None = None,
     manifestor_temperature: float = 0.0,
@@ -232,6 +168,9 @@ def build_react_v2_strategy(
         component_kinds: Optional message role for each optimized component.
         controller_selection: ``"verbalized"``, ``"uniform_random"``, or ``"jev"``.
         editor_mode: Multi-turn ``react`` or one-response ``single_call`` editing.
+        proposal_policy: Required real edits with generation recovery, or independent historical proposals.
+        react_max_iterations: Optional bound on observation-loop editor responses.
+        react_max_tool_calls: Optional bound on observation-loop edit calls.
         rng: Optional Controller RNG kept separate from GEPA's engine RNG.
         manifestor_traces_chars: Trace character cap, or ``None`` to rely on
             the configured model's context window.
@@ -278,7 +217,9 @@ def build_react_v2_strategy(
             (
                 proposer_kwargs,
                 EDITOR_ROLE
-                if separate_controller or editor_mode == SINGLE_CALL_EDITOR_MODE or controller_selection == JEV_SELECTION
+                if separate_controller
+                or editor_mode == SINGLE_CALL_EDITOR_MODE
+                or controller_selection == JEV_SELECTION
                 else "controller_editor",
             ),
             (manifestor_kwargs, MANIFESTOR_ROLE),
@@ -293,6 +234,9 @@ def build_react_v2_strategy(
         controller_selection=controller_selection,
         jev_controller=jev_controller,
         editor_mode=editor_mode,
+        proposal_policy=proposal_policy,
+        react_max_iterations=react_max_iterations,
+        react_max_tool_calls=react_max_tool_calls,
         controller_lm=LM(reflection_model, **controller_kwargs) if separate_controller else None,
         manifestor_lm=LM(reflection_model, **manifestor_kwargs),
         proposer_model=proposer_model or reflection_model,

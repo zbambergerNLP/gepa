@@ -29,6 +29,7 @@ from gepa.adapters.terminal_bench_adapter.documents import (
     validate_documents,
     write_document_bundle,
 )
+from gepa.adapters.terminal_bench_adapter.staging import load_offline_task_bundle, singularity_image_filename
 from gepa.adapters.terminal_bench_adapter.text_scope import TerminalBenchTextScope
 from gepa.core.adapter import EvaluationBatch, GEPAAdapter
 from gepa.strategies.text_limits import TextLimits, clip_text, resolve_text_limits, validate_char_limit
@@ -88,6 +89,29 @@ FAILURE_POLICY_CONTRACT = {
 
 
 HARBOR_METADATA_TIMEOUT_SECONDS = 30
+MAILMAN_TASK_ID = "terminal-bench/mailman"
+MAILMAN_IMAGE = "alexgshaw/mailman:20251031"
+MAILMAN_NAMESPACE_PROBE = """import json, os, pwd, sys
+from pathlib import Path
+
+user = pwd.getpwnam(sys.argv[1])
+maps = {}
+for kind, identifier in (("uid", user.pw_uid), ("gid", user.pw_gid)):
+    maps[kind] = Path("/proc/self/" + kind + "_map").read_text()
+    ranges = [tuple(map(int, line.split())) for line in maps[kind].splitlines()]
+    if not any(start <= identifier < start + count for start, outside, count in ranges):
+        raise RuntimeError("Unmapped " + kind + " " + str(identifier) + " for " + user.pw_name)
+os.setgroups([])
+os.setgid(user.pw_gid)
+os.setuid(user.pw_uid)
+status = dict(line.split(":", 1) for line in Path("/proc/self/status").read_text().splitlines())
+for field, identifier in (("Uid", user.pw_uid), ("Gid", user.pw_gid)):
+    if any(int(value) != identifier for value in status[field].split()):
+        raise RuntimeError("Kernel " + field + " did not change for " + user.pw_name)
+if status["Groups"].split():
+    raise RuntimeError("Kernel supplementary groups did not clear")
+print(json.dumps({"user": user.pw_name, "uid": user.pw_uid, "gid": user.pw_gid, "maps": maps}))
+"""
 
 
 class TerminalBenchOutput(TypedDict):
@@ -560,6 +584,8 @@ class HarborCLI:
         n_concurrent: Maximum trials Harbor may run concurrently.
         harbor_executable: Harbor CLI name or path.
         docker_executable: Docker CLI name or path used for readiness checks.
+        container_runtime: Official Harbor backend, ``docker`` or ``singularity``.
+        singularity_image_cache_dir: Persistent cache for converted task images.
         student_api_base: Optional LiteLLM API base for the student model.
         student_agent_kwargs: Extra Terminus kwargs that do not alter the fixed
             documents, tmux tool, skill loading, context management, or
@@ -579,6 +605,9 @@ class HarborCLI:
         n_concurrent: int = 1,
         harbor_executable: str = "harbor",
         docker_executable: str = "docker",
+        container_runtime: str = "docker",
+        singularity_image_cache_dir: str | Path | None = None,
+        offline_task_bundle: str | Path | None = None,
         student_api_base: str | None = None,
         student_agent_kwargs: Mapping[str, Any] | None = None,
         process_timeout_sec: float | None = None,
@@ -595,6 +624,9 @@ class HarborCLI:
             n_concurrent: Maximum trials Harbor may run concurrently.
             harbor_executable: Harbor CLI name or explicit path.
             docker_executable: Docker CLI name or explicit path.
+            container_runtime: Official Harbor Docker or Singularity/Apptainer backend.
+            singularity_image_cache_dir: Persistent cache for converted task images.
+            offline_task_bundle: Sealed local task packages and prepared Singularity images.
             student_api_base: Optional LiteLLM endpoint for the student model.
             student_agent_kwargs: Additional Terminus settings that do not
                 override fixed harness behavior.
@@ -609,6 +641,10 @@ class HarborCLI:
             raise ValueError("student_model must not be empty")
         if n_concurrent < 1:
             raise ValueError(f"n_concurrent must be at least 1; got {n_concurrent}")
+        if container_runtime not in {"docker", "singularity"}:
+            raise ValueError("container_runtime must be docker or singularity")
+        if offline_task_bundle is not None and container_runtime != "singularity":
+            raise ValueError("offline_task_bundle requires container_runtime singularity")
         if process_timeout_sec is not None and process_timeout_sec <= 0:
             raise ValueError("process_timeout_sec must be positive when provided")
         extra_kwargs = dict(student_agent_kwargs or {})
@@ -639,6 +675,20 @@ class HarborCLI:
         self.n_concurrent = n_concurrent
         self.harbor_executable = harbor_executable
         self.docker_executable = docker_executable
+        self.container_runtime = container_runtime
+        self.offline_task_bundle = (
+            load_offline_task_bundle(offline_task_bundle, manifest) if offline_task_bundle is not None else None
+        )
+        self.singularity_image_cache_dir = (
+            Path(singularity_image_cache_dir).expanduser().resolve()
+            if singularity_image_cache_dir is not None
+            else self.work_dir / "singularity-images"
+        )
+        if self.offline_task_bundle is not None:
+            bundled_cache = self.offline_task_bundle.image_cache_dir
+            if singularity_image_cache_dir is not None and self.singularity_image_cache_dir != bundled_cache:
+                raise ValueError("singularity_image_cache_dir must match the offline task bundle")
+            self.singularity_image_cache_dir = bundled_cache
         self.student_api_base = student_api_base
         self.student_agent_kwargs = extra_kwargs
         self.process_timeout_sec = process_timeout_sec
@@ -663,18 +713,24 @@ class HarborCLI:
             raise HarborRequirementError(f"{label} executable {executable!r} was not found on PATH")
         return resolved
 
-    def check_requirements(self) -> tuple[str, str]:
-        """Require Harbor 0.22.0 and a reachable Docker daemon.
+    def check_requirements(self, task_ids: Sequence[str] = ()) -> tuple[str, str]:
+        """Require Harbor, the backend, and selected tasks' known kernel prerequisites.
+
+        Args:
+            task_ids: Every task the planned run can execute, before model calls.
 
         Returns:
-            Resolved Harbor and Docker executable paths.
+            Resolved Harbor and container executable paths.
 
         Raises:
             HarborRequirementError: A CLI is missing, Harbor is the wrong
-                version, or Docker cannot reach its daemon.
+                version, or the selected container runtime is unavailable.
         """
         harbor = self._resolve_executable(self.harbor_executable, "Harbor")
-        docker = self._resolve_executable(self.docker_executable, "Docker")
+        container = self._resolve_executable(
+            self.docker_executable if self.container_runtime == "docker" else "singularity",
+            "Docker" if self.container_runtime == "docker" else "Singularity/Apptainer",
+        )
         harbor_version = subprocess.run(
             [harbor, "--version"],
             check=False,
@@ -693,17 +749,78 @@ class HarborCLI:
                 f"Install it with `uv tool install --force harbor=={PINNED_HARBOR_VERSION}`."
             )
 
-        docker_info = subprocess.run(
-            [docker, "info", "--format", "{{json .ServerVersion}}"],
+        command = (
+            [container, "info", "--format", "{{json .ServerVersion}}"]
+            if self.container_runtime == "docker"
+            else [container, "--version"]
+        )
+        container_info = subprocess.run(
+            command,
             check=False,
             capture_output=True,
             text=True,
             timeout=HARBOR_METADATA_TIMEOUT_SECONDS,
         )
-        if docker_info.returncode != 0:
-            detail = docker_info.stderr.strip() or docker_info.stdout.strip()
-            raise HarborRequirementError(f"Docker is installed but its daemon is unavailable: {detail}")
-        return harbor, docker
+        if container_info.returncode != 0:
+            detail = container_info.stderr.strip() or container_info.stdout.strip()
+            raise HarborRequirementError(f"{self.container_runtime} container runtime is unavailable: {detail}")
+        if self.container_runtime == "singularity" and MAILMAN_TASK_ID in task_ids:
+            self._check_mailman_namespace(container)
+        return harbor, container
+
+    def _check_mailman_namespace(self, container: str) -> None:
+        """Reject emulated service identities without changing task users or permissions."""
+        image_name = MAILMAN_IMAGE
+        if self.offline_task_bundle is not None:
+            self.offline_task_bundle.validate([MAILMAN_TASK_ID])
+            image_name = self.offline_task_bundle.payload["tasks"][MAILMAN_TASK_ID]["docker_image"]
+        image = self.singularity_image_cache_dir / singularity_image_filename(image_name)
+        if not image.is_file():
+            raise HarborRequirementError(
+                f"{MAILMAN_TASK_ID} requires a staged image for its kernel user-namespace preflight: {image}. "
+                "Stage its published image in --singularity-image-cache or provide --offline-task-bundle."
+            )
+        for user in ("list", "postfix"):
+            # Match Harbor's namespace flags, but bypass libfakeroot's simulated
+            # setuid success and verify the resulting identities through /proc.
+            command = [
+                container,
+                "exec",
+                "--fakeroot",
+                "--writable-tmpfs",
+                "--containall",
+                "--pid",
+                "--no-mount",
+                "home,tmp,bind-paths",
+                "--pwd",
+                "/app",
+                str(image),
+                "env",
+                "-u",
+                "LD_PRELOAD",
+                "-u",
+                "FAKEROOTKEY",
+                "/usr/bin/python3",
+                "-c",
+                MAILMAN_NAMESPACE_PROBE,
+                user,
+            ]
+            try:
+                result = subprocess.run(
+                    command, check=False, capture_output=True, text=True, timeout=HARBOR_METADATA_TIMEOUT_SECONDS
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise HarborRequirementError(f"{MAILMAN_TASK_ID} kernel user-namespace probe failed: {exc}") from exc
+            if result.returncode != 0:
+                detail = result.stderr.strip() or result.stdout.strip()
+                raise HarborRequirementError(
+                    f"{MAILMAN_TASK_ID} requires real nonroot UID/GID changes for {user}; "
+                    f"this Singularity runtime cannot provide them: {detail}. "
+                    "Ask the cluster administrator for supported subordinate UID/GID mappings and a launcher "
+                    "that preserves them; the current private-network launcher maps only one UID/GID. "
+                    "Alternatively, use a separate approved Linux Docker host with colocated, attested model "
+                    "servers. Docker is not permitted on Princeton clusters."
+                )
 
     def build_job_config(
         self,
@@ -750,7 +867,7 @@ class HarborCLI:
             "timeout_multiplier": 1.0,
             "n_concurrent_trials": self.n_concurrent,
             "quiet": True,
-            "environment": {"type": "docker", "force_build": False, "delete": True},
+            "environment": {"type": self.container_runtime, "force_build": False, "delete": True},
             "agents": [
                 {
                     "import_path": PROMPTED_TERMINUS_IMPORT_PATH,
@@ -760,13 +877,20 @@ class HarborCLI:
                 }
             ],
         }
-        config["datasets"] = [
-            {
-                "name": self.manifest.dataset["identifier"],
-                "ref": self.manifest.dataset["registry_content_hash"],
-                "task_names": list(task_ids),
+        if self.container_runtime == "singularity":
+            config["environment"]["kwargs"] = {
+                "singularity_image_cache_dir": str(self.singularity_image_cache_dir),
             }
-        ]
+        if self.offline_task_bundle is not None:
+            config["tasks"] = self.offline_task_bundle.task_configs(task_ids)
+        else:
+            config["datasets"] = [
+                {
+                    "name": self.manifest.dataset["identifier"],
+                    "ref": self.manifest.dataset["registry_content_hash"],
+                    "task_names": list(task_ids),
+                }
+            ]
         return config
 
     def run(self, task_ids: Sequence[str], candidate: Mapping[str, str]) -> HarborEvaluation:
@@ -783,7 +907,7 @@ class HarborCLI:
             HarborExecutionError: Harbor times out or fails, the job summary is
                 missing or invalid, or parsed trial evidence violates the
                 benchmark contract.
-            HarborRequirementError: Harbor or Docker is unavailable.
+            HarborRequirementError: Harbor or the selected container runtime is unavailable.
             ValueError: Task IDs are empty or duplicated.
             json.JSONDecodeError: A per-trial result is not valid JSON.
             OSError: A per-trial result cannot be read.
@@ -794,7 +918,7 @@ class HarborCLI:
         if len(set(task_ids)) != len(task_ids):
             raise ValueError("task_ids must be unique within one Harbor job")
         self.manifest.validate_candidate(candidate)
-        harbor, _docker = self.check_requirements()
+        harbor, _container = self.check_requirements(task_ids)
 
         candidate_digest = self.manifest.candidate_digest(candidate)
         evaluation_id = f"{candidate_digest[:12]}-{uuid.uuid4().hex}"
@@ -825,6 +949,9 @@ class HarborCLI:
         env = os.environ.copy()
         existing_pythonpath = env.get("PYTHONPATH")
         pythonpath_parts = [str(self.agent_python_path)]
+        source_path = self.agent_python_path / "src"
+        if source_path.is_dir():
+            pythonpath_parts.append(str(source_path))
         if existing_pythonpath:
             pythonpath_parts.append(existing_pythonpath)
         env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)

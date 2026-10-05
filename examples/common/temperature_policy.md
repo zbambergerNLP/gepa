@@ -94,5 +94,5 @@ cannot silently resume under the new experiment. The AutoSaddler paper's model
 choice is separate from our homogeneous local-model comparison; this policy
 does not claim exact reproduction of its endpoint settings.
 
-See [Terminal-Bench's pilot protocol](../../src/gepa/adapters/terminal_bench_adapter/README.md#output-budget-review)
-and [the Della runbook](../hotpotqa/DELLA_CAMPAIGN.md).
+See [Terminal-Bench's run guide](../terminalbench/README.md)
+and [Della preparation](../../scripts/della/README.md).

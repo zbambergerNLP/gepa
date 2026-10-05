@@ -11,9 +11,7 @@ import pytest
 from test_generation_recovery import Roles
 from test_jev_controller import setup_controller as _setup_controller
 from test_three_role import PROMPT, ThreeRoleLM, strategy, tool_call
-from test_wikipedia_react_v2_config import _hotpot_args
 
-from examples.hotpotqa.main import _run_key, build_config, build_parser, build_run_contract
 from gepa import optimize
 from gepa.core.adapter import EvaluationBatch
 from gepa.gepa_launcher import EngineConfig, GEPAConfig, ReflectionConfig, optimize_anything
@@ -453,34 +451,6 @@ def test_public_front_doors_supply_all_modules_without_advancing_round_robin(fro
                     ),
                 ),
             )
-
-
-@pytest.mark.parametrize("backend", ["verbalized", "jev"])
-def test_hotpot_cli_and_config_record_the_new_axis_without_changing_data_or_budget(backend, tmp_path):
-    args = _hotpot_args(condition="react_v2", controller_selection=backend, retrieval_provenance={"test": True})
-    original = build_run_contract("react_v2", args)
-    old_key = _run_key("react_v2", args)
-    args.module_selector = "controller"
-    updated = build_run_contract("react_v2", args)
-    assert updated["optimizer"]["component_selector"] == "controller"
-    assert updated["optimizer"]["semantic_controller_policy"]["factorization"] == "P(component, region, action)"
-    assert _run_key("react_v2", args) != old_key
-    assert updated["optimizer"]["max_metric_calls"] == original["optimizer"]["max_metric_calls"]
-    normalized = deepcopy(updated)
-    normalized["optimizer"]["component_selector"] = original["optimizer"]["component_selector"]
-    normalized["optimizer"]["semantic_controller_policy"] = original["optimizer"]["semantic_controller_policy"]
-    if backend == "jev":
-        normalized["models"]["reflection_role_decoding"]["controller"]["policy"] = original["models"][
-            "reflection_role_decoding"
-        ]["controller"]["policy"]
-    assert normalized == original
-    config, _ = build_config("react_v2", args, {}, run_dir=str(tmp_path))
-    assert config.reflection.module_selector == "controller"
-    assert config.reflection.reflection_strategy.controller_selection == backend
-    assert build_parser().parse_args(["--module-selector", "controller"]).module_selector == "controller"
-    args.condition = "vanilla"
-    with pytest.raises(ValueError, match="requires --condition react_v2"):
-        build_run_contract("vanilla", args)
 
 
 def test_jev_refuses_oversized_joint_menus_without_spending_a_request(setup_controller):

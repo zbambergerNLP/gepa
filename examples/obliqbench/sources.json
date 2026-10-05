@@ -1,0 +1,107 @@
+{
+  "dataset": "dianetc/OBLIQ-Bench",
+  "files": {
+    "analogues/math/corpus/corpus.jsonl": {
+      "algorithm": "git_blob_sha1",
+      "digest": "ea879a13b2bd9672f3716e9b20f20cc35669fc96",
+      "size": 1363398
+    },
+    "analogues/math/queries+qrels/per_query_excluded_ids.json": {
+      "algorithm": "git_blob_sha1",
+      "digest": "1dbf1ed38c64f58f7d2882cbb0b03663f29385e1",
+      "size": 9094
+    },
+    "analogues/math/queries+qrels/qrels.tsv": {
+      "algorithm": "git_blob_sha1",
+      "digest": "c7b7ce4ceecf0534208a628442c7813eea0292f7",
+      "size": 92297
+    },
+    "analogues/math/queries+qrels/qrels_pool.tsv": {
+      "algorithm": "git_blob_sha1",
+      "digest": "53e288d56bd777a04e3162467315f595a1869403",
+      "size": 97340
+    },
+    "analogues/math/queries+qrels/queries.jsonl": {
+      "algorithm": "git_blob_sha1",
+      "digest": "2d6cd31ec9e223cc74e9f883daf086c654485e5b",
+      "size": 99623
+    },
+    "analogues/writing/corpus/corpus.jsonl": {
+      "algorithm": "sha256",
+      "digest": "0051dba44940c944c6d6fca73d1130fbdff83f87df984fe61cdab80bd368c288",
+      "size": 24599786
+    },
+    "analogues/writing/queries+qrels/per_query_excluded_ids.json": {
+      "algorithm": "git_blob_sha1",
+      "digest": "e5be0b0f2d7f8ff0674a25195bf174950f0a6ded",
+      "size": 14508
+    },
+    "analogues/writing/queries+qrels/qrels.tsv": {
+      "algorithm": "git_blob_sha1",
+      "digest": "f043a0a407f2cdd6f9e8e09bc17be538748f600a",
+      "size": 49860
+    },
+    "analogues/writing/queries+qrels/queries.jsonl": {
+      "algorithm": "git_blob_sha1",
+      "digest": "8999df51ac175f51818480c346c6fa6816f28bd0",
+      "size": 1629896
+    },
+    "descriptive/twitter/corpus/corpus.jsonl": {
+      "algorithm": "sha256",
+      "digest": "4e6189a5a8ebfe0636dc919dbfb5117960f98ff25b8888dabd100605a6b79dbf",
+      "size": 18725955
+    },
+    "descriptive/twitter/queries+qrels/qrels.tsv": {
+      "algorithm": "git_blob_sha1",
+      "digest": "6b1d1f03b72ac3f8e2575ef2e2f616696c0b7157",
+      "size": 77669
+    },
+    "descriptive/twitter/queries+qrels/qrels_pool.tsv": {
+      "algorithm": "git_blob_sha1",
+      "digest": "3d59702ff67f398d571cf3620e9990ad81ac80e5",
+      "size": 110009
+    },
+    "descriptive/twitter/queries+qrels/queries.jsonl": {
+      "algorithm": "git_blob_sha1",
+      "digest": "59d85488cb1821c68c5e8baad3281122a645e0f2",
+      "size": 94198
+    },
+    "descriptive/wildchat/corpus/corpus.jsonl": {
+      "algorithm": "sha256",
+      "digest": "c6bfb867679d1e5a575b65d991442d0e1e0aedeeadb7b510c5e9b801778f9ad4",
+      "size": 2304057670
+    },
+    "descriptive/wildchat/queries+qrels/qrels.tsv": {
+      "algorithm": "git_blob_sha1",
+      "digest": "5444c4c242c78fdb189882f2cbfa43923e6cb7c7",
+      "size": 11411
+    },
+    "descriptive/wildchat/queries+qrels/qrels_pool.tsv": {
+      "algorithm": "git_blob_sha1",
+      "digest": "c984e472e12414f56af1be441c97a8fc176f66c8",
+      "size": 12928
+    },
+    "descriptive/wildchat/queries+qrels/queries.jsonl": {
+      "algorithm": "git_blob_sha1",
+      "digest": "32321e3221398a280c8391e42289dfdf30032828",
+      "size": 12895
+    },
+    "tip-of-tongue/congress/corpus/corpus.jsonl": {
+      "algorithm": "sha256",
+      "digest": "c627bb4439d41e748462ce2f1a3258d25837853213771444ddde23d004149a11",
+      "size": 562436511
+    },
+    "tip-of-tongue/congress/queries+qrels/qrels.tsv": {
+      "algorithm": "git_blob_sha1",
+      "digest": "f1f420771741acf80fdb0eee2bd00b1abcc131da",
+      "size": 8492
+    },
+    "tip-of-tongue/congress/queries+qrels/queries.jsonl": {
+      "algorithm": "git_blob_sha1",
+      "digest": "4f5e80965c030a7f11f73ad5628e489d0d31e05c",
+      "size": 214889
+    }
+  },
+  "paper": "https://arxiv.org/html/2605.06235v2",
+  "revision": "4ebee29f68ceeb62ca00bd73d5478acdd3cd7764"
+}

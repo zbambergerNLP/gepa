@@ -18,9 +18,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from examples.common.model_settings import REQUEST_TIMEOUT_SECONDS, resolve_benchmark_lm_kwargs
 from examples.common.provider_retries import complete_with_retries
-from examples.hotpotqa.model_settings import HOTPOTQA_REQUEST_TIMEOUT_SECONDS
-from examples.hotpotqa.utils import resolve_hotpotqa_lm_kwargs
 from gepa.lm_constants import PROVIDER_ATTEMPT_LOG, PROVIDER_RETRY_KEY
 
 SMOKE_MESSAGES = [
@@ -104,7 +103,7 @@ def build_chat_request(model: str, served_name: str, api_base: str) -> dict[str,
     Returns:
         JSON-serializable chat-completions request body.
     """
-    lm_kwargs = resolve_hotpotqa_lm_kwargs(model, api_base)
+    lm_kwargs = resolve_benchmark_lm_kwargs(model, api_base)
     body: dict[str, Any] = {"model": served_name, "messages": SMOKE_MESSAGES}
     body.update({key: value for key, value in lm_kwargs.items() if key not in _CLIENT_ONLY_FIELDS})
     extra_body = lm_kwargs.get("extra_body")
@@ -205,7 +204,7 @@ def main() -> None:
     parser.add_argument("--api-base", required=True, help="Local OpenAI-compatible /v1 endpoint")
     parser.add_argument("--output-dir", type=Path, required=True, help="Directory for transcript.json/.md")
     parser.add_argument(
-        "--timeout", type=float, default=HOTPOTQA_REQUEST_TIMEOUT_SECONDS, help="Per-call timeout in seconds"
+        "--timeout", type=float, default=REQUEST_TIMEOUT_SECONDS, help="Per-call timeout in seconds"
     )
     args = parser.parse_args()
     transcript = run_smoke_exchange(

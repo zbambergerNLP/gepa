@@ -1,0 +1,813 @@
+{
+  "database_sha256": "e692feb797c659f0e21ff7380aa87beb4e95a0694d7bb7945f073102f0293d28",
+  "domain": "banking_knowledge",
+  "knowledge": {
+    "count": 698,
+    "ordered_sha256": "b7cae7fdbaf198b17470218048f001a1cace57481e5d47502ef73e002679820b"
+  },
+  "lock_sha256": "6404e490ae418d1d62afda97641605dab1684c2b830b6b3de34e7685ef2153c7",
+  "prompts": {
+    "count": 17,
+    "ordered_sha256": "4281bd1fd7fdb34a4d7856a4fd8c75ed27df08c5601ba7d65070714dd1538d6b"
+  },
+  "pyproject_sha256": "3c718fbc3c1e350a4e36b465fee8f33db34eae75c97a18880cef46c14b96c77f",
+  "records": [
+    {
+      "group_id": "task_084",
+      "id": "tau-banking/task_084",
+      "scenario_id": "task_084",
+      "split": "train",
+      "task_id": "task_084",
+      "task_sha256": "4b6dae5afd9fbb493c79fc7d77096e3479459502e12600a29d89537dca4ee162"
+    },
+    {
+      "group_id": "task_024",
+      "id": "tau-banking/task_024",
+      "scenario_id": "task_024",
+      "split": "train",
+      "task_id": "task_024",
+      "task_sha256": "864843028c613f39624182a6ee27ce23eba5b127dceada37c057396af0ffcbf3"
+    },
+    {
+      "group_id": "task_075",
+      "id": "tau-banking/task_075",
+      "scenario_id": "task_075",
+      "split": "train",
+      "task_id": "task_075",
+      "task_sha256": "fe5f745abaf9fc42d323baf361da814db0efe956cf254db4b3d6c6cd1846ac35"
+    },
+    {
+      "group_id": "task_094",
+      "id": "tau-banking/task_094",
+      "scenario_id": "task_094",
+      "split": "train",
+      "task_id": "task_094",
+      "task_sha256": "1506c44d139cf214b58d71729ddfdaf097d498703ba4d90c9546446dba526747"
+    },
+    {
+      "group_id": "task_005",
+      "id": "tau-banking/task_005",
+      "scenario_id": "task_005",
+      "split": "train",
+      "task_id": "task_005",
+      "task_sha256": "0df2ce53122f398a64458678ba65514bc49c419c58aab97c3128a2c54923a56f"
+    },
+    {
+      "group_id": "task_005",
+      "id": "tau-banking/task_017",
+      "scenario_id": "task_017",
+      "split": "train",
+      "task_id": "task_017",
+      "task_sha256": "70f7fcc30a9c63147384652596ee2eb639a26819938cdc5dfbf260936e13cba0"
+    },
+    {
+      "group_id": "task_004",
+      "id": "tau-banking/task_004",
+      "scenario_id": "task_004",
+      "split": "train",
+      "task_id": "task_004",
+      "task_sha256": "4b7a6a37833ea59d03f224a0387d4f71a996d85accf2267c428d80caa7f90b25"
+    },
+    {
+      "group_id": "task_065",
+      "id": "tau-banking/task_065",
+      "scenario_id": "task_065",
+      "split": "train",
+      "task_id": "task_065",
+      "task_sha256": "a155ec9f735db0fda3d62fd5976cd9a00f6a32314411c81b5aadaf25ea1430a9"
+    },
+    {
+      "group_id": "task_065",
+      "id": "tau-banking/task_066",
+      "scenario_id": "task_066",
+      "split": "train",
+      "task_id": "task_066",
+      "task_sha256": "45a351eae75463b758e147c9d61c6e3dca2b0692ad99940863a809d196cb12de"
+    },
+    {
+      "group_id": "task_065",
+      "id": "tau-banking/task_067",
+      "scenario_id": "task_067",
+      "split": "train",
+      "task_id": "task_067",
+      "task_sha256": "94b427382bf31ad131c80f131d750f3da9a7064be86eebbf76e4557cc5daad9f"
+    },
+    {
+      "group_id": "task_065",
+      "id": "tau-banking/task_068",
+      "scenario_id": "task_068",
+      "split": "train",
+      "task_id": "task_068",
+      "task_sha256": "41483ad35a41f905695bd36db882198c175f9df01569481fa108051c7a7b85af"
+    },
+    {
+      "group_id": "task_065",
+      "id": "tau-banking/task_069",
+      "scenario_id": "task_069",
+      "split": "train",
+      "task_id": "task_069",
+      "task_sha256": "2121a8b16aa5dc70aee819ba6c4dcc060ff325944467370cfe0c3cf1ebfd5d4f"
+    },
+    {
+      "group_id": "task_082",
+      "id": "tau-banking/task_082",
+      "scenario_id": "task_082",
+      "split": "train",
+      "task_id": "task_082",
+      "task_sha256": "055ae068b47b48434fbd7077006d434e115eb1966f0886c64c8d02bda4b373e0"
+    },
+    {
+      "group_id": "task_086",
+      "id": "tau-banking/task_086",
+      "scenario_id": "task_086",
+      "split": "train",
+      "task_id": "task_086",
+      "task_sha256": "fae8b5543d977ac709825ba9f750f81f02b4bbd2b68dc453d9364c1abfaed0c4"
+    },
+    {
+      "group_id": "task_020",
+      "id": "tau-banking/task_020",
+      "scenario_id": "task_020",
+      "split": "train",
+      "task_id": "task_020",
+      "task_sha256": "bd343bc7ae8f93c8afa3727655d1c4d70cd432a46f8603d57746c9f83fbe24d0"
+    },
+    {
+      "group_id": "task_020",
+      "id": "tau-banking/task_026",
+      "scenario_id": "task_026",
+      "split": "train",
+      "task_id": "task_026",
+      "task_sha256": "6f310fcb0530526be26bdc80f250f001dc7ad5576e7e48486999ae2c33633e79"
+    },
+    {
+      "group_id": "task_020",
+      "id": "tau-banking/task_027",
+      "scenario_id": "task_027",
+      "split": "train",
+      "task_id": "task_027",
+      "task_sha256": "cd9b6569029e2052d920826ae406761e47ab7c3433b00543ac62ad305eed06b2"
+    },
+    {
+      "group_id": "task_059",
+      "id": "tau-banking/task_059",
+      "scenario_id": "task_059",
+      "split": "train",
+      "task_id": "task_059",
+      "task_sha256": "4d115aec66de71e9d03cf4f1f63933844b8f3feb97fef54963ee8fc824b5e9e4"
+    },
+    {
+      "group_id": "task_056",
+      "id": "tau-banking/task_056",
+      "scenario_id": "task_056",
+      "split": "train",
+      "task_id": "task_056",
+      "task_sha256": "de7f742c5351d499b615718337379daa2cd528bea62a359f26c22e5acce0fba4"
+    },
+    {
+      "group_id": "task_087",
+      "id": "tau-banking/task_087",
+      "scenario_id": "task_087",
+      "split": "train",
+      "task_id": "task_087",
+      "task_sha256": "a0bcc70259e17de90a6b4e2d8edc01ce9f8ca9b00a972640c81dc3b6ca12f134"
+    },
+    {
+      "group_id": "task_025",
+      "id": "tau-banking/task_025",
+      "scenario_id": "task_025",
+      "split": "train",
+      "task_id": "task_025",
+      "task_sha256": "57a1e55183c2d3aeb1d9d82a8902d56a91d58e44a4d6fbafe4141675734a5ba6"
+    },
+    {
+      "group_id": "task_034",
+      "id": "tau-banking/task_034",
+      "scenario_id": "task_034",
+      "split": "train",
+      "task_id": "task_034",
+      "task_sha256": "364587224e8e88709a65db5415ec5ba874b1dd5a581d7ab70048dcd110fe3970"
+    },
+    {
+      "group_id": "task_064",
+      "id": "tau-banking/task_064",
+      "scenario_id": "task_064",
+      "split": "train",
+      "task_id": "task_064",
+      "task_sha256": "e876129d7a4d3bbf4f4cb99c65f92afe456847990e42388fb9f84b81b156d0f6"
+    },
+    {
+      "group_id": "task_074",
+      "id": "tau-banking/task_074",
+      "scenario_id": "task_074",
+      "split": "train",
+      "task_id": "task_074",
+      "task_sha256": "d0d1f2a978556913cf9d8e1c86951ab2a871f7c4ccaed9f67eece8e625fe4d73"
+    },
+    {
+      "group_id": "task_023",
+      "id": "tau-banking/task_023",
+      "scenario_id": "task_023",
+      "split": "train",
+      "task_id": "task_023",
+      "task_sha256": "49b2e04e89628bd56d6dc3b789477e0f89bda0d836d7d6f3a48a15593e755fc8"
+    },
+    {
+      "group_id": "task_023",
+      "id": "tau-banking/task_043",
+      "scenario_id": "task_043",
+      "split": "train",
+      "task_id": "task_043",
+      "task_sha256": "90bb6c90d99e5d5f472f1576f7c23559e18f501299c37ecb9bc7a6d8396432d3"
+    },
+    {
+      "group_id": "task_023",
+      "id": "tau-banking/task_045",
+      "scenario_id": "task_045",
+      "split": "train",
+      "task_id": "task_045",
+      "task_sha256": "36151b1772b9bca91cdffb6bee781d7abf4bef8247dece337363ad2876e6ae8e"
+    },
+    {
+      "group_id": "task_023",
+      "id": "tau-banking/task_046",
+      "scenario_id": "task_046",
+      "split": "train",
+      "task_id": "task_046",
+      "task_sha256": "f73ac3d21cc8597473d3fcfbf66a0b2b6e174cf98e8b33fd1f9f9d9d4f6a0e0a"
+    },
+    {
+      "group_id": "task_023",
+      "id": "tau-banking/task_055",
+      "scenario_id": "task_055",
+      "split": "train",
+      "task_id": "task_055",
+      "task_sha256": "33f97ab93530ef52ae6c335e54f31839b77713c2ede6706148db40a3f1761b6e"
+    },
+    {
+      "group_id": "task_023",
+      "id": "tau-banking/task_070",
+      "scenario_id": "task_070",
+      "split": "train",
+      "task_id": "task_070",
+      "task_sha256": "a6fcc1865d84204af8fe90422af4d8854d421d4280e93941f0e0f763e3db7b13"
+    },
+    {
+      "group_id": "task_035",
+      "id": "tau-banking/task_035",
+      "scenario_id": "task_035",
+      "split": "train",
+      "task_id": "task_035",
+      "task_sha256": "f6ec3468d927ac12f86b94596a9e2097cb3337f027b975c05211b04bc2653b1f"
+    },
+    {
+      "group_id": "task_072",
+      "id": "tau-banking/task_072",
+      "scenario_id": "task_072",
+      "split": "train",
+      "task_id": "task_072",
+      "task_sha256": "e7ee150ff2993e94c49d6c9345802bcc232fc174f33e6c9e897e689995a0c335"
+    },
+    {
+      "group_id": "task_072",
+      "id": "tau-banking/task_077",
+      "scenario_id": "task_077",
+      "split": "train",
+      "task_id": "task_077",
+      "task_sha256": "d668f1c5833a48a166ed031a0355d2c4e121a6fdc714cbc3506d881ef8474042"
+    },
+    {
+      "group_id": "task_057",
+      "id": "tau-banking/task_057",
+      "scenario_id": "task_057",
+      "split": "train",
+      "task_id": "task_057",
+      "task_sha256": "ccf75d889dc62de80c0eaeb4e502a79b24ccadc9d236e685a12d5d1787015964"
+    },
+    {
+      "group_id": "task_053",
+      "id": "tau-banking/task_053",
+      "scenario_id": "task_053",
+      "split": "train",
+      "task_id": "task_053",
+      "task_sha256": "3abd0036c8fefbfb5ae1094f2fdbc6ff023e0442cd08b9b56e62b97ef6714b98"
+    },
+    {
+      "group_id": "task_090",
+      "id": "tau-banking/task_090",
+      "scenario_id": "task_090",
+      "split": "train",
+      "task_id": "task_090",
+      "task_sha256": "273fedf3ddc74cb4ec1b03c45a8ab5ee4dc309874e37aa8782f9fc5a2fbc6d38"
+    },
+    {
+      "group_id": "task_041",
+      "id": "tau-banking/task_041",
+      "scenario_id": "task_041",
+      "split": "train",
+      "task_id": "task_041",
+      "task_sha256": "439c74bfb42b35ede9f5b59fa71e4cf37edd661139ee86ee662a4beb24e7cdff"
+    },
+    {
+      "group_id": "task_048",
+      "id": "tau-banking/task_048",
+      "scenario_id": "task_048",
+      "split": "train",
+      "task_id": "task_048",
+      "task_sha256": "1c9dd8e2c4c3883516f9ae1b697cddf03cdd2084a575d85d741381b1a8083863"
+    },
+    {
+      "group_id": "task_071",
+      "id": "tau-banking/task_071",
+      "scenario_id": "task_071",
+      "split": "train",
+      "task_id": "task_071",
+      "task_sha256": "7c47d48d9c9d2aaa92ff21ab353c3a3e9da4a09c9ec4909e6575a08a14b754f9"
+    },
+    {
+      "group_id": "task_062",
+      "id": "tau-banking/task_062",
+      "scenario_id": "task_062",
+      "split": "train",
+      "task_id": "task_062",
+      "task_sha256": "a56aed67f2f6af89eaf6c6e6848dc4626e6cb43c4d0f1866c8ef651ebcbbd481"
+    },
+    {
+      "group_id": "task_002",
+      "id": "tau-banking/task_002",
+      "scenario_id": "task_002",
+      "split": "train",
+      "task_id": "task_002",
+      "task_sha256": "81a1aae95b6bb4d61991d0b9cef836b302b675685309174a53d878693cbd94c5"
+    },
+    {
+      "group_id": "task_008",
+      "id": "tau-banking/task_008",
+      "scenario_id": "task_008",
+      "split": "train",
+      "task_id": "task_008",
+      "task_sha256": "ded79cab7f856e5b343574204d5758a61dba30efe7b66a46a8dfd5f4464b96d5"
+    },
+    {
+      "group_id": "task_001",
+      "id": "tau-banking/task_001",
+      "scenario_id": "task_001",
+      "split": "train",
+      "task_id": "task_001",
+      "task_sha256": "9a797288dd215e89c0fab9d0063581a3a64d433f06af6179eaad795521b23ef0"
+    },
+    {
+      "group_id": "task_016",
+      "id": "tau-banking/task_016",
+      "scenario_id": "task_016",
+      "split": "train",
+      "task_id": "task_016",
+      "task_sha256": "4dfd79048329d154ff6aa04f2393dc6d314be00e029b20f2f4ea27a2e6144ef4"
+    },
+    {
+      "group_id": "task_039",
+      "id": "tau-banking/task_039",
+      "scenario_id": "task_039",
+      "split": "train",
+      "task_id": "task_039",
+      "task_sha256": "20de451f4ce02615370d8820e93661d9a18420eb81423f5497cd8abeb7462bcb"
+    },
+    {
+      "group_id": "task_039",
+      "id": "tau-banking/task_040",
+      "scenario_id": "task_040",
+      "split": "train",
+      "task_id": "task_040",
+      "task_sha256": "55e1c2dbc6fa192f62e0890c0b5431479d80bb501c6a83455c686477fd8e8b21"
+    },
+    {
+      "group_id": "task_101",
+      "id": "tau-banking/task_101",
+      "scenario_id": "task_101",
+      "split": "train",
+      "task_id": "task_101",
+      "task_sha256": "77c858307a3dbf6023ceb5e3e941e48c5b452bfe08b07f16db9461e708dd38c2"
+    },
+    {
+      "group_id": "task_101",
+      "id": "tau-banking/task_102",
+      "scenario_id": "task_102",
+      "split": "train",
+      "task_id": "task_102",
+      "task_sha256": "5aa0d292b89d09e4ea8c7033ea428d0cd0add7a6681d8a642cb661b85014b6a0"
+    },
+    {
+      "group_id": "task_093",
+      "id": "tau-banking/task_093",
+      "scenario_id": "task_093",
+      "split": "train",
+      "task_id": "task_093",
+      "task_sha256": "7e507f9688766cab2ff5f247a549c154f59a5523f2b882056e1ba5666d7bcb80"
+    },
+    {
+      "group_id": "task_100",
+      "id": "tau-banking/task_100",
+      "scenario_id": "task_100",
+      "split": "train",
+      "task_id": "task_100",
+      "task_sha256": "ea63d6247c40fd7afad04eef09e8b4a4a822b5c251213863bf958ee9b32d53c6"
+    },
+    {
+      "group_id": "task_015",
+      "id": "tau-banking/task_015",
+      "scenario_id": "task_015",
+      "split": "train",
+      "task_id": "task_015",
+      "task_sha256": "c7636e644ff2569078a61a3b2f338ecec8a90c2d182122aba477c71c09002411"
+    },
+    {
+      "group_id": "task_095",
+      "id": "tau-banking/task_095",
+      "scenario_id": "task_095",
+      "split": "train",
+      "task_id": "task_095",
+      "task_sha256": "5d45ac12d5ee411329b4f1c39c7bc7a64c3a24f46e47ee4223fe1821f726d4b3"
+    },
+    {
+      "group_id": "task_047",
+      "id": "tau-banking/task_047",
+      "scenario_id": "task_047",
+      "split": "train",
+      "task_id": "task_047",
+      "task_sha256": "39058a8e368a65608e5eca61665c7d7110b30e6aac404d20b634aed73210ac37"
+    },
+    {
+      "group_id": "task_003",
+      "id": "tau-banking/task_003",
+      "scenario_id": "task_003",
+      "split": "train",
+      "task_id": "task_003",
+      "task_sha256": "431591345634499dc8aed39de54e5b3304ca8500a927dff91d6919053a80ac73"
+    },
+    {
+      "group_id": "task_097",
+      "id": "tau-banking/task_097",
+      "scenario_id": "task_097",
+      "split": "train",
+      "task_id": "task_097",
+      "task_sha256": "1b313370494a51d3e2c3184de3c4dda4db212ee64790d7152168f628d8adad8e"
+    },
+    {
+      "group_id": "task_080",
+      "id": "tau-banking/task_080",
+      "scenario_id": "task_080",
+      "split": "train",
+      "task_id": "task_080",
+      "task_sha256": "8d3c1badb258d872c0ec33c6946d9ef0325b44c04249cbfe546a2845b46557c7"
+    },
+    {
+      "group_id": "task_080",
+      "id": "tau-banking/task_081",
+      "scenario_id": "task_081",
+      "split": "train",
+      "task_id": "task_081",
+      "task_sha256": "bd5e147f5c3acf9c1196698de1283cae0c2f5a9e7e08744199ef15932d070289"
+    },
+    {
+      "group_id": "task_006",
+      "id": "tau-banking/task_006",
+      "scenario_id": "task_006",
+      "split": "val",
+      "task_id": "task_006",
+      "task_sha256": "396d3d3e9ad6e28e0442e2e22de121cd9d9d6ff1d65c78ebc18616e063c0a73c"
+    },
+    {
+      "group_id": "task_051",
+      "id": "tau-banking/task_051",
+      "scenario_id": "task_051",
+      "split": "val",
+      "task_id": "task_051",
+      "task_sha256": "8903e0c276a0c5fe57a72d94f7375eb868740bfa93fff0d8f590280808d29335"
+    },
+    {
+      "group_id": "task_051",
+      "id": "tau-banking/task_052",
+      "scenario_id": "task_052",
+      "split": "val",
+      "task_id": "task_052",
+      "task_sha256": "595624073ae3c1d42567da1948b5ec7da40835a0dff59bcb9b6b7870afb453ae"
+    },
+    {
+      "group_id": "task_076",
+      "id": "tau-banking/task_076",
+      "scenario_id": "task_076",
+      "split": "val",
+      "task_id": "task_076",
+      "task_sha256": "419a62ec35b756618da8d0fa85a119a795f2b1c554326af406fd3566031b589d"
+    },
+    {
+      "group_id": "task_096",
+      "id": "tau-banking/task_096",
+      "scenario_id": "task_096",
+      "split": "val",
+      "task_id": "task_096",
+      "task_sha256": "5524a004c5b1d3835cbce6251b4889accd2eac8a7a8be4e4158e5952992b97c9"
+    },
+    {
+      "group_id": "task_044",
+      "id": "tau-banking/task_044",
+      "scenario_id": "task_044",
+      "split": "val",
+      "task_id": "task_044",
+      "task_sha256": "a4dd48f6f6317b795b47629a719989bdf1f16ebcb4805a87bfe4ec9421505bd4"
+    },
+    {
+      "group_id": "task_044",
+      "id": "tau-banking/task_050",
+      "scenario_id": "task_050",
+      "split": "val",
+      "task_id": "task_050",
+      "task_sha256": "36e366f8b2fa4402dfa1c35debb1bc03a6be6ed7c8f7e9848d0cf646e385db80"
+    },
+    {
+      "group_id": "task_044",
+      "id": "tau-banking/task_054",
+      "scenario_id": "task_054",
+      "split": "val",
+      "task_id": "task_054",
+      "task_sha256": "3edf9f95e151607ba4c5cd3e6d1794917f3df7f30262e498a2c9a69110cd3495"
+    },
+    {
+      "group_id": "task_098",
+      "id": "tau-banking/task_098",
+      "scenario_id": "task_098",
+      "split": "val",
+      "task_id": "task_098",
+      "task_sha256": "a4703b1cd4c6bbe97d92d8c8e73ed3cfe18026cf3e01c244a25a1d615d6a06cc"
+    },
+    {
+      "group_id": "task_089",
+      "id": "tau-banking/task_089",
+      "scenario_id": "task_089",
+      "split": "val",
+      "task_id": "task_089",
+      "task_sha256": "6071bfc38167f3ad4bdf90371e91602ea52104fcbe24ab2ace6334c6c5e69a97"
+    },
+    {
+      "group_id": "task_014",
+      "id": "tau-banking/task_014",
+      "scenario_id": "task_014",
+      "split": "val",
+      "task_id": "task_014",
+      "task_sha256": "1119c5894c8529233167338f4d377dfc645b86cf9ef21486f5b809a7794253f1"
+    },
+    {
+      "group_id": "task_032",
+      "id": "tau-banking/task_032",
+      "scenario_id": "task_032",
+      "split": "val",
+      "task_id": "task_032",
+      "task_sha256": "00fa017c0c76601d13bbce7780ec755275561011099e2f2560c250c8eb585b85"
+    },
+    {
+      "group_id": "task_060",
+      "id": "tau-banking/task_060",
+      "scenario_id": "task_060",
+      "split": "val",
+      "task_id": "task_060",
+      "task_sha256": "bcedd99c906c7b7fcd9e1c27947b581df60db5ca40c830a721057fd5bd725613"
+    },
+    {
+      "group_id": "task_060",
+      "id": "tau-banking/task_061",
+      "scenario_id": "task_061",
+      "split": "val",
+      "task_id": "task_061",
+      "task_sha256": "7c8bd8e4957aaf59640438c9c176b2d809fba847df45b4e1a34a2d61a0580aa4"
+    },
+    {
+      "group_id": "task_088",
+      "id": "tau-banking/task_088",
+      "scenario_id": "task_088",
+      "split": "val",
+      "task_id": "task_088",
+      "task_sha256": "37c1295bdf1a576c8f78758513d11ee5075f9b224e1d96e83dc22d4624df10b8"
+    },
+    {
+      "group_id": "task_010",
+      "id": "tau-banking/task_010",
+      "scenario_id": "task_010",
+      "split": "val",
+      "task_id": "task_010",
+      "task_sha256": "1b7e99916f35584033555ed92f19dd20b8870ef4c56032a5006ecdc75fa80d43"
+    },
+    {
+      "group_id": "task_085",
+      "id": "tau-banking/task_085",
+      "scenario_id": "task_085",
+      "split": "val",
+      "task_id": "task_085",
+      "task_sha256": "257de2cee301ca53ea36167f650a18adfc6b8bb1b670a2ec1089d874e39009ea"
+    },
+    {
+      "group_id": "task_058",
+      "id": "tau-banking/task_058",
+      "scenario_id": "task_058",
+      "split": "val",
+      "task_id": "task_058",
+      "task_sha256": "a725b5fe20f6631ff7f72261fec9da46c4cc39c485977b6fd18e4285a8ed6006"
+    },
+    {
+      "group_id": "task_058",
+      "id": "tau-banking/task_063",
+      "scenario_id": "task_063",
+      "split": "val",
+      "task_id": "task_063",
+      "task_sha256": "c32d90c34a9b32166a132ac4c31ab1849a1c9c6da8128e6a88951dcd07ce6925"
+    },
+    {
+      "group_id": "task_033",
+      "id": "tau-banking/task_033",
+      "scenario_id": "task_033",
+      "split": "test",
+      "task_id": "task_033",
+      "task_sha256": "43a20801a9d967dad13e5b4177865f6d095629421f6c6a10399474352518cc3e"
+    },
+    {
+      "group_id": "task_049",
+      "id": "tau-banking/task_049",
+      "scenario_id": "task_049",
+      "split": "test",
+      "task_id": "task_049",
+      "task_sha256": "7410929906ac165ff07c155e0c1ac23a8eb1237316a0632661941b9ed95b100a"
+    },
+    {
+      "group_id": "task_079",
+      "id": "tau-banking/task_079",
+      "scenario_id": "task_079",
+      "split": "test",
+      "task_id": "task_079",
+      "task_sha256": "5b829435561eda3f59f26ef89fa1e0d9bfc243de9292cfe5850129e31697cf46"
+    },
+    {
+      "group_id": "task_007",
+      "id": "tau-banking/task_007",
+      "scenario_id": "task_007",
+      "split": "test",
+      "task_id": "task_007",
+      "task_sha256": "d30123e879e031d9fe7cc2a9c99ee04165f1bac8322a0cac8cda9937ee89f1fb"
+    },
+    {
+      "group_id": "task_019",
+      "id": "tau-banking/task_019",
+      "scenario_id": "task_019",
+      "split": "test",
+      "task_id": "task_019",
+      "task_sha256": "cb3e3cf3abae2ba24ff716ca7d3edc622b4987a8299f7847da3242d13f917231"
+    },
+    {
+      "group_id": "task_073",
+      "id": "tau-banking/task_073",
+      "scenario_id": "task_073",
+      "split": "test",
+      "task_id": "task_073",
+      "task_sha256": "0317fc9f694a1af07b4be4892c2679ad7236e599a98f0eaf971fa1672af580f7"
+    },
+    {
+      "group_id": "task_091",
+      "id": "tau-banking/task_091",
+      "scenario_id": "task_091",
+      "split": "test",
+      "task_id": "task_091",
+      "task_sha256": "1ef9994ab614a3e3d739cc0e4d2736069def9506e7be437c1c814472fe5647c0"
+    },
+    {
+      "group_id": "task_083",
+      "id": "tau-banking/task_083",
+      "scenario_id": "task_083",
+      "split": "test",
+      "task_id": "task_083",
+      "task_sha256": "b76f81cae74f14056503d49f198f7f84f654c614243f93dddd14f01e466b0cda"
+    },
+    {
+      "group_id": "task_099",
+      "id": "tau-banking/task_099",
+      "scenario_id": "task_099",
+      "split": "test",
+      "task_id": "task_099",
+      "task_sha256": "e9d0a863de7c060724dc6e47c4153917bf239cbe79056be49c9e5ca574932972"
+    },
+    {
+      "group_id": "task_021",
+      "id": "tau-banking/task_021",
+      "scenario_id": "task_021",
+      "split": "test",
+      "task_id": "task_021",
+      "task_sha256": "083e3bfb6860a8ba25fde6bae719badb00c6ba74747f69130d37cf130d73734c"
+    },
+    {
+      "group_id": "task_092",
+      "id": "tau-banking/task_092",
+      "scenario_id": "task_092",
+      "split": "test",
+      "task_id": "task_092",
+      "task_sha256": "3a3bb1cec482598ce505af6f3e8219a206b3049faa43b4204a555840b4883e36"
+    },
+    {
+      "group_id": "task_018",
+      "id": "tau-banking/task_018",
+      "scenario_id": "task_018",
+      "split": "test",
+      "task_id": "task_018",
+      "task_sha256": "762b8aa240a4d4a3e6267c20d3b751514f16718371200a9aea175d2d0f3693a0"
+    },
+    {
+      "group_id": "task_018",
+      "id": "tau-banking/task_022",
+      "scenario_id": "task_022",
+      "split": "test",
+      "task_id": "task_022",
+      "task_sha256": "7b9a27ed8afaba7a434a565613850742a4057addc02c4074abc109b5f1f30a1a"
+    },
+    {
+      "group_id": "task_018",
+      "id": "tau-banking/task_028",
+      "scenario_id": "task_028",
+      "split": "test",
+      "task_id": "task_028",
+      "task_sha256": "6fbbad88ffc5b78d5be89a1db8a3c9ff2bd29b5d83bb2cffe468e33ae546b133"
+    },
+    {
+      "group_id": "task_018",
+      "id": "tau-banking/task_029",
+      "scenario_id": "task_029",
+      "split": "test",
+      "task_id": "task_029",
+      "task_sha256": "aafb6891222a22af6c3293c9cb7536cb5c7b2318448f4fa680992b15585414d4"
+    },
+    {
+      "group_id": "task_018",
+      "id": "tau-banking/task_031",
+      "scenario_id": "task_031",
+      "split": "test",
+      "task_id": "task_031",
+      "task_sha256": "0702d1e320193224d8632b1682129a9f858a513cb6489c1230a5c5ecb9e346b1"
+    },
+    {
+      "group_id": "task_018",
+      "id": "tau-banking/task_036",
+      "scenario_id": "task_036",
+      "split": "test",
+      "task_id": "task_036",
+      "task_sha256": "8fb16abe143533e4a4a907dea9da3cfb02c05440b311182c90d249ac734f67b5"
+    },
+    {
+      "group_id": "task_018",
+      "id": "tau-banking/task_037",
+      "scenario_id": "task_037",
+      "split": "test",
+      "task_id": "task_037",
+      "task_sha256": "7f6ef9e6516e1f535a37deedca53b6d4291301dad24a63b1acd15023ff38df3e"
+    },
+    {
+      "group_id": "task_018",
+      "id": "tau-banking/task_038",
+      "scenario_id": "task_038",
+      "split": "test",
+      "task_id": "task_038",
+      "task_sha256": "3c45198cdf680609e5756d701c17e9f31c29e334847e01ffc9556090b972c713"
+    },
+    {
+      "group_id": "task_078",
+      "id": "tau-banking/task_078",
+      "scenario_id": "task_078",
+      "split": "test",
+      "task_id": "task_078",
+      "task_sha256": "9888864990f709eefabae67568b8c19067cf5165d0dd14d90d7cd1441131ce8e"
+    },
+    {
+      "group_id": "task_012",
+      "id": "tau-banking/task_012",
+      "scenario_id": "task_012",
+      "split": "test",
+      "task_id": "task_012",
+      "task_sha256": "189c6cf33f2326898120d60a669423f395f9ba9dcc14ed62fc37a4eddb1a7fd9"
+    }
+  ],
+  "release": "1.0.1",
+  "repository": "https://github.com/sierra-research/tau2-bench",
+  "revision": "5bfa7e37b36656b37dc6d022156be6563c1007f3",
+  "schema_version": 1,
+  "source": {
+    "count": 260,
+    "ordered_sha256": "aceaf96885d4ead6b6db117e9fc791bf2313f9dfbc820c335e25b584c338af9c"
+  },
+  "split_policy": {
+    "group_fractions": [
+      0.6,
+      0.2,
+      0.2
+    ],
+    "official_split": false,
+    "salt": "gepa-tau-banking-group-split-v1"
+  },
+  "user_simulator": {
+    "count": 4,
+    "ordered_sha256": "9e7978d7ccee51b4f09d6fff73335ae41701dbfefbcf19dfb96748a693aac926"
+  }
+}

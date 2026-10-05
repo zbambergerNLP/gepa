@@ -456,7 +456,12 @@ for config in configs:
         )
         commands.append(
             f"HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 {ROOT}/resource-loader/bin/python -c "
-            + shlex.quote("import datasets; d=datasets.load_dataset('ryanmarten/OpenThoughts-1k-sample'); assert d")
+            # Offline discovery cannot infer the default when metadata is also cached.
+            + shlex.quote(
+                "import datasets; "
+                "assert all(datasets.load_dataset('ryanmarten/OpenThoughts-1k-sample', name) "
+                "for name in ('default', 'metadata'))"
+            )
         )
     return commands
 

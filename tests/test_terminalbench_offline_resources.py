@@ -310,6 +310,34 @@ def test_resource_recipes_preserve_task_solution_boundaries():
     assert "ignore_patterns" not in scripts["terminal-bench/mteb-leaderboard"]
 
 
+def test_offline_dataset_probe_checks_default_and_metadata_without_ambiguous_lookup(tmp_path, monkeypatch):
+    stage = tmp_path / "offline"
+    interpreter = stage / "resource-loader/bin/python"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.symlink_to(sys.executable)
+    monkeypatch.setattr(resources, "ROOT", str(stage))
+    (tmp_path / "datasets.py").write_text(
+        "import json, os\n"
+        "from pathlib import Path\n"
+        "def load_dataset(repo, name=None):\n"
+        "    assert os.environ['HF_HUB_OFFLINE'] == os.environ['HF_DATASETS_OFFLINE'] == '1'\n"
+        "    if name is None: raise ValueError('Multiple cached configurations: default, metadata')\n"
+        "    with Path(os.environ['PROBE_CALLS']).open('a') as stream:\n"
+        "        stream.write(json.dumps([repo, name]) + '\\n')\n"
+        "    return {'train': [name]}\n"
+    )
+    calls = tmp_path / "calls.jsonl"
+    command = resources._hf_snapshots([], dataset=True)[-1]
+    result = _run_shell(
+        [command], env={**os.environ, "PYTHONPATH": str(tmp_path), "PROBE_CALLS": str(calls)}, cwd=tmp_path
+    )
+    assert result.returncode == 0, result.stderr
+    assert [json.loads(line) for line in calls.read_text().splitlines()] == [
+        ["ryanmarten/OpenThoughts-1k-sample", "default"],
+        ["ryanmarten/OpenThoughts-1k-sample", "metadata"],
+    ]
+
+
 def test_mteb_compatibility_constraint_reaches_warm_and_runtime_without_changing_verifier(tmp_path, monkeypatch):
     stage = tmp_path / "offline"
     stage.mkdir()

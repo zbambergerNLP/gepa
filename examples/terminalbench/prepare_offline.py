@@ -185,13 +185,20 @@ def render_recipe(
     pip_environment = (
         "    export PIP_NO_INDEX=1\n    export PIP_FIND_LINKS=/opt/harbor-offline/wheels\n" if mode == "pip" else ""
     )
+    # Bullseye security packages moved off the live mirror after its LTS ended.
+    archive_setup = (
+        "    sed -i 's|http://deb.debian.org/debian-security|"
+        "https://archive.debian.org/debian-security|g' /etc/apt/sources.list\n"
+        if task_id in {"terminal-bench/qemu-alpine-ssh", "terminal-bench/qemu-startup"}
+        else ""
+    )
     return f"""Bootstrap: localimage
 From: {base_image}
 
 %post
     set -eu
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update
+{archive_setup}    apt-get update
     {shlex.join(["apt-get", "install", "-y", "--no-install-recommends"] + packages)}
     mkdir -p /opt/harbor-offline/home /opt/harbor-offline/uv-cache
 {installer}

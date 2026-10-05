@@ -361,6 +361,7 @@ def test_bullseye_server_uses_managed_python_without_replacing_task_python(tmp_p
     assert "uv pip install --python /opt/harbor-server/bin/python3 'fastapi==0.142.2' 'uvicorn==0.54.0'" in recipe
     assert "/usr/bin/python3 -m venv /opt/harbor-server" not in recipe
     assert "ln -s" not in recipe and "update-alternatives" not in recipe
+    assert recipe.index("https://archive.debian.org/debian-security") < recipe.index("apt-get update")
 
 
 def test_targeted_preparation_preserves_manifest_order_and_skips_other_tasks(tmp_path, preparation):

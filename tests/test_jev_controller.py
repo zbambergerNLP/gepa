@@ -421,6 +421,161 @@ def test_resume_replays_without_network_or_duplicate_cost_and_rejects_drift(setu
         select(resumed, traces="changed evidence")
 
 
+@pytest.mark.parametrize("count", [3, 7, 16, 32])
+def test_large_evidence_preserves_every_record_and_samples_once(setup_controller, count):
+    """Keep duplicates, Unicode, error records, full sections and every choice."""
+    controller, requests, _ = setup_controller
+    records = [{"input": "עברית " + "repeated\n" * 500, "id": i} for i in range(count)]
+    records[-1] = {"evaluation_error": "parse failure"}
+    traces = json.dumps(records, sort_keys=True, ensure_ascii=False)
+    rng = random.Random(42)
+    reference = random.Random(42)
+    reference.random()
+    with response_journal_scope("iteration:large"):
+        _, metadata = select(controller, rng=rng, traces=traces)
+    assert len(requests) == (count + 2) // 3
+    assert [row for request in requests for row in json.loads(request["state"]["training_evidence"])] == records
+    assert all(request["state"]["sections"] == TEMPLATES["system_prompt"].parse(PROMPT) for request in requests)
+    assert all(request["questions"] == requests[0]["questions"] for request in requests)
+    assert rng.getstate() == reference.getstate()
+    assert controller.total_tokens_in == len(requests) * 1000
+    assert metadata["physical_attempts"] == len(requests)
+    if count <= 3:
+        assert requests[0]["state"]["training_evidence"] == traces
+        assert "evidence_groups" not in metadata
+    else:
+        assert metadata["distribution_source"] == "record_weighted_evidence_pool"
+        assert metadata["confidence"] is metadata["raw_probs"] is metadata["jev_argmax"] is None
+        assert sum(group["count"] for group in metadata["evidence_groups"]) == count
+
+
+def test_group_probabilities_weight_records_then_apply_exploration(setup_controller):
+    """Normalize each raw map and give a one-record final group its correct weight."""
+    controller, _, replies = setup_controller
+
+    def weighted(request):
+        result = response(request)
+        answer = result["answers"]["edit"]
+        keys = list(answer["probabilities"])
+        start = json.loads(request["state"]["training_evidence"])[0]["id"]
+        chosen = keys[1] if start == 6 else keys[0]
+        answer["probabilities"] = {key: 0.995 if key == chosen else 0.0 for key in keys}
+        answer["choice"] = chosen
+        return httpx2.Response(200, json=result)
+
+    replies.extend([weighted] * 3)
+    with response_journal_scope("iteration:weights"):
+        _, metadata = select(controller, traces=json.dumps([{"id": i} for i in range(7)]))
+    keys = list(metadata["evidence_groups"][0]["payload"]["response"]["answers"]["edit"]["probabilities"])
+    assert metadata["probs"][keys[0]] == pytest.approx(6 / 7)
+    assert metadata["probs"][keys[1]] == pytest.approx(1 / 7)
+    assert metadata["sampling_probs"][keys[0]] == pytest.approx(0.9 * 6 / 7 + 0.05)
+    assert metadata["sampling_probs"][keys[1]] == pytest.approx(0.9 / 7 + 0.05)
+    assert all(metadata["sampling_probs"][key] == 0 for key in keys[2:])
+    assert all(group["payload"]["probability_normalization"]["applied"] for group in metadata["evidence_groups"])
+
+
+@pytest.mark.parametrize("with_attempt_log", [True, False])
+def test_group_replay_restores_usage_once(setup_controller, tmp_path, with_attempt_log):
+    """Restore physical usage from either journal source without counting the pool twice."""
+    controller, requests, _ = setup_controller
+    if not with_attempt_log:
+        controller._attempt_log = None
+    traces = json.dumps([{"id": i} for i in range(7)])
+    rng = random.Random(42)
+    with response_journal_scope("iteration:pool-replay"):
+        choice, first = select(controller, rng=rng, traces=traces)
+    replay = JevController(
+        response_journal_path=tmp_path / "responses.sqlite3",
+        attempt_log_path=tmp_path / "attempts.jsonl" if with_attempt_log else None,
+    )
+    replay_rng = random.Random(42)
+    with response_journal_scope("iteration:pool-replay"):
+        chosen, metadata = select(replay, rng=replay_rng, traces=traces)
+    assert chosen == choice and replay_rng.getstate() == rng.getstate()
+    assert metadata["replayed"] and metadata["physical_attempts"] == 0
+    assert metadata["request_id"] == first["request_id"]
+    assert replay.total_tokens_in == controller.total_tokens_in == metadata["usage"]["tokens_in"] == 3000
+    assert replay.total_cost == pytest.approx(controller.total_cost)
+    assert len(requests) == 3
+
+
+@pytest.mark.parametrize("drift", [False, True])
+def test_partial_group_resume_reuses_completed_work_and_binds_whole_batch(
+    setup_controller, tmp_path, monkeypatch, drift
+):
+    """Replay completed groups and reject changes even to a later unrequested group."""
+    controller, requests, _ = setup_controller
+    records = [{"id": i} for i in range(7)]
+    original_store = controller._journal.store
+
+    def interrupt_after_commit(*args):
+        original_store(*args)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(controller._journal, "store", interrupt_after_commit)
+    rng = random.Random(42)
+    before = rng.getstate()
+    with response_journal_scope("iteration:partial"), pytest.raises(KeyboardInterrupt):
+        select(controller, rng=rng, traces=json.dumps(records))
+    assert rng.getstate() == before and len(requests) == 1
+    replay = JevController(
+        response_journal_path=tmp_path / "responses.sqlite3", attempt_log_path=tmp_path / "attempts.jsonl"
+    )
+    replay._client = controller._client
+    if drift:
+        records[-1]["id"] = "changed after committed group"
+        with response_journal_scope("iteration:partial"), pytest.raises(ResponseJournalError, match="mismatch"):
+            select(replay, rng=rng, traces=json.dumps(records))
+        assert len(requests) == 1 and rng.getstate() == before
+    else:
+        with response_journal_scope("iteration:partial"):
+            _, metadata = select(replay, rng=rng, traces=json.dumps(records))
+        assert len(requests) == 3 and replay.total_tokens_in == 3000
+        assert metadata["physical_attempts"] == 2 and metadata["original_physical_attempts"] == 3
+
+
+@pytest.mark.parametrize("failure", [KeyboardInterrupt(), 400])
+def test_started_or_failed_group_cannot_be_blindly_reissued(setup_controller, tmp_path, failure):
+    """Keep unknown attempts and terminal errors; never drop a failing group or draw an action."""
+    controller, requests, replies = setup_controller
+
+    def interrupt(request):
+        raise KeyboardInterrupt
+
+    replies.extend([lambda request: httpx2.Response(200, json=response(request)), interrupt if failure != 400 else 400])
+    traces = json.dumps([{"id": i} for i in range(7)])
+    rng = random.Random(42)
+    before = rng.getstate()
+    error = KeyboardInterrupt if failure != 400 else JevControllerError
+    with response_journal_scope("iteration:failed-group"), pytest.raises(error):
+        select(controller, rng=rng, traces=traces)
+    assert len(requests) == 2 and rng.getstate() == before
+    replay = JevController(
+        response_journal_path=tmp_path / "responses.sqlite3", attempt_log_path=tmp_path / "attempts.jsonl"
+    )
+    replay._client = controller._client
+    with response_journal_scope("iteration:failed-group"), pytest.raises(ResponseJournalError, match="started"):
+        select(replay, rng=rng, traces=traces)
+    assert len(requests) == 2 and rng.getstate() == before
+
+
+def test_large_v4_decision_cannot_replay_as_grouped_policy(setup_controller, tmp_path, monkeypatch):
+    """Reject an old full-batch journal before issuing any grouped request."""
+    controller, requests, _ = setup_controller
+    old_policy = controller.run_contract()
+    old_policy["policy"] = "jev_joint_action_section_v4"
+    monkeypatch.setattr(controller, "run_contract", lambda: old_policy)
+    monkeypatch.setattr(controller, "_evidence_groups", lambda request: [])
+    traces = json.dumps([{"id": i} for i in range(7)])
+    with response_journal_scope("iteration:v4"):
+        select(controller, traces=traces)
+    replay = JevController(response_journal_path=tmp_path / "responses.sqlite3")
+    with response_journal_scope("iteration:v4"), pytest.raises(ResponseJournalError, match="mismatch"):
+        select(replay, traces=traces)
+    assert len(requests) == 1
+
+
 def test_seeded_sampling_uses_probabilities_rather_than_api_argmax(setup_controller):
     """Sample with the seeded probability mixture instead of returning the API argmax."""
     controller, _, replies = setup_controller
@@ -449,7 +604,13 @@ def test_seeded_sampling_uses_probabilities_rather_than_api_argmax(setup_control
 
 
 @pytest.mark.parametrize(
-    "old_version", ["jev_joint_action_section_v1", "jev_joint_action_section_v2", "jev_joint_action_section_v3"]
+    "old_version",
+    [
+        "jev_joint_action_section_v1",
+        "jev_joint_action_section_v2",
+        "jev_joint_action_section_v3",
+        "jev_joint_action_section_v4",
+    ],
 )
 def test_revised_policy_rejects_old_journal_identity_before_network(
     setup_controller, monkeypatch, tmp_path, old_version
@@ -457,7 +618,7 @@ def test_revised_policy_rejects_old_journal_identity_before_network(
     """Reject replay under an older policy identity without another provider call."""
     controller, requests, _ = setup_controller
     current_contract = controller.run_contract()
-    assert current_contract["policy"] == "jev_joint_action_section_v4"
+    assert current_contract["policy"] == "jev_joint_action_section_v5_evidence_pool"
     old_contract = deepcopy(current_contract)
     old_contract["policy"] = old_version
     old_contract.pop("probability_normalization")

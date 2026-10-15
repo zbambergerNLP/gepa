@@ -94,7 +94,7 @@ def setup(tmp_path, monkeypatch):
     return controller, calls, failures
 
 
-def choose(controller):
+def choose(controller, traces="unchanged"):
     """Select the standard test menu under a stable logical request scope.
 
     Args:
@@ -110,7 +110,7 @@ def choose(controller):
             menu,
             sections=template.parse(PROMPT),
             section_descriptions=template.sections,
-            traces="unchanged",
+            traces=traces,
             rng=random.Random(0),
         )
         return record
@@ -159,6 +159,37 @@ def test_pause_external_request_resume_and_journal_replay(setup, tmp_path, monke
     assert len(calls) == 1
     assert len((tmp_path / "attempts.jsonl").read_text().splitlines()) == 2
     assert "test-private-key" not in response.read_text()
+
+
+def test_grouped_handoff_replays_each_sealed_response_once(setup, tmp_path, monkeypatch):
+    """Resume between groups using the native external resolver without duplicate attempts."""
+    factory, calls, _ = setup
+    traces = json.dumps([{"id": i} for i in range(7)])
+    resolved = set()
+    for index in range(3):
+        with pytest.raises(SystemExit) as exc:
+            choose(factory(), traces=traces)
+        assert exc.value.code == 75
+        pending = [p for p in (tmp_path / "remote").glob("*/request.json") if p.parent.name not in resolved]
+        assert len(pending) == 1 and len(calls) == index
+        remote = pending[0]
+        external = tmp_path / "external" / remote.parent.name / "request.json"
+        external.parent.mkdir(parents=True)
+        shutil.copyfile(remote, external)
+        monkeypatch.delenv(HANDOFF_ENV)
+        sealed = resolve(external, factory(live=True))
+        assert resolve(external, factory(live=True)) == sealed
+        shutil.copyfile(sealed, remote.with_name("response.json"))
+        resolved.add(remote.parent.name)
+        monkeypatch.setenv(HANDOFF_ENV, str(tmp_path / "remote"))
+    completed = factory()
+    metadata = choose(completed, traces=traces)
+    assert metadata["original_physical_attempts"] == 3
+    assert len(calls) == 3 and completed.total_tokens_in == 300
+    replay = factory()
+    assert choose(replay, traces=traces)["replayed"] and replay.total_tokens_in == 300
+    assert len((tmp_path / "attempts.jsonl").read_text().splitlines()) == 6
+    assert [row for request in calls for row in json.loads(request["state"]["training_evidence"])] == json.loads(traces)
 
 
 def test_response_arrives_without_exiting_or_reloading_controller(setup, tmp_path, monkeypatch):

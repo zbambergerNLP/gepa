@@ -68,3 +68,27 @@ started outside the wrapper, or other nodes. It sets `VLLM_HOST_IP=127.0.0.1`,
 loopback too. Run trials sequentially because their fixed task ports share this
 job namespace. GPU access and multi-GPU collectives still need verification on
 the actual allocation; the launcher does not change Slurm device permissions.
+
+## Jev evidence pooling
+
+Jev controller policy `jev_joint_action_section_v5_evidence_pool` addresses the
+provider's 32k state-plus-question limit for large single-component reflection
+minibatches. It sends contiguous groups of at most three complete training
+records with the full component and choice constraints in every request. Each
+group's validated, normalized probability distribution is weighted by its record
+count; their arithmetic mean receives one exploration mixture and one sampled
+choice. This preserves every supplied record, including repeated text and error
+records, but changes the controller's statistical policy. It requires a fresh
+source-bound campaign and cannot continue a v4 checkpoint. Solver minibatch
+size, candidate admission, Manifestor evidence, and evaluation budgets do not
+change. Inputs of three or fewer records and joint-component selection retain
+their single-request behavior. An individual oversized group still fails closed;
+there is no truncation, model fallback, or adaptive retry with less evidence.
+
+Every group has its own response journal entry, provider request identity,
+attempt ledger, and native retry allowance. A completed group is reused after
+interruption. A direct request started without a committed response requires
+review before another call; offline requests retain the sealed mailbox protocol.
+Pooled metadata contains the individual raw responses and total usage, and labels
+the resulting probabilities as an aggregate rather than a single Jev response.
+It does not invent a joint provider confidence or count aggregate usage twice.

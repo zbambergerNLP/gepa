@@ -26,6 +26,7 @@ from gepa.response_journal import (
     ResponseJournalError,
     ResumeResponseJournal,
     canonical_request_digest,
+    response_journal_scope,
 )
 from gepa.strategies.action_space import FULL_SUPPORT_EXPLORATION_EPSILON
 from gepa.strategies.edit_tools import EditTool
@@ -39,6 +40,8 @@ from gepa.strategies.jev_constants import (
     JEV_BACKOFF_MAX_SECONDS,
     JEV_BACKOFF_MULTIPLIER,
     JEV_CHOICE_TYPE,
+    JEV_DECISION_JOURNAL_NAMESPACE,
+    JEV_EVIDENCE_GROUP_SIZE,
     JEV_INPUT_USD_PER_MILLION,
     JEV_JOURNAL_NAMESPACE,
     JEV_MAX_CHOICES,
@@ -129,7 +132,17 @@ JEV_CONTROLLER_POLICY_CONTRACT = {
     "sdk_version": JEV_SDK_VERSION,
     "primitive": JEV_CHOICE_TYPE,
     "factorization": "P(region, action)",
-    "context": "full component and full structured training evidence; no truncation",
+    "context": "full component in every request; all training records retained across evidence groups; no truncation",
+    "evidence_groups": {
+        "scope": "single-component structured JSON arrays; other inputs remain one request",
+        "max_records_per_request": JEV_EVIDENCE_GROUP_SIZE,
+        "partition": "contiguous original order; complete records; retain repeated text and error records",
+        "aggregation": "record-count-weighted arithmetic mean of each group's normalized choice probabilities",
+        "selection": "one exploration mixture and one RNG draw after all groups succeed",
+        "replay": "journal each group independently; bind every group to the full decision request",
+        "confidence": "no joint provider confidence for pooled decisions",
+        "compatibility": "new scientific policy; incompatible with full-batch v4 checkpoints",
+    },
     "selection_guidance": "contrastive action descriptions; classify the intended effect before choosing a pair",
     "canonical_constraints": "unchanged; authoritative over the selection glosses",
     "probability_normalization": {
@@ -143,6 +156,7 @@ JEV_CONTROLLER_POLICY_CONTRACT = {
     "exploration_epsilon": FULL_SUPPORT_EXPLORATION_EPSILON,
     "direction": "Manifestor derives guidance within Jev's chosen action/section; Jev emits no rationale",
     "retry": {
+        "scope": "each evidence group independently; never repartition or drop records after a failure",
         "max_attempts": PROVIDER_MAX_ATTEMPTS,
         "deadline_seconds": JEV_TIMEOUT_SECONDS,
         "sdk_retries": PROVIDER_SDK_RETRIES,
@@ -204,6 +218,12 @@ class JevController:
         self._client: Any = None
         self._journal = (
             ResumeResponseJournal(response_journal_path, self.JOURNAL_NAMESPACE) if response_journal_path else None
+        )
+        # Aggregate decisions reuse provider usage; only the provider namespace contributes to restored totals.
+        self._decision_journal = (
+            ResumeResponseJournal(response_journal_path, JEV_DECISION_JOURNAL_NAMESPACE)
+            if response_journal_path
+            else None
         )
         self._attempt_log = Path(attempt_log_path) if attempt_log_path else None
         self._lock = threading.RLock()
@@ -702,6 +722,90 @@ class JevController:
         """Choose one component/section/action from all eligible training evidence."""
         return self._select(menu, state={"components": dict(components)}, rng=rng, require_edit=require_edit)
 
+    @staticmethod
+    def _evidence_groups(request: dict[str, Any]) -> list[tuple[int, int, dict[str, Any]]]:
+        """Partition a large single-component array without shortening any record.
+
+        Return no groups for inputs that retain the single-request path. The
+        solver's evaluation minibatch and the Manifestor's evidence are unchanged.
+        """
+        try:
+            evidence = json.loads(request["state"].get("training_evidence", ""))
+        except (TypeError, ValueError):
+            return []
+        if not isinstance(evidence, list) or len(evidence) <= JEV_EVIDENCE_GROUP_SIZE:
+            return []
+        groups = []
+        for start in range(0, len(evidence), JEV_EVIDENCE_GROUP_SIZE):
+            records = evidence[start : start + JEV_EVIDENCE_GROUP_SIZE]
+            grouped = deepcopy(request)
+            grouped["state"]["training_evidence"] = json.dumps(records, sort_keys=True, ensure_ascii=False)
+            groups.append((start, len(records), grouped))
+        return groups
+
+    def _grouped_distribution(
+        self,
+        groups: list[tuple[int, int, dict[str, Any]]],
+        choices: set[str],
+        scope: str | None,
+        ordinal: int,
+        decision_digest: str,
+    ) -> dict[str, Any]:
+        """Persist independent group responses before constructing one decision.
+
+        Direct requests with a durable start claim but no committed response
+        require manual review. Offline handoffs retain their own sealed start
+        and response protocol, including reuse after a mailbox wait expires.
+        """
+        results = []
+        physical_attempts = 0
+        for index, (start, count, request) in enumerate(groups):
+            group_scope = f"{scope}/jev-evidence-group/{ordinal}/{index}" if scope else None
+            digest = canonical_request_digest(
+                {"policy": self.run_contract(), "decision_sha256": decision_digest, **request}
+            )
+            payload = self._journal.load(group_scope, 0, digest) if self._journal and group_scope else None
+            if payload is None:
+                if self._decision_journal and group_scope and not os.environ.get(HANDOFF_ENV):
+                    if self._decision_journal.load(group_scope, 0, digest) is not None:
+                        raise ResponseJournalError(
+                            "Jev evidence group was started without a committed response; inspect its attempts "
+                            "before any further provider call."
+                        )
+                    self._decision_journal.store(group_scope, 0, digest, {"started": str(uuid.uuid4())})
+                if group_scope:
+                    with response_journal_scope(group_scope):
+                        payload = self._live(request, choices)
+                else:
+                    payload = self._live(request, choices)
+                self._validate(payload["response"], choices)
+                if self._journal and group_scope:
+                    self._journal.store(group_scope, 0, digest, payload)
+                physical_attempts += payload["physical_attempts"]
+            self._validate(payload["response"], choices)
+            results.append({"start": start, "count": count, "request_sha256": digest, "payload": payload})
+        return {
+            "groups": results,
+            "request_id": f"evidence-pool:{decision_digest}",
+            "physical_attempts": physical_attempts,
+            "original_physical_attempts": sum(group["payload"]["physical_attempts"] for group in results),
+            "elapsed_seconds": sum(group["payload"]["elapsed_seconds"] for group in results),
+            "usage": {
+                key: sum(group["payload"]["usage"][key] for group in results)
+                for key in ("cost", "tokens_in", "tokens_out")
+            },
+        }
+
+    def _group_probabilities(self, payload: dict[str, Any], choices: set[str]) -> dict[str, float]:
+        """Weight each validated group's distribution by its number of records."""
+        groups = payload["groups"]
+        count = sum(group["count"] for group in groups)
+        distributions = [(group["count"], self._validate(group["payload"]["response"], choices)) for group in groups]
+        return {
+            key: math.fsum(size * probabilities[key] for size, probabilities in distributions) / count
+            for key in sorted(choices)
+        }
+
     def _select(
         self,
         menu: list[ControllerChoice],
@@ -764,13 +868,27 @@ class JevController:
             scope = ACTIVE_RESPONSE_JOURNAL_SCOPE.get()
             ordinal = self._ordinals.get(scope, 0) if scope is not None else 0
             digest = canonical_request_digest({"policy": self.run_contract(), **request})
-            payload = self._journal.load(scope, ordinal, digest) if self._journal is not None and scope else None
+            groups = self._evidence_groups(request)
+            if groups and self._journal is not None and scope:
+                # A v4 decision occupied this slot in the provider namespace; reject its incompatible identity.
+                self._journal.load(scope, ordinal, digest)
+            journal = self._decision_journal if groups else self._journal
+            payload = journal.load(scope, ordinal, digest) if journal is not None and scope else None
             replayed = payload is not None
             if payload is None:
-                payload = self._live(request, set(criteria))
-                if self._journal is not None and scope:
-                    self._journal.store(scope, ordinal, digest, payload)
-            probabilities = self._validate(payload["response"], set(criteria))
+                payload = (
+                    self._grouped_distribution(groups, set(criteria), scope, ordinal, digest)
+                    if groups
+                    else self._live(request, set(criteria))
+                )
+                if journal is not None and scope:
+                    journal.store(scope, ordinal, digest, payload)
+            probabilities = (
+                self._group_probabilities(payload, set(criteria))
+                if groups
+                else self._validate(payload["response"], set(criteria))
+            )
+            answer = payload["response"]["answers"][JEV_QUESTION_NAME] if not groups else None
             if scope:
                 self._ordinals[scope] = ordinal + 1
             support_size = sum(p > 0 for p in probabilities.values())
@@ -782,9 +900,18 @@ class JevController:
         return action, {
             "policy": JEV_CONTROLLER_POLICY_CONTRACT["policy"],
             "model": JEV_MODEL,
-            "raw_probs": deepcopy(payload["response"]["answers"][JEV_QUESTION_NAME]["probabilities"]),
+            "raw_probs": deepcopy(answer["probabilities"]) if answer else None,
             "probs": probabilities,
-            "probability_normalization": payload["probability_normalization"],
+            "probability_normalization": payload.get("probability_normalization"),
+            **(
+                {
+                    "distribution_source": "record_weighted_evidence_pool",
+                    "evidence_groups": deepcopy(payload["groups"]),
+                    "original_physical_attempts": payload["original_physical_attempts"],
+                }
+                if groups
+                else {}
+            ),
             "sampling_probs": sampling,
             "sampled": [action.menu_id],
             "sampled_reasonings": [None],
@@ -795,8 +922,9 @@ class JevController:
             "fallback": False,
             "n_parsed_entries": len(criteria),
             "excluded_choices": excluded,
-            "jev_argmax": payload["response"]["answers"][JEV_QUESTION_NAME]["choice"],
-            "confidence": payload["response"]["answers"][JEV_QUESTION_NAME]["confidence"],
+            "jev_argmax": answer["choice"] if answer else None,
+            "distribution_argmax": max(probabilities, key=lambda key: probabilities[key]),
+            "confidence": answer["confidence"] if answer else None,
             "request_sha256": digest,
             "request_id": payload["request_id"],
             "replayed": replayed,

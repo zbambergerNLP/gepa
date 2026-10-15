@@ -100,6 +100,19 @@ def definition(tmp_path, *options):
     return terminalbench.build_benchmark(args, models), args, models
 
 
+def test_docker_can_retain_della_ordered_task_scope(tmp_path, external_boundaries):
+    docker, _, _ = definition(tmp_path, "--task-scope", "della88")
+    singularity, _, _ = definition(tmp_path, "--container-runtime", "singularity")
+    assert (len(docker.trainset), len(docker.valset), len(docker.testset)) == (30, 19, 39)
+    assert docker.trainset == singularity.trainset
+    assert docker.valset == singularity.valset
+    assert docker.testset == singularity.testset
+    assert docker.source == singularity.source
+    assert docker.runtime != singularity.runtime
+    with pytest.raises(ValueError, match="all89"):
+        definition(tmp_path, "--container-runtime", "singularity", "--task-scope", "all89")
+
+
 def test_primary_entrypoint_is_a_direct_shared_route(monkeypatch):
     runner = Mock(return_value=0)
     monkeypatch.setattr(terminalbench, "run_cli", runner)

@@ -210,7 +210,9 @@ def _record(
     prompt_tokens = _field(usage, "prompt_tokens")
     completion_tokens = _field(usage, "completion_tokens")
     reasoning_tokens = _field(_field(usage, "completion_tokens_details"), "reasoning_tokens")
-    thinking_budget = (request.get("extra_body") or {}).get("thinking_token_budget", request.get("thinking_token_budget"))
+    thinking_budget = (request.get("extra_body") or {}).get(
+        "thinking_token_budget", request.get("thinking_token_budget")
+    )
     choices = _field(response, "choices", [])
     reasons = [_field(choice, "finish_reason") for choice in choices]
     empty_completion = (error is None or isinstance(error, IncompleteResponseError)) and (
@@ -271,6 +273,11 @@ def _record(
         ),
         "limits": limits,
     }
+    if "X-Gepa-Runtime-Sha256" in request.get("extra_headers", {}):
+        # A recovered Modal delivery may reuse a sealed provider response.
+        # Its gateway ledger, joined by request_id, owns physical-attempt counts.
+        row["attempt_kind"] = "modal_delivery"
+        row["physical_attempt_authority"] = "modal_gateway_delivery_journal"
     path = settings.get("log_path")
     if (
         path is not None
@@ -333,12 +340,11 @@ def _advance_output_retry_seed(request: dict[str, Any], error: BaseException) ->
         request["seed"] = (seed + 1) % PROVIDER_SEED_MODULUS
 
 
-def complete_with_retries(
-    send: Callable[..., Any], request: dict[str, Any], settings: dict[str, Any]
-) -> Any:
+def complete_with_retries(send: Callable[..., Any], request: dict[str, Any], settings: dict[str, Any]) -> Any:
     """Apply the same bounded request policy to SDK calls and raw serving probes."""
     request = dict(request)
     request_id, deadline = str(uuid.uuid4()), _deadline(request)
+    _bind_modal_request(request, request_id)
     last_error: Exception | None = None
     for attempt in range(1, PROVIDER_RETRY_POLICY["max_attempts"] + 1):
         if attempt > 1 and deadline is not None and time.monotonic() >= deadline:
@@ -399,6 +405,7 @@ def install_provider_retries() -> None:
             if settings is None:
                 return await original_async(*args, **kwargs)
             request_id, deadline = str(uuid.uuid4()), _deadline(kwargs)
+            _bind_modal_request(kwargs, request_id)
             last_error: Exception | None = None
             for attempt in range(1, PROVIDER_RETRY_POLICY["max_attempts"] + 1):
                 if attempt > 1 and deadline is not None and time.monotonic() >= deadline:
@@ -440,3 +447,12 @@ def provider_retry_kwargs(log_path: Path | None = None, role: str = "model") -> 
         "max_retries": PROVIDER_SDK_RETRIES,
         PROVIDER_RETRY_KEY: {"log_path": str(log_path) if log_path is not None else None, "role": role},
     }
+
+
+def _bind_modal_request(request: dict[str, Any], request_id: str) -> None:
+    """Let the Modal gateway recover a sealed response after an interrupted delivery."""
+    from examples.common.remote_runtime import REQUEST_HEADER, RUNTIME_HEADER
+
+    headers = request.get("extra_headers", {})
+    if RUNTIME_HEADER in headers:
+        request["extra_headers"] = {**headers, REQUEST_HEADER: request_id}

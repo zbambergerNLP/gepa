@@ -5,6 +5,11 @@ roles, optimization, validation selection, held-out evaluation, baseline reuse,
 resume checks, and timing. Each adapter owns its official data, task execution,
 scoring, and benchmark-specific constants.
 
+For cloud infrastructure, see the [Modal backend](modal/README.md). It provides
+separate preparation, launch, status, stop, and verified artifact-download commands
+for all six entrypoints. Modal runs have their own runtime identity and evidence;
+existing Della launchers and allocations are independent.
+
 | Benchmark | Entry module | Default task harness | Editable components |
 |---|---|---|---|
 | [HotPotQA](hotpotqa/) | `examples.hotpotqa.main` | Existing two-stage DSPy program and frozen Wiki-2017 BM25 retrieval | Existing program instruction modules |

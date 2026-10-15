@@ -104,6 +104,37 @@ def definition(root):
     )
 
 
+def test_modal_identity_and_transport_are_bound_before_evaluation(tmp_path, monkeypatch):
+    from examples.common.remote_runtime import RUNTIME_HEADER
+
+    cloud = {
+        "provider": "modal", "source_sha256": "source", "driver": {"image_id": "im-driver"},
+        "solver": {"identity": {"sha256": "solver-sha"}},
+        "proposer": {"identity": {"sha256": "proposer-sha"}},
+    }
+    monkeypatch.setattr("examples.common.remote_runtime.load_execution_runtime", lambda *args, **kwargs: cloud)
+    observed = {}
+
+    def build(args, models):
+        assert models.solver_kwargs["extra_headers"][RUNTIME_HEADER] == "solver-sha"
+        observed["models"] = models
+        return definition(args.run_dir)
+
+    def evaluate(benchmark, candidate, records, root, identity, **kwargs):
+        observed.update(identity=identity, benchmark=benchmark)
+        return {"ok": True}
+
+    monkeypatch.setattr(runner, "evaluate_candidate", evaluate)
+    runner.run_cli(
+        benchmark_name="local", build_benchmark=build, add_arguments=lambda _: None,
+        argv=["--mode", "pilot", "--execution-runtime", str(tmp_path / "runtime.json"), "--run-dir", str(tmp_path / "run")],
+    )
+    infrastructure = observed["identity"]["runtime"]["infrastructure"]
+    assert infrastructure["provider"] == "modal"
+    assert "proposer" not in infrastructure
+    assert observed["benchmark"].optimizer_runtime["modal_proposer"] == cloud["proposer"]
+
+
 @pytest.mark.parametrize("budget_kind", ["metric_calls", "candidate_proposals"])
 def test_real_optimizer_freezes_validation_winner_and_reuses_evidence(tmp_path, monkeypatch, budget_kind):
     benchmark = definition(tmp_path / "run")

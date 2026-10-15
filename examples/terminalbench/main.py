@@ -46,6 +46,11 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--docker-executable", default="docker")
     parser.add_argument("--container-runtime", choices=("docker", "singularity"), default="docker")
     parser.add_argument(
+        "--task-scope",
+        choices=("della88", "all89"),
+        help="Explicit comparison scope; default retains the backend's existing task set",
+    )
+    parser.add_argument(
         "--singularity-image-cache", type=Path, help="Persistent Apptainer/Singularity task-image cache"
     )
     parser.add_argument("--offline-task-bundle", type=Path, help="Verified local task packages and prepared SIF images")
@@ -72,7 +77,12 @@ def configure_models(args: argparse.Namespace, models: BenchmarkModels) -> Bench
 def build_benchmark(args: argparse.Namespace, models: BenchmarkModels) -> BenchmarkDefinition:
     """Bind fixed data, actual prompt editing, official Harbor rewards, and runtime identity."""
     manifest = load_terminalbench_manifest(MANIFEST_PATH)
-    task_exclusions = SINGULARITY_TASK_EXCLUSIONS if args.container_runtime == "singularity" else {}
+    task_scope = getattr(args, "task_scope", None)
+    if task_scope == "all89" and args.container_runtime == "singularity":
+        raise ValueError("The Singularity backend cannot run the all89 task scope")
+    task_exclusions = (
+        SINGULARITY_TASK_EXCLUSIONS if args.container_runtime == "singularity" or task_scope == "della88" else {}
+    )
     records = {
         split: [
             {

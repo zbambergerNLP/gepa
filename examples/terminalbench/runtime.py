@@ -148,6 +148,10 @@ def load_runtime_record(path: Path | None, model: str, api_base: str | None) -> 
     if path is None:
         raise ValueError("Supply --runtime-record from examples.terminalbench.runtime on this serving node")
     record = json.loads(path.read_text())
+    if isinstance(record, dict) and record.get("schema_version") == 2:
+        from examples.common.remote_runtime import load_remote_runtime
+
+        return load_remote_runtime(record, model, api_base)
     if not isinstance(record, dict) or record.get("schema_version") != 1:
         raise ValueError("Unsupported model-server runtime record")
     identity = validate_identity(record.get("identity"), model)

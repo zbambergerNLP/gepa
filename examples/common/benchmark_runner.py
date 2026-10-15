@@ -110,6 +110,7 @@ def build_parser(
     parser.add_argument("--solver-api-base", default=None)
     parser.add_argument("--reflection-api-base", default=None)
     parser.add_argument("--run-dir", type=Path, default=Path("outputs") / benchmark_name)
+    parser.add_argument("--execution-runtime", type=Path, help="Authenticated remote serving manifest (Modal)")
     add_variant_arguments(parser)
     parser.add_argument("--mode", choices=("optimize", "pilot", "optimizer-pilot", "baseline"), default="optimize")
     parser.add_argument("--max-metric-calls", type=int, default=DEFAULT_MAX_METRIC_CALLS)
@@ -715,7 +716,41 @@ def run_cli(
     if configure_models is not None:
         models = configure_models(args, models)
         validate_benchmark_model_pair(models.solver_model, models.proposer_model)
+    cloud_runtime = None
+    if args.execution_runtime is not None:
+        from examples.common.remote_runtime import RUNTIME_HEADER, load_execution_runtime
+
+        cloud_runtime = load_execution_runtime(
+            args.execution_runtime, models, include_proposer=args.mode in {"optimize", "optimizer-pilot"}
+        )
+        models = replace(
+            models,
+            solver_kwargs={
+                **models.solver_kwargs,
+                "extra_headers": {RUNTIME_HEADER: cloud_runtime["solver"]["identity"]["sha256"]},
+            },
+            proposer_kwargs={
+                **models.proposer_kwargs,
+                **(
+                    {"extra_headers": {RUNTIME_HEADER: cloud_runtime["proposer"]["identity"]["sha256"]}}
+                    if "proposer" in cloud_runtime
+                    else {}
+                ),
+            },
+        )
     definition = build_benchmark(args, models)
+    if cloud_runtime is not None:
+        definition = replace(
+            definition,
+            runtime={
+                **definition.runtime,
+                "infrastructure": {k: v for k, v in cloud_runtime.items() if k != "proposer"},
+            },
+            optimizer_runtime={
+                **definition.optimizer_runtime,
+                **({"modal_proposer": cloud_runtime["proposer"]} if "proposer" in cloud_runtime else {}),
+            },
+        )
     validate_definition(definition)
     if args.mode in {"optimize", "optimizer-pilot"} and {"random", "action"}.intersection(conditions):
         if args.module_selector == "all" and len(definition.seed_candidate) > 1:

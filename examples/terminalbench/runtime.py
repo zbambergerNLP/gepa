@@ -133,7 +133,12 @@ def server_listens(pid: int, port: int) -> bool:
                         return True
                 except FileNotFoundError:
                     continue
-            pending.extend(int(child) for child in (process / "task" / str(current) / "children").read_text().split())
+            # Launchers such as uv can create their API subprocess from a non-main thread.
+            for task in (process / "task").iterdir():
+                try:
+                    pending.extend(int(child) for child in (task / "children").read_text().split())
+                except FileNotFoundError:
+                    continue
         except FileNotFoundError:
             continue
     return False

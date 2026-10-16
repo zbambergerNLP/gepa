@@ -26,13 +26,21 @@ class TauRuntime:
     """Use upstream dependencies without mixing incompatible LiteLLM versions."""
 
     def __init__(
-        self, source: Path, artifacts: Path, solver_model: str, solver_api_base: str | None, solver_kwargs: dict
+        self,
+        source: Path,
+        artifacts: Path,
+        solver_model: str,
+        solver_api_base: str | None,
+        solver_kwargs: dict,
+        *,
+        auxiliary: dict | None = None,
     ):
         self.source = source.resolve()
         self.artifacts = artifacts.resolve()
         self.solver_model = solver_model
         self.solver_api_base = solver_api_base
         self.solver_kwargs = solver_kwargs
+        self.auxiliary = auxiliary
 
     def invoke(self, payload: dict[str, Any]) -> dict:
         """Send requests through stdin and reject interrupted or malformed worker output."""
@@ -80,5 +88,6 @@ class TauRuntime:
                 "solver_model": self.solver_model,
                 "solver_api_base": self.solver_api_base,
                 "solver_kwargs": self.solver_kwargs,
+                "auxiliary": self.auxiliary,
             }
         )

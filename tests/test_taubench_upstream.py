@@ -315,16 +315,32 @@ def test_actual_max_steps_is_failure_and_cannot_be_reported_as_success(source, t
 
 
 @pytest.mark.parametrize("judge_result", ["empty", "met", "unmet"])
-def test_required_nl_assertion_uses_fixed_judge_and_rejects_empty_grades(source, tmp_path, monkeypatch, judge_result):
+@pytest.mark.parametrize("hosted", [False, True])
+def test_required_nl_assertion_uses_fixed_judge_and_rejects_empty_grades(
+    source, tmp_path, monkeypatch, judge_result, hosted
+):
     factories = dict(registry._agent_factories)
     factories.pop(AGENT_NAME, None)
     monkeypatch.setattr(registry, "_agent_factories", factories)
     judge_calls = []
     user_calls = []
     task = Task.model_validate_json((source / DATA_PATH / "tasks/task_102.json").read_text())
+    auxiliary = (
+        {
+            "model": "openrouter/openai/gpt-4.1",
+            "kwargs": {
+                "api_base": "https://openrouter.ai/api/v1",
+                "temperature": 0.0,
+                "max_tokens": 32768,
+                "extra_body": {"provider": {"only": ["azure"], "allow_fallbacks": False}},
+            },
+        }
+        if hosted
+        else None
+    )
 
     def completion(**kwargs):
-        assert kwargs["model"] == USER_MODEL
+        assert kwargs["model"] == (auxiliary["model"] if auxiliary else USER_MODEL)
         if "expectedOutcomes:" in kwargs["messages"][-1]["content"]:
             judge_calls.append(kwargs)
             results = (
@@ -358,6 +374,7 @@ def test_required_nl_assertion_uses_fixed_judge_and_rejects_empty_grades(source,
         "solver_model": QWEN3_8_27B_MODEL,
         "solver_api_base": None,
         "solver_kwargs": {"timeout": 3600},
+        "auxiliary": auxiliary,
     }
     if judge_result == "empty":
         with pytest.raises(ValueError, match="incomplete or mismatched assertions"):
@@ -373,7 +390,10 @@ def test_required_nl_assertion_uses_fixed_judge_and_rejects_empty_grades(source,
         assert reward_info["reward_breakdown"]["NL_ASSERTION"] == float(judge_result == "met")
         assert output["reward"] == math.prod(reward_info["reward_breakdown"][basis] for basis in ("DB", "NL_ASSERTION"))
     assert len(judge_calls) == len(user_calls) == 1
-    assert judge_calls[0]["api_base"] == user_calls[0]["api_base"] == "https://api.openai.com/v1"
+    expected_base = "https://openrouter.ai/api/v1" if hosted else "https://api.openai.com/v1"
+    assert judge_calls[0]["api_base"] == user_calls[0]["api_base"] == expected_base
+    if hosted:
+        assert judge_calls[0]["extra_body"] == user_calls[0]["extra_body"] == auxiliary["kwargs"]["extra_body"]
     attempts = [json.loads(line) for line in (tmp_path / "provider-attempts.jsonl").read_text().splitlines()]
     assert {row["role"] for row in attempts} == {"tau_user", "tau_judge"}
 

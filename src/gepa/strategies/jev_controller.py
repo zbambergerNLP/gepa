@@ -54,7 +54,6 @@ from gepa.strategies.jev_constants import (
     JEV_PRIVATE_FILE_MODE,
     JEV_PROBABILITY_ROUNDOFF_TOLERANCE,
     JEV_PROBABILITY_SUM_TOLERANCE,
-    JEV_PROVIDER,
     JEV_QUESTION_NAME,
     JEV_RETRYABLE_HTTP_STATUSES,
     JEV_SDK_VERSION,
@@ -197,6 +196,7 @@ class JevController:
         self,
         *,
         api_key: str | None = None,
+        provider: str = "typesafe",
         response_journal_path: str | Path | None = None,
         attempt_log_path: str | Path | None = None,
     ) -> None:
@@ -205,6 +205,7 @@ class JevController:
         Args:
             api_key: Explicit credential, or ``None`` to read the configured
                 environment variable when the client first connects.
+            provider: Explicit typesafe or openrouter typed decision transport.
             response_journal_path: Optional SQLite journal for deterministic
                 replay of completed logical requests.
             attempt_log_path: Optional append-only ledger of physical requests.
@@ -214,6 +215,13 @@ class JevController:
             JevControllerError: A saved attempt contains invalid usage.
             ResponseJournalError: The response journal cannot be initialized.
         """
+        if provider not in {"typesafe", "openrouter"}:
+            raise ValueError("Unsupported Jev provider")
+        self._provider = provider
+        self._model = "typesafe/jev-1.13" if provider == "openrouter" else JEV_MODEL
+        self._response_model = "typesafe/jev-1.13-20260917" if provider == "openrouter" else JEV_MODEL
+        self._api_base = "https://openrouter.ai/api" if provider == "openrouter" else JEV_API_BASE
+        self._api_key_env = "OPENROUTER_API_KEY" if provider == "openrouter" else JEV_API_KEY_ENV
         self._api_key = api_key
         self._client: Any = None
         self._journal = (
@@ -245,7 +253,17 @@ class JevController:
         Returns:
             Independent copy of the policy used to identify runs and requests.
         """
-        return deepcopy(JEV_CONTROLLER_POLICY_CONTRACT)
+        contract = deepcopy(JEV_CONTROLLER_POLICY_CONTRACT)
+        if self._provider == "openrouter":
+            contract.update(
+                provider=self._provider,
+                model=self._model,
+                response_model=self._response_model,
+                api_base=self._api_base,
+                model_identity="OpenRouter Jev 1.13 alias; exact checkpoint revision unavailable",
+            )
+            contract["cost_estimate"]["source"] = "https://openrouter.ai/typesafe/jev-1.13"
+        return contract
 
     def response_journal_cursor_state(self) -> dict[str, int]:
         """Snapshot cursors before a batched reflection attempt.
@@ -287,7 +305,7 @@ class JevController:
         """
         if self._attempt_log is None:
             return
-        record = {"schema_version": JEV_ATTEMPT_SCHEMA_VERSION, "role": self.ROLE, "provider": JEV_PROVIDER, **record}
+        record = {"schema_version": JEV_ATTEMPT_SCHEMA_VERSION, "role": self.ROLE, "provider": self._provider, **record}
         # Preserve a started record before the network call, including interrupted attempts.
         try:
             self._attempt_log.parent.mkdir(parents=True, exist_ok=True)
@@ -319,7 +337,7 @@ class JevController:
         if isinstance(value, list):
             return [self._safe_evidence(item) for item in value]
         if isinstance(value, str):
-            key = self._api_key or os.environ.get(JEV_API_KEY_ENV)
+            key = self._api_key or os.environ.get(self._api_key_env)
             return value.replace(key, "[REDACTED]") if key else value
         if isinstance(value, float) and not math.isfinite(value):
             return str(value)
@@ -366,16 +384,20 @@ class JevController:
         return {
             "tokens_in": tokens_in,
             "tokens_out": tokens_out,
+            **({"provider_cost_usd": usage["cost"]} if "cost" in usage else {}),
             "cost": cast(int, tokens_in) * JEV_INPUT_USD_PER_MILLION / TOKENS_PER_MILLION,
         }
 
     @staticmethod
-    def _validate(response: Mapping[str, Any], choices: set[str]) -> dict[str, float]:
+    def _validate(
+        response: Mapping[str, Any], choices: set[str], *, expected_model: str = JEV_MODEL
+    ) -> dict[str, float]:
         """Validate the typed answer and normalize its complete probability map.
 
         Args:
             response: Provider response, including model identity and token usage.
             choices: Exact set of executable action/section IDs requested.
+            expected_model: Exact response model ID of the selected transport.
 
         Returns:
             Probabilities normalized to unit mass without changing their relative
@@ -385,7 +407,7 @@ class JevController:
             JevControllerError: The model, answer, probabilities, argmax,
                 confidence or usage violates the request contract.
         """
-        if response.get("model") != JEV_MODEL:
+        if response.get("model") != expected_model:
             raise JevControllerError("Jev returned a different model version.")
         answers = response.get("answers")
         answer = answers.get(JEV_QUESTION_NAME) if isinstance(answers, Mapping) else None
@@ -501,7 +523,7 @@ class JevController:
                 raise ValueError("Manual recovery requires contiguous, finished failures of this exact scoped request.")
         previous = prior_attempts[-1]
         try:
-            self._validate(previous["response"], choices)
+            self._validate(previous["response"], choices, expected_model=self._response_model)
         except JevResponseValidationError as exc:
             corrected = self._correction_request(request, previous["response"], str(exc))
         else:
@@ -537,20 +559,22 @@ class JevController:
             SystemExit: The configured handoff times out waiting for a response.
         """
         if os.environ.get(HANDOFF_ENV):
+            if self._provider != "typesafe":
+                raise JevControllerError("OpenRouter Jev cannot use a Typesafe Della mailbox")
             return exchange(self, request)
         if typesafe_sdk is None:
             raise JevControllerError("The Jev Controller requires the 'jev' extra: uv sync --extra jev")
         if typesafe_sdk.__version__ != JEV_CONTROLLER_POLICY_CONTRACT["sdk_version"]:
             raise JevControllerError("Jev SDK version differs from the pinned policy; run uv sync --extra jev.")
         if self._client is None:
-            self._api_key = self._api_key or os.environ.get(JEV_API_KEY_ENV)
+            self._api_key = self._api_key or os.environ.get(self._api_key_env)
             if not self._api_key:
-                raise JevControllerError("Set TYPESAFE_API_KEY before using the Jev Controller.")
+                raise JevControllerError(f"Set {self._api_key_env} before using the Jev Controller.")
             try:
                 self._client = typesafe_sdk.TypeSafeClient(
                     api_key=self._api_key,
-                    model=JEV_MODEL,
-                    base_url=JEV_API_BASE,
+                    model=self._model,
+                    base_url=self._api_base,
                     retry=typesafe_sdk.RetryPolicy(max_retries=PROVIDER_SDK_RETRIES),
                     timeout=JEV_TIMEOUT_SECONDS,
                 )
@@ -591,12 +615,12 @@ class JevController:
                     questions={
                         JEV_QUESTION_NAME: typesafe_sdk.Choice(**current_request["questions"][JEV_QUESTION_NAME])
                     },
-                    model=JEV_MODEL,
+                    model=self._model,
                     retry=typesafe_sdk.RetryPolicy(max_retries=PROVIDER_SDK_RETRIES),
                     timeout=remaining,
                 )
                 response = result.model_dump(mode="json")
-                self._validate(response, choices)
+                self._validate(response, choices, expected_model=self._response_model)
                 normalization = self._normalization_record(response["answers"][JEV_QUESTION_NAME]["probabilities"])
             except (typesafe_sdk.TypeSafeError, JevControllerError) as exc:
                 error = exc
@@ -778,11 +802,11 @@ class JevController:
                         payload = self._live(request, choices)
                 else:
                     payload = self._live(request, choices)
-                self._validate(payload["response"], choices)
+                self._validate(payload["response"], choices, expected_model=self._response_model)
                 if self._journal and group_scope:
                     self._journal.store(group_scope, 0, digest, payload)
                 physical_attempts += payload["physical_attempts"]
-            self._validate(payload["response"], choices)
+            self._validate(payload["response"], choices, expected_model=self._response_model)
             results.append({"start": start, "count": count, "request_sha256": digest, "payload": payload})
         return {
             "groups": results,
@@ -800,7 +824,10 @@ class JevController:
         """Weight each validated group's distribution by its number of records."""
         groups = payload["groups"]
         count = sum(group["count"] for group in groups)
-        distributions = [(group["count"], self._validate(group["payload"]["response"], choices)) for group in groups]
+        distributions = [
+            (group["count"], self._validate(group["payload"]["response"], choices, expected_model=self._response_model))
+            for group in groups
+        ]
         return {
             key: math.fsum(size * probabilities[key] for size, probabilities in distributions) / count
             for key in sorted(choices)
@@ -840,7 +867,7 @@ class JevController:
         if not criteria or len(criteria) > JEV_MAX_CHOICES or len(criteria) != len(feasible):
             raise JevControllerError(f"Jev requires 1..{JEV_MAX_CHOICES} unique executable choices.")
         request = {
-            "model": JEV_MODEL,
+            "model": self._model,
             "state": state,
             "questions": {
                 JEV_QUESTION_NAME: {
@@ -886,7 +913,7 @@ class JevController:
             probabilities = (
                 self._group_probabilities(payload, set(criteria))
                 if groups
-                else self._validate(payload["response"], set(criteria))
+                else self._validate(payload["response"], set(criteria), expected_model=self._response_model)
             )
             answer = payload["response"]["answers"][JEV_QUESTION_NAME] if not groups else None
             if scope:
@@ -899,7 +926,7 @@ class JevController:
             action = rng.choices(feasible, weights=[sampling[c.menu_id] for c in feasible], k=1)[0]
         return action, {
             "policy": JEV_CONTROLLER_POLICY_CONTRACT["policy"],
-            "model": JEV_MODEL,
+            "model": self._model,
             "raw_probs": deepcopy(answer["probabilities"]) if answer else None,
             "probs": probabilities,
             "probability_normalization": payload.get("probability_normalization"),

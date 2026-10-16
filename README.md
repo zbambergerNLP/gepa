@@ -181,8 +181,8 @@ See the [adapters guide](https://gepa-ai.github.io/gepa/guides/adapters/) for ho
 The [shared benchmark suite](examples/BENCHMARKS.md) runs HotPotQA, Terminal-Bench 2.1,
 OBLIQ-Bench, DecisionBench, AppWorld, and Tau banking knowledge with the same
 GEPA/FOREST lifecycle, Qwen solver, DeepSeek proposer, and per-task timing reports.
-The [Modal backend](examples/modal/README.md) prepares and launches these same
-entrypoints on cloud CPU/GPU sandboxes alongside the existing Della infrastructure.
+The [local API setup](examples/local_api/README.md) runs these same benchmarks on
+this computer with explicitly chosen models through OpenRouter.
 
 ---
 

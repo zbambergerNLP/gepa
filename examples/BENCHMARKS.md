@@ -5,10 +5,10 @@ roles, optimization, validation selection, held-out evaluation, baseline reuse,
 resume checks, and timing. Each adapter owns its official data, task execution,
 scoring, and benchmark-specific constants.
 
-For cloud infrastructure, see the [Modal backend](modal/README.md). It provides
-separate preparation, launch, status, stop, and verified artifact-download commands
-for all six entrypoints. Modal runs have their own runtime identity and evidence;
-existing Della launchers and allocations are independent.
+For execution on this computer with a hosted model API, see the
+[local OpenRouter setup](local_api/README.md). It supports explicit solver and
+proposer choices for all six entrypoints, including OpenAI models, with one key
+for model calls, Tau's simulator/judge and the optional Jev controller.
 
 | Benchmark | Entry module | Default task harness | Editable components |
 |---|---|---|---|

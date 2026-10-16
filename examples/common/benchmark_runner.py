@@ -49,6 +49,7 @@ from examples.common.react_v2 import (
     file_sha256,
     resolve_template_family,
 )
+from examples.local_api.profile import API_BASE, load_credential, load_profile, role_kwargs, verify_routes
 from gepa import optimize
 from gepa.core.adapter import EvaluationBatch, ProposalFn
 from gepa.core.callbacks import GEPACallback
@@ -83,6 +84,7 @@ def implementation_identity(benchmark_name: str) -> dict[str, Any]:
         sorted((root / "src" / "gepa").rglob("*.py"))
         + sorted((root / "examples" / "common").glob("*.py"))
         + sorted((root / "examples" / benchmark_name).glob("*.py"))
+        + sorted((root / "examples" / "local_api").glob("*.py"))
     )
     return {
         "source_sha256": digest([[str(path.relative_to(root)), file_sha256(path)] for path in files]),
@@ -105,6 +107,7 @@ def build_parser(
         A parser with consistent solver, proposer and evaluation conventions.
     """
     parser = argparse.ArgumentParser(description=f"Vanilla GEPA and FOREST on {benchmark_name}")
+    parser.set_defaults(_benchmark_name=benchmark_name)
     parser.add_argument("--model", "--solver-model", dest="model", default=DEFAULT_SOLVER_MODEL)
     parser.add_argument(
         "--reflection-model", "--proposer-model", dest="reflection_model", default=DEFAULT_PROPOSER_MODEL
@@ -113,7 +116,9 @@ def build_parser(
     parser.add_argument("--solver-api-base", default=None)
     parser.add_argument("--reflection-api-base", default=None)
     parser.add_argument("--run-dir", type=Path, default=Path("outputs") / benchmark_name)
-    parser.add_argument("--execution-runtime", type=Path, help="Authenticated remote serving manifest (Modal)")
+    parser.add_argument("--api-profile", type=Path, help="Frozen OpenRouter routes for local execution")
+    parser.add_argument("--env-file", type=Path, help="Dotenv containing OPENROUTER_API_KEY; only that key is loaded")
+    parser.add_argument("--allow-api-calls", action="store_true", help="Explicitly permit a hosted benchmark run")
     add_variant_arguments(parser)
     parser.add_argument("--mode", choices=("optimize", "pilot", "optimizer-pilot", "baseline"), default="optimize")
     parser.add_argument("--max-metric-calls", type=int, default=DEFAULT_MAX_METRIC_CALLS)
@@ -143,6 +148,42 @@ def resolve_models(args: argparse.Namespace) -> BenchmarkModels:
     Returns:
         Pinned model identities and independent request dictionaries.
     """
+    if getattr(args, "api_profile", None) is not None:
+        if not args.allow_api_calls:
+            raise ValueError(
+                "Hosted benchmark execution requires --allow-api-calls; use local_api.cli check for connection checks"
+            )
+        if any((args.api_base, args.solver_api_base, args.reflection_api_base)) or (
+            args.model != DEFAULT_SOLVER_MODEL or args.reflection_model != DEFAULT_PROPOSER_MODEL
+        ):
+            raise ValueError("The API profile owns model and endpoint settings; do not combine model/base overrides")
+        if os.environ.get("GEPA_JEV_HANDOFF_DIR"):
+            raise ValueError("Local API runs cannot use a Della Jev mailbox")
+        profile = load_profile(args.api_profile)
+        load_credential(args.env_file)
+        verify_routes(
+            profile, ("solver", "proposer", "tau") if args._benchmark_name == "taubench" else ("solver", "proposer")
+        )
+        if args._benchmark_name == "decisionbench" and not {"response_format", "structured_outputs"} <= set(
+            profile["roles"]["solver"]["supported_parameters"]
+        ):
+            raise ValueError("DecisionBench requires a solver route supporting structured JSON-schema responses")
+        if args._benchmark_name == "terminalbench" and "seed" not in profile["roles"]["solver"]["supported_parameters"]:
+            raise ValueError("Terminal-Bench requires solver seed support for its fixed repetition protocol")
+        args._api_profile = profile
+        return BenchmarkModels(
+            solver_model="openrouter/" + profile["roles"]["solver"]["model_id"],
+            proposer_model="openrouter/" + profile["roles"]["proposer"]["model_id"],
+            solver_api_base=API_BASE,
+            proposer_api_base=API_BASE,
+            solver_kwargs={
+                **role_kwargs(profile, "solver"),
+                **provider_retry_kwargs(args.run_dir / PROVIDER_ATTEMPT_LOG, SOLVER_ROLE),
+            },
+            proposer_kwargs=role_kwargs(profile, "proposer"),
+        )
+    if getattr(args, "env_file", None) is not None:
+        raise ValueError("--env-file is only supported with --api-profile")
     validate_benchmark_model_pair(args.model, args.reflection_model)
     solver_base = args.solver_api_base or args.api_base
     proposer_base = args.reflection_api_base or args.api_base
@@ -572,6 +613,7 @@ def _run_condition_locked(
                 level=settings["reflection_level"],
                 edit_tool_set=settings["edit_tool_set"] or BROAD_EDIT_TOOL_SET,
                 controller_selection=settings["controller_selection"] or "verbalized",
+                jev_provider="openrouter" if definition.runtime.get("hosted_api") else "typesafe",
                 editor_mode=settings["editor_mode"] or "react",
                 proposal_policy=settings["proposal_policy"] or "independent",
                 react_max_iterations=settings["react_max_iterations"],
@@ -579,7 +621,7 @@ def _run_condition_locked(
                 template_family=template_family,
                 component_kinds=component_kinds,
                 rng=random.Random(args.seed),
-                manifestor_temperature=float(proposer_kwargs["temperature"]),
+                manifestor_temperature=proposer_kwargs.get("temperature"),
             )
         if settings["stateless_action_selection"]:
             kinds = set(component_kinds.values())
@@ -748,43 +790,20 @@ def run_cli(
     models = resolve_models(args)
     if configure_models is not None:
         models = configure_models(args, models)
-        validate_benchmark_model_pair(models.solver_model, models.proposer_model)
-    cloud_runtime = None
-    if args.execution_runtime is not None:
-        from examples.common.remote_runtime import RUNTIME_HEADER, load_execution_runtime
-
-        cloud_runtime = load_execution_runtime(
-            args.execution_runtime, models, include_proposer=args.mode in {"optimize", "optimizer-pilot"}
-        )
-        models = replace(
-            models,
-            solver_kwargs={
-                **models.solver_kwargs,
-                "extra_headers": {RUNTIME_HEADER: cloud_runtime["solver"]["identity"]["sha256"]},
-            },
-            proposer_kwargs={
-                **models.proposer_kwargs,
-                **(
-                    {"extra_headers": {RUNTIME_HEADER: cloud_runtime["proposer"]["identity"]["sha256"]}}
-                    if "proposer" in cloud_runtime
-                    else {}
-                ),
-            },
-        )
+        if getattr(args, "_api_profile", None) is None:
+            validate_benchmark_model_pair(models.solver_model, models.proposer_model)
+    api_profile = getattr(args, "_api_profile", None)
     definition = build_benchmark(args, models)
-    if cloud_runtime is not None:
+    if api_profile is not None:
         width = args.max_workers if benchmark_name in {"hotpotqa", "decisionbench", "taubench", "terminalbench"} else 1
         definition = replace(
             definition,
             runtime={
                 **definition.runtime,
-                "infrastructure": {k: v for k, v in cloud_runtime.items() if k != "proposer"},
+                "hosted_api": api_profile,
                 "task_continuation": {"policy": POLICY, "width": width},
             },
-            optimizer_runtime={
-                **definition.optimizer_runtime,
-                **({"modal_proposer": cloud_runtime["proposer"]} if "proposer" in cloud_runtime else {}),
-            },
+            optimizer_runtime={**definition.optimizer_runtime, "hosted_api": api_profile},
         )
     validate_definition(definition)
     if args.mode in {"optimize", "optimizer-pilot"} and {"random", "action"}.intersection(conditions):
@@ -811,7 +830,7 @@ def run_cli(
         testset=definition.testset[: args.test_limit],
     )
     solver_identity_kwargs = deepcopy(models.solver_kwargs)
-    if cloud_runtime is not None and "api_base" in solver_identity_kwargs:
+    if api_profile is not None and "api_base" in solver_identity_kwargs:
         solver_identity_kwargs["api_base"] = stable_api_base_identity(solver_identity_kwargs["api_base"])
     if PROVIDER_RETRY_KEY in solver_identity_kwargs:
         solver_identity_kwargs[PROVIDER_RETRY_KEY]["log_path"] = None

@@ -113,7 +113,7 @@ def test_docker_can_retain_della_ordered_task_scope(tmp_path, external_boundarie
         definition(tmp_path, "--container-runtime", "singularity", "--task-scope", "all89")
 
 
-def test_modal_task_groups_keep_native_trials_and_repetition_seeds(tmp_path, external_boundaries, monkeypatch):
+def test_local_task_groups_keep_native_trials_and_repetition_seeds(tmp_path, external_boundaries, monkeypatch):
     from dataclasses import replace
 
     from examples.common.benchmark_runner import evaluate_candidate

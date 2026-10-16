@@ -47,14 +47,12 @@ def summarize_usage(paths: list[Path]) -> dict[str, Any]:
         {file.resolve() for path in paths for file in ([path] if path.is_file() else path.rglob(TOKEN_USAGE_LOG))}
     )
     models: dict[str, Any] = {}
-    modal_deliveries: dict[str, Any] = {}
     for file in files:
         for line in file.read_text().splitlines():
             record = json.loads(line)
             if record["schema_version"] not in {1, 2}:
                 raise ValueError(f"Unsupported token-usage schema in {file}")
-            destination = modal_deliveries if record.get("attempt_kind") == "modal_delivery" else models
-            roles = destination.setdefault(record["requested_model"], {})
+            roles = models.setdefault(record["requested_model"], {})
             totals = roles.setdefault(record["role"], {"calls": 0, "errors": 0})
             totals["calls"] += 1
             totals["errors"] += record["error_type"] is not None
@@ -74,11 +72,7 @@ def summarize_usage(paths: list[Path]) -> dict[str, Any]:
                 totals[f"{field}_unreported_calls"] = totals.get(f"{field}_unreported_calls", 0) + (
                     record[field] is None
                 )
-    result = {"schema_version": 1, "files": [str(file) for file in files], "models": models}
-    if modal_deliveries:
-        result["modal_deliveries"] = modal_deliveries
-        result["modal_physical_attempt_authority"] = "solver/proposer gateway delivery journals"
-    return result
+    return {"schema_version": 1, "files": [str(file) for file in files], "models": models}
 
 
 def main() -> None:

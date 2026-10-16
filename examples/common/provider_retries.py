@@ -234,6 +234,9 @@ def _record(
         "requested_model": request.get("model"),
         "response_model": _field(response, "model"),
         "response_id": _field(response, "id"),
+        "response_provider": _field(response, "provider"),
+        "requested_provider": (request.get("extra_body") or {}).get("provider"),
+        "provider_cost_usd": _field(usage, "cost"),
         "elapsed_seconds": time.monotonic() - started,
         "outcome": "success" if error is None else "error" if isinstance(error, Exception) else "cancelled",
         "transport_outcome": (
@@ -273,11 +276,6 @@ def _record(
         ),
         "limits": limits,
     }
-    if "X-Gepa-Runtime-Sha256" in request.get("extra_headers", {}):
-        # A recovered Modal delivery may reuse a sealed provider response.
-        # Its gateway ledger, joined by request_id, owns physical-attempt counts.
-        row["attempt_kind"] = "modal_delivery"
-        row["physical_attempt_authority"] = "modal_gateway_delivery_journal"
     path = settings.get("log_path")
     if (
         path is not None
@@ -344,7 +342,6 @@ def complete_with_retries(send: Callable[..., Any], request: dict[str, Any], set
     """Apply the same bounded request policy to SDK calls and raw serving probes."""
     request = dict(request)
     request_id, deadline = str(uuid.uuid4()), _deadline(request)
-    _bind_modal_request(request, request_id)
     last_error: Exception | None = None
     for attempt in range(1, PROVIDER_RETRY_POLICY["max_attempts"] + 1):
         if attempt > 1 and deadline is not None and time.monotonic() >= deadline:
@@ -405,7 +402,6 @@ def install_provider_retries() -> None:
             if settings is None:
                 return await original_async(*args, **kwargs)
             request_id, deadline = str(uuid.uuid4()), _deadline(kwargs)
-            _bind_modal_request(kwargs, request_id)
             last_error: Exception | None = None
             for attempt in range(1, PROVIDER_RETRY_POLICY["max_attempts"] + 1):
                 if attempt > 1 and deadline is not None and time.monotonic() >= deadline:
@@ -447,12 +443,3 @@ def provider_retry_kwargs(log_path: Path | None = None, role: str = "model") -> 
         "max_retries": PROVIDER_SDK_RETRIES,
         PROVIDER_RETRY_KEY: {"log_path": str(log_path) if log_path is not None else None, "role": role},
     }
-
-
-def _bind_modal_request(request: dict[str, Any], request_id: str) -> None:
-    """Let the Modal gateway recover a sealed response after an interrupted delivery."""
-    from examples.common.remote_runtime import REQUEST_HEADER, RUNTIME_HEADER
-
-    headers = request.get("extra_headers", {})
-    if RUNTIME_HEADER in headers:
-        request["extra_headers"] = {**headers, REQUEST_HEADER: request_id}

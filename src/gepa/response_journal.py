@@ -40,18 +40,6 @@ _AUTH_REQUEST_FIELDS = frozenset(
 )
 _AUTH_HEADER_NAMES = frozenset({"authorization", "proxy-authorization", "x-api-key"})
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
-_VERIFIED_REMOTE_ENDPOINTS: dict[str, str] = {}
-
-
-def register_verified_remote_endpoint(api_base: str, identity: Mapping[str, Any]) -> None:
-    """Bind ephemeral transport to caller-verified source, image, and model evidence.
-
-    Call only after authenticating and validating fresh serving evidence. Merely
-    supplying a runtime header never grants an external endpoint this exemption.
-    """
-    serialized = json.dumps(identity, sort_keys=True, allow_nan=False)
-    fingerprint = hashlib.sha256(serialized.encode()).hexdigest()
-    _VERIFIED_REMOTE_ENDPOINTS[api_base] = "verified-modal-runtime:" + fingerprint
 
 
 class ResponseJournalError(RuntimeError):
@@ -63,8 +51,8 @@ def stable_api_base_identity(api_base: str) -> str:
 
     A new Slurm allocation starts the same pinned local model on a new
     ephemeral loopback port. That port cannot be part of interruption-replay
-    identity. Authenticated, explicitly registered Modal endpoints instead use
-    their full material runtime binding. Other remote endpoints remain material.
+    identity. Hostnames, ports, and paths for non-loopback providers remain
+    material.
 
     Args:
         api_base: Provider or local inference endpoint.
@@ -72,8 +60,6 @@ def stable_api_base_identity(api_base: str) -> str:
     Returns:
         Endpoint identity with credentials removed and a loopback port omitted.
     """
-    if api_base in _VERIFIED_REMOTE_ENDPOINTS:
-        return _VERIFIED_REMOTE_ENDPOINTS[api_base]
     parsed = urlsplit(api_base)
     hostname = parsed.hostname
     if hostname is None:
@@ -91,7 +77,7 @@ def _semantic_request(request: Mapping[str, Any]) -> dict[str, Any]:
 
     Authentication rotates independently of experiment behavior. Likewise,
     the port of the pinned loopback vLLM service changes between Slurm jobs.
-    Explicitly verified Modal tunnels may also rotate. All other fields remain exact, including external endpoints,
+    All other request fields remain exact, including external endpoints,
     prompts, tools, decoding settings, and batch order.
 
     Args:
@@ -253,7 +239,9 @@ class ResumeResponseJournal:
             )
         actual_response = hashlib.sha256(response_json.encode("utf-8")).hexdigest()
         if actual_response != recorded_response:
-            raise ResponseJournalError(f"Response-journal checksum mismatch at {self.namespace}/{scope}/{ordinal}.")
+            raise ResponseJournalError(
+                f"Response-journal checksum mismatch at {self.namespace}/{scope}/{ordinal}."
+            )
         try:
             payload = json.loads(response_json)
         except json.JSONDecodeError as exc:
@@ -300,7 +288,9 @@ class ResumeResponseJournal:
         for scope, ordinal, response_json, recorded_response in rows:
             actual_response = hashlib.sha256(response_json.encode("utf-8")).hexdigest()
             if actual_response != recorded_response:
-                raise ResponseJournalError(f"Response-journal checksum mismatch at {self.namespace}/{scope}/{ordinal}.")
+                raise ResponseJournalError(
+                    f"Response-journal checksum mismatch at {self.namespace}/{scope}/{ordinal}."
+                )
             try:
                 payload = json.loads(response_json)
             except json.JSONDecodeError as exc:

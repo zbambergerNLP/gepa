@@ -8,6 +8,7 @@ from pathlib import Path
 
 from examples.common.benchmark_types import BenchmarkDefinition, BenchmarkModels
 from examples.common.react_v2 import resolve_template_family, structured_prompt
+from examples.local_api.profile import tau_settings
 from examples.taubench.adapter import TauBankingAdapter
 from examples.taubench.benchmark_settings import (
     DEFAULT_SOURCE,
@@ -22,7 +23,6 @@ from examples.taubench.benchmark_settings import (
     TRIAL_SEED,
     UPSTREAM_REVISION,
 )
-from examples.taubench.model_settings import JUDGE_MODEL, USER_KWARGS, USER_MODEL
 from examples.taubench.runtime import TauRuntime
 from examples.taubench.utils import digest, load_data, upstream_system_prompt
 
@@ -38,8 +38,14 @@ def build_benchmark(args: argparse.Namespace, models: BenchmarkModels) -> Benchm
     """Verify data before binding the upstream worker to the shared experiment runner."""
     source = args.tau_source.resolve()
     splits, manifest = load_data(source)
+    auxiliary = tau_settings(getattr(args, "_api_profile", None))
     runtime = TauRuntime(
-        source, Path(args.run_dir) / "tau-episodes", models.solver_model, models.solver_api_base, models.solver_kwargs
+        source,
+        Path(args.run_dir) / "tau-episodes",
+        models.solver_model,
+        models.solver_api_base,
+        models.solver_kwargs,
+        auxiliary=auxiliary,
     )
     family = resolve_template_family(args.template_family, models.solver_model)
     upstream_prompt = upstream_system_prompt(source)
@@ -63,10 +69,10 @@ def build_benchmark(args: argparse.Namespace, models: BenchmarkModels) -> Benchm
             "retrieval": RETRIEVAL_CONFIG,
             "top_k": RETRIEVAL_TOP_K,
             "corpus_order": "document_id_ascending",
-            "user_model": USER_MODEL,
-            "user_kwargs": USER_KWARGS,
-            "judge_model": JUDGE_MODEL,
-            "judge_kwargs": USER_KWARGS,
+            "user_model": auxiliary["model"],
+            "user_kwargs": auxiliary["kwargs"],
+            "judge_model": auxiliary["model"],
+            "judge_kwargs": auxiliary["kwargs"],
             "evaluator": "EvaluationType.ALL; required reward_basis product",
             "max_steps": MAX_STEPS,
             "max_errors": MAX_ERRORS,

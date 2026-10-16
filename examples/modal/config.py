@@ -97,6 +97,8 @@ def validate_plan(plan: dict) -> None:
         raise ValueError("Select an explicit benchmark mode")
     if type(plan.get("timeout")) is not int or not 600 <= plan["timeout"] <= 86400:
         raise ValueError("timeout must be 600-86400 seconds; it is an allocation limit, not a new metric budget")
+    if type(drain_seconds(plan)) is not int or not 60 <= drain_seconds(plan) <= plan["timeout"] - 300:
+        raise ValueError("drain_seconds must leave at least 300 seconds for startup and useful work")
     if not isinstance(plan.get("arguments"), list) or not all(isinstance(x, str) for x in plan["arguments"]):
         raise ValueError("arguments must be a JSON list of CLI strings")
     reserved = {
@@ -164,6 +166,11 @@ def embedding_arguments(plan: dict) -> list[str]:
         for key, value in plan["embedding"].items()
         for item in ("--embedding-" + key.replace("_", "-"), str(value))
     ]
+
+
+def drain_seconds(plan: dict) -> int:
+    """Reserve time to finish an in-flight task group, proposal and evidence sealing."""
+    return plan.get("drain_seconds", min(7200, plan["timeout"] // 4))
 
 
 def benchmark_arguments(plan: dict, endpoints: dict[str, dict]) -> list[str]:

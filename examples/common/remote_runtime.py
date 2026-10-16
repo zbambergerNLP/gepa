@@ -9,6 +9,8 @@ from copy import deepcopy
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from gepa.response_journal import register_verified_remote_endpoint
+
 RUNTIME_HEADER = "X-Gepa-Runtime-Sha256"
 REQUEST_HEADER = "X-Gepa-Logical-Request-Id"
 
@@ -52,6 +54,14 @@ def load_remote_runtime(record: dict, model: str, api_base: str | None) -> dict:
     fresh = request_json(api_base, "/runtime")
     if fresh != {key: value for key, value in record.items() if key != "api_base"}:
         raise ValueError("Modal model runtime changed or belongs to a different serving allocation")
+    register_verified_remote_endpoint(
+        api_base,
+        {
+            "identity": identity,
+            "source_sha256": record.get("source_sha256"),
+            "image_id": record.get("image_id"),
+        },
+    )
     return deepcopy(identity)
 
 

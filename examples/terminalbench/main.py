@@ -150,6 +150,7 @@ def build_benchmark(args: argparse.Namespace, models: BenchmarkModels) -> Benchm
         adapter=SharedTerminusAdapter(
             TerminusAdapter(manifest, harbor, text_scope=scope),
             [record for split in records.values() for record in split],
+            partitioned_repetitions=args.execution_runtime is not None,
         ),
         seed_candidate=scope.seed_candidate(),
         trainset=records["train"],
@@ -178,7 +179,11 @@ def build_benchmark(args: argparse.Namespace, models: BenchmarkModels) -> Benchm
             "n_concurrent_trials": args.max_workers,
             "harbor_process_timeout_sec": args.harbor_process_timeout_sec,
             "attempts_per_task_per_repetition": 1,
-            "repeat_seed_policy": "shared seed + repetition index; fresh Harbor job per repetition",
+            "repeat_seed_policy": (
+                "shared seed + repetition index; fresh Harbor job per durable task group"
+                if args.execution_runtime is not None
+                else "shared seed + repetition index; fresh Harbor job per repetition"
+            ),
             "timing": "Harbor TrialResult.finished_at minus started_at; includes setup and teardown",
         },
         metric_name="pass_at_1",

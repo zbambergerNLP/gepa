@@ -12,8 +12,10 @@ import subprocess
 import time
 from pathlib import Path
 
+from examples.common.continuation import PAUSED_EXIT_CODE, POLICY
 from examples.common.remote_runtime import request_json
 from examples.modal.config import MODELS, benchmark_arguments, digest, embedding_arguments, roles, validate_plan
+from examples.modal.continuation import allocation_directory, runtime_identity, snapshot_state, verify_state
 from examples.modal.gateway import atomic_json
 
 PYTHON = ["uv", "run", "--no-sync", "python"]
@@ -134,28 +136,34 @@ def prepare_writable_caches(plan: dict, data: Path, results: Path, cache: Path) 
         shutil.copytree(data / "huggingface", cache, symlinks=True)
     if plan["benchmark"] == "hotpotqa":
         root = results / "wiki17"
-        root.mkdir()
+        root.mkdir(exist_ok=True)
         for source in (data / "wiki17").iterdir():
             if not source.name.startswith("retriever_cache_"):
-                (root / source.name).symlink_to(source, target_is_directory=source.is_dir())
+                target = root / source.name
+                if target.is_symlink() and target.readlink() == source:
+                    continue
+                target.symlink_to(source, target_is_directory=source.is_dir())
 
 
 def main() -> None:
-    """Run exactly once; persist failures and never restart an optimizer automatically."""
+    """Drain one allocation, preserving a resumable run separately from completion."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("phase", choices=("prepare", "run"))
     args = parser.parse_args()
     plan = json.loads(os.environ["GEPA_PLAN"])
     validate_plan(plan)
     RESULTS.mkdir(exist_ok=True)
-    claim = RESULTS / (args.phase + "-started.json")
+    epoch = int(os.environ.get("GEPA_ALLOCATION_EPOCH", "0"))
+    directory = RESULTS / allocation_directory(epoch) if args.phase == "run" else RESULTS
+    directory.mkdir(parents=True, exist_ok=True)
+    claim = directory / (args.phase + "-started.json")
     with claim.open("x") as stream:
         json.dump({"plan_sha256": digest(plan), "started_unix": time.time()}, stream)
     subprocess.run(["sync", "/results"], check=True)
     endpoints = json.loads(os.environ.get("GEPA_ENDPOINTS", "{}"))
-    status = {"phase": args.phase, "state": "starting", "plan_sha256": digest(plan)}
-    status_path = RESULTS / (args.phase + "-status.json")
-    log = (RESULTS / (args.phase + "-console.log")).open("ab", buffering=0)
+    status = {"phase": args.phase, "state": "starting", "plan_sha256": digest(plan), "epoch": epoch}
+    status_path = directory / (args.phase + "-status.json")
+    log = (directory / (args.phase + "-console.log")).open("ab", buffering=0)
     process = daemon = None
 
     def interrupted(signum, _frame):
@@ -164,6 +172,8 @@ def main() -> None:
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
     try:
+        if args.phase == "run" and epoch:
+            verify_state(RESULTS, RESULTS / allocation_directory(epoch - 1))
         if plan["benchmark"] == "terminalbench":
             daemon = docker_start(log)
         if args.phase == "prepare":
@@ -179,13 +189,14 @@ def main() -> None:
             if ready["key"] != data_key(plan):
                 raise ValueError("Prepared data do not match this benchmark/source/retrieval configuration")
             prepare_writable_caches(plan, Path("/data"), RESULTS, Path("/tmp/huggingface"))
-            if plan["benchmark"] == "appworld":
+            if plan["benchmark"] == "appworld" and not (RESULTS / "appworld").exists():
                 shutil.copytree("/opt/appworld-world", RESULTS / "appworld")
             records = {}
             for role in roles(plan):
                 endpoint = endpoints[role]["api_base"]
                 records[role] = {**request_json(endpoint, "/runtime"), "api_base": endpoint}
                 atomic_json(RESULTS / f"{role}-runtime.json", records[role])
+                atomic_json(directory / f"{role}-runtime.json", records[role])
             execution = {
                 "schema_version": 1,
                 "provider": "modal",
@@ -193,7 +204,12 @@ def main() -> None:
                 "driver": json.loads(os.environ["GEPA_DRIVER_IDENTITY"]),
                 "roles": records,
             }
+            if epoch:
+                previous = json.loads((RESULTS / allocation_directory(epoch - 1) / "execution.json").read_text())
+                if runtime_identity(execution) != runtime_identity(previous):
+                    raise ValueError("Continuation source, image, resources or actual model runtime changed")
             atomic_json(RESULTS / "execution.json", execution)
+            atomic_json(directory / "execution.json", execution)
             command = [*PYTHON, "-m", f"examples.{plan['benchmark']}.main", *benchmark_arguments(plan, endpoints)]
             atomic_json(RESULTS / "command.json", command)
             environment = {
@@ -201,6 +217,7 @@ def main() -> None:
                 "HF_HOME": "/tmp/huggingface",
                 "HF_HUB_OFFLINE": "1",
                 "HF_DATASETS_OFFLINE": "1",
+                "GEPA_PAUSE_RECEIPT": str(directory / "pause.json"),
             }
             process = subprocess.Popen(
                 command, env=environment, stdout=log, stderr=subprocess.STDOUT, start_new_session=True
@@ -208,14 +225,21 @@ def main() -> None:
             while process.poll() is None:
                 status.update(state="running", updated_unix=time.time())
                 atomic_json(status_path, status)
+                atomic_json(RESULTS / "run-status.json", status)
                 subprocess.run(["sync", "/results"], check=True)
                 try:
                     process.wait(timeout=30)
                 except subprocess.TimeoutExpired:
                     pass
-            if process.returncode:
+            if process.returncode == PAUSED_EXIT_CODE:
+                proof = json.loads((directory / "pause.json").read_text())
+                if proof != {"state": "paused", "policy": POLICY, "reason": "allocation_deadline"}:
+                    raise ValueError("Missing or incompatible graceful pause evidence")
+                status.update(state="paused", returncode=PAUSED_EXIT_CODE)
+            elif process.returncode:
                 raise subprocess.CalledProcessError(process.returncode, command)
-        status.update(state="completed", returncode=0)
+        if status["state"] != "paused":
+            status.update(state="completed", returncode=0)
     except BaseException as error:
         status.update(state="failed", error_type=type(error).__name__, returncode=getattr(error, "returncode", None))
         raise
@@ -240,7 +264,10 @@ def main() -> None:
         log.close()
         status.update(updated_unix=time.time(), worker_cleanup=cleanup)
         atomic_json(status_path, status)
-        seal_files(RESULTS, RESULTS / (args.phase + "-files.json"), exclude=tuple(MODELS))
+        if args.phase == "run":
+            atomic_json(RESULTS / "run-status.json", status)
+            snapshot_state(RESULTS, directory)
+        seal_files(directory, directory / (args.phase + "-files.json"), exclude=tuple(MODELS))
         subprocess.run(["sync", "/results"], check=True)
 
 

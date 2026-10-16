@@ -18,6 +18,7 @@ from pathlib import Path
 
 from examples.common.remote_runtime import REQUEST_HEADER, RUNTIME_HEADER
 from examples.modal.config import MODELS
+from examples.modal.continuation import allocation_directory
 from examples.terminalbench.runtime import load_runtime_record
 
 
@@ -110,7 +111,7 @@ def main() -> None:
     parser.add_argument("--role", choices=tuple(MODELS), required=True)
     args = parser.parse_args()
     role = MODELS[args.role]
-    directory = Path("/results") / args.role
+    directory = Path("/results") / allocation_directory(int(os.environ["GEPA_ALLOCATION_EPOCH"])) / args.role
     directory.mkdir(parents=True, exist_ok=True)
     record_path = directory / "local-runtime.json"
     key = os.environ["HOSTED_VLLM_API_KEY"]

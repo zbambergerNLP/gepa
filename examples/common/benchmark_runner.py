@@ -6,6 +6,7 @@ import argparse
 import fcntl
 import json
 import math
+import os
 import platform
 import random
 import statistics
@@ -34,6 +35,7 @@ from examples.common.benchmark_variants import (
     selected_conditions,
     variant_settings,
 )
+from examples.common.continuation import PAUSED_EXIT_CODE, POLICY, AllocationPause, TaskWindows, check_pause, pause_due
 from examples.common.experiment_models import (
     DEFAULT_PROPOSER_MODEL,
     DEFAULT_SOLVER_MODEL,
@@ -52,6 +54,7 @@ from gepa.core.adapter import EvaluationBatch, ProposalFn
 from gepa.core.callbacks import GEPACallback
 from gepa.lm import LM
 from gepa.lm_constants import PROVIDER_ATTEMPT_LOG, PROVIDER_RETRY_KEY
+from gepa.response_journal import stable_api_base_identity
 from gepa.strategies.action_space import (
     ActionSelector,
     RandomActionSelector,
@@ -253,6 +256,8 @@ class RecordedAdapter:
         self.propose_new_texts: ProposalFn | None = None
         self._train_ids = {str(row["id"]) for row in definition.trainset}
         self._val_ids = {str(row["id"]) for row in definition.valset}
+        policy = definition.runtime.get("task_continuation")
+        self.windows = TaskWindows(directory, policy["width"]) if policy else None
 
     def evaluate(self, batch: list[dict], candidate: dict[str, str], capture_traces: bool = False) -> EvaluationBatch:
         """Record episode latency separately from concurrent batch throughput."""
@@ -269,9 +274,20 @@ class RecordedAdapter:
         if set_context is not None:
             set_context(split=phase, repetition=self.repetition, seed=self.seed + self.repetition)
         started = time.perf_counter()
-        evaluated = self.definition.adapter.evaluate(batch, deepcopy(candidate), capture_traces=capture_traces)
-        elapsed = time.perf_counter() - started
+        if self.windows is None:
+            evaluated = self.definition.adapter.evaluate(batch, deepcopy(candidate), capture_traces=capture_traces)
+            elapsed = time.perf_counter() - started
+        else:
+            evaluated, elapsed = self.windows.evaluate(
+                self.definition.adapter,
+                batch,
+                deepcopy(candidate),
+                capture_traces,
+                [phase, self.repetition, self.seed],
+                validate_evaluation,
+            )
         validate_evaluation(evaluated, len(batch), capture_traces)
+        self.last_batch_elapsed = elapsed
         self.directory.mkdir(parents=True, exist_ok=True)
         with (self.directory / "task-timings.jsonl").open("a") as stream:
             for record, output, score in zip(batch, evaluated.outputs, evaluated.scores, strict=True):
@@ -303,10 +319,14 @@ class RecordedAdapter:
     def get_adapter_state(self) -> dict[str, Any]:
         """Preserve optional upstream state in GEPA checkpoints."""
         getter = getattr(self.definition.adapter, "get_adapter_state", None)
-        return deepcopy(getter()) if getter is not None else {}
+        state = deepcopy(getter()) if getter is not None else {}
+        return {"adapter": state, "continuation": self.windows.get_state()} if self.windows else state
 
     def set_adapter_state(self, state: dict[str, Any]) -> None:
         """Restore upstream state when the official adapter exposes that hook."""
+        if self.windows and state:
+            self.windows.set_state(state["continuation"])
+            state = state["adapter"]
         setter = getattr(self.definition.adapter, "set_adapter_state", None)
         if setter is not None:
             setter(deepcopy(state))
@@ -375,9 +395,11 @@ def evaluate_candidate(
                 raise ValueError("Stored evaluation batch duration is invalid.")
         else:
             observer.repetition = repetition
+            if observer.windows:
+                observer.windows.scope, observer.windows.ordinal = f"repetition-{repetition}", 0
             started = time.perf_counter()
             evaluated = observer.evaluate(records, candidate)
-            elapsed = time.perf_counter() - started
+            elapsed = observer.last_batch_elapsed if observer.windows else time.perf_counter() - started
             payload = {
                 "contract_sha256": digest(contract),
                 "repetition": repetition,
@@ -480,6 +502,9 @@ def _run_condition_locked(
     selection_set = trainset if pilot else definition.valset
     batch_size = min(args.reflection_minibatch_size, len(trainset))
     budget = optimizer_budget(args, definition.max_candidate_proposals)
+    proposer_identity_kwargs = deepcopy(models.proposer_kwargs)
+    if definition.runtime.get("task_continuation") and "api_base" in proposer_identity_kwargs:
+        proposer_identity_kwargs["api_base"] = stable_api_base_identity(proposer_identity_kwargs["api_base"])
     contract = {
         "schema_version": 2,
         "identity": identity,
@@ -493,7 +518,7 @@ def _run_condition_locked(
         "proposer": {
             "model": models.proposer_model,
             "revision": experiment_model_version(models.proposer_model),
-            "kwargs": models.proposer_kwargs,
+            "kwargs": proposer_identity_kwargs,
             "runtime": definition.optimizer_runtime,
         },
         "optimizer": {
@@ -578,12 +603,22 @@ def _run_condition_locked(
                     rng=random.Random(args.seed),
                 )
         sampling, selection = proposal_strategies(args)
+        callbacks = [cast(GEPACallback, pilot_observer)] if pilot_observer is not None else []
+        if adapter.windows:
+            callbacks.append(cast(GEPACallback, adapter.windows))
+        stoppers = (
+            [MaxCandidateProposalsStopper(budget["max_optimizer_iterations"])]
+            if budget["max_optimizer_iterations"] is not None
+            else []
+        )
+        if adapter.windows:
+            stoppers.append(lambda _state: pause_due())
         result = optimize(
             seed_candidate=deepcopy(definition.seed_candidate),
             trainset=trainset,
             valset=selection_set,
             adapter=adapter,
-            callbacks=[cast(GEPACallback, pilot_observer)] if pilot_observer is not None else None,
+            callbacks=callbacks or None,
             reflection_lm=LM(models.proposer_model, **proposer_kwargs),
             reflection_strategy=strategy,
             action_selector=cast(ActionSelector[StatelessActionConstraint] | None, action_selector),
@@ -598,11 +633,7 @@ def _run_condition_locked(
             max_merge_invocations=settings["max_merge_invocations"],
             skip_perfect_score=not pilot,
             max_metric_calls=budget["max_metric_calls"],
-            stop_callbacks=(
-                MaxCandidateProposalsStopper(budget["max_optimizer_iterations"])
-                if budget["max_optimizer_iterations"] is not None
-                else None
-            ),
+            stop_callbacks=stoppers or None,
             run_dir=str(directory),
             seed=args.seed,
             raise_on_exception=True,
@@ -621,6 +652,8 @@ def _run_condition_locked(
                 "config": contract,
             },
         )
+        if adapter.windows:
+            check_pause()
         candidate = result.best_candidate
         if not isinstance(candidate, dict) or set(candidate) != set(definition.seed_candidate):
             raise ValueError("GEPA returned an invalid benchmark harness candidate.")
@@ -740,11 +773,13 @@ def run_cli(
         )
     definition = build_benchmark(args, models)
     if cloud_runtime is not None:
+        width = args.max_workers if benchmark_name in {"hotpotqa", "decisionbench", "taubench", "terminalbench"} else 1
         definition = replace(
             definition,
             runtime={
                 **definition.runtime,
                 "infrastructure": {k: v for k, v in cloud_runtime.items() if k != "proposer"},
+                "task_continuation": {"policy": POLICY, "width": width},
             },
             optimizer_runtime={
                 **definition.optimizer_runtime,
@@ -776,6 +811,8 @@ def run_cli(
         testset=definition.testset[: args.test_limit],
     )
     solver_identity_kwargs = deepcopy(models.solver_kwargs)
+    if cloud_runtime is not None and "api_base" in solver_identity_kwargs:
+        solver_identity_kwargs["api_base"] = stable_api_base_identity(solver_identity_kwargs["api_base"])
     if PROVIDER_RETRY_KEY in solver_identity_kwargs:
         solver_identity_kwargs[PROVIDER_RETRY_KEY]["log_path"] = None
     identity = {
@@ -796,6 +833,20 @@ def run_cli(
         },
         "provider_retry_policy": PROVIDER_RETRY_POLICY,
     }
+    try:
+        return _execute_stages(args, definition, models, identity, conditions)
+    except AllocationPause:
+        path = os.environ.get("GEPA_PAUSE_RECEIPT")
+        if path is None:
+            raise
+        atomic_json(Path(path), {"state": "paused", "policy": POLICY, "reason": "allocation_deadline"})
+        return PAUSED_EXIT_CODE
+
+
+def _execute_stages(args, definition, models, identity, conditions) -> int:
+    """Keep a drained allocation distinct from a completed scientific experiment."""
+    if definition.runtime.get("task_continuation"):
+        check_pause()
     if args.mode == "pilot":
         summary = evaluate_candidate(
             definition,

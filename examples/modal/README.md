@@ -121,12 +121,56 @@ gVisor sandboxes; TerminalBench's Docker daemon runs in a separate CPU VM.
 Optional `--region` selects the allocation region and is recorded as infrastructure.
 
 Modal sandboxes have a [24-hour maximum lifetime](https://modal.com/docs/guide/sandboxes).
-`--timeout` defaults to 12 hours and includes startup; the driver stops before
-the earliest model allocation deadline. This is an infrastructure bound, **not
-a change to the evaluation budget**. A run that reaches that bound is incomplete.
-Artifacts are retained, but automatic continuation and cross-allocation checkpoint
-resume are not implemented. Do not assume an arbitrarily long campaign will
-finish in one sandbox or copy its checkpoint to a new run ID.
+`--timeout` defaults to 12 hours and includes startup. Runs can span multiple
+allocations through the same persistent results volume, frozen images, source,
+data, scientific budget and optimizer checkpoint. A new allocation is part of
+the same logical experiment, not another replicate or an additional budget.
+
+Before the earliest model deadline, the driver stops admitting new task groups.
+`--drain-seconds` reserves time for in-flight work and evidence sealing; the default
+is two hours (or one quarter of a shorter timeout). Tasks execute in ordered groups
+bounded by the adapter's existing concurrency. Each completed group, including
+scored-zero errors, is journaled before advancing. Training padding keeps separate
+attempts even for repeated task IDs. Long validation and held-out repetitions can
+therefore continue across allocations. TerminalBench uses a fresh native Harbor
+job per group with the original task seeds and one trial per requested position.
+No task's active world or process is transplanted between sandboxes.
+
+A clean drain exits with worker state **paused**, seals its checkpoint snapshot,
+and shuts down the owned model workers. It never freezes an unfinished winner
+or treats partial held-out work as complete. Continue once with:
+
+```bash
+uv run --no-project --python 3.12 --with modal==1.6.0 \
+  python -m examples.modal.cli resume \
+  --receipt ../modal-runs/decisionbench-pilot-run.json \
+  --output ../modal-runs/decisionbench-allocation-000001.json
+```
+
+For unattended rollover, run the bounded local supervisor:
+
+```bash
+uv run --no-project --python 3.12 --with modal==1.6.0 \
+  python -m examples.modal.cli follow \
+  --receipt ../modal-runs/decisionbench-pilot-run.json --max-allocations 4
+```
+
+**Both commands can create billable allocations.** The bound includes the supplied
+allocation. `follow` must remain running locally; disconnecting it leaves the
+cloud workers to complete or drain and does not create replacements. Its output
+identifies every new receipt. After a disconnect, inspect the latest receipt and
+existing intents before following again. Keep the original source tar and all
+receipts. The supervisor never resets a claim or retries an unknown creation.
+
+Continuation requires all previous workers to exit cleanly, complete evidence
+seals, matching source/data/contracts and identical freshly verified material
+model runtimes. Only tunnel addresses, bearer keys and allocation identities may
+rotate. Started tasks or provider calls without sealed outcomes block continuation;
+timeouts, preemptions and forced stops require review. A single task group or
+proposal must finish inside the drain window. Increase the operational reserve
+in a new plan when needed; this does not change model timeouts or scientific
+budgets. Preparation remains a separately bounded stage and must complete before
+launch. Receipts from before continuation support cannot be resumed automatically.
 
 ## Observe, stop and download
 
@@ -165,7 +209,7 @@ before forwarding to vLLM. It can replay an identical sealed response after a
 delivery failure, but refuses to reroll an unresolved started request. Definitive
 HTTP errors and output-error retries retain the existing retry/seed policy.
 
-Count `solver/deliveries` and `proposer/deliveries` as physical model-attempt
+Count `allocations/NNNNNN/solver/deliveries` and the corresponding proposer ledgers as physical model-attempt
 authorities. CPU `provider-attempts.jsonl` entries marked `modal_delivery` describe
 transport attempts and can include recovered delivery of the same response.
 Harbor usage summaries separate those deliveries from physical inference.
@@ -174,6 +218,10 @@ decisions are not additional provider attempts. Tau's simulator/judge calls are
 separate external-provider work. Missing cost or reasoning-token fields stay
 unknown. Baselines are reused only by the shared runner's exact matching identity
 inside this new run; never add a Della baseline or failed experiment prefix.
+Per-allocation snapshots contain cumulative checkpoints and journals; do not sum
+their copies as new work. Allocation-specific gateway ledgers count each physical
+attempt once. The latest receipt retains the full allocation history, while each
+prior status, log, runtime record and snapshot stays sealed in its own directory.
 
 Offline verification does not establish live model quality, hardware availability,
 all-task native readiness, or successful held-out completion. Review the saved

@@ -18,7 +18,7 @@ From the repository root, install the local Python driver:
 ```bash
 export DSPY_CACHEDIR="$HOME/.cache/gepa/dspy"
 UV_PROJECT_ENVIRONMENT=.venv-local-api uv sync --locked --python 3.12 \
-  --extra full --extra decisionbench --extra obliqbench --extra jev \
+  --extra full --extra decisionbench --extra obliqbench --extra wiki17 --extra jev \
   --group hotpotqa-task-program
 
 UV_PROJECT_ENVIRONMENT=.venv-local-api uv run --no-sync python -m examples.local_api.cli doctor

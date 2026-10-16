@@ -16,7 +16,7 @@ from examples.common.provider_retries import provider_retry_kwargs
 from gepa.strategies.forest_constants import OPTIMIZER_ROLE, SOLVER_ROLE
 
 API_BASE = "https://openrouter.ai/api/v1"
-BENCHMARKS = ("hotpotqa", "decisionbench", "appworld", "obliqbench", "taubench", "terminalbench")
+BENCHMARKS = ("hotpotqa", "decisionbench", "appworld", "obliqbench", "taubench", "terminalbench", "swebench_live")
 ROLES = ("solver", "proposer", "tau")
 TAU_MODEL = "openai/gpt-4.1"
 PARAMETERS = {"max_tokens", "temperature", "top_p", "top_k", "seed", "reasoning_effort"}

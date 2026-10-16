@@ -1,6 +1,6 @@
 # Local benchmarks with OpenRouter
 
-All six existing benchmark entrypoints can execute on this computer while model
+All seven benchmark entrypoints support local execution while model
 requests go through one OpenRouter key. Solver and proposer models are explicit
 choices: there is no assumed DeepSeek, Qwen, or OpenAI model for an API campaign.
 Models may differ between roles or be identical. The existing Della entrypoints,
@@ -86,6 +86,7 @@ run locally and retain their integrity checks:
 | [OBLIQ-Bench](../obliqbench/README.md) | Frozen corpora and Qwen embedding index, built on CPU if desired. `--data-dir` and `--index-dir` select existing data. API use does not replace the retriever with BM25. |
 | [Tau](../taubench/README.md) | Separate pinned upstream environment and banking data under `--tau-source`. |
 | [Terminal-Bench](../terminalbench/) | Pinned Harbor, working Docker and the actual task images. Runtime records for a local GPU server are unnecessary with `--api-profile`; native task checks remain mandatory. Use `--task-scope della88` to retain that task membership. |
+| [SWE-bench Live](../swebench_live/README.md) | Pinned Live dataset, isolated official test grader and per-task AMD64 Docker images. `--swebench-live-root` selects prepared assets. Default native resources are 4 CPUs / 16 GiB. |
 
 `doctor` reports presence and Docker resources, not verified task readiness.
 Some task images need x86 emulation on Apple Silicon. Dataset/index and Docker
@@ -165,8 +166,8 @@ UV_PROJECT_ENVIRONMENT=.venv-local-api uv run --no-sync python -m examples.decis
   --run-dir outputs/decisionbench-api-new-campaign
 ```
 
-Replace `decisionbench` with `hotpotqa`, `appworld`, `obliqbench`, `taubench` or
-`terminalbench`, adding that benchmark's preparation arguments. All documented
+Replace `decisionbench` with `hotpotqa`, `appworld`, `obliqbench`, `taubench`,
+`terminalbench` or `swebench_live`, adding that benchmark's preparation arguments. All documented
 [method and search variants](../BENCHMARKS.md#supported-variants) remain available.
 Terminal-Bench additionally caps both roles at 32768 combined output tokens.
 

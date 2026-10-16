@@ -29,6 +29,7 @@ def doctor() -> dict:
     """Inspect local prerequisites without downloading data or executing tasks."""
     from examples.appworld.prepare import LOCAL_RUNTIME
     from examples.common.wiki17_bm25 import DEFAULT_WIKI17_ROOT
+    from examples.swebench_live.settings import ROOT as SWE_LIVE_ROOT
     from examples.taubench.benchmark_settings import DEFAULT_SOURCE
 
     packages = {}
@@ -42,6 +43,7 @@ def doctor() -> dict:
         "appworld": LOCAL_RUNTIME / "world",
         "obliqbench": Path(".cache/obliqbench/index"),
         "taubench": DEFAULT_SOURCE,
+        "swebench_live": SWE_LIVE_ROOT,
     }
     docker = {"installed": shutil.which("docker") is not None, "running": False}
     if docker["installed"]:

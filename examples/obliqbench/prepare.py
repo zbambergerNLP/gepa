@@ -14,6 +14,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--data-dir", type=Path, default=Path(".cache/obliqbench/data"))
     parser.add_argument("--subsets", nargs="+", choices=tuple(SUBSETS), default=list(SUBSETS))
     parser.add_argument("--build-index", action="store_true", help="Build or verify all selected Qwen corpus indexes")
+    parser.add_argument(
+        "--resume-index", action="store_true", help="Checkpoint and resume verified local embedding chunks"
+    )
     parser.add_argument("--index-dir", type=Path, default=Path(".cache/obliqbench/index"))
     parser.add_argument("--embedding-device", default="cpu")
     parser.add_argument("--embedding-batch-size", type=int, default=8)
@@ -27,6 +30,8 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     if args.build_index and args.metadata_only:
         parser.error("--build-index requires complete corpora; it cannot be combined with --metadata-only")
+    if args.resume_index and not args.build_index:
+        parser.error("--resume-index requires --build-index")
     if args.embedding_batch_size < 1:
         parser.error("--embedding-batch-size must be positive")
     prepare_data(args.data_dir, args.subsets, metadata_only=args.metadata_only)
@@ -36,6 +41,7 @@ def main(argv: list[str] | None = None) -> None:
         data = load_data(args.data_dir, args.subsets)
         if args.build_index:
             from examples.obliqbench.embedding_runtime import QwenEncoder, retrieval_contract
+            from examples.obliqbench.index_preparation import prepare_index
             from examples.obliqbench.retrieval import DenseRetriever
 
             encoder_settings = {"attention": args.embedding_attention, "dtype": args.embedding_dtype}
@@ -43,7 +49,8 @@ def main(argv: list[str] | None = None) -> None:
             encoder = QwenEncoder(args.embedding_device, **encoder_settings)
             indexes = {}
             for name, corpus in data.corpora.items():
-                retriever = DenseRetriever(corpus, encoder, args.index_dir, contract, args.embedding_batch_size)
+                prepare = prepare_index if args.resume_index else DenseRetriever
+                retriever = prepare(corpus, encoder, args.index_dir, contract, args.embedding_batch_size)
                 indexes[name] = {
                     "documents": len(corpus.ids),
                     "index_path": str(Path(retriever.embeddings.filename).resolve()),

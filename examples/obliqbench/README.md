@@ -135,9 +135,13 @@ the defaults, and existing eager/float32 indexes keep their cache identities.
 Changing device, batch size, dtype or attention requires its own verified index.
 
 The full suite contains 807,398 documents; float32 stored vectors occupy about
-3.31 GB before metadata. Completed collection indexes are reused after interruption.
-An interrupted collection is rebuilt from its first document. Start with batch size
-one for long documents and verify resource use before choosing a larger batch.
+3.31 GB before metadata. Add `--resume-index` during preparation to checkpoint every
+256 embedding batches. A restart verifies the corpus/runtime identity and each
+completed chunk's checksum before skipping that prefix. Only work since the last
+checkpoint is recomputed. Concurrent preparers are rejected. Final indexes retain
+the ordinary retrieval contract and pass the same byte-level integrity check.
+Without this flag, only completed collection indexes are reused after interruption.
+Start with batch size one for long documents and verify resource use before choosing a larger batch.
 The [pinned Qwen model card](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B/blob/97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3/README.md)
 recommends memory-efficient attention and left padding.
 

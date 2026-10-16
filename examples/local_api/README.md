@@ -92,6 +92,54 @@ Some task images need x86 emulation on Apple Silicon. Dataset/index and Docker
 disk/RAM requirements remain material; do not infer full readiness from a working
 API key or replace unsupported tasks silently.
 
+### Data and index preparation
+
+These commands prepare local assets without calling a solver or proposer:
+
+```bash
+UV_PROJECT_ENVIRONMENT=.venv-local-api uv run --no-sync python -m examples.common.wiki17_bm25 prepare
+UV_PROJECT_ENVIRONMENT=.venv-local-api uv run --no-sync python -m examples.obliqbench.prepare
+UV_PROJECT_ENVIRONMENT=.venv-local-api uv run --no-sync python -m examples.appworld.prepare
+```
+
+DecisionBench accepts the exact canonical Parquet through `--data-file`; the
+loader checks its hash and ordered splits. Reuse verified AppWorld and Tau
+installations through the paths in the table above to avoid duplicate downloads.
+Follow [Tau's pinned installation steps](../taubench/README.md) for a new machine.
+
+OBLIQ's fixed embedding checkpoint is part of retrieval, separate from the
+user-selected API models. Its full corpus contains 807,398 documents. Build a
+resumable CPU index with the same flags to be used for later benchmark runs:
+
+```bash
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+UV_PROJECT_ENVIRONMENT=.venv-local-api uv run --no-sync python -m examples.obliqbench.prepare \
+  --build-index --resume-index --embedding-device cpu --embedding-attention sdpa \
+  --embedding-dtype float32 --embedding-batch-size 1
+```
+
+This offline command requires the pinned embedding weights already downloaded.
+Remove the two offline environment variables when staging them for the first
+time. Indexing can take days on a laptop; it prints verified prefix counts to
+stderr and resumes with the same command. Device, attention, dtype and batch size
+are part of the index identity. Apple Silicon MPS must be checked on long corpus
+documents before use; a short embedding check does not prove full-corpus capacity.
+
+Terminal-Bench packages can be downloaded with the pinned Harbor 0.22.0 CLI:
+
+```bash
+harbor datasets download \
+  terminal-bench/terminal-bench-2-1@sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a \
+  --cache
+```
+
+Pull the task images from their verified package manifests without starting trials.
+On Apple Silicon, use `docker pull --platform linux/amd64` and record the resolved
+image digests. A download receipt is not a native execution check. Keep existing
+containers running; raising Docker's resource limits requires a separate restart.
+Eight official environments request 8 GiB, so a 4 GiB Docker VM cannot validate
+the full suite. Do not lower task resources or silently omit these tasks.
+
 Tau's official GPT-4.1 simulator and judge are separate from the chosen solver
 and proposer. They use the same key through the recorded OpenRouter route, with
 an explicit 32768 output ceiling. The official dated model name is checked in

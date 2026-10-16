@@ -50,7 +50,7 @@ def benchmark_image(modal, source: Path, benchmark: str):
             f"git -C /opt/tau checkout --detach {UPSTREAM_REVISION}",
             f"uv sync --project /opt/tau --frozen --extra knowledge --python {PYTHON_VERSION}",
             "uv pip install --python /opt/tau/.venv/bin/python " + " ".join(RUNTIME_SUPPLEMENTS),
-        )
+        ).env({"UV_NO_SYNC": "1"})  # Worker startup must not rebuild the already-pinned Tau environment.
     if benchmark == "terminalbench":
         image = image.apt_install("docker.io", "docker-compose-v2", "iptables").run_commands(
             "uv venv --python 3.12.11 /opt/harbor",

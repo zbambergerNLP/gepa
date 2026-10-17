@@ -1,4 +1,4 @@
-"""Run one isolated shell-agent rollout, then score its frozen patch with upstream tests."""
+"""Run one upstream SWE-agent rollout, then score its frozen patch with upstream tests."""
 
 from __future__ import annotations
 
@@ -7,91 +7,13 @@ import os
 import subprocess
 import time
 import uuid
-from copy import deepcopy
 from pathlib import Path
-
-import litellm
-from litellm.exceptions import ContextWindowExceededError
 
 from examples.common.artifacts import atomic_json, digest
 from examples.common.react_v2 import file_sha256
-from examples.swebench_live.apptainer import ApptainerTask
 from examples.swebench_live.settings import COMPONENT
+from examples.swebench_live.swe_agent import rollout
 from gepa.core.adapter import EvaluationBatch
-
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "shell",
-            "description": "Run a shell command inside the task repository's isolated Linux container.",
-            "parameters": {
-                "type": "object",
-                "properties": {"command": {"type": "string"}},
-                "required": ["command"],
-                "additionalProperties": False,
-            },
-        },
-    }
-]
-
-
-class DockerTask:
-    """Own one disposable container, without host mounts, credentials or networking."""
-
-    def __init__(self, image_id: str, memory_gib: int):
-        self.image_id = image_id
-        self.memory_gib = memory_gib
-        self.name = "gepa-swe-live-" + uuid.uuid4().hex
-
-    def __enter__(self):
-        subprocess.run(
-            [
-                "docker",
-                "create",
-                "--pull",
-                "never",
-                "--name",
-                self.name,
-                "--platform",
-                "linux/amd64",
-                "--network",
-                "none",
-                "--cpus",
-                "4",
-                "--memory",
-                f"{self.memory_gib}g",
-                "--workdir",
-                "/testbed",
-                self.image_id,
-                "tail",
-                "-f",
-                "/dev/null",
-            ],
-            check=True,
-            capture_output=True,
-            timeout=120,
-        )
-        try:
-            subprocess.run(["docker", "start", self.name], check=True, capture_output=True, timeout=120)
-        except BaseException:
-            self.__exit__(None, None, None)
-            raise
-        return self
-
-    def execute(self, command: str, timeout: int = 120) -> dict:
-        """Execute only inside this task container and retain complete output."""
-        result = subprocess.run(
-            ["docker", "exec", "--workdir", "/testbed", self.name, "bash", "-lc", command],
-            capture_output=True,
-            text=True,
-            errors="replace",
-            timeout=timeout,
-        )
-        return {"exit_code": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
-
-    def __exit__(self, *_):
-        subprocess.run(["docker", "rm", "--force", self.name], check=True, capture_output=True, timeout=120)
 
 
 def grade(root: Path, trial: Path, record: dict, image: dict, memory_gib: int, timeout: int) -> dict:
@@ -148,17 +70,16 @@ class SWEBenchLiveAdapter:
 
     propose_new_texts = None
 
-    def __init__(self, models, root, run_dir, records, images, *, max_steps=100, memory_gib=16, test_timeout=1800):
+    def __init__(self, models, root, run_dir, records, images, *, agent_root=None, memory_gib=16, test_timeout=1800):
         self.models = models
         self.root = root.resolve()
         self.run_dir = run_dir.resolve()
         self.records = {record["id"]: record for record in records}
         self.images = images
-        self.max_steps = max_steps
+        self.agent_root = agent_root or root / "swe-agent"
         self.memory_gib = memory_gib
         self.test_timeout = test_timeout
-        self.completion = None
-        self.task_factory = DockerTask
+        self.rollout = rollout
         self.grader = grade
         self.evaluator_rows = {}
         for split in ("train", "val", "test"):
@@ -175,65 +96,28 @@ class SWEBenchLiveAdapter:
             raise ValueError("SWE-bench Live task identity drift")
         trial = self.run_dir / "native-trials" / uuid.uuid4().hex
         trial.mkdir(parents=True, exist_ok=False)
-        messages = [
-            {"role": "system", "content": candidate[COMPONENT]},
-            {"role": "user", "content": record["problem_statement"]},
-        ]
+        messages = {}
         output = {"id": record["id"], "prompt_sha256": digest(candidate), "error": None, "trial_dir": str(trial)}
         atomic_json(trial / "intent.json", {**output, "state": "started", "image": self.images[record["id"]]})
         try:
-            image = self.images[record["id"]]
-            container = (
-                ApptainerTask(image, self.memory_gib)
-                if image.get("backend") == "apptainer"
-                else self.task_factory(image["image_id"], self.memory_gib)
+            result = self.rollout(
+                self.agent_root,
+                record,
+                self.images[record["id"]],
+                self.models,
+                candidate[COMPONENT],
+                trial,
+                self.memory_gib,
             )
-            with container as task:
-                for _ in range(self.max_steps):
-                    atomic_json(trial / "trajectory.json", messages)
-                    request = {
-                        **deepcopy(self.models.solver_kwargs),
-                        "model": self.models.solver_model,
-                        "messages": deepcopy(messages),
-                        "tools": TOOLS,
-                        "drop_params": False,
-                    }
-                    if self.models.solver_api_base:
-                        request["api_base"] = self.models.solver_api_base
-                    try:
-                        response = (self.completion or litellm.completion)(**request)
-                    except ContextWindowExceededError:
-                        output["error"] = "context_limit_exceeded_no_truncation"
-                        break
-                    message = response.choices[0].message.model_dump(exclude_none=True)
-                    messages.append(message)
-                    calls = message.get("tool_calls", [])
-                    if not calls:
-                        break
-                    for call in calls:
-                        try:
-                            arguments = json.loads(call["function"]["arguments"])
-                            if (
-                                call["function"]["name"] != "shell"
-                                or set(arguments) != {"command"}
-                                or not isinstance(arguments["command"], str)
-                            ):
-                                raise ValueError("Expected shell(command: string)")
-                        except (ValueError, TypeError) as error:
-                            result = {"error": str(error)}
-                        else:
-                            result = task.execute(arguments["command"])
-                        messages.append({"role": "tool", "tool_call_id": call["id"], "content": json.dumps(result)})
-                        atomic_json(trial / "trajectory.json", messages)
-                patch = task.execute("git --no-pager diff HEAD --text")
-                if patch["exit_code"] != 0:
-                    raise RuntimeError("Could not extract the solver patch")
-            prediction = {"instance_id": record["id"], "model_name_or_path": "solver", "model_patch": patch["stdout"]}
+            messages = result["trajectory"]
+            output["swe_agent_info"] = result["info"]
+            patch = result["patch"]
+            prediction = {"instance_id": record["id"], "model_name_or_path": "solver", "model_patch": patch}
             atomic_json(trial / "prediction.json", prediction)
             output["prediction_sha256"] = file_sha256(trial / "prediction.json")
             if output["error"]:
                 output["resolved"] = False
-            elif not patch["stdout"].strip():
+            elif not patch.strip():
                 output.update(resolved=False, error="empty_patch")
             else:
                 # The solver container is gone before any gold test data is made available.
@@ -250,7 +134,8 @@ class SWEBenchLiveAdapter:
             atomic_json(trial / "result.json", output)
             return output
         finally:
-            atomic_json(trial / "trajectory.json", messages)
+            if messages or not (trial / "trajectory.json").exists():
+                atomic_json(trial / "trajectory.json", messages)
 
     def evaluate(self, batch, candidate, capture_traces=False):
         """Run fresh tasks sequentially; propagate infrastructure failures without fabricated scores."""

@@ -1,7 +1,6 @@
 """Check real data boundaries, native rollout isolation and launch guards without model calls."""
 
 import json
-from types import SimpleNamespace
 
 import pytest
 
@@ -54,23 +53,14 @@ def native(tmp_path):
     )
     events = []
 
-    class Task:
-        def __init__(self, image, memory):
-            assert image == "sha256:image"
+    def upstream(root, safe_record, image, models, prompt, trial, memory):
+        assert not list(tmp_path.rglob("evaluator-record.json"))
+        assert not any(secret in json.dumps(safe_record) for secret in ("GOLD SOLUTION", "HIDDEN TEST", "SECRET HINT"))
+        assert models.solver_model == "explicit/solver"
+        events.extend(["start", "upstream-agent", "stop"])
+        return {"patch": "PATCH", "trajectory": {"history": ["upstream-history"]}, "info": {"exit_status": "submitted"}}
 
-        def __enter__(self):
-            events.append("start")
-            return self
-
-        def execute(self, command):
-            assert not list(tmp_path.rglob("evaluator-record.json"))
-            events.append(command)
-            return {"exit_code": 0, "stdout": "PATCH" if command.startswith("git ") else "tool result", "stderr": ""}
-
-        def __exit__(self, *_):
-            events.append("stop")
-
-    runner.task_factory = Task
+    runner.rollout = upstream
 
     def grader(root, trial, record, image, memory, timeout):
         assert events[-1] == "stop"
@@ -84,38 +74,12 @@ def native(tmp_path):
     return runner, record, events
 
 
-def response(message):
-    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(model_dump=lambda **_: message))])
-
-
 def test_native_rollout_keeps_gold_private_and_grades_only_after_patch_freeze(native):
     runner, record, events = native
-    requests = []
-
-    def completion(**kwargs):
-        requests.append(kwargs)
-        assert not any(secret in json.dumps(kwargs) for secret in ("GOLD SOLUTION", "HIDDEN TEST", "SECRET HINT"))
-        if len(requests) == 1:
-            return response(
-                {
-                    "role": "assistant",
-                    "tool_calls": [
-                        {
-                            "id": "call",
-                            "type": "function",
-                            "function": {"name": "shell", "arguments": '{"command":"ls"}'},
-                        }
-                    ],
-                }
-            )
-        return response({"role": "assistant", "content": "Done"})
-
-    runner.completion = completion
     candidate = {"system_prompt": "Generic repair instructions"}
     result = runner.evaluate([record], candidate, True)
     assert result.scores == [1.0]
-    assert events == ["start", "ls", "git --no-pager diff HEAD --text", "stop"]
-    assert requests[0]["model"] == "explicit/solver"
+    assert events == ["start", "upstream-agent", "stop"]
     feedback = runner.make_reflective_dataset(candidate, result, ["system_prompt"])
     assert feedback["system_prompt"][0]["Feedback"]["resolved"] is True
     result.trajectories[0]["record"] = {**record, "split": "test"}
@@ -127,14 +91,14 @@ def test_provider_failure_stays_unresolved_and_is_not_retried_or_scored(native):
     runner, record, events = native
     calls = []
 
-    def failure(**kwargs):
-        calls.append(kwargs)
+    def failure(*args):
+        calls.append(args)
         raise RuntimeError("provider outcome unknown")
 
-    runner.completion = failure
+    runner.rollout = failure
     with pytest.raises(RuntimeError, match="outcome unknown"):
         runner.evaluate([record], {"system_prompt": "Generic instructions"})
-    assert len(calls) == 1 and events == ["start", "stop"]
+    assert len(calls) == 1 and events == []
     assert not list(runner.run_dir.rglob("result.json"))
     assert len(list(runner.run_dir.rglob("intent.json"))) == 1
     assert len(list(runner.run_dir.rglob("trajectory.json"))) == 1

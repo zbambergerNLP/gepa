@@ -52,16 +52,22 @@ def test_linux_process_identity_handles_names_and_rejects_zombies(monkeypatch):
 
 
 @pytest.mark.parametrize("owner", ["123", "456", "other"])
-def test_api_socket_must_belong_to_server_process_tree(monkeypatch, owner):
+@pytest.mark.parametrize("launcher_thread", ["123", "124"])
+def test_api_socket_must_belong_to_server_process_tree(monkeypatch, owner, launcher_thread):
     """Recognize an API worker's inherited socket and reject another server on the port."""
 
     def read(path):
         if str(path).endswith("/net/tcp"):
             return "header\n0: 0100007F:1F40 00000000:0000 0A 0 0 0 0 0 999\n"
-        return "456" if str(path) == "/proc/123/task/123/children" else ""
+        return "456" if str(path) == f"/proc/123/task/{launcher_thread}/children" else ""
+
+    def entries(path):
+        if path.name == "task":
+            return iter([path / path.parent.name, path / "124"])
+        return iter([path / "7"])
 
     monkeypatch.setattr(Path, "read_text", read)
-    monkeypatch.setattr(Path, "iterdir", lambda path: iter([path / "7"]))
+    monkeypatch.setattr(Path, "iterdir", entries)
     monkeypatch.setattr(
         Path, "readlink", lambda path: Path("socket:[999]" if str(path) == f"/proc/{owner}/fd/7" else "pipe:[1]")
     )

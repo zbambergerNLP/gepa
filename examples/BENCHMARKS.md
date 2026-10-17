@@ -1,9 +1,14 @@
 # Shared benchmark experiments
 
-The six benchmark entrypoints use `examples.common.benchmark_runner` for model
+The seven benchmark entrypoints use `examples.common.benchmark_runner` for model
 roles, optimization, validation selection, held-out evaluation, baseline reuse,
 resume checks, and timing. Each adapter owns its official data, task execution,
 scoring, and benchmark-specific constants.
+
+For execution on this computer with a hosted model API, see the
+[local OpenRouter setup](local_api/README.md). It supports explicit solver and
+proposer choices for all seven entrypoints, including OpenAI models, with one key
+for model calls, Tau's simulator/judge and the optional Jev controller.
 
 | Benchmark | Entry module | Default task harness | Editable components |
 |---|---|---|---|
@@ -13,14 +18,16 @@ scoring, and benchmark-specific constants.
 | [DecisionBench](decisionbench/README.md) | `examples.decisionbench.main` | Official structured decision/probability-vector protocol | System prompt |
 | [AppWorld](appworld/README.md) | `examples.appworld.main` | Published ReAct code-agent pattern and official state evaluator | System prompt |
 | [Tau banking knowledge](taubench/README.md) | `examples.taubench.main` | Official text agent, user simulator, BM25 tools and reward evaluator | Agent system prompt |
+| [SWE-bench Live](swebench_live/README.md) | `examples.swebench_live.main` | Native shell agent and official Python Docker test grader; frozen Live data and disjoint derived optimization splits | System prompt |
 
-The default **solver** is `hosted_vllm/Qwen/Qwen3.8-27B`; the default **proposer**
+For the original Della entrypoints, the default **solver** is `hosted_vllm/Qwen/Qwen3.8-27B`; the default **proposer**
 is `hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash`. Exact checkpoint revisions,
 sampling parameters, thinking budgets and bounded transport retries come from
 `examples/common/experiment_models.py` and `model_settings.py`. FOREST uses the
 DeepSeek proposer for its Controller, Manifestor and editor roles. Fixed benchmark
 services, such as the OBLIQ embedding retriever and Tau user simulator/judge, are
 identified separately in each benchmark's documentation and run contract.
+Local API campaigns, including SWE-bench Live, require explicit model selection.
 
 ## Install and prepare
 

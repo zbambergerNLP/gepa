@@ -100,6 +100,59 @@ def definition(tmp_path, *options):
     return terminalbench.build_benchmark(args, models), args, models
 
 
+def test_docker_can_retain_della_ordered_task_scope(tmp_path, external_boundaries):
+    docker, _, _ = definition(tmp_path, "--task-scope", "della88")
+    singularity, _, _ = definition(tmp_path, "--container-runtime", "singularity")
+    assert (len(docker.trainset), len(docker.valset), len(docker.testset)) == (30, 19, 39)
+    assert docker.trainset == singularity.trainset
+    assert docker.valset == singularity.valset
+    assert docker.testset == singularity.testset
+    assert docker.source == singularity.source
+    assert docker.runtime != singularity.runtime
+    with pytest.raises(ValueError, match="all89"):
+        definition(tmp_path, "--container-runtime", "singularity", "--task-scope", "all89")
+
+
+def test_local_task_groups_keep_native_trials_and_repetition_seeds(tmp_path, external_boundaries, monkeypatch):
+    from dataclasses import replace
+
+    from examples.common.benchmark_runner import evaluate_candidate
+    from examples.common.continuation import POLICY, AllocationPause
+
+    benchmark, _, _ = definition(tmp_path)
+    benchmark.adapter.partitioned_repetitions = True
+    benchmark = replace(benchmark, runtime={**benchmark.runtime, "task_continuation": {"policy": POLICY, "width": 1}})
+    records = benchmark.testset[:2]
+    native = benchmark.adapter.adapter.harbor.run
+    counter = [0]
+
+    def paused(*args, **kwargs):
+        result = native(*args, **kwargs)
+        counter[0] += 1
+        if counter[0] == 1:
+            monkeypatch.setenv("GEPA_PAUSE_AT", "0")
+        return result
+
+    monkeypatch.setattr(benchmark.adapter.adapter.harbor, "run", paused)
+    kwargs = {
+        "definition": benchmark,
+        "candidate": benchmark.seed_candidate,
+        "records": records,
+        "directory": tmp_path / "heldout",
+        "identity": {"runtime": benchmark.runtime},
+        "split": "test",
+        "repetitions": 3,
+        "seed": 7,
+    }
+    with pytest.raises(AllocationPause):
+        evaluate_candidate(**kwargs)
+    monkeypatch.delenv("GEPA_PAUSE_AT")
+    summary = evaluate_candidate(**kwargs)
+    assert summary["metrics"]["tasks_per_repetition"] == 2
+    assert counter[0] == 6
+    assert [row["kwargs"]["llm_kwargs"]["seed"] for row in external_boundaries[0]] == [7, 7, 8, 8, 9, 9]
+
+
 def test_primary_entrypoint_is_a_direct_shared_route(monkeypatch):
     runner = Mock(return_value=0)
     monkeypatch.setattr(terminalbench, "run_cli", runner)
@@ -292,14 +345,28 @@ def test_partial_offline_bundle_covers_only_requested_training_prefix(tmp_path, 
     manifest, path, _ = make_offline_bundle(tmp_path)
     monkeypatch.setattr(terminalbench, "load_terminalbench_manifest", lambda _path: manifest)
     _, args, _ = definition(
-        tmp_path, "--mode", mode, "--pilot-size", "1", "--container-runtime", "singularity",
-        "--offline-task-bundle", str(path),
+        tmp_path,
+        "--mode",
+        mode,
+        "--pilot-size",
+        "1",
+        "--container-runtime",
+        "singularity",
+        "--offline-task-bundle",
+        str(path),
     )
     assert args.pilot_size == 1
     with pytest.raises(ValueError, match="requested tasks"):
         definition(
-            tmp_path, "--mode", mode, "--pilot-size", "3", "--container-runtime", "singularity",
-            "--offline-task-bundle", str(path),
+            tmp_path,
+            "--mode",
+            mode,
+            "--pilot-size",
+            "3",
+            "--container-runtime",
+            "singularity",
+            "--offline-task-bundle",
+            str(path),
         )
     assert not external_boundaries[0]
 
@@ -308,8 +375,18 @@ def test_offline_runtime_change_rejects_pilot_resume_before_reusing_results(tmp_
     manifest, path, payload = make_offline_bundle(tmp_path)
     monkeypatch.setattr(terminalbench, "load_terminalbench_manifest", lambda _path: manifest)
     argv = [
-        "--mode", "pilot", "--pilot-size", "1", "--runtime-record", str(tmp_path / "solver.json"),
-        "--run-dir", str(tmp_path / "run"), "--container-runtime", "singularity", "--offline-task-bundle", str(path),
+        "--mode",
+        "pilot",
+        "--pilot-size",
+        "1",
+        "--runtime-record",
+        str(tmp_path / "solver.json"),
+        "--run-dir",
+        str(tmp_path / "run"),
+        "--container-runtime",
+        "singularity",
+        "--offline-task-bundle",
+        str(path),
     ]
     assert terminalbench.main(argv) == 0
     calls = len(external_boundaries[0])

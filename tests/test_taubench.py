@@ -290,7 +290,7 @@ def test_shared_cli_models_full_data_and_real_optimizer_cycle(manifest, tmp_path
         return result
 
     runtime.run = run
-    monkeypatch.setattr(main, "TauRuntime", lambda *args: runtime)
+    monkeypatch.setattr(main, "TauRuntime", lambda *args, **kwargs: runtime)
     parser = runner.build_parser("taubench", main.add_arguments)
     args = parser.parse_args(["--train-limit", "1", "--run-dir", str(tmp_path / "run")])
     models = runner.resolve_models(args)

@@ -12,6 +12,7 @@ from typing import Any
 from examples.common.benchmark_runner import run_cli
 from examples.common.benchmark_types import BenchmarkDefinition, BenchmarkModels
 from examples.common.react_v2 import resolve_template_family
+from examples.local_api.profile import model_info
 from examples.terminalbench.benchmark_settings import (
     MANIFEST_PATH,
     SINGULARITY_TASK_EXCLUSIONS,
@@ -39,12 +40,19 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     """Retain Terminal-Bench's epoch budget and required serving/runtime preflights."""
     parser.set_defaults(max_metric_calls=None)
     parser.add_argument("--budget", choices=tuple(TRAINING_EPOCHS_BY_BUDGET), default="standard")
-    parser.add_argument("--runtime-record", type=Path, required=True, help="Current local solver-server runtime record")
+    parser.add_argument(
+        "--runtime-record", type=Path, help="Current local solver-server runtime record (not used with --api-profile)"
+    )
     parser.add_argument("--proposer-runtime-record", type=Path, help="Current local proposer-server runtime record")
     parser.add_argument("--harbor-work-dir", type=Path, help="Defaults to RUN_DIR/harbor")
     parser.add_argument("--harbor-executable", default="harbor")
     parser.add_argument("--docker-executable", default="docker")
     parser.add_argument("--container-runtime", choices=("docker", "singularity"), default="docker")
+    parser.add_argument(
+        "--task-scope",
+        choices=("della88", "all89"),
+        help="Explicit comparison scope; default retains the backend's existing task set",
+    )
     parser.add_argument(
         "--singularity-image-cache", type=Path, help="Persistent Apptainer/Singularity task-image cache"
     )
@@ -56,6 +64,8 @@ def configure_models(args: argparse.Namespace, models: BenchmarkModels) -> Bench
     """Apply the established combined 32768-token ceiling to both model roles."""
 
     def role_kwargs(model: str, kwargs: dict[str, Any], *, agentic: bool) -> dict[str, Any]:
+        if getattr(args, "_api_profile", None) is not None:
+            return {**deepcopy(kwargs), "max_tokens": min(32_768, kwargs["max_tokens"])}
         result = {**deepcopy(kwargs), **terminalbench_decoding(model, agentic=agentic)}
         # The historical Terminal-Bench profile uses the checkpoint's thinking
         # template with a combined output cap, not HotPotQA's separate allowance.
@@ -72,7 +82,12 @@ def configure_models(args: argparse.Namespace, models: BenchmarkModels) -> Bench
 def build_benchmark(args: argparse.Namespace, models: BenchmarkModels) -> BenchmarkDefinition:
     """Bind fixed data, actual prompt editing, official Harbor rewards, and runtime identity."""
     manifest = load_terminalbench_manifest(MANIFEST_PATH)
-    task_exclusions = SINGULARITY_TASK_EXCLUSIONS if args.container_runtime == "singularity" else {}
+    task_scope = getattr(args, "task_scope", None)
+    if task_scope == "all89" and args.container_runtime == "singularity":
+        raise ValueError("The Singularity backend cannot run the all89 task scope")
+    task_exclusions = (
+        SINGULARITY_TASK_EXCLUSIONS if args.container_runtime == "singularity" or task_scope == "della88" else {}
+    )
     records = {
         split: [
             {
@@ -87,17 +102,36 @@ def build_benchmark(args: argparse.Namespace, models: BenchmarkModels) -> Benchm
         ]
         for split, task_ids in manifest.splits.items()
     }
-    runtime = load_role_runtimes(
-        argparse.Namespace(
-            runtime_record=args.runtime_record,
-            proposer_runtime_record=args.proposer_runtime_record,
-            student_model=models.solver_model,
-            proposer_model=models.proposer_model,
-            student_api_base=models.solver_api_base,
-            proposer_api_base=models.proposer_api_base,
-        ),
-        include_proposer=args.mode in {"optimize", "optimizer-pilot"},
-    )
+    api_profile = getattr(args, "_api_profile", None)
+    if api_profile is not None:
+        runtime = {
+            "student": {"provider": "openrouter", **api_profile["roles"]["solver"]},
+            "proposer": {"provider": "openrouter", **api_profile["roles"]["proposer"]},
+        }
+        solver_info = {**model_info(api_profile, "solver"), "max_output_tokens": models.solver_kwargs["max_tokens"]}
+        limits = {
+            "context_tokens": solver_info["max_input_tokens"],
+            "max_output_tokens": solver_info["max_output_tokens"],
+            "output_includes_reasoning": True,
+            "automatic_cap_increases": False,
+            "budget_basis": "approved_practical_budget_not_provider_maximum",
+            "cap_review_split": "train",
+            "harbor_model_names": "short_registry_alias_full_request_id",
+        }
+    else:
+        runtime = load_role_runtimes(
+            argparse.Namespace(
+                runtime_record=args.runtime_record,
+                proposer_runtime_record=args.proposer_runtime_record,
+                student_model=models.solver_model,
+                proposer_model=models.proposer_model,
+                student_api_base=models.solver_api_base,
+                proposer_api_base=models.proposer_api_base,
+            ),
+            include_proposer=args.mode in {"optimize", "optimizer-pilot"},
+        )
+        solver_info = terminalbench_model_info(models.solver_model)
+        limits = terminalbench_limits(models.solver_model)
     scope = TerminalBenchTextScope("system_prompt", resolve_template_family(args.template_family, models.solver_model))
     solver_kwargs = deepcopy(models.solver_kwargs)
     # Harbor carries the endpoint as an agent constructor parameter.
@@ -115,8 +149,8 @@ def build_benchmark(args: argparse.Namespace, models: BenchmarkModels) -> Benchm
         singularity_image_cache_dir=args.singularity_image_cache,
         offline_task_bundle=args.offline_task_bundle,
         student_agent_kwargs={
-            "token_limits": terminalbench_limits(models.solver_model),
-            "model_info": terminalbench_model_info(models.solver_model),
+            "token_limits": limits,
+            "model_info": solver_info,
             "llm_kwargs": solver_kwargs,
         },
         process_timeout_sec=args.harbor_process_timeout_sec,
@@ -140,6 +174,7 @@ def build_benchmark(args: argparse.Namespace, models: BenchmarkModels) -> Benchm
         adapter=SharedTerminusAdapter(
             TerminusAdapter(manifest, harbor, text_scope=scope),
             [record for split in records.values() for record in split],
+            partitioned_repetitions=getattr(args, "_api_profile", None) is not None,
         ),
         seed_candidate=scope.seed_candidate(),
         trainset=records["train"],
@@ -161,14 +196,18 @@ def build_benchmark(args: argparse.Namespace, models: BenchmarkModels) -> Benchm
             "optimization_scope": scope.contract(),
             "document_bundle_version": BUNDLE_VERSION,
             "seed_document_digest": manifest.candidate_digest(scope.materialize(scope.seed_candidate())),
-            "token_limits": terminalbench_limits(models.solver_model),
+            "token_limits": limits,
             "token_usage_policy": TOKEN_USAGE_POLICY,
             "task_context_settings": TASK_CONTEXT_SETTINGS,
             "failure_policy": FAILURE_POLICY_CONTRACT,
             "n_concurrent_trials": args.max_workers,
             "harbor_process_timeout_sec": args.harbor_process_timeout_sec,
             "attempts_per_task_per_repetition": 1,
-            "repeat_seed_policy": "shared seed + repetition index; fresh Harbor job per repetition",
+            "repeat_seed_policy": (
+                "shared seed + repetition index; fresh Harbor job per durable task group"
+                if getattr(args, "_api_profile", None) is not None
+                else "shared seed + repetition index; fresh Harbor job per repetition"
+            ),
             "timing": "Harbor TrialResult.finished_at minus started_at; includes setup and teardown",
         },
         metric_name="pass_at_1",

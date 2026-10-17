@@ -168,6 +168,14 @@ def build_hotpotqa_task_lm(
     dspy.settings.configure(disable_history=True)
     kwargs["cache"] = False
     kwargs["cache_in_memory"] = False
+    if model.startswith("openrouter/"):
+        # This pinned DSPy fork inserts temperature=0 and special-cases o-series
+        # constructors. Keep its client, but send only the hosted profile's controls.
+        client = dspy.LM(model=model, **{**kwargs, "temperature": 1.0, "max_tokens": max(20_000, kwargs["max_tokens"])})
+        for field in ("temperature", "max_tokens", "max_completion_tokens"):
+            client.kwargs.pop(field, None)
+        client.kwargs.update({field: kwargs[field] for field in ("temperature", "max_tokens") if field in kwargs})
+        return client
     return dspy.LM(model=model, **kwargs)
 
 

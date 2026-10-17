@@ -31,8 +31,11 @@ class SharedTerminusAdapter:
 
     propose_new_texts: ProposalFn | None = None
 
-    def __init__(self, adapter: TerminusAdapter, records: list[dict[str, Any]]):
+    def __init__(
+        self, adapter: TerminusAdapter, records: list[dict[str, Any]], *, partitioned_repetitions: bool = False
+    ):
         self.adapter = adapter
+        self.partitioned_repetitions = partitioned_repetitions
         self.records = {record["id"]: dict(record) for record in records}
         self.split: str | None = None
 
@@ -124,8 +127,8 @@ class SharedTerminusAdapter:
                 raise ValueError("Incomplete or reordered Terminal-Bench evaluation.")
             evaluation_ids = {output["evaluation_id"] for output in evaluation.outputs}
             if (
-                len(evaluation_ids) != 1
-                or not next(iter(evaluation_ids))
+                (not self.partitioned_repetitions and len(evaluation_ids) != 1)
+                or not all(evaluation_ids)
                 or seen_evaluations.intersection(evaluation_ids)
             ):
                 raise ValueError("Each Terminal-Bench repetition requires a distinct official Harbor job.")

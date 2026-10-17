@@ -1,0 +1,45 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index db1473a..be43e0f 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -30 +29,0 @@ dependencies = [
+-    "modal",
+diff --git a/swebench/harness/__init__.py b/swebench/harness/__init__.py
+index 9356700..674c172 100644
+--- a/swebench/harness/__init__.py
++++ b/swebench/harness/__init__.py
+@@ -13 +12,0 @@ from swebench.harness import (
+-    modal_eval,
+@@ -29 +27,0 @@ __all__ = [
+-    "modal_eval",
+diff --git a/swebench/harness/run_evaluation.py b/swebench/harness/run_evaluation.py
+index 8c97f17..938ffb5 100644
+--- a/swebench/harness/run_evaluation.py
++++ b/swebench/harness/run_evaluation.py
+@@ -48,4 +47,0 @@ from swebench.harness.reporting import make_run_report
+-from swebench.harness.modal_eval import (
+-    run_instances_modal,
+-    validate_modal_credentials,
+-)
+@@ -462,0 +459,2 @@ def main(
++    if modal:
++        raise ValueError("This prepared runtime supports local Docker evaluation only")
+@@ -491,9 +488,0 @@ def main(
+-    if modal:
+-        # run instances on Modal
+-        if not dataset:
+-            print("No instances to run.")
+-        else:
+-            validate_modal_credentials()
+-            run_instances_modal(predictions, dataset, full_dataset, run_id, timeout)
+-        return
+-
+diff --git a/swebench/harness/test_spec/test_spec.py b/swebench/harness/test_spec/test_spec.py
+index f30db61..e9517b3 100644
+--- a/swebench/harness/test_spec/test_spec.py
++++ b/swebench/harness/test_spec/test_spec.py
+@@ -229 +229,3 @@ def make_test_spec(
+-    if platform.machine() in {"aarch64", "arm64"}:
++    if namespace == "starryzhang":
++        arch = "x86_64"
++    elif platform.machine() in {"aarch64", "arm64"}:

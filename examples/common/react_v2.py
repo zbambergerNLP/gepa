@@ -143,13 +143,14 @@ def build_react_v2_strategy(
     template_family: str,
     component_kinds: dict[str, str] | None = None,
     controller_selection: str = VERBALIZED_SELECTION,
+    jev_provider: str = "typesafe",
     editor_mode: str = REACT_EDITOR_MODE,
     proposal_policy: str = "real_edit",
     react_max_iterations: int | None = None,
     react_max_tool_calls: int | None = None,
     rng: random.Random | None = None,
     manifestor_traces_chars: int | None = None,
-    manifestor_temperature: float = 0.0,
+    manifestor_temperature: float | None = 0.0,
     react_top_p: float | None = None,
     text_limits: TextLimits | None = None,
 ) -> tuple[ThreeRoleReflectionLM, str]:
@@ -167,6 +168,7 @@ def build_react_v2_strategy(
         template_family: Explicit provider family or ``"auto"``.
         component_kinds: Optional message role for each optimized component.
         controller_selection: ``"verbalized"``, ``"uniform_random"``, or ``"jev"``.
+        jev_provider: Explicit typed decision transport, typesafe or openrouter.
         editor_mode: Multi-turn ``react`` or one-response ``single_call`` editing.
         proposal_policy: Required real edits with generation recovery, or independent historical proposals.
         react_max_iterations: Optional bound on observation-loop editor responses.
@@ -200,11 +202,13 @@ def build_react_v2_strategy(
         journal_path = lm_kwargs.get("response_journal_path")
         provider_log = lm_kwargs.get(PROVIDER_RETRY_KEY, {}).get("log_path")
         jev_controller = JevController(
+            provider=jev_provider,
             response_journal_path=journal_path,
             attempt_log_path=Path(provider_log).with_name(JEV_ATTEMPT_LOG) if provider_log else None,
         )
     manifestor_kwargs = dict(lm_kwargs)
-    manifestor_kwargs["temperature"] = manifestor_temperature
+    if manifestor_temperature is not None:
+        manifestor_kwargs["temperature"] = manifestor_temperature
     if "response_journal_path" in lm_kwargs:
         controller_kwargs["response_journal_namespace"] = CONTROLLER_ROLE
         proposer_kwargs["response_journal_namespace"] = (

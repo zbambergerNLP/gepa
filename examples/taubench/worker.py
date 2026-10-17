@@ -66,9 +66,10 @@ def ordered_knowledge_base():
     return knowledge
 
 
-def install_transport(log_path: Path) -> None:
+def install_transport(log_path: Path, auxiliary: dict | None = None) -> None:
     """Apply shared retries to tau's imported completion binding, including judges."""
     judge_settings = provider_retry_kwargs(log_path=log_path, role="tau_judge")
+    auxiliary = auxiliary or {"model": USER_MODEL, "kwargs": USER_KWARGS}
 
     def completion(**kwargs):
         if PROVIDER_RETRY_KEY not in kwargs:
@@ -76,7 +77,10 @@ def install_transport(log_path: Path) -> None:
                 raise ValueError("Unpinned evaluator model")
             kwargs = {**kwargs, **judge_settings}
             kwargs.setdefault("timeout", USER_KWARGS["timeout"])
-            kwargs.setdefault("api_base", USER_KWARGS["api_base"])
+            if auxiliary["model"].startswith("openrouter/"):
+                kwargs = {**kwargs, **deepcopy(auxiliary["kwargs"]), "model": auxiliary["model"]}
+            else:
+                kwargs.setdefault("api_base", USER_KWARGS["api_base"])
         return litellm.completion(**kwargs)
 
     llm_utils.completion = completion
@@ -91,7 +95,7 @@ def validate_simulation(simulation, task: Task, seed: int) -> None:
     reward = simulation.reward_info.reward if simulation.reward_info is not None else None
     if (
         isinstance(reward, bool)
-        or not isinstance(reward, (int, float))
+        or not isinstance(reward, int | float)
         or not math.isfinite(reward)
         or reward not in (0, 1)
     ):
@@ -167,7 +171,8 @@ def run_request(request: dict) -> dict:
     artifacts = Path(request["artifacts"])
     artifacts.mkdir(parents=True, exist_ok=True)
     log_path = artifacts / "provider-attempts.jsonl"
-    install_transport(log_path)
+    auxiliary = request.get("auxiliary") or {"model": USER_MODEL, "kwargs": USER_KWARGS}
+    install_transport(log_path, auxiliary)
     prompt = candidate["system_prompt"]
 
     def factory(*, tools, domain_policy, llm, llm_args, **ignored):
@@ -180,14 +185,14 @@ def run_request(request: dict) -> dict:
     solver_kwargs.update(provider_retry_kwargs(log_path=log_path, role="tau_solver"))
     if request["solver_api_base"] is not None:
         solver_kwargs["api_base"] = request["solver_api_base"]
-    user_kwargs = {**USER_KWARGS, **provider_retry_kwargs(log_path=log_path, role="tau_user")}
+    user_kwargs = {**auxiliary["kwargs"], **provider_retry_kwargs(log_path=log_path, role="tau_user")}
     config = TextRunConfig(
         domain=DOMAIN,
         agent=AGENT_NAME,
         user="user_simulator",
         llm_agent=request["solver_model"],
         llm_args_agent=solver_kwargs,
-        llm_user=USER_MODEL,
+        llm_user=auxiliary["model"],
         llm_args_user=user_kwargs,
         retrieval_config=RETRIEVAL_CONFIG,
         retrieval_config_kwargs={"top_k": RETRIEVAL_TOP_K},

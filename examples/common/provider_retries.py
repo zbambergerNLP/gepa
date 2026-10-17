@@ -210,7 +210,9 @@ def _record(
     prompt_tokens = _field(usage, "prompt_tokens")
     completion_tokens = _field(usage, "completion_tokens")
     reasoning_tokens = _field(_field(usage, "completion_tokens_details"), "reasoning_tokens")
-    thinking_budget = (request.get("extra_body") or {}).get("thinking_token_budget", request.get("thinking_token_budget"))
+    thinking_budget = (request.get("extra_body") or {}).get(
+        "thinking_token_budget", request.get("thinking_token_budget")
+    )
     choices = _field(response, "choices", [])
     reasons = [_field(choice, "finish_reason") for choice in choices]
     empty_completion = (error is None or isinstance(error, IncompleteResponseError)) and (
@@ -232,6 +234,9 @@ def _record(
         "requested_model": request.get("model"),
         "response_model": _field(response, "model"),
         "response_id": _field(response, "id"),
+        "response_provider": _field(response, "provider"),
+        "requested_provider": (request.get("extra_body") or {}).get("provider"),
+        "provider_cost_usd": _field(usage, "cost"),
         "elapsed_seconds": time.monotonic() - started,
         "outcome": "success" if error is None else "error" if isinstance(error, Exception) else "cancelled",
         "transport_outcome": (
@@ -333,9 +338,7 @@ def _advance_output_retry_seed(request: dict[str, Any], error: BaseException) ->
         request["seed"] = (seed + 1) % PROVIDER_SEED_MODULUS
 
 
-def complete_with_retries(
-    send: Callable[..., Any], request: dict[str, Any], settings: dict[str, Any]
-) -> Any:
+def complete_with_retries(send: Callable[..., Any], request: dict[str, Any], settings: dict[str, Any]) -> Any:
     """Apply the same bounded request policy to SDK calls and raw serving probes."""
     request = dict(request)
     request_id, deadline = str(uuid.uuid4()), _deadline(request)

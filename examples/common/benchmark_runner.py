@@ -6,6 +6,7 @@ import argparse
 import fcntl
 import json
 import math
+import os
 import platform
 import random
 import statistics
@@ -34,6 +35,7 @@ from examples.common.benchmark_variants import (
     selected_conditions,
     variant_settings,
 )
+from examples.common.continuation import PAUSED_EXIT_CODE, POLICY, AllocationPause, TaskWindows, check_pause, pause_due
 from examples.common.experiment_models import (
     DEFAULT_PROPOSER_MODEL,
     DEFAULT_SOLVER_MODEL,
@@ -47,11 +49,13 @@ from examples.common.react_v2 import (
     file_sha256,
     resolve_template_family,
 )
+from examples.local_api.profile import API_BASE, load_credential, load_profile, role_kwargs, verify_routes
 from gepa import optimize
 from gepa.core.adapter import EvaluationBatch, ProposalFn
 from gepa.core.callbacks import GEPACallback
 from gepa.lm import LM
 from gepa.lm_constants import PROVIDER_ATTEMPT_LOG, PROVIDER_RETRY_KEY
+from gepa.response_journal import stable_api_base_identity
 from gepa.strategies.action_space import (
     ActionSelector,
     RandomActionSelector,
@@ -80,6 +84,7 @@ def implementation_identity(benchmark_name: str) -> dict[str, Any]:
         sorted((root / "src" / "gepa").rglob("*.py"))
         + sorted((root / "examples" / "common").glob("*.py"))
         + sorted((root / "examples" / benchmark_name).glob("*.py"))
+        + sorted((root / "examples" / "local_api").glob("*.py"))
     )
     return {
         "source_sha256": digest([[str(path.relative_to(root)), file_sha256(path)] for path in files]),
@@ -102,6 +107,7 @@ def build_parser(
         A parser with consistent solver, proposer and evaluation conventions.
     """
     parser = argparse.ArgumentParser(description=f"Vanilla GEPA and FOREST on {benchmark_name}")
+    parser.set_defaults(_benchmark_name=benchmark_name)
     parser.add_argument("--model", "--solver-model", dest="model", default=DEFAULT_SOLVER_MODEL)
     parser.add_argument(
         "--reflection-model", "--proposer-model", dest="reflection_model", default=DEFAULT_PROPOSER_MODEL
@@ -110,6 +116,9 @@ def build_parser(
     parser.add_argument("--solver-api-base", default=None)
     parser.add_argument("--reflection-api-base", default=None)
     parser.add_argument("--run-dir", type=Path, default=Path("outputs") / benchmark_name)
+    parser.add_argument("--api-profile", type=Path, help="Frozen OpenRouter routes for local execution")
+    parser.add_argument("--env-file", type=Path, help="Dotenv containing OPENROUTER_API_KEY; only that key is loaded")
+    parser.add_argument("--allow-api-calls", action="store_true", help="Explicitly permit a hosted benchmark run")
     add_variant_arguments(parser)
     parser.add_argument("--mode", choices=("optimize", "pilot", "optimizer-pilot", "baseline"), default="optimize")
     parser.add_argument("--max-metric-calls", type=int, default=DEFAULT_MAX_METRIC_CALLS)
@@ -139,6 +148,42 @@ def resolve_models(args: argparse.Namespace) -> BenchmarkModels:
     Returns:
         Pinned model identities and independent request dictionaries.
     """
+    if getattr(args, "api_profile", None) is not None:
+        if not args.allow_api_calls:
+            raise ValueError(
+                "Hosted benchmark execution requires --allow-api-calls; use local_api.cli check for connection checks"
+            )
+        if any((args.api_base, args.solver_api_base, args.reflection_api_base)) or (
+            args.model != DEFAULT_SOLVER_MODEL or args.reflection_model != DEFAULT_PROPOSER_MODEL
+        ):
+            raise ValueError("The API profile owns model and endpoint settings; do not combine model/base overrides")
+        if os.environ.get("GEPA_JEV_HANDOFF_DIR"):
+            raise ValueError("Local API runs cannot use a Della Jev mailbox")
+        profile = load_profile(args.api_profile)
+        load_credential(args.env_file)
+        verify_routes(
+            profile, ("solver", "proposer", "tau") if args._benchmark_name == "taubench" else ("solver", "proposer")
+        )
+        if args._benchmark_name == "decisionbench" and not {"response_format", "structured_outputs"} <= set(
+            profile["roles"]["solver"]["supported_parameters"]
+        ):
+            raise ValueError("DecisionBench requires a solver route supporting structured JSON-schema responses")
+        if args._benchmark_name == "terminalbench" and "seed" not in profile["roles"]["solver"]["supported_parameters"]:
+            raise ValueError("Terminal-Bench requires solver seed support for its fixed repetition protocol")
+        args._api_profile = profile
+        return BenchmarkModels(
+            solver_model="openrouter/" + profile["roles"]["solver"]["model_id"],
+            proposer_model="openrouter/" + profile["roles"]["proposer"]["model_id"],
+            solver_api_base=API_BASE,
+            proposer_api_base=API_BASE,
+            solver_kwargs={
+                **role_kwargs(profile, "solver"),
+                **provider_retry_kwargs(args.run_dir / PROVIDER_ATTEMPT_LOG, SOLVER_ROLE),
+            },
+            proposer_kwargs=role_kwargs(profile, "proposer"),
+        )
+    if getattr(args, "env_file", None) is not None:
+        raise ValueError("--env-file is only supported with --api-profile")
     validate_benchmark_model_pair(args.model, args.reflection_model)
     solver_base = args.solver_api_base or args.api_base
     proposer_base = args.reflection_api_base or args.api_base
@@ -252,6 +297,8 @@ class RecordedAdapter:
         self.propose_new_texts: ProposalFn | None = None
         self._train_ids = {str(row["id"]) for row in definition.trainset}
         self._val_ids = {str(row["id"]) for row in definition.valset}
+        policy = definition.runtime.get("task_continuation")
+        self.windows = TaskWindows(directory, policy["width"]) if policy else None
 
     def evaluate(self, batch: list[dict], candidate: dict[str, str], capture_traces: bool = False) -> EvaluationBatch:
         """Record episode latency separately from concurrent batch throughput."""
@@ -268,9 +315,20 @@ class RecordedAdapter:
         if set_context is not None:
             set_context(split=phase, repetition=self.repetition, seed=self.seed + self.repetition)
         started = time.perf_counter()
-        evaluated = self.definition.adapter.evaluate(batch, deepcopy(candidate), capture_traces=capture_traces)
-        elapsed = time.perf_counter() - started
+        if self.windows is None:
+            evaluated = self.definition.adapter.evaluate(batch, deepcopy(candidate), capture_traces=capture_traces)
+            elapsed = time.perf_counter() - started
+        else:
+            evaluated, elapsed = self.windows.evaluate(
+                self.definition.adapter,
+                batch,
+                deepcopy(candidate),
+                capture_traces,
+                [phase, self.repetition, self.seed],
+                validate_evaluation,
+            )
         validate_evaluation(evaluated, len(batch), capture_traces)
+        self.last_batch_elapsed = elapsed
         self.directory.mkdir(parents=True, exist_ok=True)
         with (self.directory / "task-timings.jsonl").open("a") as stream:
             for record, output, score in zip(batch, evaluated.outputs, evaluated.scores, strict=True):
@@ -302,10 +360,14 @@ class RecordedAdapter:
     def get_adapter_state(self) -> dict[str, Any]:
         """Preserve optional upstream state in GEPA checkpoints."""
         getter = getattr(self.definition.adapter, "get_adapter_state", None)
-        return deepcopy(getter()) if getter is not None else {}
+        state = deepcopy(getter()) if getter is not None else {}
+        return {"adapter": state, "continuation": self.windows.get_state()} if self.windows else state
 
     def set_adapter_state(self, state: dict[str, Any]) -> None:
         """Restore upstream state when the official adapter exposes that hook."""
+        if self.windows and state:
+            self.windows.set_state(state["continuation"])
+            state = state["adapter"]
         setter = getattr(self.definition.adapter, "set_adapter_state", None)
         if setter is not None:
             setter(deepcopy(state))
@@ -374,9 +436,11 @@ def evaluate_candidate(
                 raise ValueError("Stored evaluation batch duration is invalid.")
         else:
             observer.repetition = repetition
+            if observer.windows:
+                observer.windows.scope, observer.windows.ordinal = f"repetition-{repetition}", 0
             started = time.perf_counter()
             evaluated = observer.evaluate(records, candidate)
-            elapsed = time.perf_counter() - started
+            elapsed = observer.last_batch_elapsed if observer.windows else time.perf_counter() - started
             payload = {
                 "contract_sha256": digest(contract),
                 "repetition": repetition,
@@ -479,6 +543,9 @@ def _run_condition_locked(
     selection_set = trainset if pilot else definition.valset
     batch_size = min(args.reflection_minibatch_size, len(trainset))
     budget = optimizer_budget(args, definition.max_candidate_proposals)
+    proposer_identity_kwargs = deepcopy(models.proposer_kwargs)
+    if definition.runtime.get("task_continuation") and "api_base" in proposer_identity_kwargs:
+        proposer_identity_kwargs["api_base"] = stable_api_base_identity(proposer_identity_kwargs["api_base"])
     contract = {
         "schema_version": 2,
         "identity": identity,
@@ -492,7 +559,7 @@ def _run_condition_locked(
         "proposer": {
             "model": models.proposer_model,
             "revision": experiment_model_version(models.proposer_model),
-            "kwargs": models.proposer_kwargs,
+            "kwargs": proposer_identity_kwargs,
             "runtime": definition.optimizer_runtime,
         },
         "optimizer": {
@@ -546,6 +613,7 @@ def _run_condition_locked(
                 level=settings["reflection_level"],
                 edit_tool_set=settings["edit_tool_set"] or BROAD_EDIT_TOOL_SET,
                 controller_selection=settings["controller_selection"] or "verbalized",
+                jev_provider="openrouter" if definition.runtime.get("hosted_api") else "typesafe",
                 editor_mode=settings["editor_mode"] or "react",
                 proposal_policy=settings["proposal_policy"] or "independent",
                 react_max_iterations=settings["react_max_iterations"],
@@ -553,7 +621,7 @@ def _run_condition_locked(
                 template_family=template_family,
                 component_kinds=component_kinds,
                 rng=random.Random(args.seed),
-                manifestor_temperature=float(proposer_kwargs["temperature"]),
+                manifestor_temperature=proposer_kwargs.get("temperature"),
             )
         if settings["stateless_action_selection"]:
             kinds = set(component_kinds.values())
@@ -577,12 +645,22 @@ def _run_condition_locked(
                     rng=random.Random(args.seed),
                 )
         sampling, selection = proposal_strategies(args)
+        callbacks = [cast(GEPACallback, pilot_observer)] if pilot_observer is not None else []
+        if adapter.windows:
+            callbacks.append(cast(GEPACallback, adapter.windows))
+        stoppers = (
+            [MaxCandidateProposalsStopper(budget["max_optimizer_iterations"])]
+            if budget["max_optimizer_iterations"] is not None
+            else []
+        )
+        if adapter.windows:
+            stoppers.append(lambda _state: pause_due())
         result = optimize(
             seed_candidate=deepcopy(definition.seed_candidate),
             trainset=trainset,
             valset=selection_set,
             adapter=adapter,
-            callbacks=[cast(GEPACallback, pilot_observer)] if pilot_observer is not None else None,
+            callbacks=callbacks or None,
             reflection_lm=LM(models.proposer_model, **proposer_kwargs),
             reflection_strategy=strategy,
             action_selector=cast(ActionSelector[StatelessActionConstraint] | None, action_selector),
@@ -597,11 +675,7 @@ def _run_condition_locked(
             max_merge_invocations=settings["max_merge_invocations"],
             skip_perfect_score=not pilot,
             max_metric_calls=budget["max_metric_calls"],
-            stop_callbacks=(
-                MaxCandidateProposalsStopper(budget["max_optimizer_iterations"])
-                if budget["max_optimizer_iterations"] is not None
-                else None
-            ),
+            stop_callbacks=stoppers or None,
             run_dir=str(directory),
             seed=args.seed,
             raise_on_exception=True,
@@ -620,6 +694,8 @@ def _run_condition_locked(
                 "config": contract,
             },
         )
+        if adapter.windows:
+            check_pause()
         candidate = result.best_candidate
         if not isinstance(candidate, dict) or set(candidate) != set(definition.seed_candidate):
             raise ValueError("GEPA returned an invalid benchmark harness candidate.")
@@ -714,8 +790,21 @@ def run_cli(
     models = resolve_models(args)
     if configure_models is not None:
         models = configure_models(args, models)
-        validate_benchmark_model_pair(models.solver_model, models.proposer_model)
+        if getattr(args, "_api_profile", None) is None:
+            validate_benchmark_model_pair(models.solver_model, models.proposer_model)
+    api_profile = getattr(args, "_api_profile", None)
     definition = build_benchmark(args, models)
+    if api_profile is not None:
+        width = args.max_workers if benchmark_name in {"hotpotqa", "decisionbench", "taubench", "terminalbench"} else 1
+        definition = replace(
+            definition,
+            runtime={
+                **definition.runtime,
+                "hosted_api": api_profile,
+                "task_continuation": {"policy": POLICY, "width": width},
+            },
+            optimizer_runtime={**definition.optimizer_runtime, "hosted_api": api_profile},
+        )
     validate_definition(definition)
     if args.mode in {"optimize", "optimizer-pilot"} and {"random", "action"}.intersection(conditions):
         if args.module_selector == "all" and len(definition.seed_candidate) > 1:
@@ -741,6 +830,8 @@ def run_cli(
         testset=definition.testset[: args.test_limit],
     )
     solver_identity_kwargs = deepcopy(models.solver_kwargs)
+    if api_profile is not None and "api_base" in solver_identity_kwargs:
+        solver_identity_kwargs["api_base"] = stable_api_base_identity(solver_identity_kwargs["api_base"])
     if PROVIDER_RETRY_KEY in solver_identity_kwargs:
         solver_identity_kwargs[PROVIDER_RETRY_KEY]["log_path"] = None
     identity = {
@@ -761,6 +852,20 @@ def run_cli(
         },
         "provider_retry_policy": PROVIDER_RETRY_POLICY,
     }
+    try:
+        return _execute_stages(args, definition, models, identity, conditions)
+    except AllocationPause:
+        path = os.environ.get("GEPA_PAUSE_RECEIPT")
+        if path is None:
+            raise
+        atomic_json(Path(path), {"state": "paused", "policy": POLICY, "reason": "allocation_deadline"})
+        return PAUSED_EXIT_CODE
+
+
+def _execute_stages(args, definition, models, identity, conditions) -> int:
+    """Keep a drained allocation distinct from a completed scientific experiment."""
+    if definition.runtime.get("task_continuation"):
+        check_pause()
     if args.mode == "pilot":
         summary = evaluate_candidate(
             definition,

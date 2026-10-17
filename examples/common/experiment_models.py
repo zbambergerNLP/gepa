@@ -125,6 +125,8 @@ def experiment_model_version(model: str) -> str:
     Raises:
         ValueError: The model is not part of the experiment matrix.
     """
+    if model.startswith("openrouter/"):
+        return "provider-managed; checkpoint revision unavailable"
     if model not in _EXPERIMENT_MODEL_VERSIONS:
         supported = ", ".join(_EXPERIMENT_MODEL_VERSIONS)
         raise ValueError(f"Unsupported experiment model {model!r}; expected one of: {supported}")

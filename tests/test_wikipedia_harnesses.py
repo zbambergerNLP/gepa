@@ -429,7 +429,7 @@ def test_hotpot_production_loader_uses_the_artifact_split_and_retains_labels(mon
 
     assert calls == [
         (
-            "hotpot_qa",
+            "hotpotqa/hotpot_qa",
             "fullwiki",
             {"revision": hotpot_utils.HOTPOTQA_HF_REVISION},
         )

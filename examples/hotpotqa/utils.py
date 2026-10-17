@@ -693,7 +693,7 @@ def load_hotpotqa_dataset(
         from datasets import load_dataset  # type: ignore[import-not-found]
 
         ds = load_dataset(
-            "hotpot_qa",
+            "hotpotqa/hotpot_qa",
             "fullwiki",
             revision=HOTPOTQA_HF_REVISION,
         )

@@ -1,0 +1,33 @@
+{
+  "data": {
+    "data_tree_sha256": "f5ac1ee2a0e682f2b3c6f137f448d3c626e98b40eb03ff088011af37974663f8",
+    "splits": {
+      "dev": {
+        "count": 57,
+        "ordered_records_sha256": "671a7f9f870b0f2c6d37e3aa17bba93a1e413f5e5f8c4ca77764d0ebf2a1b1ed",
+        "scenario_count": 19
+      },
+      "test_challenge": {
+        "count": 417,
+        "ordered_records_sha256": "4f826be077e1c57cc08bd38ce8f47ea30be28ee8a23d8424abb0f9aeb6bb02a4",
+        "scenario_count": 139
+      },
+      "test_normal": {
+        "count": 168,
+        "ordered_records_sha256": "a07cb801742bf3a58c36f236ff9ba9547fdc705ca1db775b03eed99cf1910aab",
+        "scenario_count": 56
+      },
+      "train": {
+        "count": 90,
+        "ordered_records_sha256": "7d138611e5cd6829098488c096ac259be5babd756e8325d2f9377ca8ba78606f",
+        "scenario_count": 30
+      }
+    }
+  },
+  "runtime": {
+    "appworld_version": "0.1.3.post1",
+    "package_sha256": "354045f278877ed8306cae10b93daef1463092b02448eab772f239cde54348b8",
+    "python_version": "3.11.14",
+    "requirements_sha256": "ac49e82b6cfa5dc3d87fc4dc2218d65e1acb32fc93794eb39a9f958b6783779e"
+  }
+}

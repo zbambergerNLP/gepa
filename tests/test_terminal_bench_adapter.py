@@ -5,8 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import pwd
 import subprocess
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -499,6 +502,159 @@ def test_requirements_enforce_exact_harbor_and_running_docker(tmp_path: Path, mo
         ["/mock/harbor", "--version"],
         ["/mock/docker", "info", "--format", "{{json .ServerVersion}}"],
     ]
+
+
+@pytest.mark.parametrize("available", [True, False])
+def test_singularity_preflight_needs_no_docker_daemon(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, available: bool):
+    """Select the HPC runtime explicitly and fail closed when its CLI is unavailable."""
+    runner = HarborCLI(work_dir=tmp_path, container_runtime="singularity", **_RUNNER_OPTIONS)
+    lookups = []
+
+    def lookup(name):
+        lookups.append(name)
+        return f"/mock/{name}" if name == "harbor" or available else None
+
+    monkeypatch.setattr(terminalbench_module.shutil, "which", lookup)
+    run = Mock(
+        side_effect=[
+            subprocess.CompletedProcess([], 0, stdout="0.22.0\n", stderr=""),
+            subprocess.CompletedProcess([], 0, stdout="apptainer version 1.4.2\n", stderr=""),
+        ]
+    )
+    monkeypatch.setattr(terminalbench_module.subprocess, "run", run)
+    if available:
+        assert runner.check_requirements() == ("/mock/harbor", "/mock/singularity")
+        assert [call.args[0] for call in run.call_args_list] == [
+            ["/mock/harbor", "--version"],
+            ["/mock/singularity", "--version"],
+        ]
+    else:
+        with pytest.raises(HarborRequirementError, match="Singularity/Apptainer"):
+            runner.check_requirements()
+        run.assert_not_called()
+    assert lookups == ["harbor", "singularity"]
+
+
+@pytest.mark.parametrize("mapped,emulated", [(False, False), (True, True), (True, False)])
+@pytest.mark.parametrize("user,uid,gid", [("list", 38, 38), ("postfix", 101, 103)])
+def test_mailman_probe_requires_kernel_mappings_and_real_identity_changes(
+    monkeypatch, capsys, mapped, emulated, user, uid, gid
+):
+    """Exercise the actual probe against unmapped, fakeroot-emulated, and real kernel states."""
+    state = {"Uid": 0, "Gid": 0, "Groups": "0"}
+    mapping = "0 377417 1\n" + ("1 100000 65536\n" if mapped else "")
+    monkeypatch.setattr(sys, "argv", ["probe", user])
+    monkeypatch.setattr(pwd, "getpwnam", lambda name: SimpleNamespace(pw_name=name, pw_uid=uid, pw_gid=gid))
+
+    def read_proc(path):
+        if str(path).endswith(("uid_map", "gid_map")):
+            return mapping
+        assert str(path) == "/proc/self/status"
+        uids = " ".join([str(state["Uid"])] * 4)
+        gids = " ".join([str(state["Gid"])] * 4)
+        return f"Uid:\t{uids}\nGid:\t{gids}\nGroups:\t{state['Groups']}\n"
+
+    def change(field, value):
+        if not emulated:
+            state[field] = value
+
+    monkeypatch.setattr(Path, "read_text", read_proc)
+    monkeypatch.setattr(os, "setgroups", lambda groups: change("Groups", ""), raising=False)
+    monkeypatch.setattr(os, "setgid", lambda value: change("Gid", value))
+    monkeypatch.setattr(os, "setuid", lambda value: change("Uid", value))
+    if not mapped or emulated:
+        with pytest.raises(RuntimeError, match="Unmapped" if not mapped else "Kernel Uid did not change"):
+            exec(terminalbench_module.MAILMAN_NAMESPACE_PROBE, {})
+    else:
+        exec(terminalbench_module.MAILMAN_NAMESPACE_PROBE, {})
+        assert json.loads(capsys.readouterr().out) == {
+            "user": user,
+            "uid": uid,
+            "gid": gid,
+            "maps": {"uid": mapping, "gid": mapping},
+        }
+
+
+@pytest.mark.parametrize(
+    "backend,selected,compatible",
+    [("singularity", True, False), ("singularity", True, True), ("singularity", False, False), ("docker", True, False)],
+)
+def test_mailman_kernel_preflight_is_selected_task_and_backend_specific(
+    tmp_path, monkeypatch, backend, selected, compatible
+):
+    """Reject the demonstrated namespace failure before creating a Harbor evaluation."""
+    runner = HarborCLI(work_dir=tmp_path / "harbor", container_runtime=backend, **_RUNNER_OPTIONS)
+    image = runner.singularity_image_cache_dir / terminalbench_module.singularity_image_filename(
+        terminalbench_module.MAILMAN_IMAGE
+    )
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"staged fixture image")
+    monkeypatch.setattr(terminalbench_module.shutil, "which", lambda name: "/mock/" + name)
+    commands = []
+
+    def run(command, **kwargs):
+        commands.append(command)
+        if command[1] != "exec":
+            return subprocess.CompletedProcess(command, 0, stdout="0.22.0\n", stderr="")
+        assert str(image) in command
+        assert command[command.index("env") : command.index("/usr/bin/python3")] == [
+            "env",
+            "-u",
+            "LD_PRELOAD",
+            "-u",
+            "FAKEROOTKEY",
+        ]
+        assert "--fakeroot" in command and "--writable-tmpfs" in command
+        assert kwargs["timeout"] == terminalbench_module.HARBOR_METADATA_TIMEOUT_SECONDS
+        return subprocess.CompletedProcess(command, 0 if compatible else 1, stdout="", stderr="Unmapped uid38")
+
+    monkeypatch.setattr(terminalbench_module.subprocess, "run", run)
+    tasks = [terminalbench_module.MAILMAN_TASK_ID] if selected else ["terminal-bench/fix-ocaml-gc"]
+    if backend == "singularity" and selected and not compatible:
+        with pytest.raises(HarborRequirementError, match="real nonroot UID/GID.*subordinate UID/GID"):
+            runner.run(tasks, _candidate())
+        assert not (runner.work_dir / "evaluations").exists()
+    else:
+        assert runner.check_requirements(tasks) == ("/mock/harbor", "/mock/" + backend)
+    assert [command[-1] for command in commands if command[1] == "exec"] == (
+        (["list", "postfix"] if compatible else ["list"]) if backend == "singularity" and selected else []
+    )
+
+
+def test_mailman_preflight_requires_a_staged_image_without_downloading(tmp_path, monkeypatch):
+    """Fail before evaluation when the selected task cannot be capability-probed."""
+    runner = HarborCLI(work_dir=tmp_path, container_runtime="singularity", **_RUNNER_OPTIONS)
+    process = Mock()
+    monkeypatch.setattr(terminalbench_module.subprocess, "run", process)
+    with pytest.raises(HarborRequirementError, match="requires a staged image"):
+        runner._check_mailman_namespace("/mock/singularity")
+    process.assert_not_called()
+
+
+def test_singularity_job_preserves_the_pinned_benchmark_protocol(tmp_path: Path):
+    """Change only the container backend and persistent image cache in an official job."""
+    options = {
+        "task_ids": ["terminal-bench/log-summary-date-ranges"],
+        "prompt_path": tmp_path / "prompt.txt",
+        "bundle_path": tmp_path / "bundle.json",
+        "jobs_dir": tmp_path / "jobs",
+        "job_name": "candidate",
+    }
+    docker = HarborCLI(work_dir=tmp_path, **_RUNNER_OPTIONS).build_job_config(**options)
+    singularity = HarborCLI(
+        work_dir=tmp_path,
+        container_runtime="singularity",
+        singularity_image_cache_dir=tmp_path / "images",
+        **_RUNNER_OPTIONS,
+    ).build_job_config(**options)
+    assert singularity.pop("environment") == {
+        "type": "singularity",
+        "force_build": False,
+        "delete": True,
+        "kwargs": {"singularity_image_cache_dir": str(tmp_path / "images")},
+    }
+    docker.pop("environment")
+    assert singularity == docker
 
 
 def test_runner_isolates_candidates_and_adapter_maps_complete_evidence_by_task_id(

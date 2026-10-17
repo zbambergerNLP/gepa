@@ -1,0 +1,2398 @@
+{
+  "schema_version": 1,
+  "dataset_ref": "sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a",
+  "scope": "Exact verifier bootstrap dependencies only. Resource recipes separately supply source/model/data artifacts; no task or grader edits.",
+  "tasks": {
+    "terminal-bench/adaptive-rejection-sampler": {
+      "task_ref": "sha256:bcaa2399985cd57666018025846289ab25e193ae0dd8fb7f0ffab2410c24d4de",
+      "docker_image": "alexgshaw/adaptive-rejection-sampler:20251031",
+      "verifier_script_sha256": "38b43560d173cc2b952c3a3e17b8a480216d84e33450515e047bcb0d806b1e0a",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "numpy==2.3.3",
+        "-w",
+        "scipy==1.16.2",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest",
+        "numpy",
+        "scipy"
+      ]
+    },
+    "terminal-bench/bn-fit-modify": {
+      "task_ref": "sha256:b5f9644970c17ad9ddb46b7266f7bcd87c761d77d7e6f55d7cfe7284d5ff66e9",
+      "docker_image": "alexgshaw/bn-fit-modify:20251031",
+      "verifier_script_sha256": "ea2adeb779621e9625d1f80a17f9d19b6ecec017b8ad8974b668a4a0fbdeb4c3",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pandas==2.3.2",
+        "-w",
+        "scipy==1.16.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest",
+        "pandas",
+        "scipy"
+      ]
+    },
+    "terminal-bench/break-filter-js-from-html": {
+      "task_ref": "sha256:678008d1a4fd1e6e1b9b3cc9a327219fe4b410a31eafc52e9099bbf947eea600",
+      "docker_image": "alexgshaw/break-filter-js-from-html:20251031",
+      "verifier_script_sha256": "09386b7e4929216fe490deb7d32c99841c03be2471897181dda2bd11f8922c00",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "selenium==4.35.0",
+        "-w",
+        "beautifulsoup4==4.13.5",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest",
+        "selenium",
+        "bs4"
+      ]
+    },
+    "terminal-bench/build-cython-ext": {
+      "task_ref": "sha256:35dc561790e73f13e59837828ac0863c0893edc6b71d42cf7d58656c843adf12",
+      "docker_image": "alexgshaw/build-cython-ext:20251031",
+      "verifier_script_sha256": "0156c9c4085258b696ce424cf1ce96cba44d1263c5d73bdf54083fd80237f915",
+      "system_packages": [],
+      "uv_version": null,
+      "mode": "pip",
+      "python": "image_default",
+      "packages": [
+        "pytest==8.4.1",
+        "pytest-json-ctrf==0.3.5"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/build-pmars": {
+      "task_ref": "sha256:63f0449b276f081986740c941ea9372068b310a02b062c1e5e3400f575241893",
+      "docker_image": "alexgshaw/build-pmars:20251031",
+      "verifier_script_sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/build-pov-ray": {
+      "task_ref": "sha256:4f08dab602fe2e9e2f42051cc6aef684a88cf2822e8b499b3ca19e670759fddb",
+      "docker_image": "alexgshaw/build-pov-ray:20251031",
+      "verifier_script_sha256": "928d1497ad21aef0c456294e3784f1fddf8493410f23584da89f9e02ec6bd134",
+      "system_packages": [
+        "curl",
+        "imagemagick"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pillow==11.1.0",
+        "-w",
+        "numpy==2.3.1",
+        "-w",
+        "scikit-image==0.25.0",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest",
+        "PIL",
+        "numpy",
+        "skimage"
+      ]
+    },
+    "terminal-bench/caffe-cifar-10": {
+      "task_ref": "sha256:7b0045106d7d5af724efe96b610ba64f7893f5c88528401c573c4d47e384e2bf",
+      "docker_image": "alexgshaw/caffe-cifar-10:20260403",
+      "verifier_script_sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/cancel-async-tasks": {
+      "task_ref": "sha256:a3d048d351136e48070696cda8bb79660dfd74db1fea3b6da88559f0332699c1",
+      "docker_image": "alexgshaw/cancel-async-tasks:20251031",
+      "verifier_script_sha256": "79600a6b863def31b4daa008297423010cd2d6243e689d67503e118e4dc53397",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/chess-best-move": {
+      "task_ref": "sha256:9ab8e4b3674282e751edafbd9b5bd551fef995fd6601585a2cdb04fd70c520da",
+      "docker_image": "alexgshaw/chess-best-move:20251031",
+      "verifier_script_sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/circuit-fibsqrt": {
+      "task_ref": "sha256:9bcffe1054bb33249aa578a9a2a74f3c8cca66b0cb7aa1328233f1d31822aae3",
+      "docker_image": "alexgshaw/circuit-fibsqrt:20251031",
+      "verifier_script_sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/cobol-modernization": {
+      "task_ref": "sha256:e03aa03965eee48c9f772d566ff9bcd741fceeac9693123f82a13fdd46be0d88",
+      "docker_image": "alexgshaw/cobol-modernization:20251031",
+      "verifier_script_sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/code-from-image": {
+      "task_ref": "sha256:ef2907bb300d9b3352410c2a75dbf831278c187c073298371870ea9c83526f78",
+      "docker_image": "alexgshaw/code-from-image:20251031",
+      "verifier_script_sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/compile-compcert": {
+      "task_ref": "sha256:22bde2a73d62fa46f5ab96f710561a72e8d1aa4266f008605a17f174622ad785",
+      "docker_image": "alexgshaw/compile-compcert:20260403",
+      "verifier_script_sha256": "dfb119d322a96c724d96a77633dfbcbf99867b934aa4e1b4406089f33d23d41a",
+      "system_packages": [
+        "binutils",
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/configure-git-webserver": {
+      "task_ref": "sha256:e3dc712acfecdb1338a889f86c97b37422c3778351253f9aca4236e895fdb36e",
+      "docker_image": "alexgshaw/configure-git-webserver:20251031",
+      "verifier_script_sha256": "afafc3ffdaf911f7a93003c0746f217188099c174e5d3eb7dada17133df15895",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/constraints-scheduling": {
+      "task_ref": "sha256:91dd6f87e1ee508328d5aafbd99a6bd1ccc47bc22671b4aaa4060bda492deb53",
+      "docker_image": "alexgshaw/constraints-scheduling:20251031",
+      "verifier_script_sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/count-dataset-tokens": {
+      "task_ref": "sha256:cd0574ec8281f53854256acc93702ed1441407c0428849e1dd4f27e863c6b08a",
+      "docker_image": "alexgshaw/count-dataset-tokens:20251031",
+      "verifier_script_sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/crack-7z-hash": {
+      "task_ref": "sha256:99cbb2269f6bd112d3387fd01cb6900118fe4aded3f75a8d656580a8296a1ae5",
+      "docker_image": "alexgshaw/crack-7z-hash:20251031",
+      "verifier_script_sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/custom-memory-heap-crash": {
+      "task_ref": "sha256:61e021e0304c9818a9be2c9173c8a0938ce5d136e95c5422e099f1fdb2dc080e",
+      "docker_image": "alexgshaw/custom-memory-heap-crash:20251031",
+      "verifier_script_sha256": "70a2b55f0c5757f6b123a216dfd202be4a646680bced28dddcd31fd8959a058f",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/db-wal-recovery": {
+      "task_ref": "sha256:07e9193513bfce038b9f9d84962ecc85683eee0a642d14ee6fb7104b086ddab4",
+      "docker_image": "alexgshaw/db-wal-recovery:20251031",
+      "verifier_script_sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/distribution-search": {
+      "task_ref": "sha256:8787d3004ac4dd9d78f0c14f5b5ef94a4ad3e69d8828d7d35b9fbd7828a69ed1",
+      "docker_image": "alexgshaw/distribution-search:20251031",
+      "verifier_script_sha256": "3eb007081bf3cfef18cf9ef7ebb44b0a93f133e3d1f0fd44a0417e5a263b0ca5",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "numpy==2.3.0",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest",
+        "numpy"
+      ]
+    },
+    "terminal-bench/dna-assembly": {
+      "task_ref": "sha256:e41a8e94d86019949b08d3b5f88a85f6d943ba0fd85d5e1d5ebb95cb8f66223f",
+      "docker_image": "alexgshaw/dna-assembly:20251031",
+      "verifier_script_sha256": "271c8317c98539e3b49233d017fe51fb0e5fba8114e76830fe698565499b2b1d",
+      "system_packages": [
+        "curl",
+        "primer3"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/dna-insert": {
+      "task_ref": "sha256:37fc023970e3464c1acc31f43e04a0b4b94758130d340788f261f00764d9e530",
+      "docker_image": "alexgshaw/dna-insert:20251031",
+      "verifier_script_sha256": "355c3f627ad14243da1ec683ebdb120aca7921bb52656c5cb65b281b347ba68b",
+      "system_packages": [
+        "curl",
+        "primer3"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/extract-elf": {
+      "task_ref": "sha256:1ef31d566be4fe3459d5368621ae7ef7a31b23ef675737e473bbc43c8c7b3fce",
+      "docker_image": "alexgshaw/extract-elf:20251031",
+      "verifier_script_sha256": "84ee50194effb4c72b9cbd0306cccaf0f855f3634227cd8359928722a53bbdaf",
+      "system_packages": [
+        "curl",
+        "gcc"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/extract-moves-from-video": {
+      "task_ref": "sha256:168e2b9168511b8f8d32b1697f4703b08626203e7949ad396658f4bef7dee66e",
+      "docker_image": "alexgshaw/extract-moves-from-video:20260403",
+      "verifier_script_sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/feal-differential-cryptanalysis": {
+      "task_ref": "sha256:8ea56995fcc43fb94f0e4e15adb12dd28836bf3e9c766b2cc7ae78a7ce90341f",
+      "docker_image": "alexgshaw/feal-differential-cryptanalysis:20251031",
+      "verifier_script_sha256": "106c27394c96343c03b4fbac14faac85542bce6628bccc66a5fe036d77f72daf",
+      "system_packages": [
+        "curl",
+        "gcc"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "setuptools==80.9.0",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest",
+        "setuptools"
+      ]
+    },
+    "terminal-bench/feal-linear-cryptanalysis": {
+      "task_ref": "sha256:0f3234c5fde85f9dc610d94cfefd4c892afb75c9e571f21f18fee66972b67332",
+      "docker_image": "alexgshaw/feal-linear-cryptanalysis:20251031",
+      "verifier_script_sha256": "9431cbc2bad2b690001e096218ecd3f7f2f241b415062a2ea1ec7083d2e7c9e1",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/filter-js-from-html": {
+      "task_ref": "sha256:2d1496b6fc62adeccdba7a56f4bc24e5ef265840434d2011234ed20b6c240759",
+      "docker_image": "alexgshaw/filter-js-from-html:20251031",
+      "verifier_script_sha256": "5d23dd089b388310e6d42317704a674340151c473a567cc44e1aee55bdbc6855",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "selenium==4.38.0",
+        "-w",
+        "bs4==0.0.2",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest",
+        "selenium",
+        "bs4"
+      ]
+    },
+    "terminal-bench/financial-document-processor": {
+      "task_ref": "sha256:63dc43a15d9ec401613016e9114d1a93ec860eea63b2db02abfe8060deea30fb",
+      "docker_image": "alexgshaw/financial-document-processor:20251031",
+      "verifier_script_sha256": "48abbda713ace5cee00dd28c7398959f28280062350eb88206a6697a28c72790",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pandas==2.3.2",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest",
+        "pandas"
+      ],
+      "promote_uv_to_system": true
+    },
+    "terminal-bench/fix-code-vulnerability": {
+      "task_ref": "sha256:d31348aa16b533a15f013420e4d9726dc529e6086adc7d6d48067d22cc18fe71",
+      "docker_image": "alexgshaw/fix-code-vulnerability:20251031",
+      "verifier_script_sha256": "f1611da693cb4cfc5e8482698c6a1858a5c67220ae9db89b50aed66584e9b17f",
+      "system_packages": [],
+      "uv_version": null,
+      "mode": "pip",
+      "python": "image_default",
+      "packages": [
+        "pytest==8.4.1",
+        "pytest-json-ctrf==0.3.5"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/fix-git": {
+      "task_ref": "sha256:16948b980df9d96de616a205f5acca1c5d395de83ff4f8ffabcafacb93226f2e",
+      "docker_image": "alexgshaw/fix-git:20260403",
+      "verifier_script_sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/fix-ocaml-gc": {
+      "task_ref": "sha256:2031f3d5224b891fe443a31526b569eb756be2f88b663cb025448af9c4f97e2c",
+      "docker_image": "alexgshaw/fix-ocaml-gc:20251031",
+      "verifier_script_sha256": "9a2114729f090f351fb8e8bf055f013f299946108d032e845f5d01e725fa2719",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/gcode-to-text": {
+      "task_ref": "sha256:7dd2af04820e71ecaba96bc493cbffa16317e96816c6c8003385c034adf6c23b",
+      "docker_image": "alexgshaw/gcode-to-text:20251031",
+      "verifier_script_sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/git-leak-recovery": {
+      "task_ref": "sha256:22a9ec10dbd4cd8b99477b70e1944103775ca41de9b9e0025ec4898cd17bd334",
+      "docker_image": "alexgshaw/git-leak-recovery:20251031",
+      "verifier_script_sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/git-multibranch": {
+      "task_ref": "sha256:7759a92a373c967dd31535975bad8659410644025673fe62385444fd2605c5fa",
+      "docker_image": "alexgshaw/git-multibranch:20251031",
+      "verifier_script_sha256": "ddbde3eea6ffa8fda105cbd86597a53bd409f41e13223900aa27e77a84b6b155",
+      "system_packages": [
+        "curl",
+        "expect"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/gpt2-codegolf": {
+      "task_ref": "sha256:fe42af8e9c5aa927c3b680acd08e43032c84088fa9d770b03ce63dbc66fea4e7",
+      "docker_image": "alexgshaw/gpt2-codegolf:20251031",
+      "verifier_script_sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/headless-terminal": {
+      "task_ref": "sha256:203953871ebdae4efbf163af9499849368dab5e219b70d447e5ee9701ad382d9",
+      "docker_image": "alexgshaw/headless-terminal:20251031",
+      "verifier_script_sha256": "bfaa32131cbbef985f9b0bbc3cb231ac51eb90579e6e3db55a2f09b5fa0f46b7",
+      "system_packages": [
+        "vim"
+      ],
+      "uv_version": null,
+      "mode": "pip",
+      "python": "image_default",
+      "packages": [
+        "pytest==8.4.1",
+        "requests==2.32.5",
+        "pytest-json-ctrf==0.3.5"
+      ],
+      "probe_modules": [
+        "pytest",
+        "requests"
+      ]
+    },
+    "terminal-bench/hf-model-inference": {
+      "task_ref": "sha256:01370f37e61286f920dfca1e471496640ebcc8d06e1cc48d874c790715dbd4ad",
+      "docker_image": "alexgshaw/hf-model-inference:20260430",
+      "verifier_script_sha256": "6528c4c44d46004738c57dc59709bc80fb4226d37aaf0e8d778cc08017642e8f",
+      "system_packages": [],
+      "uv_version": null,
+      "mode": "pip",
+      "python": "image_default",
+      "packages": [
+        "pytest==8.4.1",
+        "psutil==7.0.0",
+        "requests==2.32.4",
+        "pytest-json-ctrf==0.3.5"
+      ],
+      "probe_modules": [
+        "pytest",
+        "psutil",
+        "requests"
+      ]
+    },
+    "terminal-bench/install-windows-3.11": {
+      "task_ref": "sha256:1f1361b0012e1ad24054e7cfc039829459e8ab0631b3573d9b93499bf6b3563e",
+      "docker_image": "alexgshaw/install-windows-3.11:20251031",
+      "verifier_script_sha256": "8c7a299c5ed8338d8d4f8a65db62d56c21496e62fe66e90719e417fd99c9423a",
+      "system_packages": [
+        "curl",
+        "mtools",
+        "socat",
+        "tesseract-ocr",
+        "vncsnapshot"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "opencv-python==4.11.0.86",
+        "-w",
+        "numpy==2.3.1",
+        "-w",
+        "pytesseract==0.3.13",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest",
+        "cv2",
+        "numpy",
+        "pytesseract"
+      ]
+    },
+    "terminal-bench/kv-store-grpc": {
+      "task_ref": "sha256:973c5d4c111fb61a344457936f1c36400acd2d9e44389e7b319586fe23a7a307",
+      "docker_image": "alexgshaw/kv-store-grpc:20251031",
+      "verifier_script_sha256": "c348467a076bf614d0a850e25b2263f85bbf7b4c7a8d344fbd5454a0611a0df8",
+      "system_packages": [],
+      "uv_version": null,
+      "mode": "pip",
+      "python": "image_default",
+      "packages": [
+        "pytest==8.4.2",
+        "requests==2.32.5",
+        "psutil==7.0.0",
+        "pytest-json-ctrf==0.3.5"
+      ],
+      "probe_modules": [
+        "pytest",
+        "requests",
+        "psutil"
+      ]
+    },
+    "terminal-bench/large-scale-text-editing": {
+      "task_ref": "sha256:1f1cddc3df15e452fe2d3c6928f6b1e5b5330a7ae67cab373a0d089ea7d334a2",
+      "docker_image": "alexgshaw/large-scale-text-editing:20251031",
+      "verifier_script_sha256": "e5edb6fcd43d7e638ffcf64522c11185a8355afb5daf6ad805cdfedd47e9ceb3",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/largest-eigenval": {
+      "task_ref": "sha256:1b6f17c344d23e97435ba3fa93400d141f6bb7763ed2014fab418830983791b3",
+      "docker_image": "alexgshaw/largest-eigenval:20251031",
+      "verifier_script_sha256": "fc40868bee6cbcfd6e906b0522dda9a778064ea9876e64a40a377d66087a174b",
+      "system_packages": [],
+      "uv_version": null,
+      "mode": "pip",
+      "python": "image_default",
+      "packages": [
+        "pytest==8.4.1",
+        "pytest-json-ctrf==0.3.5"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/llm-inference-batching-scheduler": {
+      "task_ref": "sha256:a3bf47589118daec5124fe3689b4439802c805b2f4ed9d402a48ae73ca2fea67",
+      "docker_image": "alexgshaw/llm-inference-batching-scheduler:20251031",
+      "verifier_script_sha256": "005f980332355e2fe143d4ff4aac11828adf070594bbe7055399c238f06953ca",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/log-summary-date-ranges": {
+      "task_ref": "sha256:27b074a2f10fff7606e096f3abd8dced418ad8fda0f53d88acbe477f2d9ceaf6",
+      "docker_image": "alexgshaw/log-summary-date-ranges:20251031",
+      "verifier_script_sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/mailman": {
+      "task_ref": "sha256:831b3ed00807153963c05f91599443e4839099521d1d56db811c5547ab280dbe",
+      "docker_image": "alexgshaw/mailman:20251031",
+      "verifier_script_sha256": "82c7dd138ef047c84a63c2c924eef586695dff03bb80a4c6ba0ced96e9bc8cf2",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uv_venv",
+      "python": "3.12",
+      "packages": [
+        "pytest==8.4.1",
+        "mailman==3.3.8",
+        "pytest-json-ctrf==0.3.5"
+      ],
+      "probe_modules": [
+        "pytest",
+        "mailman"
+      ]
+    },
+    "terminal-bench/make-doom-for-mips": {
+      "task_ref": "sha256:2d83dd3dee8e0f055e09973934cf0d7e3169a9cd90704cba5c8940b170be9498",
+      "docker_image": "alexgshaw/make-doom-for-mips:20251031",
+      "verifier_script_sha256": "25809a2ebcb714b1c4e55563b0db16add23e2fd9b68d03e51b1734f8dbb392e1",
+      "system_packages": [
+        "curl",
+        "python3-pillow"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "numpy==2.3.1",
+        "-w",
+        "pillow==11.2.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest",
+        "numpy",
+        "PIL"
+      ]
+    },
+    "terminal-bench/make-mips-interpreter": {
+      "task_ref": "sha256:41a55da0abec5d7b32a0c2321f8b18e84000ca8074ae62c6874d6ed4a3a1cd3c",
+      "docker_image": "alexgshaw/make-mips-interpreter:20251031",
+      "verifier_script_sha256": "25809a2ebcb714b1c4e55563b0db16add23e2fd9b68d03e51b1734f8dbb392e1",
+      "system_packages": [
+        "curl",
+        "python3-pillow"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "numpy==2.3.1",
+        "-w",
+        "pillow==11.2.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest",
+        "numpy",
+        "PIL"
+      ]
+    },
+    "terminal-bench/mcmc-sampling-stan": {
+      "task_ref": "sha256:443cd2b94ed797944793e97a56527a5dc0f8ad40f78ed418fe1b2e367cf22546",
+      "docker_image": "alexgshaw/mcmc-sampling-stan:20251031",
+      "verifier_script_sha256": "349d2c34617a2959783847c9ad072396c0b119122258ca40cedf0be1db2c9a3e",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.3.4",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/merge-diff-arc-agi-task": {
+      "task_ref": "sha256:6aab6511a5344ce87698293bb1ce4cc51d9a45f1ad9f0c075d2a83197b36727d",
+      "docker_image": "alexgshaw/merge-diff-arc-agi-task:20251031",
+      "verifier_script_sha256": "c9052954cd6ce25c4a375a2fb48e765b1efa5b39f7991b93993cc793af8ab9d2",
+      "system_packages": [
+        "curl",
+        "git"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/model-extraction-relu-logits": {
+      "task_ref": "sha256:1ae5045ad68b5d34c3398b612066a07c4a08b6dc330d28868ec4021e17c94b17",
+      "docker_image": "alexgshaw/model-extraction-relu-logits:20251031",
+      "verifier_script_sha256": "3b2d8f5e0353c2bab3515d6387468a863a4f9f241ee131c73f545f3fdf9e2d52",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "numpy==2.3.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest",
+        "numpy"
+      ]
+    },
+    "terminal-bench/modernize-scientific-stack": {
+      "task_ref": "sha256:67a9952aca67df9c70510acf62faea336644a0e9d379f3aaf9df79f14c8fcb12",
+      "docker_image": "alexgshaw/modernize-scientific-stack:20251031",
+      "verifier_script_sha256": "e868c85466ebf4815e2e4efbd252bf50ad979bceb14325a9377b1bbf852f0281",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "numpy==2.3.4",
+        "-w",
+        "pandas==2.3.3",
+        "-w",
+        "matplotlib==3.10.7",
+        "-w",
+        "scipy==1.16.3",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest",
+        "numpy",
+        "pandas",
+        "matplotlib",
+        "scipy"
+      ]
+    },
+    "terminal-bench/mteb-leaderboard": {
+      "task_ref": "sha256:484f6d7008a05b5b8640fc6618a384b8c9447cd76f85416c8a595028d29bff9c",
+      "docker_image": "alexgshaw/mteb-leaderboard:20260430",
+      "verifier_script_sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/mteb-retrieve": {
+      "task_ref": "sha256:fa7c777df6ed8987a2bb144b4b73a1200935bbea69da03a2aaa1dc8aa9bd9dc9",
+      "docker_image": "alexgshaw/mteb-retrieve:20260430",
+      "verifier_script_sha256": "404ce42339d0b4df9912282a16f7c875ebc2453d40a9312b671f356208238215",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "mteb==1.36.8",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest",
+        "mteb"
+      ]
+    },
+    "terminal-bench/multi-source-data-merger": {
+      "task_ref": "sha256:70367c38732e1beda7b229968a48d60242277c2fa4db91339c3f064c4c230d49",
+      "docker_image": "alexgshaw/multi-source-data-merger:20251031",
+      "verifier_script_sha256": "d5a00e64413c0e1ae452f38a1aa1a47c3ed7b4416bbfccae1a4c053025a336d1",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pandas==2.3.3",
+        "-w",
+        "pyarrow==22.0.0",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest",
+        "pandas",
+        "pyarrow"
+      ]
+    },
+    "terminal-bench/nginx-request-logging": {
+      "task_ref": "sha256:9d1b8bebd989ea0bc8080c3b159480068caf183c5fd61385868b2574b206e097",
+      "docker_image": "alexgshaw/nginx-request-logging:20251031",
+      "verifier_script_sha256": "27761195f53cbfe5941fe39b573631f6c926869e64b7c43220377e1e116528e7",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "requests==2.32.4",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest",
+        "requests"
+      ]
+    },
+    "terminal-bench/openssl-selfsigned-cert": {
+      "task_ref": "sha256:d4afa2bd2a9ba1420db8d6cfde42ffdb4873ae2d955c35014e8da94444c83302",
+      "docker_image": "alexgshaw/openssl-selfsigned-cert:20251031",
+      "verifier_script_sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/overfull-hbox": {
+      "task_ref": "sha256:3c3b16e4b2de5fea90ca98db242b155a6843f9cc4dfd00be3479985a34bab4f7",
+      "docker_image": "alexgshaw/overfull-hbox:20260403",
+      "verifier_script_sha256": "ab4ef5988c8694f6049eac703b7683a7f846c4714a61b764bd8e66e116abe16f",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/password-recovery": {
+      "task_ref": "sha256:9b5c6bdce0cf03f075b21f6a7af5030b825ce07d7b16b37610f3964217ab84a4",
+      "docker_image": "alexgshaw/password-recovery:20251031",
+      "verifier_script_sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/path-tracing": {
+      "task_ref": "sha256:cf56094c881a488b27e9f204a638a7e78ed7d55e12dc3064108c93357190314c",
+      "docker_image": "alexgshaw/path-tracing:20251031",
+      "verifier_script_sha256": "a719dbb1ba7ae76df095e9d815941dfa4c55edaf11f173b9c3c3097afa838548",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pillow==11.2.1",
+        "-w",
+        "numpy==2.3.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest",
+        "PIL",
+        "numpy"
+      ]
+    },
+    "terminal-bench/path-tracing-reverse": {
+      "task_ref": "sha256:035880d7ef5554b217e53a75ce5e87e43193b7a44c30ad17226a6ab10fc11a6c",
+      "docker_image": "alexgshaw/path-tracing-reverse:20251031",
+      "verifier_script_sha256": "a719dbb1ba7ae76df095e9d815941dfa4c55edaf11f173b9c3c3097afa838548",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pillow==11.2.1",
+        "-w",
+        "numpy==2.3.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest",
+        "PIL",
+        "numpy"
+      ]
+    },
+    "terminal-bench/polyglot-c-py": {
+      "task_ref": "sha256:25570ccacf63f573a252eaa2a9c62ee8b55f5aa228cc803b5beb39dd6d8afeb7",
+      "docker_image": "alexgshaw/polyglot-c-py:20251031",
+      "verifier_script_sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/polyglot-rust-c": {
+      "task_ref": "sha256:a33dc72e2278d225513c0724abe2e4539653d5ee7e4c2a90ba2d676586ba9f3d",
+      "docker_image": "alexgshaw/polyglot-rust-c:20251031",
+      "verifier_script_sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/portfolio-optimization": {
+      "task_ref": "sha256:d112f8945600f18ec47bbbe76935dc05953173cc3d0a375a7aa2712b091584e4",
+      "docker_image": "alexgshaw/portfolio-optimization:20251031",
+      "verifier_script_sha256": "25d5d5008edeab93d730b44f723687d2b08978f9f53750f62af8aeb1ecae90c6",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "numpy==2.3.2",
+        "-w",
+        "setuptools==78.1.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest",
+        "numpy",
+        "setuptools"
+      ]
+    },
+    "terminal-bench/protein-assembly": {
+      "task_ref": "sha256:c491d45acce234e1aa1d44dcc6778c55fcf875e9eb254b8dd3ae5ef58119621b",
+      "docker_image": "alexgshaw/protein-assembly:20260403",
+      "verifier_script_sha256": "9ede46648fc67c9ce61975503de3e0fcff0b0fb110adc0f9e1d240a608c267b5",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "biopython==1.85",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest",
+        "Bio"
+      ]
+    },
+    "terminal-bench/prove-plus-comm": {
+      "task_ref": "sha256:d5ae25720df1f7cd619ed8408cda4b87b79a3d8b0ff4f1919e2c96e9547339c2",
+      "docker_image": "alexgshaw/prove-plus-comm:20251031",
+      "verifier_script_sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/pypi-server": {
+      "task_ref": "sha256:1a1e0542f58e2d3362fec17a9bbb98667717d9a4a3e9a4c8413d3150a4fa0ff1",
+      "docker_image": "alexgshaw/pypi-server:20251031",
+      "verifier_script_sha256": "d2b1220e42bcfdcce87907ac5bbd69ac210a3c94926545ca2439636786e7784e",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pip==25.2",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest",
+        "pip"
+      ]
+    },
+    "terminal-bench/pytorch-model-cli": {
+      "task_ref": "sha256:6f11544dcc81a380dc4611902961f5520259c462d9fceb413419d66ab9a96c79",
+      "docker_image": "alexgshaw/pytorch-model-cli:20251031",
+      "verifier_script_sha256": "43fb67e537c7adc2df11c2367f47c876cb5d16a7c1ae16d0339c3a3364bb2b06",
+      "system_packages": [
+        "curl",
+        "ffmpeg",
+        "libsm6",
+        "libxext6"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "--index",
+        "https://download.pytorch.org/whl/cpu",
+        "--index-strategy",
+        "unsafe-best-match",
+        "-p",
+        "3.13",
+        "-w",
+        "torch==2.7.1",
+        "-w",
+        "torchvision==0.22.1",
+        "-w",
+        "numpy==2.3.1",
+        "-w",
+        "opencv-python==4.11.0.86",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "torch",
+        "torchvision",
+        "numpy",
+        "cv2",
+        "pytest"
+      ]
+    },
+    "terminal-bench/pytorch-model-recovery": {
+      "task_ref": "sha256:2e628841cff93290919172398e573e794f34c95d9382b7425adde4364022decc",
+      "docker_image": "alexgshaw/pytorch-model-recovery:20260430",
+      "verifier_script_sha256": "6005f3a75ccfe00d7bed1005264b4a84a1f8e30cd780f8a97b3a804be7cc7a8e",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "torch==2.7.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest",
+        "torch"
+      ]
+    },
+    "terminal-bench/qemu-alpine-ssh": {
+      "task_ref": "sha256:60b7050b0e0aa51641208cf65766743d340e59575db2c4d2f8628240846c2a28",
+      "docker_image": "alexgshaw/qemu-alpine-ssh:20251031",
+      "verifier_script_sha256": "3b244479776c4ee3639631112799f2cde22cbb80ac10511715e3a8f32909c289",
+      "system_packages": [
+        "curl",
+        "sshpass"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/qemu-startup": {
+      "task_ref": "sha256:8e58263747da7dc688ad470688fb72825c4ba2c1c40443fa0f52963645bbd999",
+      "docker_image": "alexgshaw/qemu-startup:20251031",
+      "verifier_script_sha256": "7b4dbbad13e2e71c82f2f6000ac9afbdc0df7916817ebe71272f667a8bf20d04",
+      "system_packages": [
+        "curl",
+        "expect"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/query-optimize": {
+      "task_ref": "sha256:169496ea6843cb403b0860132675baf7aa0df0ac8b86221068e27d86395260f4",
+      "docker_image": "alexgshaw/query-optimize:20251031",
+      "verifier_script_sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/raman-fitting": {
+      "task_ref": "sha256:97ca4025332b20739da553cab0658f2ead925d1b5b3b9b7664dc9eb5e7fbeab7",
+      "docker_image": "alexgshaw/raman-fitting:20251031",
+      "verifier_script_sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/regex-chess": {
+      "task_ref": "sha256:e763e0ac1c9759081af0a4a82ba51b8cf9ae5485a93de3bbe42d7d344597bd78",
+      "docker_image": "alexgshaw/regex-chess:20251031",
+      "verifier_script_sha256": "8f7f00a1c4dde7fcca6c918c768f2aba432b8c4007c15989716c68091950da87",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "chess==1.11.2",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest",
+        "chess"
+      ]
+    },
+    "terminal-bench/regex-log": {
+      "task_ref": "sha256:802c16cfd132e6c457529cb864be5a757c1b23b6cadc57f2d01983cb0110292a",
+      "docker_image": "alexgshaw/regex-log:20251031",
+      "verifier_script_sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/reshard-c4-data": {
+      "task_ref": "sha256:a402bbfede73dd04168d697de9b9146026f69e14c8cd333b6a91fc87e44ecd4b",
+      "docker_image": "alexgshaw/reshard-c4-data:20251031",
+      "verifier_script_sha256": "833c89a17fb238b0da378566d648a6f978963f5ed9f4dd120ab6366d9cf7c35f",
+      "system_packages": [],
+      "uv_version": "0.8.15",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "datasets==3.6.0",
+        "-w",
+        "tqdm==4.67.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest",
+        "datasets",
+        "tqdm"
+      ]
+    },
+    "terminal-bench/rstan-to-pystan": {
+      "task_ref": "sha256:592f15f75751f3c4999c3d05087f2f8b2a4dbaaedbfad5a30ae54058b80b925f",
+      "docker_image": "alexgshaw/rstan-to-pystan:20251031",
+      "verifier_script_sha256": "6c3d54c3e703202edf4ee93b0a67790225e215d2ce1b8d8027759f2152bbaf0d",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/sam-cell-seg": {
+      "task_ref": "sha256:37c182b91df18b9c2ea2dceda47430bbd585e7880c56fca2f1975907ce0df8ce",
+      "docker_image": "alexgshaw/sam-cell-seg:20251031",
+      "verifier_script_sha256": "7f2bc4976949fba258f1db6dedacb55377adc300d535ab849131744ce80bf8fd",
+      "system_packages": [
+        "curl",
+        "git",
+        "libgl1"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.11",
+      "warm_argv": [
+        "uvx",
+        "--index",
+        "https://download.pytorch.org/whl/cpu",
+        "--index-strategy",
+        "unsafe-best-match",
+        "-p",
+        "3.11",
+        "-w",
+        "torch==2.5.1",
+        "-w",
+        "torchvision==0.20.1",
+        "-w",
+        "pandas==2.3.2",
+        "-w",
+        "timm==1.0.19",
+        "-w",
+        "opencv-python==4.12.0.88",
+        "-w",
+        "shapely==2.1.1",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "-w",
+        "git+https://github.com/ChaoningZhang/MobileSAM.git@34bbbfdface3c18e5221aa7de6032d7220c6c6a1",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "torch",
+        "torchvision",
+        "pandas",
+        "timm",
+        "cv2",
+        "shapely",
+        "pytest",
+        "mobile_sam"
+      ]
+    },
+    "terminal-bench/sanitize-git-repo": {
+      "task_ref": "sha256:6e86297715fae62cd499fbdd27013e11a38d05d7e05b7f661cb50b4ecead128f",
+      "docker_image": "alexgshaw/sanitize-git-repo:20251031",
+      "verifier_script_sha256": "16014722171ae4479112051d2e8af7d0c5bb231bae6aff1b80cfa19e718c814f",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "gitpython==3.1.44",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest",
+        "git"
+      ]
+    },
+    "terminal-bench/schemelike-metacircular-eval": {
+      "task_ref": "sha256:58130c2166c3115276dc8592f358e326ff2d81ea852e3d88636c82fd1dff57e6",
+      "docker_image": "alexgshaw/schemelike-metacircular-eval:20251031",
+      "verifier_script_sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/sparql-university": {
+      "task_ref": "sha256:02aeca67b6c5b0d2d72c91ab471beb51ded6f42f0dc3dec580e20d489f09a867",
+      "docker_image": "alexgshaw/sparql-university:20251031",
+      "verifier_script_sha256": "45902b57bd0f1dd6959216bc9943ab27bb349edc7ff557035a1ecc8732e4cc6b",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "rdflib==7.1.4",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest",
+        "rdflib"
+      ]
+    },
+    "terminal-bench/sqlite-db-truncate": {
+      "task_ref": "sha256:956f038b479cc3b9b493553b57a60a8ff4154526386c3914c0b99e93e1ab6e87",
+      "docker_image": "alexgshaw/sqlite-db-truncate:20251031",
+      "verifier_script_sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/sqlite-with-gcov": {
+      "task_ref": "sha256:9f9bd57fbf9f4831e9031755e83aea6b9d60d2b2d54e8a12d48cff4dca3c231d",
+      "docker_image": "alexgshaw/sqlite-with-gcov:20251031",
+      "verifier_script_sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/torch-pipeline-parallelism": {
+      "task_ref": "sha256:db605337c749a872cea7b5b413429b3915bb4c3efe0f7875f0c46ce81bd8c4fb",
+      "docker_image": "alexgshaw/torch-pipeline-parallelism:20251031",
+      "verifier_script_sha256": "cc9fd28b6590993fc37e4a99da771cbf04726c8c62fe308e802612241da69dea",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "torch==2.7.0",
+        "-w",
+        "transformers==4.55.0",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest",
+        "torch",
+        "transformers"
+      ]
+    },
+    "terminal-bench/torch-tensor-parallelism": {
+      "task_ref": "sha256:f32ce74a5aeb6638480247ab799fe46127bbee631acdd0921b0f394ec49b3684",
+      "docker_image": "alexgshaw/torch-tensor-parallelism:20251031",
+      "verifier_script_sha256": "a7e6c9408b2401e4e7448371f7ddc72f3284caccfb56277d3cd4e98051868cdf",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "torch==2.7.0",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest",
+        "torch"
+      ]
+    },
+    "terminal-bench/train-fasttext": {
+      "task_ref": "sha256:460fc0818971ec83545a76805267b65459128fad52e68c26a199a0d74022badb",
+      "docker_image": "alexgshaw/train-fasttext:20251031",
+      "verifier_script_sha256": "22c8b907ea8e19ffda8c10f4433e0e6ef9a74db0f0f4c61ed59c4035645147df",
+      "system_packages": [
+        "build-essential",
+        "curl",
+        "git"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.11",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.11",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/tune-mjcf": {
+      "task_ref": "sha256:7da0fd3b906624df9eff8829ccd4f19cbb1ba967411b6d64d92b85b2f3fbdfb0",
+      "docker_image": "alexgshaw/tune-mjcf:20251031",
+      "verifier_script_sha256": "343a0604775b960f47cb7ed04bc0c4f9e23f8439c4ba44d6027f0cb245327e97",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "mujoco==3.3.5",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest",
+        "mujoco"
+      ]
+    },
+    "terminal-bench/video-processing": {
+      "task_ref": "sha256:d3f02e177b49e5768b6ce6709fc4ae3ef2ce0cdecb63b09fc9b07f9d3ddb7203",
+      "docker_image": "alexgshaw/video-processing:20251031",
+      "verifier_script_sha256": "836bc8f77561680c6bf5b3f76905da87e8a2315e2885d36c3f9ee9a29fb99ef9",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "toml==0.10.2",
+        "-w",
+        "opencv-contrib-python==4.11.0.86",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest",
+        "toml",
+        "cv2"
+      ]
+    },
+    "terminal-bench/vulnerable-secret": {
+      "task_ref": "sha256:d76dfa9e256487c5542905b892156f694137aeef784e1abf3f41e15a8c946eac",
+      "docker_image": "alexgshaw/vulnerable-secret:20251031",
+      "verifier_script_sha256": "d9e46bae71e0b119bdc8aaf689de9a780db29741cb5d46bfcc9090ad8943e08e",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/winning-avg-corewars": {
+      "task_ref": "sha256:a9f2c630fb7d656e96f3a42ade600a8abcb500631d153d62d5ceb2df073bc256",
+      "docker_image": "alexgshaw/winning-avg-corewars:20251031",
+      "verifier_script_sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    },
+    "terminal-bench/write-compressor": {
+      "task_ref": "sha256:d9ddd9a8e925e2c566b37b2492cbf995afecefe58874e4043ef78d7f3c892c7e",
+      "docker_image": "alexgshaw/write-compressor:20251031",
+      "verifier_script_sha256": "4770437ea96c3cc84684b4f99d55fb148fcac09f9ea1e8ef49de487716e6c334",
+      "system_packages": [
+        "curl"
+      ],
+      "uv_version": "0.9.5",
+      "mode": "uvx",
+      "python": "3.13",
+      "warm_argv": [
+        "uvx",
+        "-p",
+        "3.13",
+        "-w",
+        "pytest==8.4.1",
+        "-w",
+        "pytest-json-ctrf==0.3.5",
+        "pytest",
+        "--version"
+      ],
+      "probe_modules": [
+        "pytest"
+      ]
+    }
+  }
+}

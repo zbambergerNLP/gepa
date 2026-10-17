@@ -121,7 +121,7 @@ def test_run_serving_verification_requires_one_attempt_per_tool_before_model_set
     """
     resolve_kwargs = Mock()
     lm_factory = Mock()
-    monkeypatch.setattr(verify_serving, "resolve_hotpotqa_lm_kwargs", resolve_kwargs)
+    monkeypatch.setattr(verify_serving, "resolve_benchmark_lm_kwargs", resolve_kwargs)
     monkeypatch.setattr(verify_serving, "LM", lm_factory)
 
     with pytest.raises(verify_serving.ServingVerificationError, match="At least 4 edit attempts"):
@@ -143,7 +143,7 @@ def test_run_serving_verification_cycles_every_tool_and_reports_pass(monkeypatch
     ordinary_probe = Mock()
     continuation_probe = Mock()
     edit_probe = Mock()
-    monkeypatch.setattr(verify_serving, "resolve_hotpotqa_lm_kwargs", resolve_kwargs)
+    monkeypatch.setattr(verify_serving, "resolve_benchmark_lm_kwargs", resolve_kwargs)
     monkeypatch.setattr(verify_serving, "LM", lm_factory)
     monkeypatch.setattr(verify_serving, "_ordinary_completion_probe", ordinary_probe)
     monkeypatch.setattr(verify_serving, "_tool_continuation_probe", continuation_probe)
@@ -189,7 +189,7 @@ def test_run_serving_verification_records_failures_and_keeps_checking(monkeypatc
     ordinary_probe = Mock()
     continuation_probe = Mock(side_effect=failure)
     edit_probe = Mock(side_effect=[None, RuntimeError("provider timeout"), None, None])
-    monkeypatch.setattr(verify_serving, "resolve_hotpotqa_lm_kwargs", Mock(return_value={}))
+    monkeypatch.setattr(verify_serving, "resolve_benchmark_lm_kwargs", Mock(return_value={}))
     monkeypatch.setattr(verify_serving, "LM", Mock(return_value=lm))
     monkeypatch.setattr(verify_serving, "_ordinary_completion_probe", ordinary_probe)
     monkeypatch.setattr(verify_serving, "_tool_continuation_probe", continuation_probe)

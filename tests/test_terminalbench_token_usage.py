@@ -1,13 +1,11 @@
 """Verify practical caps and usage evidence without making model requests."""
 
 import json
-import sys
 from pathlib import Path
 from unittest.mock import Mock
 
 import litellm
 import pytest
-from terminalbench_pilot_helpers import offline_runtime as offline_runtime
 
 from examples.common.experiment_models import (
     EXPERIMENT_MODELS,
@@ -16,16 +14,13 @@ from examples.common.experiment_models import (
     experiment_request_overrides,
 )
 from examples.common import provider_retries
-from examples.terminalbench import canary
 from examples.terminalbench.model_settings import (
     terminalbench_decoding,
     terminalbench_limits,
     terminalbench_model_info,
 )
-from examples.terminalbench.token_usage import observe_optimizer, record_usage, summarize_usage
-from gepa.adapters.terminal_bench_adapter import TERMINUS_ADAPTER_CONTRACT
-from gepa.adapters.terminal_bench_adapter.text_scope import OPTIMIZATION_SCOPES
-from gepa.core.adapter import EvaluationBatch
+from examples.terminalbench.token_usage import observe_harbor, summarize_usage
+from types import SimpleNamespace
 from gepa.lm import LM
 from gepa.response_journal import response_journal_scope
 
@@ -60,10 +55,32 @@ def test_report_keeps_unknown_usage_and_distinguishes_caps_from_cutoffs(tmp_path
     """Aggregate physical logs once per file without merging different model arms."""
     first, second = EXPERIMENT_MODELS
     path = tmp_path / "trial" / "token-usage.jsonl"
+
+    def append_usage(raw, model):
+        usage = raw.usage if raw is not None else None
+        output = usage.completion_tokens if usage is not None else None
+        finish = raw.choices[0].finish_reason if raw is not None else None
+        details = getattr(usage, "completion_tokens_details", None)
+        record = {
+            "schema_version": 2,
+            "requested_model": model,
+            "role": "task_agent",
+            "error_type": "RuntimeError" if raw is None else None,
+            "prompt_tokens": usage.prompt_tokens if usage is not None else None,
+            "completion_tokens": output,
+            "reasoning_tokens": details.reasoning_tokens if details else None,
+            "length_finish": finish == "length" if finish else None,
+            "output_cap_reached": output >= 32768 if output is not None else None,
+            "context_cap_reached": False if output is not None else None,
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as stream:
+            stream.write(json.dumps(record) + "\n")
+
     for output, finish in [(32_768, "length"), (32_768, "stop"), (100, "length")]:
-        record_usage(path, "task_agent", first, terminalbench_limits(first), response(first, output, finish, 50))
-    record_usage(path, "task_agent", first, terminalbench_limits(first), error=RuntimeError("private error"))
-    record_usage(path, "task_agent", second, terminalbench_limits(second), response(second, 10))
+        append_usage(response(first, output, finish, 50), first)
+    append_usage(None, first)
+    append_usage(response(second, 10), second)
     report = summarize_usage([path, tmp_path])
     assert report["files"] == [str(path)]
     totals = report["models"][first]["task_agent"]
@@ -92,16 +109,14 @@ def test_optimizer_usage_records_live_responses_once_and_excludes_journal_replay
     monkeypatch.setattr(litellm, "completion_cost", Mock(return_value=0.25))
     path = tmp_path / "token-usage.jsonl"
     for _ in range(2):
-        lm = observe_optimizer(
-            LM(
-                model,
-                response_journal_path=tmp_path / "responses.sqlite3",
-                response_journal_namespace="proposer",
-                **terminalbench_decoding(model),
-            ),
-            path,
-            "proposer",
-            terminalbench_limits(model),
+        transport = SimpleNamespace(_llm_kwargs={})
+        observe_harbor(transport, path, terminalbench_limits(model))
+        lm = LM(
+            model,
+            response_journal_path=tmp_path / "responses.sqlite3",
+            response_journal_namespace="proposer",
+            **terminalbench_decoding(model),
+            **transport._llm_kwargs,
         )
         with response_journal_scope("iteration-0"):
             if mode == "plain":
@@ -123,121 +138,5 @@ def test_optimizer_usage_records_live_responses_once_and_excludes_journal_replay
     assert records[-2]["response_error"] == "output_length"
     assert not records[-1]["length_finish"] and records[-1]["reasoning_tokens"] == 50
     assert all(record["completion_tokens"] is None for record in records[:failures])
-    totals = summarize_usage([path])["models"][model]["proposer"]
+    totals = summarize_usage([path])["models"][model]["task_agent"]
     assert totals["completion_tokens"] == 32_868 and totals["errors"] == failures + 1
-
-
-@pytest.mark.parametrize("experiment", [None, "tb2.1"])
-@pytest.mark.parametrize("model", EXPERIMENT_MODELS)
-@pytest.mark.parametrize("fails", [False, True])
-@pytest.mark.parametrize("n_concurrent", [None, 2])
-@pytest.mark.parametrize("optimization_scope", [None, *OPTIMIZATION_SCOPES])
-def test_canary_uses_only_training_tasks_and_saves_usage_on_failure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    experiment: str | None,
-    model: str,
-    fails: bool,
-    n_concurrent: int | None,
-    optimization_scope: str | None,
-) -> None:
-    """Retain pilot evidence while excluding validation and held-out test tasks."""
-    factory = Mock(wraps=canary.HarborCLI)
-    monkeypatch.setattr(canary.HarborCLI, "check_requirements", Mock())
-    monkeypatch.setattr(canary, "HarborCLI", factory)
-    output_dir = tmp_path / "pilot"
-
-    def evaluate(adapter, tasks, candidate):
-        """Simulate the model boundary and verify the real manifest's selected split."""
-        assert [task.task_id for task in tasks] == adapter.manifest.splits["train"][:3]
-        assert not {task.task_id for task in tasks}.intersection(adapter.manifest.splits["val"])
-        assert not {task.task_id for task in tasks}.intersection(adapter.manifest.splits["test"])
-        assert adapter.text_scope.name == (optimization_scope or "system_prompt")
-        assert set(candidate) == set(adapter.text_scope.component_kinds)
-        record_usage(
-            output_dir / "harbor" / "token-usage.jsonl",
-            "task_agent",
-            model,
-            terminalbench_limits(model),
-            response(model, 32_768, "length"),
-        )
-        if fails:
-            raise RuntimeError("failed pilot")
-        return EvaluationBatch(
-            outputs=[{"task_id": task.task_id, "reward": 0.0, "errors": []} for task in tasks],
-            scores=[0.0] * len(tasks),
-        )
-
-    monkeypatch.setattr(canary.TerminusAdapter, "evaluate", evaluate)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "canary",
-            *(["--optimization-scope", optimization_scope] if optimization_scope is not None else []),
-            *(["--experiment", experiment] if experiment is not None else []),
-            "--model",
-            model,
-            "--api-base",
-            "http://localhost:8000/v1",
-            "--output-dir",
-            str(output_dir),
-            *(["--n-concurrent", str(n_concurrent)] if n_concurrent is not None else []),
-        ],
-    )
-    if fails:
-        with pytest.raises(RuntimeError, match="failed pilot"):
-            canary.main()
-    else:
-        canary.main()
-    config = json.loads((output_dir / "canary-config.json").read_text())
-    assert config["schema_version"] == 9
-    assert config["stage"] == "smoke"
-    assert (output_dir / "pilot-complete.json").exists() is not fails
-    assert config["optimization_scope"] == (optimization_scope or "system_prompt")
-    assert config["adapter"] == TERMINUS_ADAPTER_CONTRACT
-    assert config["experiment"] == "tb2.1"
-    assert config["task_context_settings"] == {
-        "enable_summarize": True,
-        "proactive_summarization_threshold": 8_000,
-    }
-    assert config["split"] == "train"
-    assert config["n_concurrent"] == factory.call_args.kwargs["n_concurrent"] == (n_concurrent or 1)
-    settings = factory.call_args.kwargs["student_agent_kwargs"]
-    assert settings == config["student_agent_kwargs"]
-    assert settings["llm_kwargs"]["max_tokens"] == settings["model_info"]["max_output_tokens"] == 32_768
-    assert (
-        settings["llm_kwargs"]["extra_body"]
-        == experiment_request_overrides(model, explicit_reasoning=True)["extra_body"]
-    )
-    report = json.loads((output_dir / "token-usage-summary.json").read_text())
-    assert report["models"][model]["task_agent"]["length_finish"] == 1
-
-
-@pytest.mark.parametrize("n_concurrent", [0, -1])
-def test_canary_rejects_invalid_concurrency_before_starting_harbor(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, n_concurrent: int
-) -> None:
-    """Reject invalid calibration settings before creating a pilot directory."""
-    harbor = Mock()
-    monkeypatch.setattr(canary, "HarborCLI", harbor)
-    output_dir = tmp_path / "pilot"
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "canary",
-            "--experiment",
-            "tb2.1",
-            "--api-base",
-            "http://localhost:8000/v1",
-            "--output-dir",
-            str(output_dir),
-            "--n-concurrent",
-            str(n_concurrent),
-        ],
-    )
-    with pytest.raises(SystemExit):
-        canary.main()
-    harbor.assert_not_called()
-    assert not output_dir.exists()

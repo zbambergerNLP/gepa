@@ -178,6 +178,10 @@ GEPA connects to your system via the [`GEPAAdapter`](src/gepa/core/adapter.py) i
 
 See the [adapters guide](https://gepa-ai.github.io/gepa/guides/adapters/) for how to build your own, and [DSPy's adapter](https://github.com/stanfordnlp/dspy/tree/main/dspy/teleprompt/gepa/gepa_utils.py) as a reference.
 
+The [shared benchmark suite](examples/BENCHMARKS.md) runs HotPotQA, Terminal-Bench 2.1,
+OBLIQ-Bench, DecisionBench, AppWorld, and Tau banking knowledge with the same
+GEPA/FOREST lifecycle, Qwen solver, DeepSeek proposer, and per-task timing reports.
+
 ---
 
 ## Integrations

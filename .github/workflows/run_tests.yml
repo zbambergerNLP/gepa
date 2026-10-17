@@ -10,6 +10,27 @@ on:
   workflow_dispatch:
 
 jobs:
+  benchmark-adapters:
+    name: Shared benchmark runner and adapters
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pinned benchmark dependencies
+        run: uv sync --locked --extra dev --extra decisionbench --extra obliqbench --group hotpotqa-task-program
+      - name: Verify adapters without model calls or model downloads
+        env:
+          DSPY_CACHEDIR: ${{ runner.temp }}/dspy-cache
+          RECORD_TESTS: "false"
+        run: |
+          uv run --no-sync python -m pytest -q -m 'not smoke' \
+            tests/test_benchmark_runner.py tests/test_decisionbench.py \
+            tests/test_obliqbench.py tests/test_appworld.py tests/test_taubench.py \
+            tests/test_hotpotqa_shared_runner.py tests/test_terminalbench_shared_runner.py
+
   terminalbench-runtime:
     name: Terminal Bench document runtime
     runs-on: ubuntu-latest

@@ -1,0 +1,2 @@
+# AppWorld's stable published engine is isolated from GEPA's Pydantic 2 stack.
+appworld==0.1.3.post1

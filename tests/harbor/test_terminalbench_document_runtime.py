@@ -8,11 +8,14 @@ import asyncio
 import copy
 import json
 import shlex
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from terminalbench_staging_fixtures import make_offline_bundle
 
 # This test directory can satisfy a top-level namespace import without Harbor installed.
 pytest.importorskip("harbor.agents.terminus_2")
@@ -23,7 +26,11 @@ from harbor.llms.base import ContextLengthExceededError, LLMResponse, OutputLeng
 from harbor.llms.chat import Chat
 from harbor.models.agent.context import AgentContext
 from harbor.models.job.config import JobConfig
+from harbor.models.task.id import LocalTaskId
+from harbor.models.task.task import Task
 from harbor.models.trajectories import Step
+from harbor.publisher.packager import Packager
+from harbor.tasks.client import TaskClient
 
 from examples.terminalbench.terminus_agent import PromptedTerminus
 from gepa.adapters.terminal_bench_adapter import HarborCLI, load_terminalbench_manifest
@@ -214,6 +221,88 @@ def test_job_config_is_accepted_by_pinned_harbor(runtime: tuple) -> None:
     assert parsed.agents[0].override_timeout_sec is None
     assert parsed.timeout_multiplier == 1.0
     assert len(parsed.tasks) + len(parsed.datasets) == 1
+
+
+def test_singularity_config_is_accepted_by_pinned_harbor(tmp_path: Path) -> None:
+    """Keep the cluster backend on Harbor's actual supported job schema."""
+    root = Path(__file__).parents[2]
+    manifest = load_terminalbench_manifest(root / "examples/terminalbench/terminalbench-v2.1-manifest.json")
+    runner = HarborCLI(
+        manifest=manifest,
+        student_model="openai/gpt-4o-mini",
+        work_dir=tmp_path,
+        agent_python_path=tmp_path,
+        container_runtime="singularity",
+    )
+    config = runner.build_job_config(
+        manifest.splits["train"][:1],
+        prompt_path=tmp_path / "prompt.txt",
+        bundle_path=tmp_path / "bundle.json",
+        jobs_dir=tmp_path / "jobs",
+        job_name="cluster",
+    )
+    parsed = JobConfig.model_validate(config)
+    assert parsed.environment.type.value == "singularity"
+    assert parsed.environment.kwargs == {"singularity_image_cache_dir": str(tmp_path / "singularity-images")}
+
+
+def test_offline_job_preserves_real_harbor_task_names_hashes_and_cached_images(tmp_path: Path, monkeypatch) -> None:
+    """Resolve real local tasks and cached SIFs while prohibiting network subprocesses."""
+    from harbor.environments.singularity.singularity import SingularityEnvironment
+
+    manifest, bundle_path, payload = make_offline_bundle(tmp_path)
+    runner = HarborCLI(
+        manifest=manifest, student_model="fixture", work_dir=tmp_path / "work", agent_python_path=tmp_path,
+        container_runtime="singularity", offline_task_bundle=bundle_path,
+    )
+    ordered = list(reversed(payload["tasks"]))
+    config = runner.build_job_config(
+        ordered, prompt_path=tmp_path / "prompt", bundle_path=tmp_path / "documents",
+        jobs_dir=tmp_path / "jobs", job_name="offline-test",
+    )
+    parsed = JobConfig.model_validate(config)
+    assert parsed.datasets == []
+    local_ids = [task.get_task_id() for task in parsed.tasks]
+    assert all(isinstance(task_id, LocalTaskId) for task_id in local_ids)
+    monkeypatch.setattr(TaskClient, "_resolve_package_version", AsyncMock(side_effect=AssertionError("registry access")))
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", AsyncMock(side_effect=AssertionError("image pull")))
+    resolved = asyncio.run(TaskClient().download_tasks(local_ids))
+    assert [Task(result.path).name for result in resolved.results] == ordered
+    for result in resolved.results:
+        task = Task(result.path)
+        digest, files = Packager.compute_content_hash(task.task_dir)
+        assert f"sha256:{digest}" == manifest.task_refs[task.name]
+        assert len(files) == len(payload["tasks"][task.name]["files"])
+        environment = object.__new__(SingularityEnvironment)
+        environment._image_cache_dir = runner.singularity_image_cache_dir
+        environment.logger = Mock()
+        cached_sif = asyncio.run(environment._convert_docker_to_sif(task.config.environment.docker_image))
+        assert cached_sif.is_file()
+
+
+def test_harbor_child_imports_prompted_agent_without_inherited_pythonpath(tmp_path: Path, monkeypatch) -> None:
+    """Import the actual agent in Harbor's separate interpreter using only runner-provided paths."""
+    root = Path(__file__).parents[2]
+    manifest = load_terminalbench_manifest(root / "examples/terminalbench/terminalbench-v2.1-manifest.json")
+    runner = HarborCLI(manifest=manifest, student_model="fixture", work_dir=tmp_path, agent_python_path=root)
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    monkeypatch.setattr(runner, "check_requirements", lambda task_ids=(): ("harbor", "singularity"))
+    child_env = {}
+
+    def capture(_command, **kwargs):
+        child_env.update(kwargs["env"])
+        raise RuntimeError("captured child environment")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(subprocess, "run", capture)
+        with pytest.raises(RuntimeError, match="captured child environment"):
+            runner.run(manifest.splits["train"][:1], seed_documents("generic"))
+    child_env["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
+    completed = subprocess.run(
+        [sys.executable, "-c", "from examples.terminalbench.terminus_agent import PromptedTerminus"],
+        cwd=tmp_path, env=child_env, capture_output=True, text=True, timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_real_agent_loop_discovers_then_reads_skills_and_repairs_json(

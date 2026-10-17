@@ -13,9 +13,8 @@ from threading import Lock
 from typing import Any
 from urllib.parse import urlsplit
 
+from examples.common.model_settings import REQUEST_TIMEOUT_SECONDS, resolve_benchmark_lm_kwargs
 from examples.common.provider_retries import PROVIDER_RETRY_POLICY, provider_retry_kwargs
-from examples.hotpotqa.model_settings import HOTPOTQA_REQUEST_TIMEOUT_SECONDS
-from examples.hotpotqa.utils import resolve_hotpotqa_lm_kwargs
 from gepa.lm import LM, ToolCompletion
 from gepa.proposer.reflective_mutation.react_v2_proposer import ReActV2Proposer
 from gepa.proposer.reflective_mutation.single_call_proposer import SingleCallProposer
@@ -28,7 +27,7 @@ from gepa.strategies.forest_constants import (
     SINGLE_CALL_EDITOR_MODE,
 )
 
-_CANARY_TIMEOUT_SECONDS = HOTPOTQA_REQUEST_TIMEOUT_SECONDS
+_CANARY_TIMEOUT_SECONDS = REQUEST_TIMEOUT_SECONDS
 _MINIMUM_ATTEMPTS = 20
 _EDIT_LOG_LOCK = Lock()
 _REPEATED_CHARACTER_RE = re.compile(r"(\S)\1{31,}")
@@ -381,7 +380,7 @@ def run_runtime_canary(
         raise RuntimeCanaryError(
             f"The fail-closed runtime gate requires at least {_MINIMUM_ATTEMPTS} repetitions; received {attempts}."
         )
-    lm_kwargs: dict[str, Any] = dict(resolve_hotpotqa_lm_kwargs(model, api_base, role=OPTIMIZER_ROLE))
+    lm_kwargs: dict[str, Any] = dict(resolve_benchmark_lm_kwargs(model, api_base, role=OPTIMIZER_ROLE))
     lm_kwargs.update(provider_retry_kwargs(attempt_log, "runtime_canary"))
     lm_kwargs["timeout"] = _CANARY_TIMEOUT_SECONDS
     lm = LM(model, **lm_kwargs)

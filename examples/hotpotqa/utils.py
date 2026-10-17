@@ -11,58 +11,28 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import distribution as package_distribution
 from importlib.metadata import version as package_version
 
-import litellm  # type: ignore[import-not-found]
-
 from examples.hotpotqa.benchmark_settings import (
     DATASET_SAMPLE_SEED,
     DATASET_SIZE,
+    DEFAULT_DATA_PATH,
+    HOTPOTQA_DSPY_COMMIT,
+    HOTPOTQA_DSPY_VERSION,
+    HOTPOTQA_HF_REVISION,
     RETRIEVAL_K,
     TEST_SIZE,
     TRAIN_SIZE,
     TRAIN_VALIDATION_SIZE,
     VALIDATION_SIZE,
 )
-from gepa.strategies.forest_constants import OPTIMIZER_ROLE, SOLVER_ROLE
 
 try:
     import dspy  # type: ignore[import-not-found]
 except ImportError:
     dspy = None  # type: ignore[assignment]
 
-from examples.common.experiment_models import (
-    EXPERIMENT_MODELS,
-    EXPERIMENT_NUM_RETRIES,
-    QWEN3_8_27B_MODEL,
-    experiment_decoding,
-    experiment_request_overrides,
-)
-from examples.common.provider_retries import provider_retry_kwargs
+from examples.common.experiment_models import QWEN3_8_27B_MODEL
+from examples.common.model_settings import resolve_benchmark_lm_kwargs
 from examples.common.wikipedia import WikipediaPassage, WikipediaRetriever
-from examples.hotpotqa.model_settings import (
-    HOTPOTQA_OPTIMIZER_MAX_TOKENS,
-    HOTPOTQA_OPTIMIZER_THINKING_TOKENS,
-    HOTPOTQA_REQUEST_TIMEOUT_SECONDS,
-    HOTPOTQA_SCIENTIFIC_REQUEST_SEED,
-    HOTPOTQA_SOLVER_MAX_TOKENS,
-    HOTPOTQA_SOLVER_THINKING_TOKENS,
-)
-
-DEFAULT_DATA_PATH = os.path.join(
-    os.path.dirname(__file__),
-    "data",
-    "hotpotqa_distractor_sample.jsonl",
-)
-
-FINAL_RESPONSE_MARKER = "Final Response:"
-HOTPOTQA_DSPY_VERSION = "2.6.23"
-HOTPOTQA_DSPY_COMMIT = "62dc3b634d7dc0c4889abcf905cb4c391ea6b396"
-HOTPOTQA_HF_REVISION = "1908d6afbbead072334abe2965f91bd2709910ab"
-HOTPOTQA_SCIENTIFIC_SPLIT_SHA256 = {
-    "train": "0287a62f31caa939df13d9e176436293a5c071164728bcb3cfcbf8dd40a7918e",
-    "val": "c6d794b172724eb87e8087d671b74e94725040b79c9a63980cb45dcb53146408",
-    "test": "55cd1c7a999476ea4c7ec67f964ad4fa0ae662a2b9f7ade59c64108e659add31",
-}
-
 
 if dspy is not None:
 
@@ -168,49 +138,6 @@ def validate_hotpotqa_dspy_runtime() -> tuple[str, str]:
     return installed_version, installed_commit
 
 
-def resolve_hotpotqa_lm_kwargs(
-    model: str,
-    api_base: str | None,
-    *,
-    role: str = SOLVER_ROLE,
-) -> dict[str, object]:
-    """Resolve the fixed HotPotQA scientific request settings.
-
-    Args:
-        model: Exact LiteLLM runtime model identifier.
-        api_base: Optional role-specific API endpoint.
-        role: Solver or optimizer, selecting its approved output ceiling.
-
-    Returns:
-        Independent LM keyword arguments for the requested local runtime.
-    """
-    if role not in {SOLVER_ROLE, OPTIMIZER_ROLE}:
-        raise ValueError(f"Unknown HotPotQA model role: {role!r}")
-    kwargs: dict[str, object] = {
-        "num_retries": EXPERIMENT_NUM_RETRIES,
-        "timeout": HOTPOTQA_REQUEST_TIMEOUT_SECONDS,
-        **provider_retry_kwargs(role=role),
-        **experiment_decoding(model, agentic=False),
-        **experiment_request_overrides(model, explicit_reasoning=True),
-    }
-    if model in EXPERIMENT_MODELS:
-        kwargs["max_tokens"] = (
-            HOTPOTQA_SOLVER_MAX_TOKENS if role == SOLVER_ROLE else HOTPOTQA_OPTIMIZER_MAX_TOKENS[model]
-        )
-        kwargs["seed"] = HOTPOTQA_SCIENTIFIC_REQUEST_SEED
-        extra_body = kwargs["extra_body"]
-        assert isinstance(extra_body, dict)
-        # Native reasoning termination reserves final-answer space within the
-        # existing output ceiling, including on a runaway reasoning attempt.
-        thinking_budget = (
-            HOTPOTQA_SOLVER_THINKING_TOKENS if role == SOLVER_ROLE else HOTPOTQA_OPTIMIZER_THINKING_TOKENS[model]
-        )
-        kwargs["extra_body"] = {**extra_body, "thinking_token_budget": thinking_budget}
-    if api_base is not None:
-        kwargs["api_base"] = api_base
-    return kwargs
-
-
 def build_hotpotqa_task_lm(
     model: str,
     api_base: str | None,
@@ -222,7 +149,7 @@ def build_hotpotqa_task_lm(
         model: LiteLLM model identifier.
         api_base: Optional solver API endpoint.
         lm_kwargs: Optional fully resolved request settings. When omitted, the
-            scientific profile is used for backward-compatible direct calls.
+            shared solver profile is used.
 
     Returns:
         DSPy language-model client configured with the experiment's fixed
@@ -235,7 +162,7 @@ def build_hotpotqa_task_lm(
     validate_hotpotqa_dspy_runtime()
 
     if lm_kwargs is None:
-        kwargs = resolve_hotpotqa_lm_kwargs(model, api_base)
+        kwargs = resolve_benchmark_lm_kwargs(model, api_base)
     else:
         kwargs = deepcopy(lm_kwargs)
     dspy.settings.configure(disable_history=True)
@@ -303,103 +230,6 @@ def normalize_answer(text: str) -> str:
     text = "".join(ch for ch in text if ch not in set(string.punctuation))
     text = re.sub(r"\b(a|an|the)\b", " ", text)
     return " ".join(text.split())
-
-
-def _extract_final_response(output: str) -> str:
-    """Extract the last marked final response after removing reasoning blocks.
-
-    Args:
-        output: Raw model output.
-
-    Returns:
-        Text after the final response marker, or all visible output when the
-        marker is absent.
-    """
-    output = re.sub(r"<think>.*?</think>", "", output, flags=re.DOTALL).strip()
-    if FINAL_RESPONSE_MARKER in output:
-        return output.rsplit(FINAL_RESPONSE_MARKER, 1)[1].strip()
-    return output.strip()
-
-
-def _call_lm(
-    system: str,
-    user: str,
-    model: str,
-    api_base: str | None,
-    lm_kwargs: dict[str, object] | None = None,
-) -> str:
-    """Call the solver with the HotPotQA experiment's decoding settings.
-
-    Args:
-        system: Candidate system prompt, omitted when empty.
-        user: Example-specific user message.
-        model: LiteLLM model identifier.
-        api_base: Optional solver API endpoint.
-        lm_kwargs: Optional fully resolved request settings. When omitted, the
-            scientific profile is used for backward-compatible direct calls.
-
-    Returns:
-        Raw message content when it contains non-whitespace text, otherwise raw
-        reasoning content when available. Returns an empty string when every
-        context-window retry fails or the response contains neither field.
-    """
-    messages = []
-    if system.strip():
-        messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": user})
-    if lm_kwargs is None:
-        kwargs = resolve_hotpotqa_lm_kwargs(model, api_base)
-    else:
-        kwargs = deepcopy(lm_kwargs)
-    kwargs["model"] = model
-    kwargs["messages"] = messages
-    kwargs["cache"] = {"no-cache": True, "no-store": True}
-    response = None
-    max_token_fallbacks = dict.fromkeys((kwargs["max_tokens"], 4096, 1024, 256))
-    for max_tokens in max_token_fallbacks:
-        kwargs["max_tokens"] = max_tokens
-        try:
-            response = litellm.completion(**kwargs)
-            break
-        except litellm.exceptions.ContextWindowExceededError:
-            continue
-    if response is None:
-        print(f"WARNING: input exceeds model context (prompt {len(system) + len(user)} chars); scoring 0.")
-        return ""
-    message = response.choices[0].message
-    content = message.content or ""
-    if not content.strip():
-        content = getattr(message, "reasoning_content", None) or ""
-    return content
-
-
-def run_single_stage(
-    prompt: str,
-    question: str,
-    retriever: WikipediaRetriever,
-    model: str = QWEN3_8_27B_MODEL,
-    api_base: str | None = None,
-    retrieval_k: int = RETRIEVAL_K,
-    lm_kwargs: dict[str, object] | None = None,
-) -> str:
-    """Retrieve once and answer with one optimized prompt.
-
-    Args:
-        prompt: Candidate answering instruction.
-        question: HotPotQA question.
-        retriever: Wikipedia passage retriever.
-        model: Solver model identifier.
-        api_base: Optional solver API endpoint.
-        retrieval_k: Maximum passages requested.
-        lm_kwargs: Optional fully resolved solver request settings.
-
-    Returns:
-        Extracted final answer.
-    """
-    passages = "\n\n".join(_render_passages(retriever.search(question, retrieval_k)))
-    user = f"Question:\n{question}\n\nRetrieved passages:\n{passages}\n\nAnswer:"
-    out = _call_lm(prompt, user, model, api_base, lm_kwargs)
-    return _extract_final_response(out)
 
 
 def run_two_stage(
@@ -797,10 +627,6 @@ def _jsonl_to_examples(records: list[dict]) -> list[dict]:
 
 def load_hotpotqa_dataset(
     data_path: str | None = None,
-    train_limit: int | None = None,
-    val_limit: int | None = None,
-    test_limit: int | None = None,
-    seed: int = 0,
 ) -> tuple[list[dict], list[dict], list[dict]]:
     """Load HotpotQA fullwiki with deterministic 150/300/300 splits.
 
@@ -809,21 +635,14 @@ def load_hotpotqa_dataset(
     test pool, the next 40 percent to validation, and the final 20 percent to
     training. As in the paper artifact, each pool is independently sampled
     with ``random.Random(1)`` to 300 test, 300 validation, and 150 training
-    examples. A nonzero experiment seed remixes only the selected training and
-    validation examples; the test split remains fixed.
+    examples. Split membership and order are fixed across optimization seeds.
 
     If `data_path` is given, loads that JSONL file (smoke, 20 examples). For
     the 20-example sample, returns a 14/3/3 split (14 train / 3 val / 3 test)
-    so the smoke still exercises the 3-way pipeline; the 14 train / 6 val
-    legacy is preserved in the counts when val+test are combined.
+    so the smoke exercises the three-way evaluation pipeline.
 
     Args:
         data_path: Explicit JSONL smoke source. ``None`` selects fullwiki.
-        train_limit: Optional prefix limit for the training split.
-        val_limit: Optional prefix limit for the validation split.
-        test_limit: Optional prefix limit for the test split.
-        seed: Experiment seed. Zero preserves the artifact split; a nonzero
-            value remixes the selected training and validation examples.
 
     Returns:
         Deterministic training, validation, and test examples. Gold context is
@@ -844,7 +663,7 @@ def load_hotpotqa_dataset(
         records = _load_from_jsonl(data_path)
         examples = _jsonl_to_examples(records)
         if len(examples) >= DATASET_SIZE:
-            rng = random.Random(seed)
+            rng = random.Random(0)
             rng.shuffle(examples)
             trainset = examples[:TRAIN_SIZE]
             valset = examples[TRAIN_SIZE:TRAIN_VALIDATION_SIZE]
@@ -853,25 +672,13 @@ def load_hotpotqa_dataset(
             trainset = examples[:14]
             remainder = examples[14:]
             mid = len(remainder) // 2
-            valset = remainder[:mid] if mid else remainder[:3]
-            testset = remainder[mid:] if mid else remainder[3:]
-            if not valset and remainder:
-                valset = remainder[:3]
-            if not testset and remainder:
-                testset = remainder[3:6] if len(remainder) >= 6 else remainder[-3:]
-            if not testset:
-                testset = valset
+            valset = remainder[:mid]
+            testset = remainder[mid:]
         else:
             trainset = examples
             valset = examples
             testset = examples
 
-        if train_limit is not None:
-            trainset = trainset[:train_limit]
-        if val_limit is not None:
-            valset = valset[:val_limit]
-        if test_limit is not None:
-            testset = testset[:test_limit]
         return trainset, valset, testset
 
     try:
@@ -894,18 +701,7 @@ def load_hotpotqa_dataset(
         trainset = random.Random(DATASET_SAMPLE_SEED).sample(train_pool, TRAIN_SIZE)
         valset = random.Random(DATASET_SAMPLE_SEED).sample(val_pool, VALIDATION_SIZE)
         testset = random.Random(DATASET_SAMPLE_SEED).sample(test_pool, TEST_SIZE)
-        if seed != 0:
-            combined_train_val = trainset + valset
-            random.Random(seed).shuffle(combined_train_val)
-            trainset = combined_train_val[:TRAIN_SIZE]
-            valset = combined_train_val[TRAIN_SIZE:]
 
-        if train_limit is not None:
-            trainset = trainset[:train_limit]
-        if val_limit is not None:
-            valset = valset[:val_limit]
-        if test_limit is not None:
-            testset = testset[:test_limit]
         return trainset, valset, testset
 
     except Exception as exc:

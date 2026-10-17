@@ -1,7 +1,6 @@
 #!/bin/bash
 # One-off, manual check that the frozen vLLM serving environment serves
-# DeepSeek-V4.1-Flash exactly the way examples/hotpotqa/run_hotpotqa.sbatch
-# does, and that the served model handles the HotPotQA ReAct V2 tool protocol.
+# DeepSeek-V4.1-Flash and handles the shared FOREST ReAct V2 tool protocol.
 #
 # Run it yourself, once, with four H200s allocated on one node from the synced checkout
 # (REMOTE_DIR) after scripts/della/build_env.sh has built both venvs and staged the
@@ -11,8 +10,7 @@
 #   cd /scratch/gpfs/BSTEWART/$USER/gepa     # REMOTE_DIR
 #   scripts/della/verify_deepseek_serving.sh
 #
-# It is deliberately not wired into scripts/della/submit_hotpotqa.sh, is not a
-# dependency of any campaign job, and writes no campaign marker. Its outputs
+# Its outputs
 # are the PASS/FAIL report on stdout, a non-zero exit status on failure, and one
 # results directory ($SCRATCH_BASE/logs/hotpotqa/verify/<job id>) holding the vLLM
 # log, the installed serving packages, the GPU inventory, the tool-probe report,
@@ -50,7 +48,7 @@ VERIFY_PORT="${VERIFY_PORT:-}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-3600}"
 VERIFY_ATTEMPTS="${VERIFY_ATTEMPTS:-4}"
 VERIFY_TIMEOUT="${VERIFY_TIMEOUT:-3600}"
-# Same serving values as run_hotpotqa.sbatch.
+# Resolve serving limits from the shared configuration source.
 GEN_GMU="${FOREST_GPU_MEMORY_UTILIZATION}"
 GEN_MAX_LEN="${FOREST_CONTEXT_TOKENS}"
 VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-1}"
@@ -100,7 +98,7 @@ if ! command -v nvidia-smi >/dev/null 2>&1 || ! "${GEPA_UV_BIN:-uv}" run --no-pr
     exit 1
 fi
 
-# --- Same cache, offline, and logging environment as the sbatch -------------
+# Keep runtime caches on allocated scratch and prevent unexpected downloads.
 export XDG_CACHE_HOME="${SCRATCH_BASE}/.cache"
 export HF_HOME="${SCRATCH_BASE}/.cache/huggingface"
 export DSPY_CACHEDIR="${SCRATCH_BASE}/.cache/dspy"
@@ -131,7 +129,7 @@ if ! module load "${HOTPOTQA_CUDA_MODULE}" || ! module is-loaded "${HOTPOTQA_CUD
     echo "ERROR: exact CUDA module ${HOTPOTQA_CUDA_MODULE} is unavailable" >&2
     exit 1
 fi
-# Same header/library precedence as run_hotpotqa.sbatch: FlashInfer's first-load JIT
+# FlashInfer's first-load JIT requires the selected compiler headers first:
 # builds must find cuBLAS headers even on nodes whose local CUDA install lacks them.
 SERVING_CUDA_ROOT="$("${VLLM_PY}" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')/nvidia/cu13"
 if [[ -d "${SERVING_CUDA_ROOT}/include" ]]; then

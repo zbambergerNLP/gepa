@@ -1,8 +1,8 @@
 # FOREST configuration constants
 
 Repeated configuration values have named owners shared by FOREST's roles and
-benchmark entry points. CLI and environment overrides retain their existing
-precedence. This refactor does not change any default or scientific setting.
+benchmark entry points. The shared runner owns cross-benchmark defaults; adapters own their scoring
+and task-specific settings.
 
 | Configuration | Owner |
 | --- | --- |
@@ -11,8 +11,9 @@ precedence. This refactor does not change any default or scientific setting.
 | Jev provider policy, probability tolerances, pricing and handoff protocol | `src/gepa/strategies/jev_constants.py` |
 | Action sampling support and verbalized candidate count | `src/gepa/strategies/action_space.py` |
 | Model identities, revisions, decoding, context capacity and provider effort | `examples/common/experiment_models.py` |
-| HotPotQA role output/thinking budgets and request timeout | `examples/hotpotqa/model_settings.py` |
-| HotPotQA optimization budgets, ordered split sizes and retrieval defaults | `examples/hotpotqa/benchmark_settings.py` |
+| Shared role output/thinking budgets and request timeout | `examples/common/model_settings.py` |
+| Shared optimization budget, workers, seed and pilot size | `examples/common/benchmark_settings.py` |
+| HotPotQA ordered split sizes and retrieval defaults | `examples/hotpotqa/benchmark_settings.py` |
 | Terminal-Bench role output budget | `examples/terminalbench/model_settings.py` |
 | Shared Bash launcher defaults | `examples/common/launcher_constants.py` |
 
@@ -31,8 +32,7 @@ uv run python -m examples.common.launcher_constants > scripts/della/runtime_cons
 
 A test checks both generated-file parity and actual Bash values. Existing
 protocol tests keep explicit expected values to detect unintended behavior
-changes. Runtime identities include the constants module when an isolated
-qualification worker shares LM dispatch with a different strategy revision.
+changes. Shared run identities include the benchmark and common source files.
 
 These files belong to each immutable source revision. Changing a constant does
 not update an existing allocation, sealed export, checkpoint or qualification.

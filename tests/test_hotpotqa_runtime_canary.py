@@ -27,7 +27,7 @@ def test_canary_batches_independent_conversations_without_retry(monkeypatch):
             attempts.append(attempt)
         return 0
 
-    monkeypatch.setattr(runtime_canary, "resolve_hotpotqa_lm_kwargs", Mock(return_value={}))
+    monkeypatch.setattr(runtime_canary, "resolve_benchmark_lm_kwargs", Mock(return_value={}))
     monkeypatch.setattr(runtime_canary, "LM", Mock(side_effect=lambda *a, **kw: object()))
     monkeypatch.setattr(runtime_canary, "_ordinary_completion_probe", Mock())
     monkeypatch.setattr(runtime_canary, "_tool_continuation_probe", Mock())
@@ -210,7 +210,7 @@ def test_run_runtime_canary_requires_twenty_attempts_before_model_setup(monkeypa
     """
     resolve_kwargs = Mock()
     lm_factory = Mock()
-    monkeypatch.setattr(runtime_canary, "resolve_hotpotqa_lm_kwargs", resolve_kwargs)
+    monkeypatch.setattr(runtime_canary, "resolve_benchmark_lm_kwargs", resolve_kwargs)
     monkeypatch.setattr(runtime_canary, "LM", lm_factory)
 
     with pytest.raises(runtime_canary.RuntimeCanaryError, match="at least 20 repetitions"):
@@ -236,7 +236,7 @@ def test_run_runtime_canary_cycles_all_four_tools_for_twenty_attempts(monkeypatc
     ordinary_probe = Mock()
     continuation_probe = Mock()
     edit_probe = Mock(return_value=0)
-    monkeypatch.setattr(runtime_canary, "resolve_hotpotqa_lm_kwargs", resolve_kwargs)
+    monkeypatch.setattr(runtime_canary, "resolve_benchmark_lm_kwargs", resolve_kwargs)
     monkeypatch.setattr(runtime_canary, "LM", lm_factory)
     monkeypatch.setattr(runtime_canary, "_ordinary_completion_probe", ordinary_probe)
     monkeypatch.setattr(runtime_canary, "_tool_continuation_probe", continuation_probe)
@@ -282,7 +282,7 @@ def test_run_runtime_canary_propagates_probe_failure_and_stops(monkeypatch) -> N
     ordinary_probe = Mock()
     continuation_probe = Mock(side_effect=failure)
     edit_probe = Mock()
-    monkeypatch.setattr(runtime_canary, "resolve_hotpotqa_lm_kwargs", Mock(return_value={}))
+    monkeypatch.setattr(runtime_canary, "resolve_benchmark_lm_kwargs", Mock(return_value={}))
     monkeypatch.setattr(runtime_canary, "LM", Mock(return_value=lm))
     monkeypatch.setattr(runtime_canary, "_ordinary_completion_probe", ordinary_probe)
     monkeypatch.setattr(runtime_canary, "_tool_continuation_probe", continuation_probe)

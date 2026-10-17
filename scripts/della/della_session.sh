@@ -7,7 +7,7 @@
 # master connection per host; every later BatchMode ssh/rsync reuses it through
 # ControlMaster multiplexing, so the launcher never sees a prompt.
 #
-# Requires this block in ~/.ssh/config (see examples/hotpotqa/DELLA_CAMPAIGN.md):
+# Requires this block in ~/.ssh/config (see scripts/della/README.md):
 #   Host della.princeton.edu della-vis1.princeton.edu
 #       User <netid>
 #       IdentityFile ~/.ssh/id_ed25519

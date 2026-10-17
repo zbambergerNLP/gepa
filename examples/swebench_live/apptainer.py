@@ -65,6 +65,7 @@ def runtime_identity(memory_gib: int) -> dict:
         "version": subprocess.check_output([executable, "version"], text=True, timeout=30).strip(),
         "executable_sha256": sha256(Path(executable).resolve()),
         "isolation": ISOLATION,
+        "instance_execution": ["--userns", "--cleanenv", "--pwd", "/testbed"],
         "resources": allocation_limits(memory_gib),
         "writable_state": "fresh sandbox, private temporary directories and persistent instance per task",
     }
@@ -169,6 +170,7 @@ class ApptainerTask:
             [
                 "apptainer",
                 "exec",
+                "--userns",
                 "--cleanenv",
                 "--pwd",
                 "/testbed",

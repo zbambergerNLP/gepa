@@ -101,6 +101,7 @@ def test_task_preserves_files_without_host_mounts_or_secrets(monkeypatch, tmp_pa
         assert "--containall" in startup and "--no-home" in startup
         assert startup[startup.index("--network") + 1] == "none"
         assert "--bind" not in calls[-1][0]
+        assert "--userns" in calls[-1][0]
         assert not any(k in calls[-1][1] for k in ("OPENROUTER_API_KEY", "APPTAINER_BIND", "APPTAINERENV_SECRET"))
     assert not directory.exists()
     assert calls[-1][0] == ["apptainer", "instance", "stop", "--force", task.name]

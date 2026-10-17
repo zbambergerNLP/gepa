@@ -8,6 +8,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 
 ISOLATION = [
@@ -61,12 +62,12 @@ def runtime_identity(memory_gib: int) -> dict:
     if executable is None:
         raise RuntimeError("Apptainer is not installed")
     return {
-        "backend": "apptainer-sandbox-v1",
+        "backend": "apptainer-instance-v1",
         "version": subprocess.check_output([executable, "version"], text=True, timeout=30).strip(),
         "executable_sha256": sha256(Path(executable).resolve()),
         "isolation": ISOLATION,
         "resources": allocation_limits(memory_gib),
-        "writable_state": "fresh sandbox and private temporary directories per task",
+        "writable_state": "fresh sandbox, private temporary directories and persistent instance per task",
     }
 
 
@@ -76,6 +77,8 @@ class ApptainerTask:
     def __init__(self, image: dict, memory_gib: int):
         self.image, self.memory_gib = image, memory_gib
         self.temporary = None
+        self.name = "swebench-" + uuid.uuid4().hex
+        self.start_attempted = False
 
     def __enter__(self):
         """Verify the image and unpack a fresh root without running its tests."""
@@ -111,6 +114,22 @@ class ApptainerTask:
             )
             if result["exit_code"]:
                 raise RuntimeError(f"Cannot unpack task image: {result['stderr']}")
+            self.start_attempted = True
+            result = self._run(
+                [
+                    "apptainer",
+                    "instance",
+                    "start",
+                    *ISOLATION,
+                    "--workdir",
+                    str(self.work),
+                    str(self.sandbox),
+                    self.name,
+                ],
+                timeout=120,
+            )
+            if result["exit_code"]:
+                raise RuntimeError(f"Cannot start task instance: {result['stderr']}")
             result = self.execute("test -d /testbed/.git && test -w /testbed && test $(id -u) = 0")
             if result["exit_code"]:
                 raise RuntimeError(f"Cannot start isolated task root: {result['stderr']}")
@@ -151,10 +170,10 @@ class ApptainerTask:
             [
                 "apptainer",
                 "exec",
-                *ISOLATION,
-                "--workdir",
-                str(self.work),
-                str(self.sandbox),
+                "--cleanenv",
+                "--pwd",
+                "/testbed",
+                "instance://" + self.name,
                 "/bin/bash",
                 "-lc",
                 command,
@@ -173,5 +192,10 @@ class ApptainerTask:
     def __exit__(self, *_):
         """Remove only this task's unpacked filesystem and private temporary files."""
         if self.temporary is not None:
+            if self.start_attempted:
+                result = self._run(["apptainer", "instance", "stop", "--force", self.name], timeout=120)
+                if result["exit_code"]:
+                    raise RuntimeError(f"Cannot stop owned task instance {self.name}: {result['stderr']}")
+                self.start_attempted = False
             self.temporary.cleanup()
             self.temporary = None

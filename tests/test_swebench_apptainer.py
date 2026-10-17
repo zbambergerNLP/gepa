@@ -95,12 +95,14 @@ def test_task_preserves_files_without_host_mounts_or_secrets(monkeypatch, tmp_pa
         directory = task.directory
         task.execute("touch /testbed/state")
         task.execute("test -f /testbed/state")
-        assert calls[-1][0][-4] == calls[-2][0][-4] == str(task.sandbox)
-        assert "--containall" in calls[-1][0] and "--no-home" in calls[-1][0]
-        assert calls[-1][0][calls[-1][0].index("--network") + 1] == "none"
+        assert calls[-1][0][-4] == calls[-2][0][-4] == "instance://" + task.name
+        startup = calls[1][0]
+        assert "--containall" in startup and "--no-home" in startup
+        assert startup[startup.index("--network") + 1] == "none"
         assert "--bind" not in calls[-1][0]
         assert not any(k in calls[-1][1] for k in ("OPENROUTER_API_KEY", "APPTAINER_BIND", "APPTAINERENV_SECRET"))
     assert not directory.exists()
+    assert calls[-1][0] == ["apptainer", "instance", "stop", "--force", task.name]
 
 
 def test_registry_only_accepts_official_task_images():

@@ -6,6 +6,10 @@ choices: there is no assumed DeepSeek, Qwen, or OpenAI model for an API campaign
 Models may differ between roles or be identical. The existing Della entrypoints,
 defaults, jobs and artifacts remain independent.
 
+The driver can also run on an internet-connected Della visualization node; see
+the [Della API runbook](../../scripts/della/API_RUNBOOK.md) for isolated storage,
+pinned native runtimes and Terminal-Bench's private-network OpenRouter tunnel.
+
 The local process has no cloud sandbox lifetime. Completed task groups, provider
 responses, optimizer checkpoints and held-out repetitions are journaled on disk.
 An unresolved started task or Jev request blocks replay for review; this is not an

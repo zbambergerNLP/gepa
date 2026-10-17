@@ -1,5 +1,8 @@
 # Della benchmark preparation
 
+For hosted inference with the driver and task environments on Della, follow the
+[OpenRouter preparation runbook](API_RUNBOOK.md).
+
 Benchmark evaluation and optimization use the six entrypoints documented in the
 [shared suite guide](../../examples/BENCHMARKS.md). The scripts here prepare
 remote environments, pinned model checkpoints, and HotPotQA's frozen retrieval

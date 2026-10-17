@@ -1,6 +1,7 @@
 """Run isolated, writable task filesystems inside a bounded Slurm allocation."""
 
 import hashlib
+import json
 import os
 import platform
 import shlex
@@ -23,8 +24,6 @@ ISOLATION = [
     "--net",
     "--network",
     "none",
-    "--pwd",
-    "/testbed",
 ]
 
 
@@ -193,9 +192,13 @@ class ApptainerTask:
         """Remove only this task's unpacked filesystem and private temporary files."""
         if self.temporary is not None:
             if self.start_attempted:
-                result = self._run(["apptainer", "instance", "stop", "--force", self.name], timeout=120)
+                result = self._run(["apptainer", "instance", "list", "--json", self.name], timeout=30)
                 if result["exit_code"]:
-                    raise RuntimeError(f"Cannot stop owned task instance {self.name}: {result['stderr']}")
+                    raise RuntimeError(f"Cannot inspect owned task instance {self.name}: {result['stderr']}")
+                if json.loads(result["stdout"])["instances"]:
+                    result = self._run(["apptainer", "instance", "stop", "--force", self.name], timeout=120)
+                    if result["exit_code"]:
+                        raise RuntimeError(f"Cannot stop owned task instance {self.name}: {result['stderr']}")
                 self.start_attempted = False
             self.temporary.cleanup()
             self.temporary = None

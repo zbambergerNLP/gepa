@@ -86,7 +86,8 @@ def test_task_preserves_files_without_host_mounts_or_secrets(monkeypatch, tmp_pa
 
     def run(self, argv, timeout, stdin=None, merge_output=False):
         calls.append((argv, dict(self.env)))
-        return {"exit_code": 0, "stdout": "", "stderr": ""}
+        stdout = json.dumps({"instances": [{"instance": self.name}]}) if "list" in argv else ""
+        return {"exit_code": 0, "stdout": stdout, "stderr": ""}
 
     monkeypatch.setattr(apptainer.ApptainerTask, "_run", run)
     with apptainer.ApptainerTask(
@@ -103,6 +104,31 @@ def test_task_preserves_files_without_host_mounts_or_secrets(monkeypatch, tmp_pa
         assert not any(k in calls[-1][1] for k in ("OPENROUTER_API_KEY", "APPTAINER_BIND", "APPTAINERENV_SECRET"))
     assert not directory.exists()
     assert calls[-1][0] == ["apptainer", "instance", "stop", "--force", task.name]
+
+
+def test_failed_instance_start_preserves_error_and_removes_unused_sandbox(monkeypatch, tmp_path):
+    monkeypatch.setattr(apptainer, "allocation_limits", lambda _: {})
+    image = tmp_path / "task.sif"
+    image.write_bytes(b"pinned image")
+    calls = []
+
+    def run(self, argv, *args, **kwargs):
+        calls.append(argv)
+        return {
+            "exit_code": 1 if "start" in argv else 0,
+            "stdout": '{"instances": []}' if "list" in argv else "",
+            "stderr": "native start failure" if "start" in argv else "",
+        }
+
+    monkeypatch.setattr(apptainer.ApptainerTask, "_run", run)
+    task = apptainer.ApptainerTask(
+        {"backend": "apptainer", "image_id": str(image), "sif_sha256": apptainer.sha256(image)}, 16
+    )
+    with pytest.raises(RuntimeError, match="Cannot start task instance: native start failure"):
+        with task:
+            pytest.fail("Failed startup must not execute a task")
+    assert not task.directory.exists()
+    assert not any("stop" in argv for argv in calls)
 
 
 def test_registry_only_accepts_official_task_images():

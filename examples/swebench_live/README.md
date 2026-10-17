@@ -1,8 +1,9 @@
-# SWE-bench Live on the local machine
+# SWE-bench Live with Docker or Apptainer
 
 This is the seventh benchmark alongside HotPotQA, DecisionBench, AppWorld,
 OBLIQ, Tau and Terminal-Bench. It uses Microsoft's **SWE-bench Live** Python
-dataset and official Docker test grader. It does not use the older SWE-bench
+dataset and official test scripts and scorer. Docker is the default backend;
+Apptainer supports Della CPU allocations. It does not use the older SWE-bench
 Verified prototype or its patch-similarity metric.
 
 ## Prepare without running an experiment
@@ -61,6 +62,63 @@ per sequential task. This follows the upstream resource guidance; passing the
 resource check still does not establish native test compatibility. A 4 GiB
 Docker VM cannot pass this default check. Preparation never changes Docker
 settings or restarts it. Image downloads alone are not native execution tests.
+
+## Apptainer on Della
+
+Stage images on an internet-connected visualization host, using a fresh scratch
+directory. The Apptainer backend reads registry metadata directly, pins the
+Linux AMD64 OCI manifest and verifies the resulting SIF checksum. It never
+requires a Docker daemon. For example, prepare one training image without
+starting a container or making a model request:
+
+```bash
+UV_PROJECT_ENVIRONMENT=.venv-local-api uv run --no-sync python -m examples.swebench_live.prepare \
+  --root /absolute/scratch/path/to/swebench-live \
+  --backend apptainer --images --image-split train \
+  --instance-id patroni__patroni-2998
+```
+
+Omit `--instance-id` to stage the entire selected image split. Partial staging
+does not change dataset selection: the run preflight requires every image
+selected by its training, validation and test limits. The default run needs
+1,450 images; preparing one image proves no readiness for that full collection.
+Keep the Apptainer manifest and SIFs together in `apptainer-images/`. A changed
+SIF or an existing unverified SIF fails closed and requires inspection.
+
+Execution requires an allocated Linux AMD64 node with exactly one node, four
+CPUs, `--mem=16G`, no GPUs, and sequential tasks (`--max-workers 1`). An explicit
+`--task-memory-gib` must match the allocation and becomes part of the experiment
+contract. Slurm enforces the allocation's CPU and memory budget. Set `TMPDIR`
+to a private job directory with enough space to unpack a task image. Downloads
+and image conversion belong on the visualization host, not inside task runs.
+
+Each task gets a fresh writable sandbox and a persistent Apptainer instance.
+File edits and background services survive individual shell commands. The
+instance has private PID, IPC and network namespaces, local loopback, no external
+network, and no host home, scratch, current-directory or configured bind mounts.
+An environment allowlist excludes API keys and user-supplied Apptainer bindings.
+The instance is stopped before its filesystem is removed. The evaluator starts
+a separate fresh instance and uses the pinned official patch application,
+evaluation script and resolution scorer. Complete test logs and infrastructure
+failures are preserved.
+
+Inside the CPU allocation, load `proxy/default` for the parent driver's
+OpenRouter requests. Task containers remain offline. After paid work is
+separately authorized, add these arguments to the API command below:
+
+```text
+--container-backend apptainer --swebench-live-root /absolute/scratch/path/to/swebench-live
+```
+
+The backend, Apptainer binary/version, isolation settings, allocation limits,
+OCI digests and SIF checksums enter the run contract. Docker and Apptainer runs
+cannot silently share checkpoints or starting-prompt baselines. Before a paid
+campaign, verify native task execution and official negative/reference grading
+on training records; a download or an offline unit test is insufficient.
+
+See the [Della API runbook](../../scripts/della/API_RUNBOOK.md) and upstream
+[Apptainer instances](https://apptainer.org/docs/user/latest/running_services.html)
+and [fakeroot](https://apptainer.org/docs/user/latest/fakeroot.html) documentation.
 
 ## Execution contract
 

@@ -56,7 +56,7 @@ task workspaces, receipts and outputs under the new preparation directory.
 | OBLIQ | All five frozen corpora and a complete matching Qwen embedding index. Use `--data-dir` and `--index-dir`; device, attention, dtype and batch size must match its identity. A queued builder is not a ready index. Do not duplicate an existing owned builder. |
 | Tau | Pinned upstream source, data and isolated runtime; pass the native offline runtime tests with the actual `TAU2_SOURCE`. Use `--tau-source`. |
 | Terminal-Bench | Pinned Harbor 0.22.0, verified offline bundle, task images, compatible fakeroot helper and passing native checks for all 88 Della tasks. Use the flags below. Mailman remains excluded. |
-| SWE-bench Live | Pinned data and official isolated grader can be staged on Della. The current adapter and official grader require Docker; Apptainer availability alone does not make this benchmark executable. A reviewed native backend and its grader checks are still required. |
+| SWE-bench Live | Pinned data and isolated official grader, verified AMD64 OCI/SIF images, and native training-task negative/reference grading through the Apptainer backend. Use `--container-backend apptainer --swebench-live-root <assets>`, exactly four CPUs and 16 GiB in a single-node CPU allocation, and `--max-workers 1`. The parent uses `proxy/default`; task instances stay offline. See the [preparation and isolation guide](../../examples/swebench_live/README.md#apptainer-on-della). |
 
 Keep disk headroom when staging images. SWE Live alone references 1,895 distinct
 images; do not infer that shared scratch can hold them from a successful small

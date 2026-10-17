@@ -5,6 +5,8 @@ from pathlib import Path
 from examples.common.benchmark_types import BenchmarkDefinition
 from examples.common.react_v2 import resolve_template_family, structured_prompt
 from examples.swebench_live.adapter import SWEBenchLiveAdapter
+from examples.swebench_live.apptainer import runtime_identity as apptainer_runtime
+from examples.swebench_live.apptainer_images import verify_images as verify_apptainer_images
 from examples.swebench_live.data import load_data
 from examples.swebench_live.images import verify_images
 from examples.swebench_live.runtime import verify_runtime
@@ -14,6 +16,7 @@ from examples.swebench_live.settings import COMPONENT, ROOT, SEED_PROMPT
 def add_arguments(parser):
     """Expose local asset paths and record explicit native execution limits."""
     parser.add_argument("--swebench-live-root", type=Path, default=ROOT)
+    parser.add_argument("--container-backend", choices=("docker", "apptainer"), default="docker")
     parser.add_argument("--agent-max-steps", type=int, default=100)
     parser.add_argument("--task-memory-gib", type=int, default=16)
     parser.add_argument("--test-timeout", type=int, default=1800)
@@ -32,7 +35,12 @@ def build_benchmark(args, models):
     splits, source = load_data(root)
     runtime = verify_runtime(root)
     selected = [record for name, rows in splits.items() for record in rows[: getattr(args, f"{name}_limit")]]
-    images = verify_images(root, selected, args.task_memory_gib)
+    container_runtime = {"backend": "docker"}
+    if args.container_backend == "apptainer":
+        container_runtime = apptainer_runtime(args.task_memory_gib)
+        images = verify_apptainer_images(root, selected)
+    else:
+        images = verify_images(root, selected, args.task_memory_gib)
     family = resolve_template_family(args.template_family, models.solver_model)
     return BenchmarkDefinition(
         name="swebench_live",
@@ -52,6 +60,7 @@ def build_benchmark(args, models):
         testset=splits["test"],
         source=source,
         runtime={
+            "container": container_runtime,
             "official_grader": runtime,
             "images": images,
             "agent": "native-shell-v1",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import time
 import uuid
@@ -14,6 +15,7 @@ from litellm.exceptions import ContextWindowExceededError
 
 from examples.common.artifacts import atomic_json, digest
 from examples.common.react_v2 import file_sha256
+from examples.swebench_live.apptainer import ApptainerTask
 from examples.swebench_live.settings import COMPONENT
 from gepa.core.adapter import EvaluationBatch
 
@@ -102,6 +104,18 @@ def grade(root: Path, trial: Path, record: dict, image: dict, memory_gib: int, t
         "memory_gib": memory_gib,
         "timeout_seconds": timeout,
     }
+    apptainer = image.get("backend") == "apptainer"
+    worker = [str(Path(__file__).with_name("grader_worker.py"))]
+    env = None
+    if apptainer:
+        request["image"] = image
+        worker = ["-m", "examples.swebench_live.apptainer_grader"]
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key in {"PATH", "HOME", "TMPDIR", "LANG"} or key.startswith("SLURM_")
+        }
+        env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2])
     atomic_json(trial / "grader-request.json", request)
     with (trial / "grader.log").open("w") as log:
         subprocess.run(
@@ -113,10 +127,11 @@ def grade(root: Path, trial: Path, record: dict, image: dict, memory_gib: int, t
                 "--python",
                 str(root / "venv" / "bin" / "python"),
                 "python",
-                str(Path(__file__).with_name("grader_worker.py")),
+                *worker,
                 str(trial / "grader-request.json"),
             ],
             cwd=trial,
+            env=env,
             check=True,
             stdout=log,
             stderr=log,
@@ -167,7 +182,13 @@ class SWEBenchLiveAdapter:
         output = {"id": record["id"], "prompt_sha256": digest(candidate), "error": None, "trial_dir": str(trial)}
         atomic_json(trial / "intent.json", {**output, "state": "started", "image": self.images[record["id"]]})
         try:
-            with self.task_factory(self.images[record["id"]]["image_id"], self.memory_gib) as task:
+            image = self.images[record["id"]]
+            container = (
+                ApptainerTask(image, self.memory_gib)
+                if image.get("backend") == "apptainer"
+                else self.task_factory(image["image_id"], self.memory_gib)
+            )
+            with container as task:
                 for _ in range(self.max_steps):
                     atomic_json(trial / "trajectory.json", messages)
                     request = {

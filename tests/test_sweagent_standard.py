@@ -13,7 +13,7 @@ import yaml
 
 from examples.common.benchmark_types import BenchmarkModels
 from examples.swebench_live import swe_agent
-from examples.swebench_live.main import add_arguments
+from examples.swebench_live.main import add_arguments, build_benchmark
 
 
 @pytest.fixture
@@ -33,6 +33,13 @@ def test_default_selection_and_no_custom_turn_cap():
     assert (args.train_limit, args.val_limit, args.test_limit) == (60, 120, 120)
     assert args.container_backend == "apptainer"
     assert not hasattr(args, "agent_max_steps")
+
+
+@pytest.mark.parametrize("condition", ["forest", "both", "all", "random", "action", "react_v2_random"])
+def test_structured_optimization_stops_before_runtime_or_model_work(condition):
+    args = argparse.Namespace(api_profile="explicit.json", mode="optimize", condition=condition)
+    with pytest.raises(ValueError, match="will not be reformatted automatically"):
+        build_benchmark(args, None)
 
 
 def test_pinned_default_agent_configuration_is_preserved(agent_root):

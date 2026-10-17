@@ -57,11 +57,10 @@ never replaces a recorded manifest with a newer tag. `--image-split train`,
 task images; the complete collection can far exceed a laptop's free storage.
 Partial staging is reported explicitly and does not imply native readiness.
 
-The default local execution contract requires four Docker CPUs and 16 GiB RAM
-per sequential task. This follows the upstream resource guidance; passing the
-resource check still does not establish native test compatibility. A 4 GiB
-Docker VM cannot pass this default check. Preparation never changes Docker
-settings or restarts it. Image downloads alone are not native execution tests.
+The retained Docker preparation and grading helpers require four CPUs and
+16 GiB RAM per sequential task. A 4 GiB Docker VM cannot pass that check.
+Preparation never changes Docker settings or restarts it. Image downloads
+alone are not native execution tests.
 
 ## Apptainer on Della
 
@@ -174,11 +173,15 @@ errors are preserved as unresolved infrastructure failures, not scored as failed
 tests. Raw upstream statistics remain in `.traj`; provider journals are the
 accounting authority, including unknown costs rather than fabricated zeros.
 
-The standard starting system template is used verbatim. GEPA/FOREST may later
+The standard starting system template is used verbatim. Vanilla GEPA can
 optimize that one template; the instance prompt, tools, parser and history policy
-stay fixed. This optimization, the 60/120/120 split, chosen model/provider, and
-Apptainer are declared research-protocol differences from a leaderboard run.
-Validation selects the winner; held-out results never guide optimization.
+stay fixed. FOREST and the other structured-prompt conditions are blocked before
+runtime work: their editor currently requires section headers absent from the
+upstream prompt. Supporting those conditions needs a separately reviewed
+integration; this adapter never reformats the standard starting prompt silently.
+Prompt optimization, the 60/120/120 split, chosen model/provider, and Apptainer
+are declared research-protocol differences from a leaderboard run. Validation
+selects the winner; held-out results never guide optimization.
 
 After the solver closes, its upstream submission patch is frozen and scored in
 a separate fresh container using the official grader. One test evaluation is
@@ -191,7 +194,7 @@ After separate paid-call authorization, the command is:
 ```bash
 uv run --no-project --python /absolute/new/venv/bin/python python -m examples.swebench_live.main \
   --api-profile outputs/api-profile.json --env-file /absolute/path/to/.env \
-  --allow-api-calls --condition both --run-dir outputs/swebench-live-new-campaign \
+  --allow-api-calls --condition vanilla --run-dir outputs/swebench-live-new-campaign \
   --swebench-live-root /absolute/scratch/assets --swe-agent-root /absolute/new/swe-agent \
   --container-backend apptainer --max-workers 1
 ```

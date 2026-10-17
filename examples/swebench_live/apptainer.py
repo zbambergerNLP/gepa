@@ -106,7 +106,7 @@ class ApptainerTask:
                     "--sandbox",
                     "--fix-perms",
                     "--disable-cache",
-                    "--no-test",
+                    "--notest",
                     str(self.sandbox),
                     self.image["image_id"],
                 ],

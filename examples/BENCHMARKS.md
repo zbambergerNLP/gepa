@@ -5,6 +5,12 @@ roles, optimization, validation selection, held-out evaluation, baseline reuse,
 resume checks, and timing. Each adapter owns its official data, task execution,
 scoring, and benchmark-specific constants.
 
+All agent and chatbot optimizations edit **system instructions only**. The shared
+runner rejects user-prompt, skill, or other editable component kinds. Each adapter
+also validates its exact candidate keys. Task inputs, demonstrations, tool
+definitions, auxiliary prompts, skills, parsers, and workflows stay fixed.
+HotPotQA exposes the system instructions of its four fixed DSPy predictors.
+
 For execution on this computer with a hosted model API, see the
 [local OpenRouter setup](local_api/README.md). It supports explicit solver and
 proposer choices for all seven entrypoints, including OpenAI models, with one key
@@ -13,12 +19,12 @@ for model calls, Tau's simulator/judge and the optional Jev controller.
 | Benchmark | Entry module | Default task harness | Editable components |
 |---|---|---|---|
 | [HotPotQA](hotpotqa/) | `examples.hotpotqa.main` | Existing two-stage DSPy program and frozen Wiki-2017 BM25 retrieval | Existing program instruction modules |
-| [Terminal-Bench 2.1](terminalbench/) | `examples.terminalbench.main` | Official Harbor/Terminus; 89 pinned tasks, 88 on Singularity/Della (Mailman excluded) | Unified initial instruction prompt |
+| [Terminal-Bench 2.1](terminalbench/) | `examples.terminalbench.main` | Harbor 0.22.0 PromptedTerminus port; 89 pinned tasks, 88 on Singularity/Della (Mailman excluded) | Agent system prompt |
 | [OBLIQ-Bench](obliqbench/README.md) | `examples.obliqbench.main` | One query rewrite, fixed Qwen embedding retriever, top 1,000 | Query-rewriting system prompt |
 | [DecisionBench](decisionbench/README.md) | `examples.decisionbench.main` | Official structured decision/probability-vector protocol | System prompt |
 | [AppWorld](appworld/README.md) | `examples.appworld.main` | Published ReAct code-agent pattern and official state evaluator | System prompt |
 | [Tau banking knowledge](taubench/README.md) | `examples.taubench.main` | Official text agent, user simulator, BM25 tools and reward evaluator | Agent system prompt |
-| [SWE-bench Live](swebench_live/README.md) | `examples.swebench_live.main` | Native shell agent and official Python Docker test grader; frozen Live data and disjoint derived optimization splits | System prompt |
+| [SWE-bench Live](swebench_live/README.md) | `examples.swebench_live.main` | Live-recommended SWE-agent fork, pinned default configuration, Apptainer execution and official grader | Upstream agent system template |
 
 For the original Della entrypoints, the default **solver** is `hosted_vllm/Qwen/Qwen3.8-27B`; the default **proposer**
 is `hosted_vllm/deepseek-ai/DeepSeek-V4.1-Flash`. Exact checkpoint revisions,

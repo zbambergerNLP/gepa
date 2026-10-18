@@ -15,10 +15,12 @@ tasks. The deterministic optimization split is recorded in
 `examples/terminalbench/terminalbench-v2.1-manifest.json` along with immutable
 task references and content hashes.
 
-The suite edits one unified initial instruction prompt. The `system_prompt`
-scope preserves Terminus's actual initial user-message role. Prompt documents,
-context-summary instructions, and skill files are materialized by the adapter;
-auxiliary instructions and skills stay fixed in this benchmark configuration.
+The suite edits only `system_prompt`, sent as an actual system-role message and
+preserved across context recovery. The adapter materializes fixed user-role task
+inputs, tool guidance, context-summary instructions, and skill files. Extra
+candidate keys and the former `all_text` scope fail before Harbor runs. This
+maintained port's protocol differs from upstream Terminus's combined initial
+user message; runtime v2 and bundle v3 prevent reuse of old results or baselines.
 
 Task execution uses the official verifier reward, ATIF messages, and verifier
 diagnostics. The adapter validates task identities and complete result evidence.

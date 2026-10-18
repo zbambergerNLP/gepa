@@ -1,4 +1,4 @@
-"""Apply candidate documents inside Harbor 0.22.0's Terminus agent.
+"""Apply system-prompt-only candidates inside Harbor 0.22.0's Terminus agent.
 
 The summarization and recovery methods are adapted from harbor-framework/harbor
 v0.22.0, src/harbor/agents/terminus_2/terminus_2.py (Apache-2.0). They retain
@@ -43,7 +43,7 @@ SUMMARY_TARGET_FREE_TOKENS = 4000
 
 
 class PromptedTerminus(Terminus2):
-    """Run the fixed terminal agent with one candidate's reusable documents."""
+    """Run the fixed terminal agent with one editable system prompt."""
 
     def __init__(
         self,
@@ -72,7 +72,7 @@ class PromptedTerminus(Terminus2):
         digest = hashlib.sha256(
             json.dumps(self._bundle["documents"], sort_keys=True, ensure_ascii=False).encode()
         ).hexdigest()
-        if self._bundle["version"] != 2 or digest != self._bundle["digest"]:
+        if self._bundle["version"] != 3 or digest != self._bundle["digest"]:
             raise ValueError("Invalid Terminal Bench document bundle")
         self._candidate_prompt_template_path = Path(prompt_template_path).resolve()
         if self._candidate_prompt_template_path.parent != self._bundle_path.parent:
@@ -110,28 +110,54 @@ class PromptedTerminus(Terminus2):
         })
         (logs_dir / "document-bundle.json").write_text(self._bundle_path.read_text(encoding="utf-8"), encoding="utf-8")
 
+    def _ensure_system_prompt(self, chat: Chat) -> None:
+        """Keep the candidate in a distinct system message throughout the conversation."""
+        message = {"role": "system", "content": self._bundle["documents"]["instruction_prompt"]}
+        if chat.messages and chat.messages[0].get("role") == "system":
+            if chat.messages[0] != message:
+                raise ValueError("Terminal-Bench system prompt changed during evaluation")
+        else:
+            chat.messages.insert(0, message)
+            chat.reset_response_chain()
+
+    async def _run_agent_loop(self, initial_prompt: str, chat: Chat, original_instruction: str = "") -> None:
+        """Record the actual system role before entering Harbor's fixed action loop."""
+        self._ensure_system_prompt(chat)
+        self._trajectory_steps.insert(0, Step(step_id=1, source="system", message=chat.messages[0]["content"]))
+        for index, step in enumerate(self._trajectory_steps, start=1):
+            step.step_id = index
+        await super()._run_agent_loop(initial_prompt, chat, original_instruction)
+
+    def _unwind_messages_to_free_tokens(self, chat: Chat, target_free_tokens: int = 4000) -> None:
+        """Retain both the system instructions and initial task when trimming history."""
+        self._ensure_system_prompt(chat)
+        context_limit = self._llm.get_model_context_limit()
+        while len(chat.messages) > 2 and context_limit - self._count_total_tokens(chat) < target_free_tokens:
+            chat._messages = chat.messages[:max(2, len(chat.messages) - 2)]
+        chat.reset_response_chain()
+
     def _document(self, component: str, **fields: str) -> str:
-        """Render candidate guidance with the fixed runtime inputs.
+        """Render fixed auxiliary guidance with the runtime inputs.
 
         Args:
             component: Prompt component in the bundle.
             **fields: Observations and task inputs supplied by the agent.
 
         Returns:
-            Model input containing literal candidate text and runtime fields.
+            Model input containing fixed guidance and runtime fields.
         """
         return self._bundle["prompts"][component].format(**fields)
 
     def _get_prompt_template_path(self) -> Path:
-        """Return this candidate's main instruction template."""
+        """Return the fixed user-role task and tool template."""
         return self._candidate_prompt_template_path
 
     def _get_timeout_template_path(self) -> Path:
-        """Return this candidate's command-timeout guidance."""
+        """Return the fixed command-timeout guidance."""
         return self._bundle_path.parent / "timeout.txt"
 
     async def setup(self, environment: BaseEnvironment) -> None:
-        """Install candidate skills before starting the standard terminal.
+        """Install fixed skills before starting the standard terminal.
 
         Args:
             environment: Isolated task environment owned by Harbor.
@@ -140,7 +166,7 @@ class PromptedTerminus(Terminus2):
         await super().setup(environment)
 
     def _get_completion_confirmation_message(self, terminal_output: str) -> str:
-        """Render editable completion guidance around the fixed confirmation gate.
+        """Render fixed completion guidance around the confirmation gate.
 
         Args:
             terminal_output: Actual current terminal state.
@@ -153,7 +179,7 @@ class PromptedTerminus(Terminus2):
     async def _handle_llm_interaction(
         self, chat: Chat, prompt: str, original_instruction: str = "", session: TmuxSession | None = None
     ) -> tuple:
-        """Attach editable repair instructions to real parser feedback.
+        """Attach fixed repair instructions to real parser feedback.
 
         Args:
             chat: Current main-agent conversation.
@@ -174,7 +200,7 @@ class PromptedTerminus(Terminus2):
     async def _summarize(
         self, chat: Chat, original_instruction: str, session: TmuxSession
     ) -> tuple[str, list[SubagentTrajectoryRef] | None]:
-        """Render candidate context-management prompts through the pinned Harbor flow.
+        """Render fixed context-management prompts through the pinned Harbor flow.
 
         Args:
             chat: Current main-agent conversation.
@@ -184,12 +210,13 @@ class PromptedTerminus(Terminus2):
         Returns:
             Handoff prompt and summarization trajectory references.
         """
-        if len(chat.messages) == 0:
+        self._ensure_system_prompt(chat)
+        if len(chat.messages) == 1:
             return (original_instruction, None)
         self._summarization_count += 1
         subagent_trajectory_refs = []
         summary_session_id = f"{self._session_id}-summarization-{self._summarization_count}-summary"
-        steps_to_include = 1 + (len(chat.messages) - 1) // 2
+        steps_to_include = 2 + (len(chat.messages) - 2) // 2
         summary_steps, step_id_counter = self._prepare_copied_trajectory_steps(steps_to_include)
         summary_prompt = self._document("summary", original_instruction=original_instruction)
         summary_response, summary_trajectory_ref = await self._run_subagent(
@@ -266,7 +293,7 @@ class PromptedTerminus(Terminus2):
         )
         subagent_trajectory_refs.append(answers_trajectory_ref)
         chat._messages = [
-            chat.messages[0],
+            *chat.messages[:2],
             {"role": "user", "content": question_prompt},
             {"role": "assistant", "content": model_questions},
         ]
@@ -291,7 +318,7 @@ class PromptedTerminus(Terminus2):
     async def _query_llm(
         self, chat: Chat, prompt: str, original_instruction: str = "", session: TmuxSession | None = None
     ) -> LLMResponse:
-        """Query the model using candidate retry and fallback instructions.
+        """Query the model with system instructions and fixed recovery behavior.
 
         Args:
             chat: Current main-agent conversation.
@@ -305,6 +332,7 @@ class PromptedTerminus(Terminus2):
         Raises:
             ContextLengthExceededError: Summarization is disabled.
         """
+        self._ensure_system_prompt(chat)
         try:
             start_time = time.time()
             llm_response = await chat.chat(prompt, **self._llm_call_kwargs)

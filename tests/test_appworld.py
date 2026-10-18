@@ -265,6 +265,9 @@ def test_prompt_rendering_preserves_task_text_and_first_code_block_only():
     assert messages[0]["content"] == candidate[COMPONENT]
     assert "Always look at API specifications" in messages[0]["content"]
     assert any("Task: How many playlists" in message["content"] for message in messages[1:])
+    revised = initial_messages({COMPONENT: "Different system instructions"}, context)
+    assert revised[0] == {"role": "system", "content": "Different system instructions"}
+    assert revised[1:] == messages[1:]
     code, retained = extract_code("```python\nprint(1)\n```\n```python\nprint(2)\n```")
     assert code == "print(1)"
     assert "print(2)" not in retained

@@ -58,7 +58,8 @@ def test_all_documents_are_materialized_without_evaluating_candidate_braces(tmp_
     initial = (tmp_path / "terminus-prompt.txt").read_text().format(**fields)
     assert "OBSERVED_instruction" in initial
     assert "OBSERVED_terminal_state" in initial
-    for name in ("instruction_prompt", "terminal_tool", "skill_discovery", "command_format"):
+    assert candidate["instruction_prompt"] not in initial
+    for name in ("terminal_tool", "skill_discovery", "command_format"):
         assert candidate[name] in initial
     for name in CONTEXT_FIELDS:
         assert candidate[name] in bundle["prompts"][name].format(**fields)

@@ -256,6 +256,7 @@ def test_actual_agent_user_bm25_and_end_state_grader(source, tmp_path, offline_p
     assert len(solver_requests) == 2 and len(user_requests) == 2
     assert any(m["role"] == "tool" and "doc_credit_cards" in m["content"] for m in solver_requests[1]["messages"])
     for request in solver_requests:
+        assert request["messages"][0]["role"] == "system"
         assert request["messages"][0]["content"] == prompt
         assert "Sarah Bosch" not in json.dumps(request["messages"])
         assert "evaluation_criteria" not in json.dumps(request["messages"])

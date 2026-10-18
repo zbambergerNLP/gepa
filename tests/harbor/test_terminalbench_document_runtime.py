@@ -122,7 +122,10 @@ def test_summary_questions_answers_and_handoff_reach_the_model(
     assert calls[1][1]["message_history"] == []
     assert calls[2][1]["message_history"][-2]["content"] == calls[0][0]
     assert candidate["handoff"] in handoff and "ANSWERS" in handoff
-    assert chat.messages[1]["content"] == calls[1][0]
+    assert chat.messages[0] == {"role": "system", "content": candidate["instruction_prompt"]}
+    assert chat.messages[1] == {"role": "user", "content": "TASK_INPUT"}
+    assert chat.messages[2]["content"] == calls[1][0]
+    assert calls[0][1]["message_history"][0] == chat.messages[0]
     assert len(refs) == 3
     traces = "\n".join(path.read_text() for path in (root / "logs").glob("trajectory*.json"))
     assert "SENTINEL_summary" in traces and "SENTINEL_summary_answers" in traces
@@ -158,6 +161,9 @@ def test_context_fallback_prompts_reach_the_model(
     recovered_prompt = model.call.call_args_list[2].kwargs["prompt"]
     assert candidate["context_recovery"] in recovered_prompt
     assert "TASK_INPUT" in recovered_prompt and "REAL_STATE" in recovered_prompt
+    assert model.call.call_args_list[2].kwargs["message_history"][0] == {
+        "role": "system", "content": candidate["instruction_prompt"]
+    }
 
 
 def test_output_limit_uses_candidate_guidance_and_preserves_failed_response(runtime: tuple) -> None:
@@ -175,8 +181,9 @@ def test_output_limit_uses_candidate_guidance_and_preserves_failed_response(runt
     asyncio.run(agent._query_llm(chat, "TASK_INPUT"))
     retry_prompt = model.call.call_args_list[1].kwargs["prompt"]
     assert candidate["output_limit"] in retry_prompt and "4096 tokens" in retry_prompt
-    assert chat.messages[0]["content"] == "TASK_INPUT"
-    assert chat.messages[1]["content"] == "TRUNCATED"
+    assert chat.messages[0] == {"role": "system", "content": candidate["instruction_prompt"]}
+    assert chat.messages[1]["content"] == "TASK_INPUT"
+    assert chat.messages[2]["content"] == "TRUNCATED"
 
 
 def test_timeout_keeps_real_command_and_observation(runtime: tuple) -> None:
@@ -193,6 +200,42 @@ def test_timeout_keeps_real_command_and_observation(runtime: tuple) -> None:
     assert timed_out
     assert candidate["timeout"] in message
     assert "sleep 10" in message and "REAL_STATE" in message
+
+
+def test_context_trimming_preserves_system_and_task(runtime: tuple, monkeypatch) -> None:
+    """Keep both protected messages even when the available context is exhausted."""
+    agent, candidate, model, _ = runtime
+    chat = Chat(model)
+    chat._messages = [
+        {"role": "user", "content": "TASK_INPUT"},
+        {"role": "assistant", "content": "FIRST_RESPONSE"},
+        {"role": "user", "content": "TOOL_OUTPUT"},
+        {"role": "assistant", "content": "SECOND_RESPONSE"},
+    ]
+    monkeypatch.setattr(agent, "_count_total_tokens", lambda _: 32768)
+    agent._unwind_messages_to_free_tokens(chat)
+    assert chat.messages == [
+        {"role": "system", "content": candidate["instruction_prompt"]},
+        {"role": "user", "content": "TASK_INPUT"},
+    ]
+
+
+def test_candidate_changes_only_the_system_message_at_model_boundary(runtime: tuple) -> None:
+    """Capture real Harbor Chat calls with identical task inputs and different candidates."""
+    agent, _, model, _ = runtime
+    captured = []
+
+    async def respond(**kwargs):
+        captured.append(copy.deepcopy(kwargs))
+        return LLMResponse("RESPONSE")
+
+    model.call.side_effect = respond
+    for text in ("First system {literal}", "Second system {literal}"):
+        agent._bundle["documents"]["instruction_prompt"] = text
+        asyncio.run(agent._query_llm(Chat(model), "FIXED_TASK_AND_TOOLS"))
+    assert captured[0].pop("message_history") == [{"role": "system", "content": "First system {literal}"}]
+    assert captured[1].pop("message_history") == [{"role": "system", "content": "Second system {literal}"}]
+    assert captured[0] == captured[1]
 
 
 def test_real_harbor_copied_context_keeps_the_original_message(runtime: tuple) -> None:
@@ -382,6 +425,11 @@ def test_real_agent_loop_discovers_then_reads_skills_and_repairs_json(
     asyncio.run(agent.run("TASK_INPUT", environment, AgentContext()))
     prompts = [call.kwargs["prompt"] for call in model.call.call_args_list]
     assert render_initial_instructions(candidate) in prompts[0]
+    assert candidate["instruction_prompt"] not in prompts[0]
+    for call in model.call.call_args_list:
+        assert call.kwargs["message_history"][0] == {
+            "role": "system", "content": candidate["instruction_prompt"]
+        }
     assert "terminal-debugging" in prompts[0] and "terminal-verification" in prompts[0]
     assert "SENTINEL_skill_debugging" not in prompts[0]
     assert "SENTINEL_parse_error" in prompts[1]
@@ -389,3 +437,4 @@ def test_real_agent_loop_discovers_then_reads_skills_and_repairs_json(
     assert "SENTINEL_completion" in prompts[3]
     trace = (root / "logs" / "trajectory.json").read_text()
     assert "SENTINEL_skill_debugging" in trace
+    assert json.loads(trace)["steps"][0]["source"] == "system"

@@ -33,8 +33,8 @@ def _reflect(trajectories: list[dict]) -> list[dict]:
             }
         ],
     )
-    rows = adapter.make_reflective_dataset(candidate, evaluated, ["instruction_prompt"])
-    return rows["instruction_prompt"][0]["Generated Outputs"]["atif_trajectories"]
+    rows = adapter.make_reflective_dataset(candidate, evaluated, ["system_prompt"])
+    return rows["system_prompt"][0]["Generated Outputs"]["atif_trajectories"]
 
 
 def _trajectory(steps: list[dict]) -> dict:

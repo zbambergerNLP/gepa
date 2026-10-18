@@ -36,6 +36,14 @@ uv run pyright src/
 
 ## Benchmark comparisons
 
+For agent and chatbot benchmarks, optimize only system instructions. Keep task
+and user messages, demonstrations, tools and their definitions, skills, auxiliary
+prompts, parsers, and execution workflows fixed. Validate exact candidate keys
+before model work and test the actual message roles at the model boundary.
+Multi-stage programs may expose each fixed predictor's system instructions;
+their graph, signatures, and retrieval settings remain fixed. Record protocol
+changes in runtime/resume contracts; never retrofit queued or frozen campaigns.
+
 Within a benchmark, all ablations and model arms must use the same pinned data
 and exact ordered train/validation/test examples. Preserve source revisions,
 content hashes or immutable task refs, and split membership, not just counts.

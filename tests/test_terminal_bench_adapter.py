@@ -99,6 +99,11 @@ def _candidate(**documents: str) -> dict[str, str]:
     return {**seed_documents("generic"), **documents}
 
 
+def _editable(**documents: str) -> dict[str, str]:
+    """Expose only the system instructions to the adapter under test."""
+    return {"system_prompt": _candidate(**documents)["instruction_prompt"]}
+
+
 def test_terminus_adapter_alias_preserves_public_api() -> None:
     """Keep the documented pre-existing adapter name importable."""
     assert TerminusAdapter is TerminalBenchAdapter
@@ -294,7 +299,7 @@ def test_rendered_prompt_preserves_candidate_braces_and_runtime_fields() -> None
     rendered = render_terminus_prompt(_candidate(instruction_prompt="Use {literal} syntax."))
     formatted = rendered.format(instruction="TASK", terminal_state="STATE")
 
-    assert "Use {literal} syntax." in formatted
+    assert "Use {literal} syntax." not in formatted
     assert "Task Description:\nTASK" in formatted
     assert "Current terminal state:\nSTATE" in formatted
 
@@ -395,7 +400,7 @@ def test_tb21_evaluation_keeps_literal_prompt_and_reports_its_own_evidence(
     manifest = load_terminalbench_manifest(MANIFEST_PATH)
     runner = HarborCLI(work_dir=tmp_path, **{**_RUNNER_OPTIONS, "manifest": manifest})
     monkeypatch.setattr(runner, "check_requirements", Mock(return_value=("/mock/harbor", "/mock/docker")))
-    candidate = _candidate(instruction_prompt="Inspect {literal} and {instruction}; שלום.")
+    candidate = _editable(instruction_prompt="Inspect {literal} and {instruction}; שלום.")
 
     def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         """Write verifier evidence while checking the actual rendered model input."""
@@ -406,16 +411,16 @@ def test_tb21_evaluation_keeps_literal_prompt_and_reports_its_own_evidence(
             .read_text()
             .format(instruction="REAL_TASK", terminal_state="REAL_STATE")
         )
-        assert candidate["instruction_prompt"] in prompt
-        assert render_initial_instructions(candidate) in prompt
+        assert candidate["system_prompt"] not in prompt
+        assert render_initial_instructions(TerminalBenchTextScope().materialize(candidate)) in prompt
         assert "Task Description:\nREAL_TASK" in prompt
         assert "Current terminal state:\nREAL_STATE" in prompt
         assert (config_path.parent / "skills/skill_debugging/SKILL.md").exists()
         assert (config_path.parent / "skills/skill_verification/SKILL.md").exists()
         bundle = json.loads(Path(config["agents"][0]["kwargs"]["document_bundle_path"]).read_text())
-        assert bundle["documents"] == candidate
+        assert bundle["documents"] == TerminalBenchTextScope().materialize(candidate)
         saved = json.loads((config_path.parent / "candidate.json").read_text())
-        assert saved["documents"] == candidate
+        assert saved["documents"] == TerminalBenchTextScope().materialize(candidate)
         assert saved["experiment"] == "tb2.1"
         job_dir = Path(config["jobs_dir"]) / config["job_name"]
         job_dir.mkdir(parents=True)
@@ -424,17 +429,17 @@ def test_tb21_evaluation_keeps_literal_prompt_and_reports_its_own_evidence(
         return subprocess.CompletedProcess(command, 0, "complete", "")
 
     monkeypatch.setattr(terminalbench_module.subprocess, "run", run)
-    adapter = TerminalBenchAdapter(manifest, runner, text_scope=TerminalBenchTextScope("all_text"))
-    with pytest.raises(ValueError, match="complete document bundle"):
-        adapter.evaluate(manifest.tasks("train", 1), {"system_prompt": "old experiment"})
+    adapter = TerminalBenchAdapter(manifest, runner, text_scope=TerminalBenchTextScope())
+    with pytest.raises(ValueError, match="editable system_prompt components"):
+        adapter.evaluate(manifest.tasks("train", 1), _candidate())
     result = adapter.evaluate(manifest.tasks("train", 1), candidate, capture_traces=True)
     assert result.scores == [1.0] and result.num_metric_calls == 1
     rows = adapter.make_reflective_dataset(candidate, result, list(candidate))
-    assert set(rows) == set(COMPONENT_KINDS)
+    assert set(rows) == {"system_prompt"}
     assert all(entries[0]["Inputs"]["dataset"] == "terminal-bench/terminal-bench-2-1" for entries in rows.values())
-    assert all(entries[0]["Document"]["kind"] == COMPONENT_KINDS[name] for name, entries in rows.items())
+    assert all(entries[0]["Document"]["kind"] == "system_prompt" for name, entries in rows.items())
     with pytest.raises(ValueError, match="Unknown Terminal Bench document selection"):
-        adapter.make_reflective_dataset(candidate, result, ["system_prompt"])
+        adapter.make_reflective_dataset(candidate, result, ["command_format"])
 
 
 def test_requirements_fail_when_harbor_is_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -709,8 +714,8 @@ def test_runner_isolates_candidates_and_adapter_maps_complete_evidence_by_task_i
 
     monkeypatch.setattr(terminalbench_module.subprocess, "run", fake_run)
     batch = [manifest.tasks("train")[1], manifest.tasks("train")[0]]
-    adapter = TerminalBenchAdapter(manifest, runner, text_scope=TerminalBenchTextScope("all_text"))
-    evaluated = adapter.evaluate(batch, _candidate(instruction_prompt=SEED_PROMPT), capture_traces=True)
+    adapter = TerminalBenchAdapter(manifest, runner, text_scope=TerminalBenchTextScope())
+    evaluated = adapter.evaluate(batch, _editable(instruction_prompt=SEED_PROMPT), capture_traces=True)
 
     assert [output["task_id"] for output in evaluated.outputs] == [task.task_id for task in batch]
     assert evaluated.scores == [1.0, 0.0]
@@ -728,19 +733,19 @@ def test_runner_isolates_candidates_and_adapter_maps_complete_evidence_by_task_i
     assert all(not trajectory["errors"] for trajectory in evaluated.trajectories)
 
     reflective = adapter.make_reflective_dataset(
-        _candidate(instruction_prompt=SEED_PROMPT),
+        _editable(instruction_prompt=SEED_PROMPT),
         evaluated,
-        ["instruction_prompt"],
+        ["system_prompt"],
     )
-    assert [row["Inputs"]["task_id"] for row in reflective["instruction_prompt"]] == [task.task_id for task in batch]
-    assert reflective["instruction_prompt"][0]["Generated Outputs"]["atif_trajectories"]
-    for component in COMPONENT_KINDS:
-        rows = adapter.make_reflective_dataset(_candidate(instruction_prompt=SEED_PROMPT), evaluated, [component])
-        assert rows[component][0]["Document"]["kind"] == COMPONENT_KINDS[component]
+    assert [row["Inputs"]["task_id"] for row in reflective["system_prompt"]] == [task.task_id for task in batch]
+    assert reflective["system_prompt"][0]["Generated Outputs"]["atif_trajectories"]
+    for component in ("system_prompt",):
+        rows = adapter.make_reflective_dataset(_editable(instruction_prompt=SEED_PROMPT), evaluated, [component])
+        assert rows[component][0]["Document"]["kind"] == "system_prompt"
         assert rows[component][0]["Generated Outputs"]["atif_trajectories"]
         assert rows[component][0]["Generated Outputs"]["trial_result"] == evaluated.trajectories[0]["trial_result"]
         assert rows[component][0]["Generated Outputs"]["harbor_process"]["returncode"] == 0
-        assert rows[component][0]["Document"]["text"] == _candidate(instruction_prompt=SEED_PROMPT)[component]
+        assert rows[component][0]["Document"]["text"] == _editable(instruction_prompt=SEED_PROMPT)[component]
 
     runner.run([batch[0].task_id], _candidate(instruction_prompt=SEED_PROMPT))
     assert len(captured_configs) == 2
@@ -816,10 +821,10 @@ def test_runner_rejects_incomplete_or_failed_harbor_evidence(
         )
 
     monkeypatch.setattr(terminalbench_module.subprocess, "run", fake_run)
-    adapter = TerminalBenchAdapter(manifest, runner, text_scope=TerminalBenchTextScope("all_text"))
+    adapter = TerminalBenchAdapter(manifest, runner, text_scope=TerminalBenchTextScope())
 
     with pytest.raises(HarborExecutionError, match=match):
-        adapter.evaluate([task], _candidate(instruction_prompt=SEED_PROMPT), capture_traces=True)
+        adapter.evaluate([task], _editable(instruction_prompt=SEED_PROMPT), capture_traces=True)
 
 
 def test_runner_preserves_valid_verified_zero_reward(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -853,9 +858,9 @@ def test_runner_preserves_valid_verified_zero_reward(tmp_path: Path, monkeypatch
         return subprocess.CompletedProcess(command, 0, stdout="complete", stderr="")
 
     monkeypatch.setattr(terminalbench_module.subprocess, "run", fake_run)
-    evaluated = TerminalBenchAdapter(manifest, runner, text_scope=TerminalBenchTextScope("all_text")).evaluate(
+    evaluated = TerminalBenchAdapter(manifest, runner, text_scope=TerminalBenchTextScope()).evaluate(
         [task],
-        _candidate(instruction_prompt=SEED_PROMPT),
+        _editable(instruction_prompt=SEED_PROMPT),
         capture_traces=True,
     )
 
@@ -903,15 +908,15 @@ def test_verified_agent_timeout_counts_once_and_reaches_reflection(
 
     process = Mock(side_effect=run)
     monkeypatch.setattr(terminalbench_module.subprocess, "run", process)
-    adapter = TerminalBenchAdapter(manifest, runner, text_scope=TerminalBenchTextScope("all_text"))
-    candidate = _candidate()
+    adapter = TerminalBenchAdapter(manifest, runner, text_scope=TerminalBenchTextScope())
+    candidate = _editable()
     evaluated = adapter.evaluate([task], candidate, capture_traces=True)
 
     process.assert_called_once()
     assert evaluated.scores == [reward]
     assert evaluated.num_metric_calls == 1
     assert "AgentTimeoutError" in evaluated.outputs[0]["errors"][0]
-    rows = adapter.make_reflective_dataset(candidate, evaluated, list(COMPONENT_KINDS))
+    rows = adapter.make_reflective_dataset(candidate, evaluated, ["system_prompt"])
     for entries in rows.values():
         feedback = json.loads(entries[0]["Feedback"])
         assert feedback["reward"] == reward
@@ -960,8 +965,8 @@ def test_timeout_policy_rejects_unverified_infrastructure_and_extra_attempts(
     process = Mock(side_effect=run)
     monkeypatch.setattr(terminalbench_module.subprocess, "run", process)
     with pytest.raises(HarborExecutionError):
-        TerminalBenchAdapter(runner.manifest, runner, text_scope=TerminalBenchTextScope("all_text")).evaluate(
-            [task], _candidate(), capture_traces=True
+        TerminalBenchAdapter(runner.manifest, runner, text_scope=TerminalBenchTextScope()).evaluate(
+            [task], _editable(), capture_traces=True
         )
     process.assert_called_once()
     assert len(list(tmp_path.glob("evaluations/*/jobs/*/trial-0/result.json"))) == 1
@@ -1007,8 +1012,8 @@ def test_verifier_console_output_is_textual_feedback_for_every_component(
         return subprocess.CompletedProcess(command, 0, "complete", "")
 
     monkeypatch.setattr(terminalbench_module.subprocess, "run", run)
-    adapter = TerminalBenchAdapter(manifest, runner, text_scope=TerminalBenchTextScope("all_text"))
-    candidate = _candidate()
+    adapter = TerminalBenchAdapter(manifest, runner, text_scope=TerminalBenchTextScope())
+    candidate = _editable()
     evaluated = adapter.evaluate([task], candidate, capture_traces=True)
     assert evaluated.scores == [reward]
     assert evaluated.num_metric_calls == 1
@@ -1022,22 +1027,22 @@ def test_verifier_console_output_is_textual_feedback_for_every_component(
     assert actual["verifier_log_status"] == "available"
     assert actual["verifier_logs"] == expected_logs
     assert "private verifier implementation" not in json.dumps(rows)
-    assert "שלום" in rows["instruction_prompt"][0]["Feedback"]
+    assert "שלום" in rows["system_prompt"][0]["Feedback"]
     reflection_lm = Mock(return_value="```Revised instruction```")
     StatelessReflectionLM(reflection_lm).reflect(candidate, rows, list(candidate))
-    assert reflection_lm.call_count == 16
+    assert reflection_lm.call_count == 1
     assert all("FAILED test_output" in call.args[0] for call in reflection_lm.call_args_list)
-    assert "FAILED test_output" in summarize_feedback(rows["instruction_prompt"])
+    assert "FAILED test_output" in summarize_feedback(rows["system_prompt"])
 
     evaluated.trajectories[0]["verifier_logs"] = {}
-    missing = adapter.make_reflective_dataset(candidate, evaluated, ["instruction_prompt"])
-    assert json.loads(missing["instruction_prompt"][0]["Feedback"])["verifier_log_status"] == "unavailable"
+    missing = adapter.make_reflective_dataset(candidate, evaluated, ["system_prompt"])
+    assert json.loads(missing["system_prompt"][0]["Feedback"])["verifier_log_status"] == "unavailable"
     assert evaluated.scores == [reward]
 
     for split in ("val", "test"):
         evaluated.trajectories[0]["task_id"] = manifest.splits[split][0]
         with pytest.raises(ValueError, match="restricted to training tasks"):
-            adapter.make_reflective_dataset(candidate, evaluated, ["instruction_prompt"])
+            adapter.make_reflective_dataset(candidate, evaluated, ["system_prompt"])
 
 
 @pytest.mark.parametrize("maximum", [None, 8192])
@@ -1172,9 +1177,9 @@ def test_runner_rejects_malformed_or_structurally_invalid_atif(
     monkeypatch.setattr(terminalbench_module.subprocess, "run", fake_run)
 
     with pytest.raises(HarborExecutionError, match=match):
-        TerminalBenchAdapter(manifest, runner, text_scope=TerminalBenchTextScope("all_text")).evaluate(
+        TerminalBenchAdapter(manifest, runner, text_scope=TerminalBenchTextScope()).evaluate(
             [task],
-            _candidate(instruction_prompt=SEED_PROMPT),
+            _editable(instruction_prompt=SEED_PROMPT),
             capture_traces=True,
         )
 
@@ -1214,9 +1219,9 @@ def test_runner_wraps_atif_file_read_errors(tmp_path: Path, monkeypatch: pytest.
     monkeypatch.setattr(terminalbench_module.subprocess, "run", fake_run)
 
     with pytest.raises(HarborExecutionError, match="unreadable or invalid JSON"):
-        TerminalBenchAdapter(manifest, runner, text_scope=TerminalBenchTextScope("all_text")).evaluate(
+        TerminalBenchAdapter(manifest, runner, text_scope=TerminalBenchTextScope()).evaluate(
             [task],
-            _candidate(instruction_prompt=SEED_PROMPT),
+            _editable(instruction_prompt=SEED_PROMPT),
             capture_traces=True,
         )
 
@@ -1242,10 +1247,10 @@ def test_real_harbor_terminalbench_single_task_smoke(tmp_path: Path) -> None:
         agent_python_path=REPO_ROOT,
         n_concurrent=1,
     )
-    adapter = TerminalBenchAdapter(manifest, runner, text_scope=TerminalBenchTextScope("all_text"))
+    adapter = TerminalBenchAdapter(manifest, runner, text_scope=TerminalBenchTextScope())
     evaluated = adapter.evaluate(
         manifest.tasks("val", 1),
-        _candidate(instruction_prompt=SEED_PROMPT),
+        _editable(instruction_prompt=SEED_PROMPT),
         capture_traces=True,
     )
 

@@ -231,7 +231,7 @@ def test_definition_uses_pinned_full_data_epochs_and_official_adapter(tmp_path, 
     assert args.max_metric_calls is None
     assert benchmark.test_repetitions == 3
     assert benchmark.seed_candidate == benchmark.adapter.adapter.text_scope.seed_candidate()
-    assert benchmark.component_kinds == {"instruction_prompt": "user_prompt"}
+    assert benchmark.component_kinds == {"system_prompt": "system_prompt"}
     observed, runtime, requirements = external_boundaries
     assert not observed
     assert runtime.call_count == requirements.call_count == 1
@@ -296,16 +296,16 @@ def test_full_identity_does_not_change_with_budget_or_training_prefix(tmp_path, 
 
 def test_actual_edited_prompt_and_per_trial_latency_reach_shared_outputs(tmp_path, external_boundaries):
     benchmark, _, _ = definition(tmp_path)
-    candidate = {"instruction_prompt": "Modified live instructions"}
+    candidate = {"system_prompt": "Modified live instructions"}
     benchmark.adapter.set_evaluation_context(split="train", repetition=0, seed=9)
     result = benchmark.adapter.evaluate(benchmark.trainset[:2], candidate, capture_traces=True)
     assert [output["elapsed_seconds"] for output in result.outputs] == [5.0, 17.0]
     assert [output["id"] for output in result.outputs] == [record["id"] for record in benchmark.trainset[:2]]
     assert result.scores == [1.0, 0.0]
-    assert external_boundaries[0][0]["documents"]["instruction_prompt"] == candidate["instruction_prompt"]
+    assert external_boundaries[0][0]["documents"]["instruction_prompt"] == candidate["system_prompt"]
     assert external_boundaries[0][0]["kwargs"]["llm_kwargs"]["seed"] == 9
-    feedback = benchmark.adapter.make_reflective_dataset(candidate, result, ["instruction_prompt"])
-    assert feedback["instruction_prompt"][0]["Document"]["text"] == candidate["instruction_prompt"]
+    feedback = benchmark.adapter.make_reflective_dataset(candidate, result, ["system_prompt"])
+    assert feedback["system_prompt"][0]["Document"]["text"] == candidate["system_prompt"]
     with pytest.raises(ValueError, match="requested evaluation split"):
         benchmark.adapter.evaluate(benchmark.testset[:1], candidate)
 
@@ -581,8 +581,8 @@ def test_actual_epoch_padding_executes_every_training_occurrence(
         assert result.num_metric_calls == len(batch)
         assert [output["task_id"] for output in result.outputs] == [record["task_id"] for record in batch]
         assert [trace["task_id"] for trace in result.trajectories] == [record["task_id"] for record in batch]
-        feedback = benchmark.adapter.make_reflective_dataset(benchmark.seed_candidate, result, ["instruction_prompt"])
-        assert len(feedback["instruction_prompt"]) == len(batch)
+        feedback = benchmark.adapter.make_reflective_dataset(benchmark.seed_candidate, result, ["system_prompt"])
+        assert len(feedback["system_prompt"]) == len(batch)
     calls = external_boundaries[0]
     assert saw_padding
     assert len(expected) > train_size

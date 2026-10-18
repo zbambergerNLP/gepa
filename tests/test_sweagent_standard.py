@@ -50,6 +50,11 @@ def test_pinned_default_agent_configuration_is_preserved(agent_root):
         "openrouter/test", "unused", "https://openrouter.ai/api/v1", None, {"temperature": 0.5, "max_tokens": 1234}, {}
     )
     config = swe_agent.configuration(agent_root, models)
+    edited = swe_agent.configuration(agent_root, models, "Changed system instructions")
+    assert edited["templates"].pop("system_template") == "Changed system instructions"
+    baseline = swe_agent.configuration(agent_root, models)
+    baseline["templates"].pop("system_template")
+    assert edited == baseline
     assert config["templates"] == original["templates"]
     assert config["history_processors"] == original["history_processors"]
     for key, value in original["tools"].items():

@@ -96,6 +96,10 @@ File edits and background services survive individual shell commands. The
 instance has private PID, IPC and network namespaces, local loopback, no external
 network, and no host home, scratch, current-directory or configured bind mounts.
 An environment allowlist excludes API keys and user-supplied Apptainer bindings.
+The disposable task root gets IPv4/IPv6 `localhost` entries in `/etc/hosts`;
+disabling configured bind mounts also disables Apptainer's generated hosts file.
+This OS configuration is included in the runtime contract and applies equally
+to solver and grader containers. Benchmark source and test files stay unchanged.
 The instance is stopped before its filesystem is removed. The evaluator starts
 a separate fresh instance and uses the pinned official patch application,
 evaluation script and resolution scorer. Complete test logs and infrastructure

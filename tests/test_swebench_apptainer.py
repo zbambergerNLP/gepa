@@ -83,9 +83,12 @@ def test_task_preserves_files_without_host_mounts_or_secrets(monkeypatch, tmp_pa
     image = tmp_path / "task.sif"
     image.write_bytes(b"pinned image")
     calls = []
+    writes = []
 
     def run(self, argv, timeout, stdin=None, merge_output=False):
         calls.append((argv, dict(self.env)))
+        if stdin is not None:
+            writes.append((argv[-1], stdin))
         stdout = json.dumps({"instances": [{"instance": self.name}]}) if "list" in argv else ""
         return {"exit_code": 0, "stdout": stdout, "stderr": ""}
 
@@ -98,6 +101,7 @@ def test_task_preserves_files_without_host_mounts_or_secrets(monkeypatch, tmp_pa
         task.execute("test -f /testbed/state")
         assert calls[-1][0][-4] == calls[-2][0][-4] == "instance://" + task.name
         startup = calls[1][0]
+        assert writes == [("cat > /etc/hosts", apptainer.LOOPBACK_HOSTS)]
         assert "--containall" in startup and "--no-home" in startup
         assert startup[startup.index("--network") + 1] == "none"
         assert "--bind" not in calls[-1][0]
@@ -105,6 +109,43 @@ def test_task_preserves_files_without_host_mounts_or_secrets(monkeypatch, tmp_pa
         assert not any(k in calls[-1][1] for k in ("OPENROUTER_API_KEY", "APPTAINER_BIND", "APPTAINERENV_SECRET"))
     assert not directory.exists()
     assert calls[-1][0] == ["apptainer", "instance", "stop", "--force", task.name]
+
+
+def test_loopback_configuration_failure_prevents_task_execution(monkeypatch, tmp_path):
+    monkeypatch.setattr(apptainer, "allocation_limits", lambda _: {})
+    image = tmp_path / "task.sif"
+    image.write_bytes(b"pinned image")
+    calls = []
+
+    def run(self, argv, *args, **kwargs):
+        calls.append(argv)
+        return {
+            "exit_code": 1 if argv[-1] == "cat > /etc/hosts" else 0,
+            "stdout": '{"instances": [{}]}' if "list" in argv else "",
+            "stderr": "read-only hosts file" if argv[-1] == "cat > /etc/hosts" else "",
+        }
+
+    monkeypatch.setattr(apptainer.ApptainerTask, "_run", run)
+    task = apptainer.ApptainerTask(
+        {"backend": "apptainer", "image_id": str(image), "sif_sha256": apptainer.sha256(image)}, 16
+    )
+    with pytest.raises(RuntimeError, match="Cannot copy evaluator input: read-only hosts file"):
+        with task:
+            pytest.fail("An unconfigured task must not run")
+    assert not any(argv[-1].startswith("test -d") for argv in calls)
+    assert calls[-1] == ["apptainer", "instance", "stop", "--force", task.name]
+    assert not task.directory.exists()
+
+
+def test_loopback_configuration_is_part_of_runtime_identity(monkeypatch):
+    monkeypatch.setattr(apptainer.shutil, "which", lambda _: "/usr/bin/apptainer")
+    monkeypatch.setattr(apptainer, "sha256", lambda _: "binary-hash")
+    monkeypatch.setattr(apptainer, "allocation_limits", lambda _: {"cpus": 4})
+    monkeypatch.setattr(apptainer.subprocess, "check_output", lambda *a, **kw: "1.5.0\n")
+    before = apptainer.runtime_identity(16)
+    assert before["hosts"] == {"path": "/etc/hosts", "content": apptainer.LOOPBACK_HOSTS}
+    monkeypatch.setattr(apptainer, "LOOPBACK_HOSTS", "")
+    assert apptainer.runtime_identity(16) != before
 
 
 def test_failed_instance_start_preserves_error_and_removes_unused_sandbox(monkeypatch, tmp_path):

@@ -25,6 +25,7 @@ ISOLATION = [
     "--network",
     "none",
 ]
+LOOPBACK_HOSTS = "127.0.0.1 localhost\n::1 localhost ip6-localhost ip6-loopback\n"
 
 
 def sha256(path: Path) -> str:
@@ -66,6 +67,7 @@ def runtime_identity(memory_gib: int) -> dict:
         "executable_sha256": sha256(Path(executable).resolve()),
         "isolation": ISOLATION,
         "instance_execution": ["--userns", "--cleanenv", "--pwd", "/testbed"],
+        "hosts": {"path": "/etc/hosts", "content": LOOPBACK_HOSTS},
         "resources": allocation_limits(memory_gib),
         "writable_state": "fresh sandbox, private temporary directories and persistent instance per task",
     }
@@ -130,6 +132,9 @@ class ApptainerTask:
             )
             if result["exit_code"]:
                 raise RuntimeError(f"Cannot start task instance: {result['stderr']}")
+            # Disabling configured bind paths also removes Apptainer's generated hosts file.
+            # Supply loopback inside the disposable root without exposing the host's DNS names.
+            self.write_text("/etc/hosts", LOOPBACK_HOSTS)
             result = self.execute("test -d /testbed/.git && test -w /testbed && test $(id -u) = 0")
             if result["exit_code"]:
                 raise RuntimeError(f"Cannot start isolated task root: {result['stderr']}")

@@ -670,13 +670,7 @@ class ThreeRoleReflectionLM:
         self.validate_candidate(dict(candidate))
         component_kinds = {name: self._component_kind(name) for name in candidate}
         active_kinds = sorted(set(component_kinds.values()))
-        templates = {
-            kind: {
-                "document_kind": self.templates[kind].kind,
-                "sections": list(self.templates[kind].sections.items()),
-            }
-            for kind in active_kinds
-        }
+        templates = {kind: self.templates[kind].run_contract() for kind in active_kinds}
         controller: dict[str, Any]
         if self.jev_controller is not None:
             controller = self.jev_controller.run_contract()

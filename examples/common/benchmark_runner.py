@@ -572,6 +572,11 @@ def _run_condition_locked(
             "seed": args.seed,
             "template_family": template_family,
             "component_kinds": component_kinds,
+            **(
+                {"templates": {kind: template.run_contract() for kind, template in definition.templates.items()}}
+                if definition.templates
+                else {}
+            ),
             "stateless_selector_policy": (
                 stateless_selector_policy_contract(settings["stateless_action_selection"])
                 if settings["stateless_action_selection"]
@@ -622,6 +627,7 @@ def _run_condition_locked(
                 react_max_tool_calls=settings["react_max_tool_calls"],
                 template_family=template_family,
                 component_kinds=component_kinds,
+                templates=definition.templates,
                 rng=random.Random(args.seed),
                 manifestor_temperature=proposer_kwargs.get("temperature"),
             )
@@ -629,7 +635,7 @@ def _run_condition_locked(
             kinds = set(component_kinds.values())
             if len(kinds) != 1:
                 raise ValueError("Stateless action conditions require one shared component template kind")
-            template = TEMPLATE_FAMILIES[template_family][next(iter(kinds))]
+            template = {**TEMPLATE_FAMILIES[template_family], **definition.templates}[next(iter(kinds))]
             actions = [
                 StatelessActionConstraint(spec, section, template)
                 for section in template.sections

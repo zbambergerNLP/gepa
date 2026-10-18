@@ -168,7 +168,7 @@ _NATIVE_TOOL_DESCRIPTIONS: dict[EditTool, str] = {
 }
 
 REACT_V2_SYSTEM_PROMPT = """\
-Revise only the selected section body of this structured {kind} document.
+{document_scope}
 
 On every turn, emit exactly one action: {action_protocol}, or <finish>briefly state why the
 revision is complete</finish>. Never emit both. Tool arguments are literal: copy targets and
@@ -182,8 +182,7 @@ body is shown as a JSON string; decode it before copying literal tool arguments.
 string means the section has no text. If the selected action cannot apply to that body,
 emit <finish> with the reason. An unchanged result is discarded, never accepted as an edit.
 
-The harness owns the surrounding document and its headers. You receive only one section body. Never write
-a `## <Section>` header; every target and non-empty anchor must come from the selected body.
+{boundary_rule}
 
 Available tools:
 {tool_schemas}
@@ -620,7 +619,19 @@ class ReActV2Proposer:
             )
             tool_schemas = "\n\n".join(_TOOL_SCHEMAS[tool] for tool in self.allowed_tools)
         system = REACT_V2_SYSTEM_PROMPT.format(
-            kind=self.template.kind,
+            document_scope=(
+                "Revise only the supplied prompt, exposed as one virtual region without a surrounding header."
+                if self.template.is_verbatim
+                else f"Revise only the selected section body of this structured {self.template.kind} document."
+            ),
+            boundary_rule=(
+                "The region name is metadata: do not add a wrapper or normalize the prompt's formatting. "
+                "Any headings inside the supplied prompt are ordinary text. Every target and non-empty anchor "
+                "must come from that prompt. Other messages, tools and workflow are fixed and outside your scope."
+                if self.template.is_verbatim
+                else "The harness owns the surrounding document and its headers. You receive only one section body. "
+                "Never write\na `## <Section>` header; every target and non-empty anchor must come from the selected body."
+            ),
             action_protocol=action_protocol,
             tool_schemas=tool_schemas,
             completion_rule=completion_rule,

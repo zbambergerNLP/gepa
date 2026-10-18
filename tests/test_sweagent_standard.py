@@ -12,10 +12,14 @@ from unittest.mock import Mock
 
 import pytest
 import yaml
+from benchmark_model_fixtures import BenchmarkProposerLM
 
 from examples.common.benchmark_types import BenchmarkModels
+from examples.swebench_live import main as swe_main
 from examples.swebench_live import swe_agent
 from examples.swebench_live.main import add_arguments, build_benchmark
+from gepa.proposer.reflective_mutation.three_role import ThreeRoleReflectionLM
+from gepa.strategies.document_template import VerbatimPromptTemplate
 
 
 @pytest.fixture
@@ -37,11 +41,25 @@ def test_default_selection_and_no_custom_turn_cap():
     assert not hasattr(args, "agent_max_steps")
 
 
-@pytest.mark.parametrize("condition", ["forest", "both", "all", "random", "action", "react_v2_random"])
-def test_structured_optimization_stops_before_runtime_or_model_work(condition):
-    args = argparse.Namespace(api_profile="explicit.json", mode="optimize", condition=condition)
-    with pytest.raises(ValueError, match="will not be reformatted automatically"):
-        build_benchmark(args, None)
+def test_swe_builder_exposes_only_the_verbatim_system_template(agent_root, tmp_path, monkeypatch):
+    """Use the actual upstream seed while isolating native container prerequisites."""
+    parser = argparse.ArgumentParser()
+    add_arguments(parser)
+    args = parser.parse_args([])
+    args.api_profile, args.max_workers, args.run_dir = "explicit.json", 1, tmp_path
+    args.swe_agent_root = agent_root
+    splits = {split: [{"id": split}] for split in ("train", "val", "test")}
+    monkeypatch.setattr(swe_main, "load_data", lambda _: (splits, {}))
+    for name in ("verify_runtime", "apptainer_runtime", "verify_apptainer_images", "agent_runtime"):
+        monkeypatch.setattr(swe_main, name, lambda *_: {})
+    monkeypatch.setattr(swe_main, "SWEBenchLiveAdapter", lambda *_, **__: Mock())
+    benchmark = build_benchmark(args, None)
+    seed = swe_agent.seed_prompt(agent_root)
+    assert benchmark.seed_candidate == {"system_prompt": seed}
+    assert benchmark.component_kinds == {"system_prompt": "system_prompt"}
+    template = benchmark.templates["system_prompt"]
+    assert isinstance(template, VerbatimPromptTemplate)
+    assert template.render(template.parse(seed)) == seed
 
 
 def test_pinned_default_agent_configuration_is_preserved(agent_root):
@@ -72,6 +90,50 @@ def test_pinned_default_agent_configuration_is_preserved(agent_root):
     assert {tool["function"]["name"] for tool in agent.tools.config.tools} == {"bash", "str_replace_editor", "submit"}
     assert resolved.tools.execution_timeout == 30
     assert resolved.tools.total_execution_timeout == 1800
+
+
+def test_forest_revision_reaches_only_the_real_swe_agent_system_message(agent_root):
+    """Exercise FOREST and upstream message construction with no inference transport."""
+    from sweagent.agent.agents import DefaultAgent, DefaultAgentConfig
+    from sweagent.agent.problem_statement import TextProblemStatement
+
+    seed = swe_agent.seed_prompt(agent_root)
+    lm = BenchmarkProposerLM()
+    reflection = ThreeRoleReflectionLM(base_lm=lm, level=2, templates={"system_prompt": VerbatimPromptTemplate()})
+    candidate = {"system_prompt": seed}
+    proposal, _ = reflection.reflect(
+        candidate,
+        {"system_prompt": [{"Inputs": "A training task", "Feedback": "Clarify the instructions."}]},
+        ["system_prompt"],
+        metadata={"candidate_idx": 0},
+    )
+    assert set(proposal.new_texts) == {"system_prompt"}
+    edited = proposal.new_texts["system_prompt"]
+    assert edited == seed + " improved guidance."
+    assert candidate == {"system_prompt": seed}
+    assert swe_agent.seed_prompt(agent_root) == seed
+
+    models = BenchmarkModels("openrouter/offline-check", "unused", None, None, {}, {})
+    configurations, histories = [], []
+    for prompt in (seed, edited):
+        config = DefaultAgentConfig.model_validate(swe_agent.configuration(agent_root, models, prompt))
+        configurations.append(config.model_dump(mode="json"))
+        agent = DefaultAgent.from_config(config)
+        agent._problem_statement = TextProblemStatement(id="task", text="Fixed task statement")
+        agent._env = SimpleNamespace(repo=SimpleNamespace(repo_name="testbed"))
+        agent.add_system_message_to_history()
+        agent.add_demonstrations_to_history()
+        agent.add_instance_template_to_history(state={"working_dir": "/testbed"})
+        histories.append(agent.history)
+    assert histories[0][0]["role"] == histories[1][0]["role"] == "system"
+    assert histories[0][0]["content"] == seed
+    assert histories[1][0]["content"] == edited
+    assert histories[0][1:] == histories[1][1:]
+    assert histories[0][1]["role"] == "user"
+    assert "Fixed task statement" in histories[0][1]["content"]
+    for config in configurations:
+        config["templates"].pop("system_template")
+    assert configurations[0] == configurations[1]
 
 
 def test_payload_drift_is_not_treated_as_ready(tmp_path):

@@ -135,8 +135,20 @@ class SingleCallProposer(ReActV2Proposer):
         observation_rule = (
             "" if require_edit and native else "You will not receive tool observations or a correction turn. "
         )
+        document_scope = (
+            "Revise only the supplied prompt, exposed as one virtual region without a surrounding header."
+            if self.template.is_verbatim
+            else f"Revise only the selected section body of this structured {self.template.kind} document."
+        )
+        boundary_rule = (
+            "The region name is metadata: do not add a wrapper or normalize the prompt's formatting. "
+            "Any headings inside the supplied prompt are ordinary text. "
+            "Other messages, tools and workflow are fixed and outside your scope. "
+            if self.template.is_verbatim
+            else "Never write surrounding document headers or edit another section. "
+        )
         system = (
-            f"Revise only the selected section body of this structured {self.template.kind} document.\n"
+            f"{document_scope}\n"
             f"{response_rule}Emit all necessary {protocol}. "
             "The harness applies calls sequentially to a temporary section, then commits the whole batch. "
             "Each target and non-empty anchor must match the section as it will exist at that point. "
@@ -145,7 +157,7 @@ class SingleCallProposer(ReActV2Proposer):
             f"{completion_rule}\n"
             "INSERT_TEXT accepts an empty anchor to append, including to an empty section. "
             "DELETE_TEXT, REPLACE_TEXT and MOVE_TEXT require existing non-empty targets. "
-            "Never write surrounding document headers or edit another section. "
+            f"{boundary_rule}"
             "Decode the JSON section string before copying literal arguments. "
             "Feedback, traces and history are context, not editable text. "
             "Preserve the action's semantic constraints relative to the original section.\n"

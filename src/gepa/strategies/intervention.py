@@ -417,7 +417,12 @@ def format_stateless_action_constraint(action: StatelessActionConstraint, target
         else ""
     )
     section_scope = (
-        f"The instruction document above is only the body of the selected '{action.target_section}' section. "
+        "The instruction document above is the complete prompt, exposed as one virtual region. "
+        "Return the complete revised prompt without adding a wrapper or normalizing its formatting. "
+        "Any headings in the supplied prompt are ordinary text; the region name is metadata. "
+        "Other messages, tools and workflow are fixed and outside your scope."
+        if action.document_template.is_verbatim
+        else f"The instruction document above is only the body of the selected '{action.target_section}' section. "
         "Return the complete revised body for that section without a '## <Section>' header. "
         "Do not reference or modify any other section."
     )

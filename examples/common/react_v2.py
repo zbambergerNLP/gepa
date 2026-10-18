@@ -12,7 +12,7 @@ from typing import Any
 from examples.common.provider_retries import PROVIDER_RETRY_KEY
 from gepa.lm import LM
 from gepa.proposer.reflective_mutation.three_role import ThreeRoleReflectionLM
-from gepa.strategies.document_template import TEMPLATE_FAMILIES, infer_template_family
+from gepa.strategies.document_template import TEMPLATE_FAMILIES, DocumentTemplate, infer_template_family
 from gepa.strategies.forest_constants import (
     CONTROLLER_ROLE,
     EDITOR_ROLE,
@@ -142,6 +142,7 @@ def build_react_v2_strategy(
     edit_tool_set: str,
     template_family: str,
     component_kinds: dict[str, str] | None = None,
+    templates: Mapping[str, DocumentTemplate] | None = None,
     controller_selection: str = VERBALIZED_SELECTION,
     jev_provider: str = "typesafe",
     editor_mode: str = REACT_EDITOR_MODE,
@@ -167,6 +168,7 @@ def build_react_v2_strategy(
         edit_tool_set: Named edit-operator basis exposed to the proposer.
         template_family: Explicit provider family or ``"auto"``.
         component_kinds: Optional message role for each optimized component.
+        templates: Explicit document representations for particular component kinds.
         controller_selection: ``"verbalized"``, ``"uniform_random"``, or ``"jev"``.
         jev_provider: Explicit typed decision transport, typesafe or openrouter.
         editor_mode: Multi-turn ``react`` or one-response ``single_call`` editing.
@@ -235,6 +237,7 @@ def build_react_v2_strategy(
         edit_tool_set=edit_tool_set,
         component_kinds=component_kinds,
         template_family=resolved_family,
+        templates=templates,
         controller_selection=controller_selection,
         jev_controller=jev_controller,
         editor_mode=editor_mode,

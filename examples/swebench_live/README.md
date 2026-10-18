@@ -173,12 +173,16 @@ errors are preserved as unresolved infrastructure failures, not scored as failed
 tests. Raw upstream statistics remain in `.traj`; provider journals are the
 accounting authority, including unknown costs rather than fabricated zeros.
 
-The standard starting system template is used verbatim. Vanilla GEPA can
-optimize that one template; the instance prompt, tools, parser and history policy
-stay fixed. FOREST and the other structured-prompt conditions are blocked before
-runtime work: their editor currently requires section headers absent from the
-upstream prompt. Supporting those conditions needs a separately reviewed
-integration; this adapter never reformats the standard starting prompt silently.
+The standard starting system template is used verbatim by every condition.
+Vanilla GEPA edits that one template directly. FOREST and action-conditioned
+ablations address it as one virtual `Instructions` region using
+`VerbatimPromptTemplate`: the region name is optimizer metadata and is never
+added to the prompt. The existing prompt action catalog and text operators apply
+to the exact system text, including any whitespace or Markdown it already contains.
+The instance prompt, demonstrations, tools, auxiliary templates, parser and history
+policy stay fixed. The document representation is recorded in optimizer contracts;
+changing it requires a fresh run directory. This compatibility path adds no model
+calls to seed preparation and does not authorize a paid run.
 Prompt optimization, the 60/120/120 split, chosen model/provider, and Apptainer
 are declared research-protocol differences from a leaderboard run. Validation
 selects the winner; held-out results never guide optimization.

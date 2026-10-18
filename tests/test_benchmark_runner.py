@@ -16,6 +16,7 @@ from examples.common.benchmark_types import BenchmarkDefinition
 from examples.common.experiment_models import DEFAULT_PROPOSER_MODEL, DEFAULT_SOLVER_MODEL
 from examples.common.react_v2 import structured_prompt
 from gepa.core.adapter import EvaluationBatch
+from gepa.strategies.document_template import VerbatimPromptTemplate
 from gepa.strategies.jev_constants import JEV_MODEL
 
 VARIANT_CASES = [
@@ -328,9 +329,18 @@ def test_duplicate_optimizer_writer_is_rejected_before_model_work(tmp_path):
 
 
 @pytest.mark.parametrize("condition, flags", VARIANT_CASES)
-def test_real_optimizer_pilots_cover_supported_variants_without_test_leakage(tmp_path, monkeypatch, condition, flags):
+@pytest.mark.parametrize("verbatim", [False, True])
+def test_real_optimizer_pilots_cover_supported_variants_without_test_leakage(
+    tmp_path, monkeypatch, condition, flags, verbatim
+):
     """Exercise real proposal generation, evaluation and selection on training records only."""
     benchmark = definition(tmp_path / "run")
+    if verbatim:
+        benchmark = replace(
+            benchmark,
+            seed_candidate={"system_prompt": "  Answer the task.\n## Existing heading\nKeep this formatting.\n\n"},
+            templates={"system_prompt": VerbatimPromptTemplate()},
+        )
     benchmark.adapter.include_objectives = False
     models = install_proposer(monkeypatch)
     kwargs = {
@@ -361,6 +371,11 @@ def test_real_optimizer_pilots_cover_supported_variants_without_test_leakage(tmp
     assert contract["optimizer"]["max_optimizer_iterations"] == 1
     assert contract["optimizer"]["max_candidate_proposals"] == contract["optimizer"]["proposals_per_iteration"]
     assert contract["optimizer"]["max_metric_calls"] is None
+    assert benchmark.adapter.calls[0][1] == benchmark.seed_candidate
+    if verbatim:
+        assert contract["optimizer"]["templates"]["system_prompt"]["format"] == "verbatim_single_region_v1"
+    else:
+        assert "templates" not in contract["optimizer"]
     assert all(ids == ["train1"] for ids, _ in benchmark.adapter.calls)
     assert any(candidate != benchmark.seed_candidate for _, candidate in benchmark.adapter.calls)
     assert sum(len(model.calls) for model in models) > 0
@@ -369,6 +384,11 @@ def test_real_optimizer_pilots_cover_supported_variants_without_test_leakage(tmp
     calls = len(benchmark.adapter.calls)
     runner.run_cli(**kwargs)
     assert len(benchmark.adapter.calls) == calls
+    if verbatim:
+        benchmark = replace(benchmark, templates={})
+        with pytest.raises(ValueError, match="configuration or data changed"):
+            runner.run_cli(**kwargs)
+        assert len(benchmark.adapter.calls) == calls
 
 
 def test_optimizer_pilot_forces_reflection_for_a_perfect_starting_seed(tmp_path, monkeypatch):
@@ -730,12 +750,19 @@ def jev_setup(tmp_path):
 
 @pytest.mark.parametrize("module_selector", ["round_robin", "all", "controller"])
 @pytest.mark.parametrize("policy", ["real_edit", "independent"])
+@pytest.mark.parametrize("verbatim", [False, True])
 def test_jev_backend_and_adaptive_components_reach_real_optimizer(
-    tmp_path, monkeypatch, jev_setup, module_selector, policy
+    tmp_path, monkeypatch, jev_setup, module_selector, policy, verbatim
 ):
     """Exercise typed Jev selection, edit execution and joint-module wiring end to end."""
     controller, requests, replies = jev_setup
     benchmark = definition(tmp_path)
+    if verbatim:
+        benchmark = replace(
+            benchmark,
+            seed_candidate={"system_prompt": "Answer the task without adding a wrapper."},
+            templates={"system_prompt": VerbatimPromptTemplate()},
+        )
     benchmark = replace(
         benchmark, seed_candidate={**benchmark.seed_candidate, "answer": benchmark.seed_candidate["system_prompt"]}
     )
@@ -744,7 +771,8 @@ def test_jev_backend_and_adaptive_components_reach_real_optimizer(
 
     def response(payload):
         choices = payload["questions"]["edit"]["criteria"]
-        chosen = next(key for key in choices if "contextualize@Objective/INSERT_TEXT" in key)
+        region = "Instructions" if verbatim else "Objective"
+        chosen = next(key for key in choices if f"contextualize@{region}/INSERT_TEXT" in key)
         return httpx2.Response(
             200,
             json={

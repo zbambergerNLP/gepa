@@ -6,6 +6,8 @@
 Each template specifies an ordered set of optional ``## <Section>`` headings.
 :meth:`DocumentTemplate.parse` validates that format, while
 :func:`migrate_document` converts free-form text.
+``VerbatimPromptTemplate`` explicitly opts into lossless single-region editing
+for upstream prompts that must retain their original format.
 Provider families follow their published section ordering and use ``generic``
 when no provider schema applies. PromptPrism (arXiv:2505.12592) motivates
 treating section order as part of the schema.
@@ -15,6 +17,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import Any, ClassVar
 
 from gepa.proposer.reflective_mutation.base import LanguageModel
 
@@ -101,6 +104,11 @@ class DocumentTemplate:
 
     kind: str
     sections: dict[str, str]
+    is_verbatim: ClassVar[bool] = False
+
+    def run_contract(self) -> dict[str, Any]:
+        """Identify the document representation used by a resumable optimizer."""
+        return {"document_kind": self.kind, "sections": list(self.sections.items())}
 
     def parse(self, text: str) -> dict[str, str]:
         """Split a canonical document into its section bodies.
@@ -238,6 +246,44 @@ class DocumentTemplate:
         bodies = self.parse(text)
         bodies[section] = body
         return self.render(bodies)
+
+
+class VerbatimPromptTemplate(DocumentTemplate):
+    """Expose a complete prompt as one virtual region without serializing a header.
+
+    This is an explicit opt-in for upstream prompts whose bytes must not be
+    migrated. Whitespace, Markdown headings and template syntax are ordinary
+    editable text; only the caller-supplied prompt component is in scope.
+    """
+
+    is_verbatim = True
+
+    def __init__(self) -> None:
+        """Use the prompt action catalog and one non-serialized region name."""
+        super().__init__("prompt", {"Instructions": "The complete prompt; this region name is metadata, not text."})
+
+    def run_contract(self) -> dict[str, Any]:
+        """Distinguish lossless whole-prompt editing from Markdown section editing."""
+        return {**super().run_contract(), "format": "verbatim_single_region_v1"}
+
+    def parse(self, text: str) -> dict[str, str]:
+        """Return the exact prompt text as the sole region, including whitespace."""
+        return {"Instructions": text}
+
+    def render(self, bodies: dict[str, str]) -> str:
+        """Return the region unchanged, without adding or normalizing text."""
+        return bodies.get("Instructions", "")
+
+    def section_body_span(self, text: str, section: str) -> tuple[int, int]:
+        """Locate the whole prompt; reject targets outside the sole virtual region."""
+        if section not in self.sections:
+            raise KeyError(section)
+        return 0, len(text)
+
+    def replace_section_body(self, text: str, section: str, body: str) -> str:
+        """Replace the complete prompt with the exact edited region."""
+        self.section_body_span(text, section)
+        return body
 
 
 # Generic guidance does not distinguish the two message roles, so the registry

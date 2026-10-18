@@ -3,7 +3,6 @@
 from pathlib import Path
 
 from examples.common.benchmark_types import BenchmarkDefinition
-from examples.common.benchmark_variants import selected_conditions
 from examples.swebench_live.adapter import SWEBenchLiveAdapter
 from examples.swebench_live.apptainer import runtime_identity as apptainer_runtime
 from examples.swebench_live.apptainer_images import verify_images as verify_apptainer_images
@@ -12,6 +11,7 @@ from examples.swebench_live.runtime import verify_runtime
 from examples.swebench_live.settings import COMPONENT, ROOT
 from examples.swebench_live.swe_agent import runtime_identity as agent_runtime
 from examples.swebench_live.swe_agent import seed_prompt
+from gepa.strategies.document_template import VerbatimPromptTemplate
 
 
 def add_arguments(parser):
@@ -28,11 +28,6 @@ def build_benchmark(args, models):
     """Bind explicit hosted models to disjoint data and verified native task images."""
     if args.api_profile is None:
         raise ValueError("SWE-bench Live requires an explicit --api-profile; no implicit model defaults")
-    if args.mode in {"optimize", "optimizer-pilot"} and selected_conditions(args) != ("vanilla",):
-        raise ValueError(
-            "The standard SWE-agent prompt supports vanilla GEPA only. Structured-prompt conditions need a "
-            "separately reviewed integration; the upstream prompt will not be reformatted automatically."
-        )
     if args.max_workers != 1:
         raise ValueError("Local SWE-bench Live executes one container at a time")
     if min(args.task_memory_gib, args.test_timeout) < 1:
@@ -75,6 +70,7 @@ def build_benchmark(args, models):
         },
         metric_name="resolved",
         component_kinds={COMPONENT: "system_prompt"},
+        templates={"system_prompt": VerbatimPromptTemplate()},
     )
 
 

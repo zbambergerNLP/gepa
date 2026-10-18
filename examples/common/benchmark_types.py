@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from gepa.core.adapter import GEPAAdapter
+from gepa.strategies.document_template import DocumentTemplate
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,8 @@ class BenchmarkDefinition:
     split and fixed trial seed before execution, including held-out repetitions.
     Optimizer-only runtime metadata belongs in ``optimizer_runtime`` so seed
     baselines can be reused while optimizer resumes still reject runtime drift.
+    ``templates`` explicitly overrides optimizer document representations by
+    component kind; it never rewrites the seed or changes solver configuration.
     """
 
     name: str
@@ -47,6 +50,7 @@ class BenchmarkDefinition:
     component_kinds: dict[str, str] = field(default_factory=dict)
     max_candidate_proposals: int | None = None
     optimizer_runtime: dict[str, Any] = field(default_factory=dict)
+    templates: dict[str, DocumentTemplate] = field(default_factory=dict)
 
 
 BenchmarkBuilder = Callable[[Namespace, BenchmarkModels], BenchmarkDefinition]

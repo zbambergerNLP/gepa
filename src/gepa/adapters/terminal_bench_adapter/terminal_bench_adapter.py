@@ -1072,8 +1072,8 @@ class TerminusAdapter(GEPAAdapter[TerminalBenchTask, TerminalBenchTrajectory, Te
     The upstream adapter name and GEPA evaluation/reflection interface are retained.
     Its legacy runner, result parsing, and single-prompt feedback are replaced for
     TB2.1; this is not the unmodified upstream implementation or constructor API.
-    Candidates expose one unified initial prompt with fixed auxiliary text by
-    default, or all prompts and skills when the all-text scope is selected.
+    Candidates expose only the system prompt. Tool guidance, task messages,
+    auxiliary prompts, and skills remain fixed.
 
     Args:
         manifest: Checked-in, validated experiment manifest.
@@ -1090,7 +1090,7 @@ class TerminusAdapter(GEPAAdapter[TerminalBenchTask, TerminalBenchTrajectory, Te
         Args:
             manifest: Checked-in, validated experiment manifest.
             harbor: Pinned runner configured with the student model.
-            text_scope: Editable candidate boundary; omitted means the unified initial prompt.
+            text_scope: System-prompt-only candidate boundary and seed template family.
 
         Raises:
             ValueError: The adapter and runner use different manifests.

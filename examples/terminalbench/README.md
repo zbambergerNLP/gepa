@@ -3,10 +3,16 @@
 `python -m examples.terminalbench.main` now routes directly through
 `examples.common.benchmark_runner`. It uses the existing pinned Harbor 0.22.0
 transport, `PromptedTerminus` agent, immutable task manifest, and official
-verifier rewards. GEPA and FOREST edit the same actual unified initial prompt
-through the existing `system_prompt` text scope; auxiliary prompts and skills
-remain fixed. That scope's component is named `instruction_prompt` and retains
-Terminus's actual initial user-message role.
+verifier rewards. GEPA and FOREST edit exactly one `system_prompt` component,
+sent as a separate system-role message. The user-role task and terminal inputs,
+tool guidance, command format, auxiliary prompts, and skill files remain fixed.
+The old `all_text` scope and `instruction_prompt` candidate shape are rejected.
+
+This is a system-prompt optimization protocol implemented by the maintained
+Harbor port, not an unchanged upstream Terminus prompt. Runtime contract v2 and
+document bundle v3 distinguish it from the old combined user-message protocol;
+old checkpoints and baselines cannot be reused. Frozen queued campaigns retain
+their original source and contracts.
 
 The shared runner owns optimization, validation selection, freezing, held-out
 evaluation, the shared unoptimized baseline, timing reports, tracking, and resume

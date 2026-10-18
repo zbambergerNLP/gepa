@@ -1,8 +1,4 @@
-"""Define and render the reusable documents optimized for Terminus.
-
-Candidate text is data. Tool instructions are editable, while runtime fields,
-the parser, and actual command behavior remain outside the optimization target.
-"""
+"""Render Terminus's editable system instructions and fixed harness documents."""
 
 from __future__ import annotations
 
@@ -14,7 +10,7 @@ from pathlib import Path
 
 from gepa.strategies.document_template import TEMPLATE_FAMILIES
 
-BUNDLE_VERSION = 2
+BUNDLE_VERSION = 3
 SKILLS_PATH = "/opt/gepa-skills"
 COMMAND_FORMAT_SEED = r"""Return a JSON object with required fields "analysis" (string), "plan" (string), and "commands" (array).
 Each command has "keystrokes" (string) and optional "duration" (seconds, default 1.0, capped at 60).
@@ -50,8 +46,12 @@ SKILL_SEEDS = {
         "Instructions": "Translate the task into observable checks. Run the relevant tests or exercise the requested workflow. Inspect the outputs and confirm that the final result satisfies the task requirements.",
     },
 }
-COMPONENT_KINDS = {**dict.fromkeys(PROMPT_SEEDS, "user_prompt"), **dict.fromkeys(SKILL_SEEDS, "skill")}
-INITIAL_COMPONENTS = ("instruction_prompt", "terminal_tool", "skill_discovery", "command_format")
+COMPONENT_KINDS = {
+    **dict.fromkeys(PROMPT_SEEDS, "user_prompt"),
+    **dict.fromkeys(SKILL_SEEDS, "skill"),
+    "instruction_prompt": "system_prompt",
+}
+INITIAL_COMPONENTS = ("terminal_tool", "skill_discovery", "command_format")
 
 TASK_FIELDS = """Task Description:
 {instruction}
@@ -91,6 +91,9 @@ def seed_documents(template_family: str) -> dict[str, str]:
         "alibaba": "Objective",
     }[template_family]
     candidate = {name: template.render({task_section: text}) for name, text in PROMPT_SEEDS.items()}
+    system_template = TEMPLATE_FAMILIES[template_family]["system_prompt"]
+    system_section = {"generic": "Task", "alibaba": "Objective"}.get(template_family, "Instructions")
+    candidate["instruction_prompt"] = system_template.render({system_section: PROMPT_SEEDS["instruction_prompt"]})
     skill_template = TEMPLATE_FAMILIES[template_family]["skill"]
     candidate.update({name: skill_template.render(sections) for name, sections in SKILL_SEEDS.items()})
     return candidate
@@ -139,24 +142,21 @@ def escape_document(text: str) -> str:
 
 
 def render_initial_instructions(candidate: Mapping[str, str]) -> str:
-    """Compose one initial instruction block shared by both optimization scopes.
+    """Compose fixed user-role guidance without the candidate system instructions.
 
-    Guidance documents use nested headings so their repeated provider section
-    names do not become duplicate sections in the unified editable prompt.
-    Only heading depth changes; component bodies and literal braces are retained.
+    Retain the existing nested headings and literal guidance bodies while
+    separating the system instructions from the user-role template.
     """
     validate_documents(candidate)
     return "\n\n".join(
-        candidate[name]
-        if name == "instruction_prompt"
-        else re.sub(r"^## ", "### ", candidate[name], flags=re.MULTILINE)
+        re.sub(r"^## ", "### ", candidate[name], flags=re.MULTILINE)
         for name in INITIAL_COMPONENTS
         if candidate[name].strip()
     )
 
 
 def render_instruction(candidate: Mapping[str, str]) -> str:
-    """Assemble editable instructions and tool documentation with runtime inputs.
+    """Assemble fixed tool documentation and task inputs for the user message.
 
     Args:
         candidate: Complete reusable document bundle.
@@ -187,7 +187,6 @@ def write_document_bundle(directory: Path, candidate: Mapping[str, str]) -> Path
     (directory / "timeout.txt").write_text(prompts["timeout"], encoding="utf-8")
     skills = []
     for component in SKILL_SEEDS:
-        # Vanilla may produce free-form text; both methods use the same renderer.
         text = candidate[component]
         sections = dict.fromkeys(("Name", "Description", "Instructions", "Examples"), "")
         active = "Instructions"

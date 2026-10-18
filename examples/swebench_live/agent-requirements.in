@@ -1,0 +1,29 @@
+# SWE-agent-for-eval 824224225e1e952b48da91f2d1bde38adb2115f2 dependencies.
+# Source is separately pinned and verified; bundled SWE-ReX must take precedence.
+datasets
+numpy
+pandas
+rich
+ruamel.yaml
+tenacity
+unidiff
+simple-parsing
+rich-argparse
+flask
+flask-cors
+flask-socketio
+pydantic
+python-dotenv
+pydantic-settings
+litellm>=1.83,<1.92
+GitPython
+ghapi
+tabulate
+textual>=1
+requests
+aiohttp
+bashlex==0.18
+pexpect==4.9.0
+pyyaml
+cloudpickle
+tqdm

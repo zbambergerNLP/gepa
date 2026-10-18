@@ -170,7 +170,7 @@ def test_stateless_harness_combinations_fail_before_any_condition_calls_models(
         benchmark, seed_candidate={**benchmark.seed_candidate, "second": "Other instructions"}, component_kinds=kinds
     )
     proposers = install_proposer(monkeypatch)
-    with pytest.raises(SystemExit) as exc:
+    with pytest.raises(ValueError if kinds else SystemExit) as exc:
         runner.run_cli(
             benchmark_name="local",
             build_benchmark=lambda *_: benchmark,
@@ -186,7 +186,10 @@ def test_stateless_harness_combinations_fail_before_any_condition_calls_models(
                 str(tmp_path / "run"),
             ],
         )
-    assert exc.value.code == 2
+    if kinds:
+        assert "only system prompts" in str(exc.value)
+    else:
+        assert exc.value.code == 2
     assert benchmark.adapter.calls == [] and proposers == []
 
 
@@ -227,6 +230,16 @@ def test_split_overlap_and_missing_ids_fail_before_evaluation(tmp_path, bad_id):
     benchmark = definition(tmp_path)
     with pytest.raises(ValueError, match="IDs"):
         runner.validate_definition(replace(benchmark, testset=[{"id": bad_id}]))
+    assert benchmark.adapter.calls == []
+
+
+@pytest.mark.parametrize("kind", ["user_prompt", "skill", "code"])
+@pytest.mark.parametrize("name", ["hotpotqa", "terminalbench", "appworld", "taubench", "swebench_live", "decisionbench", "obliqbench"])
+def test_agent_benchmark_definitions_reject_non_system_edits(tmp_path, name, kind):
+    """Reject broader optimization scopes before any agent or model work."""
+    benchmark = replace(definition(tmp_path), name=name, component_kinds={"system_prompt": kind})
+    with pytest.raises(ValueError, match="only system prompts"):
+        runner.validate_definition(benchmark)
     assert benchmark.adapter.calls == []
 
 

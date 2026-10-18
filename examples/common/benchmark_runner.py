@@ -231,6 +231,8 @@ def validate_definition(definition: BenchmarkDefinition) -> None:
         seen.update(ids)
     if definition.component_kinds and set(definition.component_kinds) != set(definition.seed_candidate):
         raise ValueError("Component kinds must cover the exact editable prompt components.")
+    if set(definition.component_kinds.values()) - {"system_prompt"}:
+        raise ValueError("Agent and chatbot benchmarks may optimize only system prompts.")
     json.dumps(
         {"source": definition.source, "runtime": definition.runtime, "optimizer_runtime": definition.optimizer_runtime},
         allow_nan=False,

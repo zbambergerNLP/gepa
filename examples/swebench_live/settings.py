@@ -24,14 +24,6 @@ PREPARED_HASHES = {
     "train": "42bac24ad50393db61728bdc947e05c1dfd763735cd3e222719675a03d4be69d",
     "val": "dd17e86d9a95b4d3fbcad572974dbc737a432b4e8898962245a10ae197e90b7e",
 }
-SEED_PROMPT = """Resolve the software issue in the repository at /testbed.
-Inspect the source and available tests, make a minimal correct change, and run relevant tests.
-Use the shell tool to work inside the task container. Each command runs in a new shell;
-use explicit paths or cd when needed. Do not change tests to hide failures. Do not fetch
-solutions or access external services. When finished, explain the change in your final
-response. The submitted solution is the repository diff, including staged new files."""
-
-
 def image_tag(instance_id: str) -> str:
     """Return the upstream Python task's published AMD64 image name."""
     return f"starryzhang/sweb.eval.x86_64.{instance_id.lower().replace('__', '_1776_')}:latest"

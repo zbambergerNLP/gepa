@@ -188,7 +188,7 @@ def build_benchmark(args: argparse.Namespace, models: BenchmarkModels) -> Benchm
             **({"task_exclusions": dict(task_exclusions)} if task_exclusions else {}),
         },
         runtime={
-            "harness": "terminalbench-shared-v1",
+            "harness": "terminalbench-shared-v2",
             "adapter": TERMINUS_ADAPTER_CONTRACT,
             "container_runtime": args.container_runtime,
             **({"offline_task_bundle": harbor.offline_task_bundle.contract()} if harbor.offline_task_bundle else {}),

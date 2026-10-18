@@ -82,6 +82,7 @@ def test_real_dspy_program_executes_all_edited_components_and_keeps_gold_out():
     assert retriever.queries == [("Question 0?", RETRIEVAL_K), ("Second retrieval query", RETRIEVAL_K)]
     assert len(adapter.task_lm.history) == 4
     for history, prompt in zip(adapter.task_lm.history, candidate.values(), strict=True):
+        assert history["messages"][0]["role"] == "system"
         assert prompt in history["messages"][0]["content"]
         inputs = json.dumps(history["messages"]).casefold()
         assert "final gold secret" not in inputs

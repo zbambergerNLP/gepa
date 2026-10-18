@@ -7,6 +7,8 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import yaml
@@ -77,6 +79,34 @@ def test_payload_drift_is_not_treated_as_ready(tmp_path):
     (tmp_path / "manifest.json").write_text(json.dumps({"source": {}, "files": {"runtime": "wrong"}}))
     with pytest.raises(ValueError, match="checksum drift"):
         swe_agent.verify_payload(tmp_path)
+
+
+@pytest.mark.parametrize("reason", ["exit_api", "exit_environment_error", "exit_error"])
+@pytest.mark.parametrize("autosubmitted", [False, True])
+def test_rollout_preserves_infrastructure_failures_after_autosubmission(
+    agent_root, tmp_path, monkeypatch, reason, autosubmitted
+):
+    """Never return a salvaged patch for grading after a provider or runtime failure."""
+    from sweagent.agent.agents import DefaultAgent
+    from sweagent.environment import swe_env
+
+    from examples.swebench_live import swe_agent_rex
+
+    status = f"submitted ({reason})" if autosubmitted else reason
+    info = {"exit_status": status, "submission": "partial patch"}
+    trajectory = {"info": info, "trajectory": [{"observation": "interrupted work"}]}
+    agent = SimpleNamespace(run=lambda **_: SimpleNamespace(info=info), get_trajectory_data=lambda: trajectory)
+    environment = SimpleNamespace(start=Mock(), close=Mock())
+    monkeypatch.setattr(DefaultAgent, "from_config", lambda _: agent)
+    monkeypatch.setattr(swe_env, "SWEEnv", lambda **_: environment)
+    monkeypatch.setattr(swe_agent_rex, "ApptainerDeployment", lambda *_: None)
+    models = BenchmarkModels("openrouter/offline-check", "unused", None, None, {}, {})
+
+    with pytest.raises(RuntimeError, match="preserve the unresolved trial"):
+        swe_agent.rollout(agent_root, {"id": "task", "problem_statement": "task"}, {}, models, "system", tmp_path, 16)
+
+    assert json.loads((tmp_path / "trajectory.json").read_text()) == trajectory
+    environment.close.assert_called_once_with()
 
 
 def test_real_swerex_retains_shell_state_and_transfers_errors(agent_root, tmp_path):

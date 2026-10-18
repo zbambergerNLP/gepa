@@ -128,7 +128,9 @@ def rollout(
         )
         atomic_json(trial / "trajectory.json", agent.get_trajectory_data())
         status = result.info.get("exit_status", "")
-        if status in {"exit_api", "exit_environment_error", "exit_error"}:
+        # Upstream salvages a partial patch by wrapping the original failure status.
+        exit_reason = status.removeprefix("submitted (").removesuffix(")")
+        if exit_reason in {"exit_api", "exit_environment_error", "exit_error"}:
             raise RuntimeError(f"SWE-agent stopped with {status}; preserve the unresolved trial")
         patch = result.info.get("submission") or ""
         return {"patch": patch, "info": result.info, "trajectory": agent.get_trajectory_data()}

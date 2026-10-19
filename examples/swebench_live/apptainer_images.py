@@ -98,11 +98,19 @@ def stage_images(root: Path, split: str, instance_ids: list[str] | None = None) 
             required = 10 * 1024**3 + 4 * entry["compressed_bytes"]
             if shutil.disk_usage(directory).free < required:
                 raise RuntimeError("Insufficient space to stage this image while retaining a 10 GiB reserve")
+            build_root = os.environ.get("APPTAINER_TMPDIR") or tempfile.gettempdir()
+            if shutil.disk_usage(build_root).free < required:
+                raise RuntimeError("Insufficient temporary build space while retaining a 10 GiB reserve")
             target = directory / (entry["immutable"].split("sha256:")[1] + ".sif")
             if target.exists():
                 raise ValueError("Unverified SIF exists; inspect it before replacing or adopting it")
-            with tempfile.TemporaryDirectory(prefix="build-", dir=directory) as temporary:
-                output = Path(temporary) / "image.sif"
+            # Parallel filesystems can reject valid OCI timestamps during extraction.
+            # Keep publication on the cache filesystem so the final rename stays atomic.
+            with (
+                tempfile.TemporaryDirectory(prefix="build-", dir=directory) as publication,
+                tempfile.TemporaryDirectory(prefix="gepa-apptainer-", dir=build_root) as temporary,
+            ):
+                output = Path(publication) / "image.sif"
                 subprocess.run(
                     [
                         "apptainer",

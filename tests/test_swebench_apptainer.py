@@ -3,10 +3,86 @@
 import hashlib
 import io
 import json
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from examples.swebench_live import apptainer, apptainer_images
+
+
+@pytest.mark.parametrize("explicit_tmpdir", [False, True])
+def test_staging_extracts_locally_and_publishes_atomically(monkeypatch, tmp_path, explicit_tmpdir):
+    assets = tmp_path / "shared-assets"
+    local = tmp_path / "local-tmp"
+    local.mkdir()
+    tag = "starryzhang/sweb.eval.x86_64.example:latest"
+    pin = tag.rsplit(":", 1)[0] + "@sha256:" + "a" * 64
+    monkeypatch.setattr(apptainer_images, "load_data", lambda _: ({"train": [{"id": "task", "image": tag}]}, {}))
+    monkeypatch.setattr(
+        apptainer_images,
+        "resolve_image",
+        lambda _: {
+            "tag": tag,
+            "immutable": pin,
+            "architecture": "amd64",
+            "compressed_bytes": 10,
+        },
+    )
+    monkeypatch.setattr(apptainer_images.shutil, "disk_usage", lambda _: SimpleNamespace(free=100 * 1024**3))
+    monkeypatch.setattr(apptainer_images.tempfile, "gettempdir", lambda: str(local))
+    monkeypatch.delenv("APPTAINER_TMPDIR", raising=False)
+    if explicit_tmpdir:
+        monkeypatch.setenv("APPTAINER_TMPDIR", str(local))
+        monkeypatch.setattr(apptainer_images.tempfile, "gettempdir", lambda: pytest.fail("Explicit root ignored"))
+    calls = []
+
+    def build(argv, *, env, check, timeout):
+        extraction = Path(env["APPTAINER_TMPDIR"])
+        output = Path(argv[-2])
+        assert extraction.parent == local
+        assert output.parent.parent == assets / "apptainer-images"
+        assert extraction != output.parent
+        assert argv[-1] == "docker://" + pin
+        assert check and timeout == 3600
+        assert not (assets / "apptainer-images" / ("a" * 64 + ".sif")).exists()
+        output.write_bytes(b"verified image bytes")
+        calls.append(argv)
+
+    monkeypatch.setattr(apptainer_images.subprocess, "run", build)
+    assert apptainer_images.stage_images(assets, "train", ["task"]) == {"requested": 1, "verified": 1}
+    entry = json.loads((assets / "apptainer-images/manifest.json").read_text())["task"]
+    apptainer_images.verify_image(entry, tag)
+    assert Path(entry["image_id"]).stat().st_mode & 0o777 == 0o444
+    apptainer_images.stage_images(assets, "train", ["task"])
+    assert len(calls) == 1
+
+
+def test_staging_rejects_insufficient_local_build_space(monkeypatch, tmp_path):
+    local = tmp_path / "local-tmp"
+    local.mkdir()
+    tag = "starryzhang/sweb.eval.x86_64.example:latest"
+    monkeypatch.setenv("APPTAINER_TMPDIR", str(local))
+    monkeypatch.setattr(apptainer_images, "load_data", lambda _: ({"train": [{"id": "task", "image": tag}]}, {}))
+    monkeypatch.setattr(
+        apptainer_images,
+        "resolve_image",
+        lambda _: {
+            "tag": tag,
+            "immutable": "repo@sha256:" + "a" * 64,
+            "compressed_bytes": 10,
+        },
+    )
+    monkeypatch.setattr(
+        apptainer_images.shutil,
+        "disk_usage",
+        lambda path: SimpleNamespace(
+            free=0 if Path(path) == local else 100 * 1024**3,
+        ),
+    )
+    monkeypatch.setattr(apptainer_images.subprocess, "run", lambda *a, **k: pytest.fail("Build must not start"))
+    with pytest.raises(RuntimeError, match="temporary build space"):
+        apptainer_images.stage_images(tmp_path / "assets", "train")
 
 
 def test_registry_resolution_pins_config_and_manifest(monkeypatch):

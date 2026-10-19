@@ -84,6 +84,11 @@ selected by its training, validation and test limits. The default run needs
 Keep the Apptainer manifest and SIFs together in `apptainer-images/`. A changed
 SIF or an existing unverified SIF fails closed and requires inspection.
 
+Image extraction uses `APPTAINER_TMPDIR`, or Python's temporary directory when
+it is unset. Choose node-local storage, such as `/tmp`, with space for the
+uncompressed image. GPFS can reject valid OCI file timestamps. Final SIF files
+remain on shared storage and enter the manifest only after checksum verification.
+
 Execution requires an allocated Linux AMD64 node with exactly one node, four
 CPUs, `--mem=16G`, no GPUs, and sequential tasks (`--max-workers 1`). An explicit
 `--task-memory-gib` must match the allocation and becomes part of the experiment

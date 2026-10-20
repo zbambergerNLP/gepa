@@ -292,6 +292,118 @@ def test_tau_worker_receives_one_explicit_auxiliary_route(hosted, tmp_path, monk
     assert seen[0]["auxiliary"]["model"] == "openrouter/openai/gpt-4.1"
     assert seen[0]["auxiliary"]["kwargs"]["extra_body"]["provider"]["only"] == ["provider-a"]
     assert "fixture-key" not in json.dumps(seen)
+    assert hosted[1]["schema_version"] == 2 and "tau_protocol" not in hosted[1]
+    assert auxiliary["official_model"] == "gpt-4.1-2025-04-14"
+    assert auxiliary["kwargs"]["max_tokens"] == 32768
+    assert auxiliary["kwargs"]["temperature"] == 0.0
+    assert "reasoning" not in auxiliary["kwargs"]["extra_body"]
+
+
+def test_custom_tau_cannot_reuse_reference_baseline_or_resume_contract(hosted, tmp_path, monkeypatch):
+    from examples.taubench import main
+
+    monkeypatch.setattr(main, "load_data", lambda _: ({"train": [], "val": [], "test": []}, {"records": []}))
+    monkeypatch.setattr(main, "upstream_system_prompt", lambda _: "Keep this system instruction")
+    args = SimpleNamespace(tau_source=tmp_path, run_dir=tmp_path / "run", template_family="alibaba", max_workers=1)
+    models = SimpleNamespace(solver_model="deepseek/fixture", solver_api_base=profile.API_BASE, solver_kwargs={})
+    args._api_profile = hosted[1]
+    reference = main.build_benchmark(args, models)
+    custom = deepcopy(hosted[1])
+    custom.update(schema_version=3, tau_protocol=profile.CUSTOM_TAU_PROTOCOL)
+    custom["roles"]["tau"]["model_id"] = "deepseek/custom"
+    custom["roles"]["tau"]["parameters"]["reasoning_effort"] = "low"
+    args._api_profile = custom
+    variant = main.build_benchmark(args, models)
+    assert reference.seed_candidate == variant.seed_candidate
+    assert reference.source == variant.source
+    assert "auxiliary_protocol" not in reference.runtime
+    assert variant.runtime["auxiliary_protocol"] == profile.CUSTOM_TAU_PROTOCOL
+    assert variant.runtime["user_model"] == variant.runtime["judge_model"] == "openrouter/deepseek/custom"
+    monkeypatch.setattr(
+        runner, "evaluate_candidate", lambda definition, candidate, records, directory, *a, **kw: directory
+    )
+    old_path = runner._starting_baseline(reference, args.run_dir, reference.runtime, 0)
+    new_path = runner._starting_baseline(variant, args.run_dir, variant.runtime, 0)
+    assert old_path != new_path
+    assert new_path == runner._starting_baseline(variant, tmp_path / "other-method", variant.runtime, 0)
+    runner.ensure_contract(args.run_dir, "run-contract.json", reference.runtime)
+    with pytest.raises(ValueError, match="configuration or data changed"):
+        runner.ensure_contract(args.run_dir, "run-contract.json", variant.runtime)
+
+
+def test_custom_tau_cli_preserves_low_for_all_roles_and_requires_explicit_opt_in(tmp_path, monkeypatch):
+    model = "deepseek/deepseek-v4.1-flash-1017"
+    monkeypatch.setattr(profile, "endpoints", lambda name: [endpoint(name, "deepinfra/fp8")])
+    path = tmp_path / "custom.json"
+    parameters = {"max_tokens": 32768, "reasoning_effort": "low", "seed": 0}
+    assert (
+        cli.main(
+            [
+                "plan",
+                "--output",
+                str(path),
+                "--solver-model",
+                model,
+                "--proposer-model",
+                model,
+                "--tau-model",
+                model,
+                "--solver-parameters",
+                json.dumps(parameters),
+                "--proposer-parameters",
+                json.dumps(parameters),
+                "--tau-parameters",
+                json.dumps(parameters),
+            ]
+        )
+        == 0
+    )
+    custom = profile.load_profile(path)
+    profile.verify_routes(custom)
+    assert custom["schema_version"] == 3
+    assert custom["tau_protocol"] == profile.CUSTOM_TAU_PROTOCOL
+    assert custom["jev"] == profile.JEV_TRANSPORT
+    auxiliary = profile.tau_settings(custom)
+    assert auxiliary["model"] == "openrouter/" + model
+    assert "official_model" not in auxiliary
+    for kwargs in (profile.role_kwargs(custom, "solver"), profile.role_kwargs(custom, "proposer"), auxiliary["kwargs"]):
+        assert kwargs["extra_body"]["reasoning"] == {"effort": "low"}
+        assert kwargs["extra_body"]["provider"]["only"] == ["deepinfra/fp8"]
+        assert kwargs["extra_body"]["provider"]["allow_fallbacks"] is False
+        assert "reasoning_effort" not in kwargs
+    legacy = deepcopy(custom)
+    legacy["schema_version"] = 2
+    legacy.pop("tau_protocol")
+    path.write_text(json.dumps(legacy))
+    with pytest.raises(ValueError, match="Incompatible tau"):
+        profile.load_profile(path)
+    custom["tau_protocol"] = "official"
+    path.write_text(json.dumps(custom))
+    with pytest.raises(ValueError, match="protocol"):
+        profile.load_profile(path)
+    with pytest.raises(ValueError, match="explicit tau_model"):
+        profile.make_profile(model, model, tau_parameters=parameters)
+
+
+@pytest.mark.parametrize("control", ["reasoning", "response_format", "structured_outputs"])
+def test_custom_tau_rejects_missing_judge_controls_before_calls(tmp_path, monkeypatch, control):
+    monkeypatch.setattr(profile, "endpoints", lambda model: [endpoint(model)])
+    record = profile.make_profile(
+        "openai/a",
+        "openai/b",
+        tau_model="deepseek/custom",
+        tau_parameters={"max_tokens": 32768, "reasoning_effort": "low"},
+    )
+    broken = endpoint("deepseek/custom")
+    broken["supported_parameters"].remove(control)
+    monkeypatch.setattr(profile, "endpoints", lambda model: [broken])
+    with pytest.raises(ValueError, match="Pinned tau"):
+        profile.verify_routes(record, ("tau",))
+    record["roles"]["tau"]["supported_parameters"].remove(control)
+    path = tmp_path / "broken.json"
+    path.write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="Incompatible tau"):
+        profile.load_profile(path)
 
 
 def test_jev_uses_openrouter_key_and_dated_response_identity(monkeypatch):

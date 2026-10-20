@@ -316,8 +316,8 @@ def test_actual_max_steps_is_failure_and_cannot_be_reported_as_success(source, t
 
 
 @pytest.mark.parametrize("judge_result", ["empty", "met", "unmet"])
-@pytest.mark.parametrize("hosted", [False, True])
-def test_required_nl_assertion_uses_fixed_judge_and_rejects_empty_grades(
+@pytest.mark.parametrize("hosted", [False, True, "deepseek"])
+def test_required_nl_assertion_uses_selected_judge_and_rejects_empty_grades(
     source, tmp_path, monkeypatch, judge_result, hosted
 ):
     factories = dict(registry._agent_factories)
@@ -339,6 +339,22 @@ def test_required_nl_assertion_uses_fixed_judge_and_rejects_empty_grades(
         if hosted
         else None
     )
+    if hosted == "deepseek":
+        from examples.local_api.profile import tau_settings
+
+        auxiliary = tau_settings(
+            {
+                "schema_version": 3,
+                "roles": {
+                    "tau": {
+                        "model_id": "deepseek/deepseek-v4.1-flash-1017",
+                        "tag": "deepinfra/fp8",
+                        "pricing": {"prompt": "0.000000098", "completion": "0.000000294"},
+                        "parameters": {"max_tokens": 32768, "reasoning_effort": "low", "seed": 0},
+                    }
+                },
+            }
+        )
 
     def completion(**kwargs):
         assert kwargs["model"] == (auxiliary["model"] if auxiliary else USER_MODEL)
@@ -395,6 +411,12 @@ def test_required_nl_assertion_uses_fixed_judge_and_rejects_empty_grades(
     assert judge_calls[0]["api_base"] == user_calls[0]["api_base"] == expected_base
     if hosted:
         assert judge_calls[0]["extra_body"] == user_calls[0]["extra_body"] == auxiliary["kwargs"]["extra_body"]
+    if hosted == "deepseek":
+        for call in (judge_calls[0], user_calls[0]):
+            assert call["extra_body"]["reasoning"] == {"effort": "low"}
+            assert call["extra_body"]["provider"]["only"] == ["deepinfra/fp8"]
+            assert call["extra_body"]["provider"]["allow_fallbacks"] is False
+            assert "reasoning_effort" not in call
     attempts = [json.loads(line) for line in (tmp_path / "provider-attempts.jsonl").read_text().splitlines()]
     assert {row["role"] for row in attempts} == {"tau_user", "tau_judge"}
 

@@ -142,6 +142,13 @@ uv run python -m examples.taubench.main --condition both --run-dir outputs/tau-b
 
 No paid model campaign or Slurm launch is part of the offline verification.
 
+Hosted runs can explicitly select a custom simulator and judge through a
+[version-3 API profile](../local_api/README.md). This is a separate Tau variant:
+the user simulator can change task difficulty, and the judge can change required
+NL assertion scores. Keep the same auxiliary model and decoding settings across
+methods. Use fresh run directories and baselines. The default dated GPT-4.1
+configuration and all pinned benchmark files remain unchanged.
+
 ## Offline verification
 
 ```sh

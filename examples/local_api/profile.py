@@ -19,6 +19,7 @@ API_BASE = "https://openrouter.ai/api/v1"
 BENCHMARKS = ("hotpotqa", "decisionbench", "appworld", "obliqbench", "taubench", "terminalbench", "swebench_live")
 ROLES = ("solver", "proposer", "tau")
 TAU_MODEL = "openai/gpt-4.1"
+CUSTOM_TAU_PROTOCOL = "custom_auxiliary_model_v1"
 PARAMETERS = {"max_tokens", "temperature", "top_p", "top_k", "seed", "reasoning_effort"}
 JEV_TRANSPORT = {
     "model": "typesafe/jev-1.13",
@@ -66,7 +67,7 @@ def validate_parameters(parameters: dict) -> None:
         raise ValueError("Unsupported reasoning effort")
 
 
-def eligible(endpoint: dict, model: str, parameters: dict, *, tau: bool = False) -> bool:
+def eligible(endpoint: dict, model: str, parameters: dict, *, tau: bool = False, custom_tau: bool = False) -> bool:
     """Require the exact chosen model, capacity, native tools and requested controls."""
     supported = set(endpoint.get("supported_parameters", []))
     if "max_completion_tokens" in supported:
@@ -80,7 +81,14 @@ def eligible(endpoint: dict, model: str, parameters: dict, *, tau: bool = False)
         and (endpoint.get("max_completion_tokens") or 0) >= parameters["max_tokens"]
         and endpoint.get("context_length", 0) > parameters["max_tokens"]
         and required <= supported
-        and (not tau or (model == TAU_MODEL and "2025-04-14" in endpoint.get("name", "")))
+        and (
+            not tau
+            or (
+                {"response_format", "structured_outputs"} <= supported
+                if custom_tau
+                else model == TAU_MODEL and "2025-04-14" in endpoint.get("name", "")
+            )
+        )
     )
 
 
@@ -108,22 +116,34 @@ def make_profile(
     *,
     solver_parameters: dict | None = None,
     proposer_parameters: dict | None = None,
+    tau_model: str | None = None,
+    tau_parameters: dict | None = None,
     input_output_ratio: float = 5.0,
 ) -> dict:
     """Choose prices only after the user chooses models and decoding requirements."""
     if not math.isfinite(input_output_ratio) or input_output_ratio < 0:
         raise ValueError("Input/output ratio must be finite and nonnegative")
+    if tau_parameters is not None and tau_model is None:
+        raise ValueError("Custom Tau parameters require an explicit tau_model and a new benchmark variant")
+    custom_tau = tau_model is not None
     choices = {
         "solver": (solver_model, solver_parameters or {"max_tokens": 32_768}),
         "proposer": (proposer_model, proposer_parameters or {"max_tokens": 32_768}),
-        "tau": (TAU_MODEL, {"max_tokens": 32_768, "temperature": 0.0}),
+        "tau": (
+            tau_model if custom_tau else TAU_MODEL,
+            tau_parameters if tau_parameters is not None else {"max_tokens": 32_768, "temperature": 0.0},
+        ),
     }
     roles = {}
     for role, (model, parameters) in choices.items():
         if not re.fullmatch(r"[A-Za-z0-9_.:-]+/[A-Za-z0-9_./:-]+", model):
             raise ValueError("Use an explicit OpenRouter provider/model ID")
         validate_parameters(parameters)
-        candidates = [row for row in endpoints(model) if eligible(row, model, parameters, tau=role == "tau")]
+        candidates = [
+            row
+            for row in endpoints(model)
+            if eligible(row, model, parameters, tau=role == "tau", custom_tau=custom_tau)
+        ]
         if not candidates:
             raise ValueError(f"No compatible, available endpoint for {role}: {model}")
         chosen = min(
@@ -136,7 +156,8 @@ def make_profile(
         )
         roles[role] = {**route_record(chosen), "parameters": deepcopy(parameters)}
     return {
-        "schema_version": 2,
+        "schema_version": 3 if custom_tau else 2,
+        **({"tau_protocol": CUSTOM_TAU_PROTOCOL} if custom_tau else {}),
         "provider": "openrouter",
         "observed_at": datetime.now(timezone.utc).isoformat(),
         "selection": {"uncached_input_tokens_per_output_token": input_output_ratio, "fallbacks": False},
@@ -144,17 +165,32 @@ def make_profile(
         "jev": dict(JEV_TRANSPORT),
         "compatibility": "New hosted campaign. Model choices and request parameters are explicit; omitted "
         "sampling parameters use provider defaults. Quantization is catalog-reported; checkpoint revisions "
-        "are unavailable. No Della checkpoint, baseline or timing identity is reused.",
+        "are unavailable. No Della checkpoint, baseline or timing identity is reused."
+        + (
+            " Tau uses a custom simulator/judge model; results belong to a separate benchmark variant."
+            if custom_tau
+            else ""
+        ),
     }
 
 
 def load_profile(path: Path) -> dict:
     """Reject secrets, arbitrary endpoints and incomplete route identities."""
     profile = json.loads(path.read_text())
-    if set(profile) != {"schema_version", "provider", "observed_at", "selection", "roles", "jev", "compatibility"}:
+    custom_tau = profile.get("schema_version") == 3
+    fields = {"schema_version", "provider", "observed_at", "selection", "roles", "jev", "compatibility"}
+    if custom_tau:
+        fields.add("tau_protocol")
+    if set(profile) != fields:
         raise ValueError("Unexpected API profile fields; never put credentials in a profile")
-    if profile["schema_version"] != 2 or profile["provider"] != "openrouter" or set(profile["roles"]) != set(ROLES):
+    if (
+        profile["schema_version"] not in (2, 3)
+        or profile["provider"] != "openrouter"
+        or set(profile["roles"]) != set(ROLES)
+    ):
         raise ValueError("Unsupported API profile")
+    if custom_tau and profile["tau_protocol"] != CUSTOM_TAU_PROTOCOL:
+        raise ValueError("Unrecognized custom Tau benchmark protocol")
     if profile["jev"] != JEV_TRANSPORT:
         raise ValueError("Unpinned Jev transport")
     for role, route in profile["roles"].items():
@@ -172,7 +208,13 @@ def load_profile(path: Path) -> dict:
         }:
             raise ValueError("Incomplete or unexpected route identity")
         validate_parameters(route["parameters"])
-        if not eligible({**route, "status": 0}, route["model_id"], route["parameters"], tau=role == "tau"):
+        if not eligible(
+            {**route, "status": 0},
+            route["model_id"],
+            route["parameters"],
+            tau=role == "tau",
+            custom_tau=custom_tau,
+        ):
             raise ValueError(f"Incompatible {role} route")
         for field in ("prompt", "completion"):
             price = Decimal(route["pricing"][field])
@@ -186,7 +228,13 @@ def verify_routes(profile: dict, roles: tuple[str, ...] = ("solver", "proposer",
     for role in roles:
         saved = profile["roles"][role]
         current = next((row for row in endpoints(saved["model_id"]) if row["tag"] == saved["tag"]), None)
-        if current is None or not eligible(current, saved["model_id"], saved["parameters"], tau=role == "tau"):
+        if current is None or not eligible(
+            current,
+            saved["model_id"],
+            saved["parameters"],
+            tau=role == "tau",
+            custom_tau=profile.get("schema_version") == 3,
+        ):
             raise ValueError(f"Pinned {role} route unavailable or no longer compatible")
         if not set(saved["supported_parameters"]) <= set(current["supported_parameters"]):
             raise ValueError(f"Pinned {role} route lost parameter support")
@@ -233,21 +281,28 @@ def role_kwargs(profile: dict, role: str) -> dict:
 
 
 def tau_settings(profile: dict | None) -> dict:
-    """Keep Tau's official model while routing both simulator and judge explicitly."""
+    """Route simulator and judge together, preserving the default dated GPT protocol."""
     from examples.taubench.model_settings import USER_KWARGS, USER_MODEL
 
     if profile is None:
         return {"model": USER_MODEL, "kwargs": deepcopy(USER_KWARGS)}
-    return {
-        "model": "openrouter/" + TAU_MODEL,
-        "official_model": USER_MODEL,
-        "kwargs": {
-            **deepcopy(profile["roles"]["tau"]["parameters"]),
-            "timeout": USER_KWARGS["timeout"],
-            "api_base": API_BASE,
-            "extra_body": {"provider": provider_options(profile["roles"]["tau"])},
-        },
+    route = profile["roles"]["tau"]
+    kwargs = {
+        **deepcopy(route["parameters"]),
+        "timeout": USER_KWARGS["timeout"],
+        "api_base": API_BASE,
+        "extra_body": {"provider": provider_options(route)},
     }
+    if "reasoning_effort" in kwargs:
+        kwargs["extra_body"]["reasoning"] = {"effort": kwargs.pop("reasoning_effort")}
+    if "top_k" in kwargs:
+        kwargs["extra_body"]["top_k"] = kwargs.pop("top_k")
+    identity = (
+        {"protocol": CUSTOM_TAU_PROTOCOL, "reference_model": USER_MODEL}
+        if profile.get("schema_version") == 3
+        else {"official_model": USER_MODEL}
+    )
+    return {"model": "openrouter/" + route["model_id"], **identity, "kwargs": kwargs}
 
 
 def model_info(profile: dict, role: str) -> dict:

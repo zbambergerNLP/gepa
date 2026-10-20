@@ -151,6 +151,23 @@ an explicit 32768 output ceiling. The official dated model name is checked in
 endpoint metadata. Account privacy restrictions remain effective; a rejected
 route is not retried through a different provider.
 
+To use a different Tau simulator and judge, explicitly add `--tau-model` and
+`--tau-parameters` to `plan`. This writes a version-3 profile marked
+`custom_auxiliary_model_v1`. Both auxiliary roles use that exact model, route and
+decoding configuration. For DeepSeek low reasoning, pass
+`--tau-model deepseek/deepseek-v4.1-flash-1017` and
+`--tau-parameters '{"max_tokens":32768,"temperature":0.0,"seed":0,"reasoning_effort":"low"}'`.
+Set low reasoning separately in the solver and proposer parameters as well.
+Inspect the selected route before use; this metadata command does not make model calls.
+
+A custom simulator changes user behavior. A custom judge can change NL assertion
+scores. Report this as a separate Tau variant, with the same auxiliary settings
+for both methods and a fresh baseline. Tasks, splits, prompts, tools and grading
+code remain fixed. The profile and runtime contract record the changed identity.
+Version-2 profiles still require the dated GPT-4.1 route. Existing runs must not
+resume under a different profile. Live compatibility still needs an approved
+paid pilot; metadata and offline checks do not establish it.
+
 FOREST's optional Jev controller also uses this key, through OpenRouter's typed
 decision endpoint. It requests `typesafe/jev-1.13` and validates the observed
 dated response ID `typesafe/jev-1.13-20260917`. It does not upgrade Jev or turn

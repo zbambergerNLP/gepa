@@ -234,8 +234,9 @@ def run_request(request: dict) -> dict:
             "gepa_candidate": candidate,
             "manifest_sha256": digest(manifest),
             "solver_model": request["solver_model"],
-            "user_model": USER_MODEL,
-            "judge_model": JUDGE_MODEL,
+            "user_model": auxiliary.get("official_model", auxiliary["model"]),
+            "judge_model": auxiliary.get("official_model", auxiliary["model"]),
+            **({"auxiliary_protocol": auxiliary["protocol"]} if "protocol" in auxiliary else {}),
         }
         filename = f"{record['task_id']}-trial{trial}-{uuid4().hex}.json"
         (artifacts / filename).write_text(simulation.model_dump_json(indent=2))

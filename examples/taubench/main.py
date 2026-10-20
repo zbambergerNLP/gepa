@@ -73,6 +73,7 @@ def build_benchmark(args: argparse.Namespace, models: BenchmarkModels) -> Benchm
             "user_kwargs": auxiliary["kwargs"],
             "judge_model": auxiliary["model"],
             "judge_kwargs": auxiliary["kwargs"],
+            **({"auxiliary_protocol": auxiliary["protocol"]} if "protocol" in auxiliary else {}),
             "evaluator": "EvaluationType.ALL; required reward_basis product",
             "max_steps": MAX_STEPS,
             "max_errors": MAX_ERRORS,

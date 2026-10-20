@@ -191,6 +191,8 @@ def main(argv: list[str] | None = None) -> int:
     plan.add_argument("--proposer-model", required=True, help="OpenRouter model ID; may equal solver")
     plan.add_argument("--solver-parameters", default='{"max_tokens":32768}', help="Explicit decoding JSON")
     plan.add_argument("--proposer-parameters", default='{"max_tokens":32768}', help="Explicit decoding JSON")
+    plan.add_argument("--tau-model", help="Opt into a separate Tau variant with this simulator and judge model")
+    plan.add_argument("--tau-parameters", help="Explicit auxiliary decoding JSON; requires --tau-model")
     commands.add_parser("doctor", help="Inspect local prerequisites only")
     check = commands.add_parser("check", help="Check auth/routes; optional four tiny API requests")
     check.add_argument("--profile", type=Path, required=True)
@@ -207,6 +209,8 @@ def main(argv: list[str] | None = None) -> int:
             args.proposer_model,
             solver_parameters=json.loads(args.solver_parameters),
             proposer_parameters=json.loads(args.proposer_parameters),
+            tau_model=args.tau_model,
+            tau_parameters=json.loads(args.tau_parameters) if args.tau_parameters is not None else None,
             input_output_ratio=args.input_output_ratio,
         )
         args.output.parent.mkdir(parents=True, exist_ok=True)

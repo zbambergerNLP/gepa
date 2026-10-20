@@ -70,7 +70,19 @@ class SWEBenchLiveAdapter:
 
     propose_new_texts = None
 
-    def __init__(self, models, root, run_dir, records, images, *, agent_root=None, memory_gib=16, test_timeout=1800):
+    def __init__(
+        self,
+        models,
+        root,
+        run_dir,
+        records,
+        images,
+        *,
+        agent_root=None,
+        memory_gib=16,
+        test_timeout=1800,
+        agent_max_steps=None,
+    ):
         self.models = models
         self.root = root.resolve()
         self.run_dir = run_dir.resolve()
@@ -79,6 +91,7 @@ class SWEBenchLiveAdapter:
         self.agent_root = agent_root or root / "swe-agent"
         self.memory_gib = memory_gib
         self.test_timeout = test_timeout
+        self.agent_max_steps = agent_max_steps
         self.rollout = rollout
         self.grader = grade
         self.evaluator_rows = {}
@@ -108,6 +121,7 @@ class SWEBenchLiveAdapter:
                 candidate[COMPONENT],
                 trial,
                 self.memory_gib,
+                max_steps=self.agent_max_steps,
             )
             messages = result["trajectory"]
             output["swe_agent_info"] = result["info"]

@@ -8,7 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import yaml
@@ -38,7 +38,142 @@ def test_default_selection_and_no_custom_turn_cap():
     args = parser.parse_args([])
     assert (args.train_limit, args.val_limit, args.test_limit) == (60, 120, 120)
     assert args.container_backend == "apptainer"
-    assert not hasattr(args, "agent_max_steps")
+    assert args.agent_max_steps is None
+    assert parser.parse_args(["--agent-max-steps", "30"]).agent_max_steps == 30
+
+
+@pytest.mark.parametrize("limit", ["0", "-1"])
+def test_invalid_step_limit_fails_before_loading_assets(limit, monkeypatch):
+    parser = argparse.ArgumentParser()
+    add_arguments(parser)
+    args = parser.parse_args(["--agent-max-steps", limit])
+    args.api_profile, args.max_workers = "explicit.json", 1
+    loader = Mock(side_effect=AssertionError("Must not read assets"))
+    monkeypatch.setattr(swe_main, "load_data", loader)
+    with pytest.raises(ValueError, match="max_steps must be positive"):
+        build_benchmark(args, None)
+    loader.assert_not_called()
+
+
+def test_step_limit_changes_only_model_limit_and_runtime_identity(agent_root, monkeypatch):
+    from examples.common.artifacts import digest
+
+    models = BenchmarkModels("openrouter/offline-check", "unused", None, None, {}, {})
+    original = swe_agent.configuration(agent_root, models)
+    limited = swe_agent.configuration(agent_root, models, max_steps=30)
+    assert limited["model"].pop("per_instance_call_limit") == 30
+    assert original["model"].pop("per_instance_call_limit") == 100
+    assert limited == original
+    monkeypatch.setattr(swe_agent, "verify_payload", lambda _: {"test_payload": True})
+    original_runtime = swe_agent.runtime_identity(agent_root, models)
+    limited_runtime = swe_agent.runtime_identity(agent_root, models, max_steps=30)
+    assert "step_budget" not in original_runtime
+    assert limited_runtime["step_budget"] == {"max_queries": 30, "enforcement": "before_query_v1"}
+    assert digest(limited_runtime) != digest(original_runtime)
+
+
+@pytest.mark.parametrize("limit", [1, 30])
+def test_pinned_agent_stops_before_extra_query_and_uses_native_autosubmission(agent_root, monkeypatch, limit):
+    """Exercise the pinned parser and stop handler without a provider or container."""
+    from sweagent.agent.agents import DefaultAgent, DefaultAgentConfig
+    from sweagent.agent.models import PredeterminedTestModel
+
+    response = {
+        "message": "Inspect the repository",
+        "tool_calls": [
+            {"id": "probe", "type": "function", "function": {"name": "bash", "arguments": '{"command":"pwd"}'}}
+        ],
+    }
+    model = PredeterminedTestModel([response] * (limit + 1))
+    dispatch = Mock(wraps=model.query)
+    monkeypatch.setattr(model, "query", dispatch)
+    models = BenchmarkModels("openrouter/offline-check", "unused", None, None, {}, {})
+    config = DefaultAgentConfig.model_validate(swe_agent.configuration(agent_root, models, max_steps=limit))
+    agent = DefaultAgent.from_config(config)
+    agent.model = swe_agent._StepLimitedModel(model, limit)
+    agent._env = SimpleNamespace(
+        deployment=SimpleNamespace(is_alive=AsyncMock(return_value=True)),
+        repo=SimpleNamespace(repo_name="testbed"),
+        execute_command=Mock(),
+        read_file=Mock(return_value="partial patch"),
+    )
+    handle_action = Mock(side_effect=lambda step: step)
+    autosubmit = Mock(wraps=agent.attempt_autosubmission_after_error)
+    monkeypatch.setattr(agent, "handle_action", handle_action)
+    monkeypatch.setattr(agent, "attempt_autosubmission_after_error", autosubmit)
+
+    for _ in range(limit):
+        assert not agent.forward_with_handling([]).done
+    stopped = agent.forward_with_handling([])
+    assert dispatch.call_count == handle_action.call_count == limit
+    assert stopped.done and stopped.exit_status == "submitted (exit_cost)"
+    assert stopped.submission == "partial patch"
+    autosubmit.assert_called_once()
+    agent._env.execute_command.assert_called_once_with(
+        "git add -A && git diff --cached > /root/model.patch", check=True, cwd="/testbed"
+    )
+    assert agent.model.stats is model.stats
+
+
+def test_recovery_queries_share_the_same_step_budget(agent_root, monkeypatch):
+    from sweagent.agent.agents import DefaultAgent, DefaultAgentConfig
+    from sweagent.exceptions import ContentPolicyViolationError
+
+    models = BenchmarkModels("openrouter/offline-check", "unused", None, None, {}, {})
+    config = DefaultAgentConfig.model_validate(swe_agent.configuration(agent_root, models, max_steps=1))
+    agent = DefaultAgent.from_config(config)
+    dispatch = Mock(side_effect=ContentPolicyViolationError("Retry consumes the existing query budget"))
+    agent.model = swe_agent._StepLimitedModel(SimpleNamespace(query=dispatch), 1)
+    autosubmit = Mock(side_effect=lambda step: step)
+    monkeypatch.setattr(agent, "attempt_autosubmission_after_error", autosubmit)
+    stopped = agent.forward_with_handling([])
+    assert stopped.done and stopped.exit_status == "exit_cost"
+    dispatch.assert_called_once()
+    autosubmit.assert_called_once()
+
+
+def test_rollout_installs_a_fresh_budget_and_closes_before_return(agent_root, tmp_path, monkeypatch):
+    from sweagent.agent.agents import DefaultAgent
+    from sweagent.environment import swe_env
+    from sweagent.exceptions import InstanceCallLimitExceededError
+
+    from examples.swebench_live import swe_agent_rex
+
+    dispatch = Mock(return_value={"message": "test"})
+    model = SimpleNamespace(query=dispatch)
+    agents = []
+    info = {"exit_status": "submitted (exit_cost)", "submission": "partial patch"}
+
+    def from_config(_):
+        agent = SimpleNamespace(model=model, get_trajectory_data=lambda: {"info": info})
+
+        def run(**_):
+            for _ in range(30):
+                agent.model.query([])
+            with pytest.raises(InstanceCallLimitExceededError):
+                agent.model.query([])
+            return SimpleNamespace(info=info)
+
+        agent.run = run
+        agents.append(agent)
+        return agent
+
+    environment = SimpleNamespace(start=Mock(), close=Mock())
+    monkeypatch.setattr(DefaultAgent, "from_config", from_config)
+    monkeypatch.setattr(swe_env, "SWEEnv", lambda **_: environment)
+    monkeypatch.setattr(swe_agent_rex, "ApptainerDeployment", lambda *_: None)
+    models = BenchmarkModels("openrouter/offline-check", "unused", None, None, {}, {})
+    for index in range(2):
+        trial = tmp_path / str(index)
+        trial.mkdir()
+        result = swe_agent.rollout(
+            agent_root, {"id": "task", "problem_statement": "task"}, {}, models, "system", trial, 16, max_steps=30
+        )
+        assert result["patch"] == "partial patch"
+        assert json.loads((trial / "swe-agent-config.json").read_text())["model"]["per_instance_call_limit"] == 30
+    assert dispatch.call_count == 60
+    assert agents[0].model is not agents[1].model
+    assert environment.close.call_count == 2
 
 
 def test_swe_builder_exposes_only_the_verbatim_system_template(agent_root, tmp_path, monkeypatch):
@@ -51,9 +186,16 @@ def test_swe_builder_exposes_only_the_verbatim_system_template(agent_root, tmp_p
     splits = {split: [{"id": split}] for split in ("train", "val", "test")}
     monkeypatch.setattr(swe_main, "load_data", lambda _: (splits, {}))
     for name in ("verify_runtime", "apptainer_runtime", "verify_apptainer_images", "agent_runtime"):
-        monkeypatch.setattr(swe_main, name, lambda *_: {})
-    monkeypatch.setattr(swe_main, "SWEBenchLiveAdapter", lambda *_, **__: Mock())
+        monkeypatch.setattr(swe_main, name, lambda *_, **__: {})
+    adapter = Mock()
+    monkeypatch.setattr(swe_main, "SWEBenchLiveAdapter", adapter)
+    args.agent_max_steps = 30
+    runtime = Mock(return_value={"step_budget": {"max_queries": 30, "enforcement": "before_query_v1"}})
+    monkeypatch.setattr(swe_main, "agent_runtime", runtime)
     benchmark = build_benchmark(args, None)
+    runtime.assert_called_once_with(agent_root, None, max_steps=30)
+    assert adapter.call_args.kwargs["agent_max_steps"] == 30
+    assert benchmark.runtime["agent"]["step_budget"]["max_queries"] == 30
     seed = swe_agent.seed_prompt(agent_root)
     assert benchmark.seed_candidate == {"system_prompt": seed}
     assert benchmark.component_kinds == {"system_prompt": "system_prompt"}

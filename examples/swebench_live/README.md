@@ -143,6 +143,16 @@ This pin is the Live-recommended evaluation fork as inspected on October 17,
 configuration sets `per_instance_call_limit: 100`. The upstream implementation
 checks the limit after a response and can issue a 101st call before stopping;
 we retain and record that behavior rather than silently changing the agent.
+An explicit `--agent-max-steps 30` selects a separate limited runtime. It permits
+at most 30 agent model queries per task and stops before dispatching query 31.
+Recovery queries and submission-review queries count toward this limit.
+Transport retries within one query remain separate provider attempts.
+The limit is not a token or dollar cap. The upstream agent still extracts any
+partial patch when the query budget ends. No additional model query is used.
+The limit and its enforcement enter the runtime contract. Use a fresh baseline
+and output directory when changing the limit. Omitting the flag preserves the
+original configuration and stopping behavior. Benchmark tests, task records,
+tools, and the upstream starting prompt do not change.
 The default tool timeouts are also upstream's: 30 seconds per action and
 1,800 seconds of cumulative execution. The text editor's own clipping and
 file-map behavior remain active; this is not the old untruncated shell tool.

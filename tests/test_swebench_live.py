@@ -53,10 +53,11 @@ def native(tmp_path):
     )
     events = []
 
-    def upstream(root, safe_record, image, models, prompt, trial, memory):
-        assert not list(tmp_path.rglob("evaluator-record.json"))
+    def upstream(root, safe_record, image, models, prompt, trial, memory, *, max_steps=None):
+        assert not (trial / "evaluator-record.json").exists()
         assert not any(secret in json.dumps(safe_record) for secret in ("GOLD SOLUTION", "HIDDEN TEST", "SECRET HINT"))
         assert models.solver_model == "explicit/solver"
+        assert max_steps == runner.agent_max_steps
         events.extend(["start", "upstream-agent", "stop"])
         return {"patch": "PATCH", "trajectory": {"history": ["upstream-history"]}, "info": {"exit_status": "submitted"}}
 
@@ -91,7 +92,7 @@ def test_provider_failure_stays_unresolved_and_is_not_retried_or_scored(native):
     runner, record, events = native
     calls = []
 
-    def failure(*args):
+    def failure(*args, **kwargs):
         calls.append(args)
         raise RuntimeError("provider outcome unknown")
 
@@ -102,6 +103,13 @@ def test_provider_failure_stays_unresolved_and_is_not_retried_or_scored(native):
     assert not list(runner.run_dir.rglob("result.json"))
     assert len(list(runner.run_dir.rglob("intent.json"))) == 1
     assert len(list(runner.run_dir.rglob("trajectory.json"))) == 1
+
+
+def test_adapter_passes_the_same_step_limit_to_each_task(native):
+    runner, record, _ = native
+    runner.agent_max_steps = 30
+    result = runner.evaluate([record, record], {"system_prompt": "Generic instructions"})
+    assert result.scores == [1.0, 1.0]
 
 
 def test_task_record_drift_is_rejected_before_a_container_or_model(native):

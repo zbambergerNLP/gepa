@@ -51,8 +51,13 @@ def configuration(root: Path, models, prompt: str | None = None, *, max_steps: i
     config = yaml.safe_load((root / "source/config/default.yaml").read_text())["agent"]
     config = copy.deepcopy(config)
     config["model"]["name"] = models.solver_model
-    config["model"]["api_base"] = models.solver_api_base
-    config["model"]["completion_kwargs"] = copy.deepcopy(models.solver_kwargs)
+    completion_kwargs = copy.deepcopy(models.solver_kwargs)
+    # Upstream expands its dedicated endpoint separately from completion kwargs.
+    api_base = completion_kwargs.pop("api_base", models.solver_api_base)
+    if models.solver_api_base is not None and api_base != models.solver_api_base:
+        raise ValueError("SWE-agent solver API endpoints disagree")
+    config["model"]["api_base"] = api_base
+    config["model"]["completion_kwargs"] = completion_kwargs
     # The shared provider wrapper owns retries and durable attempt accounting.
     # Do not retry an exhausted or unknown provider outcome in a second layer.
     config["model"]["retry"] = {"retries": 1, "min_wait": 0, "max_wait": 0}

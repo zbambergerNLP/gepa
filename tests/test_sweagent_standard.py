@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -15,6 +16,7 @@ import yaml
 from benchmark_model_fixtures import BenchmarkProposerLM
 
 from examples.common.benchmark_types import BenchmarkModels
+from examples.local_api.profile import API_BASE, role_kwargs
 from examples.swebench_live import main as swe_main
 from examples.swebench_live import swe_agent
 from examples.swebench_live.main import add_arguments, build_benchmark
@@ -232,6 +234,66 @@ def test_pinned_default_agent_configuration_is_preserved(agent_root):
     assert {tool["function"]["name"] for tool in agent.tools.config.tools} == {"bash", "str_replace_editor", "submit"}
     assert resolved.tools.execution_timeout == 30
     assert resolved.tools.total_execution_timeout == 1800
+
+
+@pytest.mark.parametrize("endpoint_source", ["duplicate", "dedicated", "kwargs", "default"])
+def test_pinned_agent_api_base_reaches_completion_once(agent_root, monkeypatch, endpoint_source):
+    """Reach the real upstream dispatch with hosted controls and a fake transport."""
+    import litellm
+    from sweagent.agent.agents import DefaultAgent, DefaultAgentConfig
+
+    route = {
+        "tag": "deepinfra/fp8",
+        "pricing": {"prompt": "0.000001", "completion": "0.000002"},
+        "parameters": {"max_tokens": 65_536, "reasoning_effort": "low", "seed": 0, "temperature": 1, "top_p": 0.95},
+    }
+    kwargs = role_kwargs({"roles": {"solver": route}}, "solver")
+    if endpoint_source in {"dedicated", "default"}:
+        kwargs.pop("api_base")
+    models = BenchmarkModels(
+        "openrouter/deepseek/deepseek-v4.1-flash-1017",
+        "unused",
+        API_BASE if endpoint_source in {"duplicate", "dedicated"} else None,
+        None,
+        kwargs,
+        {},
+    )
+    original_kwargs = deepcopy(models.solver_kwargs)
+    response = litellm.ModelResponse(choices=[{"message": {"role": "assistant", "content": "ready"}}])
+    dispatch = Mock(return_value=response)
+    monkeypatch.setattr(litellm, "completion", dispatch)
+    # Token counting and price lookup are outside the endpoint-binding boundary.
+    monkeypatch.setattr(litellm.utils, "token_counter", lambda **_: 1)
+    monkeypatch.setattr(litellm.cost_calculator, "completion_cost", lambda *_, **__: 0.0)
+
+    config = DefaultAgentConfig.model_validate(swe_agent.configuration(agent_root, models, max_steps=30))
+    agent = DefaultAgent.from_config(config)
+    result = agent.model.query([{"role": "system", "content": "Inspect the training task."}])
+
+    assert result == {"message": "ready", "tool_calls": []}
+    dispatch.assert_called_once()
+    sent = dispatch.call_args.kwargs
+    if endpoint_source == "default":
+        assert "api_base" not in sent
+    else:
+        assert sent["api_base"] == API_BASE
+    assert "api_base" not in config.model.completion_kwargs
+    assert sent["model"] == models.solver_model
+    assert sent["fallbacks"] == []
+    for key, value in original_kwargs.items():
+        if key != "api_base":
+            assert sent[key] == value
+    assert config.model.per_instance_call_limit == 30
+    assert config.model.retry.retries == 1
+    assert models.solver_kwargs == original_kwargs
+
+
+def test_conflicting_solver_api_bases_fail_before_dispatch(agent_root):
+    models = BenchmarkModels(
+        "openrouter/test", "unused", API_BASE, None, {"api_base": "https://different.invalid/v1"}, {}
+    )
+    with pytest.raises(ValueError, match="SWE-agent solver API endpoints disagree"):
+        swe_agent.configuration(agent_root, models)
 
 
 def test_forest_revision_reaches_only_the_real_swe_agent_system_message(agent_root):

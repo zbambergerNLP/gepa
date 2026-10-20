@@ -21,6 +21,11 @@ def add_arguments(parser):
     parser.add_argument("--swe-agent-root", type=Path)
     parser.add_argument("--task-memory-gib", type=int, default=16)
     parser.add_argument("--test-timeout", type=int, default=1800)
+    parser.add_argument(
+        "--agent-max-steps",
+        type=int,
+        help="Cap agent model queries per task, including recovery queries, before dispatch. Omit for upstream behavior.",
+    )
     parser.set_defaults(train_limit=60, val_limit=120, test_limit=120)
 
 
@@ -32,6 +37,8 @@ def build_benchmark(args, models):
         raise ValueError("Local SWE-bench Live executes one container at a time")
     if min(args.task_memory_gib, args.test_timeout) < 1:
         raise ValueError("SWE-bench Live execution bounds must be positive")
+    if args.agent_max_steps is not None and args.agent_max_steps < 1:
+        raise ValueError("SWE-agent max_steps must be positive")
     root = args.swebench_live_root
     splits, source = load_data(root)
     runtime = verify_runtime(root)
@@ -39,7 +46,7 @@ def build_benchmark(args, models):
     container_runtime = apptainer_runtime(args.task_memory_gib)
     images = verify_apptainer_images(root, selected)
     agent_root = args.swe_agent_root or root / "swe-agent"
-    agent_identity = agent_runtime(agent_root, models)
+    agent_identity = agent_runtime(agent_root, models, max_steps=args.agent_max_steps)
     return BenchmarkDefinition(
         name="swebench_live",
         adapter=SWEBenchLiveAdapter(
@@ -51,6 +58,7 @@ def build_benchmark(args, models):
             agent_root=agent_root,
             memory_gib=args.task_memory_gib,
             test_timeout=args.test_timeout,
+            agent_max_steps=args.agent_max_steps,
         ),
         seed_candidate={COMPONENT: seed_prompt(agent_root)},
         trainset=splits["train"],

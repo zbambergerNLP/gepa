@@ -46,7 +46,7 @@ def activate(root: Path) -> dict:
     return identity
 
 
-def configuration(root: Path, models, prompt: str | None = None) -> dict:
+def configuration(root: Path, models, prompt: str | None = None, *, max_steps: int | None = None) -> dict:
     """Preserve upstream agent behavior; bind the explicitly chosen API model."""
     config = yaml.safe_load((root / "source/config/default.yaml").read_text())["agent"]
     config = copy.deepcopy(config)
@@ -56,6 +56,10 @@ def configuration(root: Path, models, prompt: str | None = None) -> dict:
     # The shared provider wrapper owns retries and durable attempt accounting.
     # Do not retry an exhausted or unknown provider outcome in a second layer.
     config["model"]["retry"] = {"retries": 1, "min_wait": 0, "max_wait": 0}
+    if max_steps is not None:
+        if max_steps < 1:
+            raise ValueError("SWE-agent max_steps must be positive")
+        config["model"]["per_instance_call_limit"] = max_steps
     if prompt is not None:
         config["templates"]["system_template"] = prompt
     for bundle in config["tools"]["bundles"]:
@@ -68,13 +72,13 @@ def seed_prompt(root: Path) -> str:
     return yaml.safe_load((root / "source/config/default.yaml").read_text())["agent"]["templates"]["system_template"]
 
 
-def runtime_identity(root: Path, models) -> dict:
+def runtime_identity(root: Path, models, *, max_steps: int | None = None) -> dict:
     """Record the exact agent and resolved config in the experiment contract."""
     identity = activate(root)
     from sweagent.agent.agents import DefaultAgentConfig
 
-    config = DefaultAgentConfig.model_validate(configuration(root, models))
-    return {
+    config = DefaultAgentConfig.model_validate(configuration(root, models, max_steps=max_steps))
+    result = {
         "agent": "SWE-agent",
         "source": identity,
         "config": config.model_dump(mode="json"),
@@ -82,6 +86,32 @@ def runtime_identity(root: Path, models) -> dict:
         "payload": verify_payload(root / "payload"),
         "packages": {d.metadata["Name"]: d.version for d in importlib.metadata.distributions()},
     }
+    if max_steps is not None:
+        result["step_budget"] = {"max_queries": max_steps, "enforcement": "before_query_v1"}
+    return result
+
+
+class _StepLimitedModel:
+    """Count agent queries, including recovery queries, before model dispatch."""
+
+    def __init__(self, model, max_steps: int):
+        if max_steps < 1:
+            raise ValueError("SWE-agent max_steps must be positive")
+        self.model = model
+        self.max_steps = max_steps
+        self.queries = 0
+
+    def __getattr__(self, name):
+        return getattr(self.model, name)
+
+    def query(self, *args, **kwargs):
+        from sweagent.exceptions import InstanceCallLimitExceededError
+
+        # The pinned upstream model checks its limit after sending a request.
+        if self.queries >= self.max_steps:
+            raise InstanceCallLimitExceededError(f"SWE-agent reached its {self.max_steps}-query limit")
+        self.queries += 1
+        return self.model.query(*args, **kwargs)
 
 
 def verify_payload(payload: Path) -> dict:
@@ -98,7 +128,16 @@ def verify_payload(payload: Path) -> dict:
 
 
 def rollout(
-    root: Path, record: dict, image: dict, models, prompt: str, trial: Path, memory_gib: int, test_model=None
+    root: Path,
+    record: dict,
+    image: dict,
+    models,
+    prompt: str,
+    trial: Path,
+    memory_gib: int,
+    test_model=None,
+    *,
+    max_steps: int | None = None,
 ) -> dict:
     """Run DefaultAgent and its standard tools, then close the solver before grading."""
     activate(root)
@@ -109,11 +148,13 @@ def rollout(
 
     from examples.swebench_live.swe_agent_rex import ApptainerDeployment
 
-    config = DefaultAgentConfig.model_validate(configuration(root, models, prompt))
+    config = DefaultAgentConfig.model_validate(configuration(root, models, prompt, max_steps=max_steps))
     atomic_json(trial / "swe-agent-config.json", config.model_dump(mode="json"))
     agent = DefaultAgent.from_config(config)
     if test_model is not None:
         agent.model = test_model
+    if max_steps is not None:
+        agent.model = _StepLimitedModel(agent.model, max_steps)
     env = SWEEnv(
         deployment=ApptainerDeployment(image, memory_gib, root / "payload", trial),
         repo=PreExistingRepoConfig(repo_name="testbed", base_commit="HEAD"),

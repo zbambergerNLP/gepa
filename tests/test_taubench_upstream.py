@@ -329,6 +329,7 @@ def test_required_nl_assertion_uses_selected_judge_and_rejects_empty_grades(
     auxiliary = (
         {
             "model": "openrouter/openai/gpt-4.1",
+            "official_model": USER_MODEL,
             "kwargs": {
                 "api_base": "https://openrouter.ai/api/v1",
                 "temperature": 0.0,
@@ -401,7 +402,14 @@ def test_required_nl_assertion_uses_selected_judge_and_rejects_empty_grades(
         assert failed["scored"] is False and failed["elapsed_seconds"] > 0
     else:
         output = run_request(request)["outputs"][0]
-        reward_info = json.loads(Path(output["simulation_path"]).read_text())["reward_info"]
+        saved_simulation = json.loads(Path(output["simulation_path"]).read_text())
+        reward_info = saved_simulation["reward_info"]
+        expected_model = auxiliary.get("official_model", auxiliary["model"]) if auxiliary else USER_MODEL
+        assert saved_simulation["info"]["user_model"] == saved_simulation["info"]["judge_model"] == expected_model
+        if hosted == "deepseek":
+            assert saved_simulation["info"]["auxiliary_protocol"] == "custom_auxiliary_model_v1"
+        else:
+            assert "auxiliary_protocol" not in saved_simulation["info"]
         assert set(reward_info["reward_basis"]) == {"DB", "NL_ASSERTION"}
         assert reward_info["nl_assertions"][0]["met"] is (judge_result == "met")
         assert reward_info["reward_breakdown"]["NL_ASSERTION"] == float(judge_result == "met")

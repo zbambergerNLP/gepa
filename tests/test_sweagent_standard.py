@@ -198,6 +198,7 @@ def test_swe_builder_exposes_only_the_verbatim_system_template(agent_root, tmp_p
     runtime.assert_called_once_with(agent_root, None, max_steps=30)
     assert adapter.call_args.kwargs["agent_max_steps"] == 30
     assert benchmark.runtime["agent"]["step_budget"]["max_queries"] == 30
+    assert benchmark.runtime["reflection_trajectory_format"] == "swe-agent-history-and-steps-without-query-snapshots-v1"
     seed = swe_agent.seed_prompt(agent_root)
     assert benchmark.seed_candidate == {"system_prompt": seed}
     assert benchmark.component_kinds == {"system_prompt": "system_prompt"}

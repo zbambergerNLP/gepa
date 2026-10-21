@@ -15,6 +15,21 @@ from examples.swebench_live.settings import COMPONENT
 from examples.swebench_live.swe_agent import rollout
 from gepa.core.adapter import EvaluationBatch
 
+REFLECTION_TRAJECTORY_FORMAT = "swe-agent-history-and-steps-without-query-snapshots-v1"
+
+
+def reflection_trajectory(trace: dict) -> dict:
+    """Keep history and step results without repeating each step's model input."""
+    if not isinstance(trace, dict) or not isinstance(trace.get("history"), list):
+        raise ValueError("SWE-agent reflection requires the saved message history")
+    steps = trace.get("trajectory", [])
+    if not isinstance(steps, list) or not all(isinstance(step, dict) for step in steps):
+        raise ValueError("SWE-agent reflection requires a list of trajectory steps")
+    if "trajectory" not in trace:
+        return trace
+    # Each query repeats a growing conversation; the full raw trace remains on disk.
+    return {**trace, "trajectory": [{key: value for key, value in step.items() if key != "query"} for step in steps]}
+
 
 def grade(root: Path, trial: Path, record: dict, image: dict, memory_gib: int, timeout: int) -> dict:
     """Pass sealed predictions to the official evaluator in a separate fresh container."""
@@ -184,7 +199,9 @@ class SWEBenchLiveAdapter:
             feedback.append(
                 {
                     "Inputs": record["problem_statement"],
-                    "Generated Outputs": json.loads((Path(output["trial_dir"]) / "trajectory.json").read_text()),
+                    "Generated Outputs": reflection_trajectory(
+                        json.loads((Path(output["trial_dir"]) / "trajectory.json").read_text())
+                    ),
                     "Feedback": {"resolved": output["resolved"], "error": output["error"]},
                 }
             )

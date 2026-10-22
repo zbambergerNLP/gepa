@@ -1,6 +1,7 @@
 """Check real data boundaries, native rollout isolation and launch guards without model calls."""
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -103,6 +104,41 @@ def test_provider_failure_stays_unresolved_and_is_not_retried_or_scored(native):
     assert not list(runner.run_dir.rglob("result.json"))
     assert len(list(runner.run_dir.rglob("intent.json"))) == 1
     assert len(list(runner.run_dir.rglob("trajectory.json"))) == 1
+
+
+def test_reflection_keeps_history_and_results_without_repeated_query_snapshots(native):
+    runner, record, _ = native
+    candidate = {"system_prompt": "Generic repair instructions"}
+    batch = runner.evaluate([record], candidate, True)
+    path = Path(batch.outputs[0]["trial_dir"]) / "trajectory.json"
+    history = [{"role": "system", "content": candidate["system_prompt"]}]
+    steps = []
+    for index in range(30):
+        history.append({"role": "assistant", "content": f"inspect file {index}"})
+        history.append({"role": "user", "content": "file contents " + "x" * 1024})
+        steps.append({"query": list(history), "action": f"inspect {index}", "observation": history[-1]["content"]})
+    raw = {"history": history, "trajectory": steps, "info": {"exit_status": "exit_cost"}}
+    atomic_json(path, raw)
+    original = path.read_bytes()
+
+    reflected = runner.make_reflective_dataset(candidate, batch, ["system_prompt"])["system_prompt"][0]
+
+    assert reflected["Inputs"] == record["problem_statement"]
+    assert reflected["Generated Outputs"]["history"] == history
+    assert reflected["Generated Outputs"]["info"] == raw["info"]
+    assert reflected["Generated Outputs"]["trajectory"] == [
+        {"action": step["action"], "observation": step["observation"]} for step in steps
+    ]
+    assert len(json.dumps(reflected)) < len(original) / 5
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    "trace", [{"trajectory": [{"query": ["only saved input"]}]}, {"history": [], "trajectory": [None]}]
+)
+def test_reflection_rejects_missing_history_or_invalid_steps(trace):
+    with pytest.raises(ValueError, match="SWE-agent reflection requires"):
+        adapter.reflection_trajectory(trace)
 
 
 def test_adapter_passes_the_same_step_limit_to_each_task(native):

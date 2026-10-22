@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from examples.common.benchmark_types import BenchmarkDefinition
-from examples.swebench_live.adapter import SWEBenchLiveAdapter
+from examples.swebench_live.adapter import REFLECTION_TRAJECTORY_FORMAT, SWEBenchLiveAdapter
 from examples.swebench_live.apptainer import runtime_identity as apptainer_runtime
 from examples.swebench_live.apptainer_images import verify_images as verify_apptainer_images
 from examples.swebench_live.data import load_data
@@ -70,6 +70,7 @@ def build_benchmark(args, models):
             "official_grader": runtime,
             "images": images,
             "agent": agent_identity,
+            "reflection_trajectory_format": REFLECTION_TRAJECTORY_FORMAT,
             "memory_gib": args.task_memory_gib,
             "cpus": 4,
             "network": "none",

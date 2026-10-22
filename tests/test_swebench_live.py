@@ -9,6 +9,7 @@ from examples.common.artifacts import atomic_json, digest
 from examples.common.benchmark_types import BenchmarkModels
 from examples.swebench_live import adapter, images
 from examples.swebench_live.data import partition
+from gepa.strategies.instruction_proposal import InstructionProposalSignature
 
 
 def row(name, **kwargs):
@@ -106,7 +107,7 @@ def test_provider_failure_stays_unresolved_and_is_not_retried_or_scored(native):
     assert len(list(runner.run_dir.rglob("trajectory.json"))) == 1
 
 
-def test_reflection_keeps_history_and_results_without_repeated_query_snapshots(native):
+def test_reflection_keeps_history_and_metadata_without_queries_or_raw_observations(native):
     runner, record, _ = native
     candidate = {"system_prompt": "Generic repair instructions"}
     batch = runner.evaluate([record], candidate, True)
@@ -126,9 +127,7 @@ def test_reflection_keeps_history_and_results_without_repeated_query_snapshots(n
     assert reflected["Inputs"] == record["problem_statement"]
     assert reflected["Generated Outputs"]["history"] == history
     assert reflected["Generated Outputs"]["info"] == raw["info"]
-    assert reflected["Generated Outputs"]["trajectory"] == [
-        {"action": step["action"], "observation": step["observation"]} for step in steps
-    ]
+    assert reflected["Generated Outputs"]["trajectory"] == [{"action": step["action"]} for step in steps]
     assert len(json.dumps(reflected)) < len(original) / 5
     assert path.read_bytes() == original
 
@@ -139,6 +138,41 @@ def test_reflection_keeps_history_and_results_without_repeated_query_snapshots(n
 def test_reflection_rejects_missing_history_or_invalid_steps(trace):
     with pytest.raises(ValueError, match="SWE-agent reflection requires"):
         adapter.reflection_trajectory(trace)
+
+
+def test_reflection_uses_saved_tool_message_instead_of_unprocessed_output(native):
+    runner, record, _ = native
+    candidate = {"system_prompt": "Generic repair instructions"}
+    batch = runner.evaluate([record], candidate, True)
+    path = Path(batch.outputs[0]["trial_dir"]) / "trajectory.json"
+    history = [
+        {"role": "assistant", "content": "Read the log"},
+        {"role": "tool", "content": "Failure at line 10\n[output truncated]\nRetry failed"},
+    ]
+    metadata = {"action": "cat large.log", "state": {"working_dir": "/testbed"}, "extra_info": {"exit_code": 0}}
+    raw = {
+        "history": history,
+        "trajectory": [{**metadata, "query": history, "observation": "raw-only-output\n" * 400_000}],
+        "info": {"exit_status": "exit_cost"},
+    }
+    atomic_json(path, raw)
+    original = path.read_bytes()
+
+    feedback = runner.make_reflective_dataset(candidate, batch, ["system_prompt"])["system_prompt"]
+    prompt = InstructionProposalSignature.prompt_renderer(
+        {
+            "current_instruction_doc": candidate["system_prompt"],
+            "dataset_with_feedback": feedback,
+            "prompt_template": None,
+        }
+    )
+
+    assert "raw-only-output" not in prompt
+    assert "Failure at line 10" in prompt and "Retry failed" in prompt and "[output truncated]" in prompt
+    assert feedback[0]["Generated Outputs"] == {"history": history, "trajectory": [metadata], "info": raw["info"]}
+    assert feedback[0]["Feedback"] == {"resolved": True, "error": None}
+    assert len(prompt.encode()) < 10_000
+    assert path.read_bytes() == original
 
 
 def test_adapter_passes_the_same_step_limit_to_each_task(native):

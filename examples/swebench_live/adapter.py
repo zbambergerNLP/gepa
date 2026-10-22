@@ -15,11 +15,11 @@ from examples.swebench_live.settings import COMPONENT
 from examples.swebench_live.swe_agent import rollout
 from gepa.core.adapter import EvaluationBatch
 
-REFLECTION_TRAJECTORY_FORMAT = "swe-agent-history-and-steps-without-query-snapshots-v1"
+REFLECTION_TRAJECTORY_FORMAT = "swe-agent-history-and-step-metadata-v2"
 
 
 def reflection_trajectory(trace: dict) -> dict:
-    """Keep history and step results without repeating each step's model input."""
+    """Keep saved message history and step metadata without raw tool output."""
     if not isinstance(trace, dict) or not isinstance(trace.get("history"), list):
         raise ValueError("SWE-agent reflection requires the saved message history")
     steps = trace.get("trajectory", [])
@@ -27,8 +27,14 @@ def reflection_trajectory(trace: dict) -> dict:
         raise ValueError("SWE-agent reflection requires a list of trajectory steps")
     if "trajectory" not in trace:
         return trace
-    # Each query repeats a growing conversation; the full raw trace remains on disk.
-    return {**trace, "trajectory": [{key: value for key, value in step.items() if key != "query"} for step in steps]}
+    # Raw observations bypass the agent's output shortening; history retains its saved messages.
+    # The full raw trace remains on disk, including queries and unprocessed observations.
+    return {
+        **trace,
+        "trajectory": [
+            {key: value for key, value in step.items() if key not in {"query", "observation"}} for step in steps
+        ],
+    }
 
 
 def grade(root: Path, trial: Path, record: dict, image: dict, memory_gib: int, timeout: int) -> dict:

@@ -80,7 +80,8 @@ def offline_rollout(tmp_path, monkeypatch):
     def run(agent, **kwargs):
         agent._env = environment
         agent._problem_statement = kwargs["problem_statement"]
-        agent.history = [{"role": "user", "content": "Fix the fixture.", "agent": agent.name}]
+        agent.add_system_message_to_history()
+        agent.add_instance_template_to_history(state={"working_dir": "/testbed"})
 
         def action(step):
             step.observation = "/testbed"
@@ -132,9 +133,14 @@ def offline_rollout(tmp_path, monkeypatch):
     return requests, result, details
 
 
-def test_native_one_tool_parser_disables_parallel_calls(offline_rollout):
+def test_native_one_tool_rule_reaches_the_initial_request(offline_rollout):
     requests, _, _ = offline_rollout
-    assert all(request.get("parallel_tool_calls") is False for request in requests)
+    for request in requests:
+        assert "parallel_tool_calls" not in request
+        user = next(message for message in request["messages"] if message["role"] == "user")
+        content = user["content"]
+        text = content if isinstance(content, str) else "".join(block["text"] for block in content)
+        assert "Call exactly one tool per response." in text
 
 
 def test_tool_reasoning_survives_history_and_next_wire_request(offline_rollout):

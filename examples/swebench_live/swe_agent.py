@@ -15,6 +15,7 @@ from examples.common.react_v2 import file_sha256
 AGENT_URL = "https://github.com/njukenanli/SWE-agent-for-eval.git"
 AGENT_REVISION = "824224225e1e952b48da91f2d1bde38adb2115f2"
 OPENROUTER_MODEL_PROTOCOL = "openrouter-tool-reasoning-and-usage-v1"
+SINGLE_TOOL_INSTRUCTION = "Call exactly one tool per response. Do not issue parallel tool calls."
 
 
 def source_identity(source: Path) -> dict:
@@ -64,7 +65,9 @@ def configuration(root: Path, models, prompt: str | None = None, *, max_steps: i
             "parallel_tool_calls" in extra_body and extra_body["parallel_tool_calls"] is not False
         ):
             raise ValueError("The pinned SWE-agent parser requires one tool call per response")
-        completion_kwargs["parallel_tool_calls"] = False
+        # The pinned DeepInfra route does not advertise parallel_tool_calls support.
+        # State the native parser's rule without adding an unsupported request parameter.
+        config["templates"]["instance_template"] += "\n\n" + SINGLE_TOOL_INSTRUCTION
     config["model"]["completion_kwargs"] = completion_kwargs
     # The shared provider wrapper owns retries and durable attempt accounting.
     # Do not retry an exhausted or unknown provider outcome in a second layer.

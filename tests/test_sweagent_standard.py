@@ -220,13 +220,17 @@ def test_pinned_default_agent_configuration_is_preserved(agent_root):
     baseline = swe_agent.configuration(agent_root, models)
     baseline["templates"].pop("system_template")
     assert edited == baseline
-    assert config["templates"] == original["templates"]
+    expected_templates = deepcopy(original["templates"])
+    expected_templates["instance_template"] += (
+        "\n\nCall exactly one tool per response. Do not issue parallel tool calls."
+    )
+    assert config["templates"] == expected_templates
     assert config["history_processors"] == original["history_processors"]
     for key, value in original["tools"].items():
         if key != "bundles":
             assert config["tools"][key] == value
     assert config["model"]["per_instance_call_limit"] == 100
-    assert config["model"]["completion_kwargs"] == {**models.solver_kwargs, "parallel_tool_calls": False}
+    assert config["model"]["completion_kwargs"] == models.solver_kwargs
     assert config["model"]["retry"]["retries"] == 1
     assert swe_agent.seed_prompt(agent_root) == original["templates"]["system_template"]
     resolved = DefaultAgentConfig.model_validate(config)

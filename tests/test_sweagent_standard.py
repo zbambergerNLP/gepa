@@ -69,6 +69,7 @@ def test_step_limit_changes_only_model_limit_and_runtime_identity(agent_root, mo
     monkeypatch.setattr(swe_agent, "verify_payload", lambda _: {"test_payload": True})
     original_runtime = swe_agent.runtime_identity(agent_root, models)
     limited_runtime = swe_agent.runtime_identity(agent_root, models, max_steps=30)
+    assert limited_runtime["model_adapter"] == "openrouter-tool-reasoning-and-usage-v1"
     assert "step_budget" not in original_runtime
     assert limited_runtime["step_budget"] == {"max_queries": 30, "enforcement": "before_query_v1"}
     assert digest(limited_runtime) != digest(original_runtime)
@@ -135,7 +136,6 @@ def test_recovery_queries_share_the_same_step_budget(agent_root, monkeypatch):
 
 
 def test_rollout_installs_a_fresh_budget_and_closes_before_return(agent_root, tmp_path, monkeypatch):
-    from sweagent.agent.agents import DefaultAgent
     from sweagent.environment import swe_env
     from sweagent.exceptions import InstanceCallLimitExceededError
 
@@ -161,7 +161,7 @@ def test_rollout_installs_a_fresh_budget_and_closes_before_return(agent_root, tm
         return agent
 
     environment = SimpleNamespace(start=Mock(), close=Mock())
-    monkeypatch.setattr(DefaultAgent, "from_config", from_config)
+    monkeypatch.setattr(swe_agent, "create_agent", from_config)
     monkeypatch.setattr(swe_env, "SWEEnv", lambda **_: environment)
     monkeypatch.setattr(swe_agent_rex, "ApptainerDeployment", lambda *_: None)
     models = BenchmarkModels("openrouter/offline-check", "unused", None, None, {}, {})
@@ -220,7 +220,11 @@ def test_pinned_default_agent_configuration_is_preserved(agent_root):
     baseline = swe_agent.configuration(agent_root, models)
     baseline["templates"].pop("system_template")
     assert edited == baseline
-    assert config["templates"] == original["templates"]
+    expected_templates = deepcopy(original["templates"])
+    expected_templates["instance_template"] += (
+        "\n\nCall exactly one tool per response. Do not issue parallel tool calls."
+    )
+    assert config["templates"] == expected_templates
     assert config["history_processors"] == original["history_processors"]
     for key, value in original["tools"].items():
         if key != "bundles":
@@ -230,7 +234,7 @@ def test_pinned_default_agent_configuration_is_preserved(agent_root):
     assert config["model"]["retry"]["retries"] == 1
     assert swe_agent.seed_prompt(agent_root) == original["templates"]["system_template"]
     resolved = DefaultAgentConfig.model_validate(config)
-    agent = DefaultAgent.from_config(resolved)
+    agent = swe_agent.create_agent(resolved)
     assert type(agent) is DefaultAgent
     assert {tool["function"]["name"] for tool in agent.tools.config.tools} == {"bash", "str_replace_editor", "submit"}
     assert resolved.tools.execution_timeout == 30
@@ -241,7 +245,7 @@ def test_pinned_default_agent_configuration_is_preserved(agent_root):
 def test_pinned_agent_api_base_reaches_completion_once(agent_root, monkeypatch, endpoint_source):
     """Reach the real upstream dispatch with hosted controls and a fake transport."""
     import litellm
-    from sweagent.agent.agents import DefaultAgent, DefaultAgentConfig
+    from sweagent.agent.agents import DefaultAgentConfig
 
     route = {
         "tag": "deepinfra/fp8",
@@ -268,7 +272,7 @@ def test_pinned_agent_api_base_reaches_completion_once(agent_root, monkeypatch, 
     monkeypatch.setattr(litellm.cost_calculator, "completion_cost", lambda *_, **__: 0.0)
 
     config = DefaultAgentConfig.model_validate(swe_agent.configuration(agent_root, models, max_steps=30))
-    agent = DefaultAgent.from_config(config)
+    agent = swe_agent.create_agent(config)
     result = agent.model.query([{"role": "system", "content": "Inspect the training task."}])
 
     assert result == {"message": "ready", "tool_calls": []}
@@ -295,6 +299,23 @@ def test_conflicting_solver_api_bases_fail_before_dispatch(agent_root):
     )
     with pytest.raises(ValueError, match="SWE-agent solver API endpoints disagree"):
         swe_agent.configuration(agent_root, models)
+
+
+@pytest.mark.parametrize("kwargs", [{"parallel_tool_calls": True}, {"extra_body": {"parallel_tool_calls": True}}])
+def test_parallel_tool_override_fails_before_dispatch(agent_root, kwargs):
+    models = BenchmarkModels("openrouter/test", "unused", API_BASE, None, kwargs, {})
+    with pytest.raises(ValueError, match="one tool call"):
+        swe_agent.configuration(agent_root, models)
+
+
+def test_other_provider_keeps_its_native_model_boundary(agent_root):
+    from sweagent.agent.agents import DefaultAgentConfig
+    from sweagent.agent.models import LiteLLMModel
+
+    models = BenchmarkModels("openai/offline-check", "unused", None, None, {"temperature": 0.5}, {})
+    config = swe_agent.configuration(agent_root, models)
+    assert config["model"]["completion_kwargs"] == models.solver_kwargs
+    assert type(swe_agent.create_agent(DefaultAgentConfig.model_validate(config)).model) is LiteLLMModel
 
 
 def test_forest_revision_reaches_only_the_real_swe_agent_system_message(agent_root):
@@ -354,7 +375,6 @@ def test_rollout_preserves_infrastructure_failures_after_autosubmission(
     agent_root, tmp_path, monkeypatch, reason, autosubmitted
 ):
     """Never return a salvaged patch for grading after a provider or runtime failure."""
-    from sweagent.agent.agents import DefaultAgent
     from sweagent.environment import swe_env
 
     from examples.swebench_live import swe_agent_rex
@@ -364,7 +384,7 @@ def test_rollout_preserves_infrastructure_failures_after_autosubmission(
     trajectory = {"info": info, "trajectory": [{"observation": "interrupted work"}]}
     agent = SimpleNamespace(run=lambda **_: SimpleNamespace(info=info), get_trajectory_data=lambda: trajectory)
     environment = SimpleNamespace(start=Mock(), close=Mock())
-    monkeypatch.setattr(DefaultAgent, "from_config", lambda _: agent)
+    monkeypatch.setattr(swe_agent, "create_agent", lambda _: agent)
     monkeypatch.setattr(swe_env, "SWEEnv", lambda **_: environment)
     monkeypatch.setattr(swe_agent_rex, "ApptainerDeployment", lambda *_: None)
     models = BenchmarkModels("openrouter/offline-check", "unused", None, None, {}, {})

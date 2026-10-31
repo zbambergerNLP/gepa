@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import warnings
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -431,3 +432,68 @@ def test_real_swerex_retains_shell_state_and_transfers_errors(agent_root, tmp_pa
             if process.poll() is None:
                 process.terminate()
             process.wait(timeout=10)
+
+
+@pytest.fixture
+def owned_deployment(agent_root, tmp_path, monkeypatch):
+    from examples.swebench_live import swe_agent_rex
+
+    task = SimpleNamespace(temporary=object())
+    task.__exit__ = Mock(side_effect=lambda: setattr(task, "temporary", None))
+    monkeypatch.setattr(swe_agent_rex, "ApptainerTask", lambda *_: task)
+    deployment = swe_agent_rex.ApptainerDeployment({}, 16, tmp_path, tmp_path)
+    runtime = SimpleNamespace(failed=False, close=AsyncMock())
+    process = Mock()
+    process.poll.return_value = None
+    log = Mock()
+    deployment._runtime, deployment.process, deployment.log = runtime, process, log
+    yield deployment, runtime, process, log, task
+    asyncio.run(deployment.stop())
+
+
+@pytest.mark.parametrize("loop_state", ["unset", "closed", "idle"])
+def test_deployment_finalizer_releases_resources_without_a_running_loop(owned_deployment, loop_state):
+    deployment, runtime, process, log, task = owned_deployment
+    loop = None if loop_state == "unset" else asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    if loop_state == "closed":
+        loop.close()
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            deployment.__del__()
+        runtime.close.assert_awaited_once_with()
+        process.terminate.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=10)
+        log.close.assert_called_once_with()
+        assert task.temporary is None
+        assert not any("never awaited" in str(item.message) for item in caught)
+    finally:
+        asyncio.set_event_loop(None)
+        if loop is not None and not loop.is_closed():
+            loop.close()
+
+
+def test_deployment_finalizer_uses_running_loop_and_skips_stopped_resources(owned_deployment):
+    deployment, runtime, process, log, task = owned_deployment
+
+    async def check():
+        deployment.__del__()
+        await asyncio.sleep(0)
+        runtime.close.assert_awaited_once_with()
+        assert deployment.process is None and task.temporary is None
+
+    asyncio.run(check())
+    loop = asyncio.new_event_loop()
+    loop.close()
+    asyncio.set_event_loop(loop)
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            deployment.__del__()
+        assert not any("never awaited" in str(item.message) for item in caught)
+        runtime.close.assert_awaited_once_with()
+        process.wait.assert_called_once_with(timeout=10)
+        log.close.assert_called_once_with()
+    finally:
+        asyncio.set_event_loop(None)

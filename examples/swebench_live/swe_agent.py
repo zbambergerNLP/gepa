@@ -14,6 +14,7 @@ from examples.common.react_v2 import file_sha256
 
 AGENT_URL = "https://github.com/njukenanli/SWE-agent-for-eval.git"
 AGENT_REVISION = "824224225e1e952b48da91f2d1bde38adb2115f2"
+OPENROUTER_MODEL_PROTOCOL = "openrouter-tool-reasoning-and-usage-v1"
 
 
 def source_identity(source: Path) -> dict:
@@ -57,6 +58,13 @@ def configuration(root: Path, models, prompt: str | None = None, *, max_steps: i
     if models.solver_api_base is not None and api_base != models.solver_api_base:
         raise ValueError("SWE-agent solver API endpoints disagree")
     config["model"]["api_base"] = api_base
+    if models.solver_model.startswith("openrouter/"):
+        extra_body = completion_kwargs.get("extra_body") or {}
+        if completion_kwargs.get("parallel_tool_calls") is True or (
+            "parallel_tool_calls" in extra_body and extra_body["parallel_tool_calls"] is not False
+        ):
+            raise ValueError("The pinned SWE-agent parser requires one tool call per response")
+        completion_kwargs["parallel_tool_calls"] = False
     config["model"]["completion_kwargs"] = completion_kwargs
     # The shared provider wrapper owns retries and durable attempt accounting.
     # Do not retry an exhausted or unknown provider outcome in a second layer.
@@ -93,7 +101,22 @@ def runtime_identity(root: Path, models, *, max_steps: int | None = None) -> dic
     }
     if max_steps is not None:
         result["step_budget"] = {"max_queries": max_steps, "enforcement": "before_query_v1"}
+    if models.solver_model.startswith("openrouter/"):
+        result["model_adapter"] = OPENROUTER_MODEL_PROTOCOL
     return result
+
+
+def create_agent(config):
+    """Keep the native agent and install its provider-specific model boundary."""
+    from sweagent.agent.agents import DefaultAgent
+
+    agent = DefaultAgent.from_config(config)
+    if config.model.name.startswith("openrouter/"):
+        from examples.swebench_live.openrouter_model import OpenRouterModel, ReasoningHistoryHook
+
+        agent.model = OpenRouterModel(config.model, config.tools)
+        agent.add_hook(ReasoningHistoryHook(agent.model))
+    return agent
 
 
 class _StepLimitedModel:
@@ -146,7 +169,7 @@ def rollout(
 ) -> dict:
     """Run DefaultAgent and its standard tools, then close the solver before grading."""
     activate(root)
-    from sweagent.agent.agents import DefaultAgent, DefaultAgentConfig
+    from sweagent.agent.agents import DefaultAgentConfig
     from sweagent.agent.problem_statement import TextProblemStatement
     from sweagent.environment.repo import PreExistingRepoConfig
     from sweagent.environment.swe_env import SWEEnv
@@ -155,7 +178,7 @@ def rollout(
 
     config = DefaultAgentConfig.model_validate(configuration(root, models, prompt, max_steps=max_steps))
     atomic_json(trial / "swe-agent-config.json", config.model_dump(mode="json"))
-    agent = DefaultAgent.from_config(config)
+    agent = create_agent(config)
     if test_model is not None:
         agent.model = test_model
     if max_steps is not None:

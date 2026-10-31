@@ -6,6 +6,19 @@ dataset and official test scripts and scorer. The solver is upstream SWE-agent,
 with an Apptainer transport for Della CPU allocations. It does not use the older SWE-bench
 Verified prototype or its patch-similarity metric.
 
+OpenRouter solver requests disable parallel tool calls because the pinned agent
+accepts one tool call per response. The OpenRouter model adapter preserves
+`reasoning_details` in saved assistant history and subsequent tool continuations.
+It uses provider token usage, including tool arguments and reasoning, when supplied.
+Other providers keep the native model adapter.
+
+The runtime contract records `openrouter-tool-reasoning-and-usage-v1` and the
+resolved one-tool request setting. This changes the solver and reflection inputs:
+the saved history now contains returned reasoning. It can increase context size.
+The v2 reflection filter still omits raw observations and query snapshots.
+Do not resume an earlier frozen campaign under this model adapter. Deployment or
+new paid work requires approval; offline regressions do not establish patch quality.
+
 ## Prepare without running an experiment
 
 From the repository root, with the [local API environment](../local_api/README.md)

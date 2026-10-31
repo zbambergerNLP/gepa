@@ -1,5 +1,6 @@
 """Adapt SWE-ReX transport to isolated Apptainer instances without replacing the agent."""
 
+import asyncio
 import base64
 import io
 import json
@@ -18,6 +19,8 @@ from swerex.runtime.remote import RemoteRuntime
 
 from examples.swebench_live.apptainer import ApptainerTask
 from examples.swebench_live.swe_agent import verify_payload
+
+_FINALIZERS: set[asyncio.Task] = set()
 
 
 class PipeRuntime(RemoteRuntime):
@@ -74,6 +77,20 @@ class ApptainerDeployment(AbstractDeployment):
         self.logger = logging.getLogger(__name__)
         self._hooks = CombinedDeploymentHook()
         self._runtime = self.process = self.log = None
+
+    def __del__(self):
+        """Release owned resources without reusing a missing or closed event loop."""
+        if getattr(self, "process", None) is None and getattr(getattr(self, "task", None), "temporary", None) is None:
+            return
+        # The pinned upstream finalizer silently drops cleanup on a closed loop.
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(self.stop())
+        else:
+            task = loop.create_task(self.stop())
+            _FINALIZERS.add(task)
+            task.add_done_callback(_FINALIZERS.discard)
 
     def add_hook(self, hook):
         self._hooks.add_hook(hook)

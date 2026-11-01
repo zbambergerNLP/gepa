@@ -608,6 +608,7 @@ def test_seeded_sampling_uses_probabilities_rather_than_api_argmax(setup_control
         "jev_joint_action_section_v2",
         "jev_joint_action_section_v3",
         "jev_joint_action_section_v4",
+        "jev_joint_action_section_v5_evidence_pool",
     ],
 )
 def test_revised_policy_rejects_old_journal_identity_before_network(
@@ -616,7 +617,7 @@ def test_revised_policy_rejects_old_journal_identity_before_network(
     """Reject replay under an older policy identity without another provider call."""
     controller, requests, _ = setup_controller
     current_contract = controller.run_contract()
-    assert current_contract["policy"] == "jev_joint_action_section_v5_evidence_pool"
+    assert current_contract["policy"] == "jev_joint_action_section_v6_size_bounded_evidence_pool"
     old_contract = deepcopy(current_contract)
     old_contract["policy"] = old_version
     old_contract.pop("probability_normalization")

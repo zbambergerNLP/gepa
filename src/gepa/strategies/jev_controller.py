@@ -47,6 +47,7 @@ from gepa.strategies.jev_constants import (
     JEV_MAX_CHOICES,
     JEV_MODEL,
     JEV_NORMALIZATION_POLICY,
+    JEV_OPENROUTER_REQUEST_UTF8_LIMIT,
     JEV_OUTPUT_USD_PER_MILLION,
     JEV_POLICY_ID,
     JEV_PRICING_DATE,
@@ -55,6 +56,7 @@ from gepa.strategies.jev_constants import (
     JEV_PROBABILITY_ROUNDOFF_TOLERANCE,
     JEV_PROBABILITY_SUM_TOLERANCE,
     JEV_QUESTION_NAME,
+    JEV_REQUEST_SIZING_POLICY,
     JEV_RETRYABLE_HTTP_STATUSES,
     JEV_SDK_VERSION,
     JEV_TIMEOUT_SECONDS,
@@ -133,14 +135,23 @@ JEV_CONTROLLER_POLICY_CONTRACT = {
     "factorization": "P(region, action)",
     "context": "full component in every request; all training records retained across evidence groups; no truncation",
     "evidence_groups": {
-        "scope": "single-component structured JSON arrays; other inputs remain one request",
+        "scope": "single-component structured JSON arrays; other inputs must fit one request",
         "max_records_per_request": JEV_EVIDENCE_GROUP_SIZE,
-        "partition": "contiguous original order; complete records; retain repeated text and error records",
+        "partition": "greedy contiguous original order within record and byte limits; complete records; no truncation",
         "aggregation": "record-count-weighted arithmetic mean of each group's normalized choice probabilities",
         "selection": "one exploration mixture and one RNG draw after all groups succeed",
         "replay": "journal each group independently; bind every group to the full decision request",
         "confidence": "no joint provider confidence for pooled decisions",
-        "compatibility": "new scientific policy; incompatible with full-batch v4 checkpoints",
+        "compatibility": "new scientific policy; incompatible with v5 count-only and earlier checkpoints",
+    },
+    "request_sizing": {
+        "policy": JEV_REQUEST_SIZING_POLICY,
+        "max_request_utf8_bytes": None,
+        "scope": "OpenRouter only; direct TypeSafe retains count-only grouping",
+        "serialization": "json.dumps of model, state and questions; sort_keys=True, ensure_ascii=False, allow_nan=False",
+        "meaning": "client safety budget, not a token count or a guarantee of provider acceptance",
+        "preflight": "validate every complete group before any provider call; reject an oversized single record",
+        "corrections": "validate the full corrected request before retry; never regroup after a provider failure",
     },
     "selection_guidance": "contrastive action descriptions; classify the intended effect before choosing a pair",
     "canonical_constraints": "unchanged; authoritative over the selection glosses",
@@ -179,6 +190,10 @@ class JevControllerError(LMRequestExhaustedError):
 
 class JevResponseValidationError(JevControllerError):
     """Request a corrected typed response without changing the optimization task."""
+
+
+class JevInputSizeError(JevControllerError):
+    """Reject an input locally without truncation or a paid provider request."""
 
 
 class JevController:
@@ -263,6 +278,7 @@ class JevController:
                 model_identity="OpenRouter Jev 1.13 alias; exact checkpoint revision unavailable",
             )
             contract["cost_estimate"]["source"] = "https://openrouter.ai/typesafe/jev-1.13"
+        contract["request_sizing"]["max_request_utf8_bytes"] = self._request_size_limit()
         return contract
 
     def response_journal_cursor_state(self) -> dict[str, int]:
@@ -558,6 +574,7 @@ class JevController:
                 or cannot be persisted.
             SystemExit: The configured handoff times out waiting for a response.
         """
+        self._check_request_size(recovery[1] if recovery else request)
         if os.environ.get(HANDOFF_ENV):
             if self._provider != "typesafe":
                 raise JevControllerError("OpenRouter Jev cannot use a Typesafe Della mailbox")
@@ -653,6 +670,13 @@ class JevController:
                 and attempt < PROVIDER_MAX_ATTEMPTS
                 and time.monotonic() + delay < deadline
             )
+            next_request = current_request
+            retry_blocked = None
+            if will_retry and isinstance(error, JevResponseValidationError) and response is not None:
+                next_request = self._correction_request(request, response, str(error))
+                if not self._request_fits(next_request):
+                    will_retry = False
+                    retry_blocked = "input_size_limit"
             self._log(
                 {
                     **record,
@@ -663,6 +687,7 @@ class JevController:
                     "elapsed_seconds": time.monotonic() - attempt_started,
                     "outcome": "error" if error else "success",
                     "will_retry": will_retry,
+                    "retry_blocked": retry_blocked,
                     "error_type": type(error).__name__ if error else None,
                     "error_message": str(error) if error else None,
                     "http_status": getattr(error, "status", None),
@@ -678,9 +703,10 @@ class JevController:
                     "elapsed_seconds": time.monotonic() - started,
                 }
             if not will_retry:
+                if retry_blocked:
+                    self._check_request_size(next_request)
                 raise JevControllerError(f"Jev request failed ({type(error).__name__}); see its attempt log.") from None
-            if isinstance(error, JevResponseValidationError) and response is not None:
-                current_request = self._correction_request(request, response, str(error))
+            current_request = next_request
             time.sleep(delay)
         raise AssertionError("Jev attempt loop must return or raise")
 
@@ -747,24 +773,70 @@ class JevController:
         return self._select(menu, state={"components": dict(components)}, rng=rng, require_edit=require_edit)
 
     @staticmethod
-    def _evidence_groups(request: dict[str, Any]) -> list[tuple[int, int, dict[str, Any]]]:
-        """Partition a large single-component array without shortening any record.
+    def _request_utf8_size(request: dict[str, Any]) -> int:
+        """Measure the complete logical JSON payload, without claiming a token count."""
+        return len(json.dumps(request, sort_keys=True, ensure_ascii=False, allow_nan=False).encode("utf-8"))
+
+    def _request_size_limit(self) -> int | None:
+        """Return the OpenRouter budget; retain the direct transport's existing policy."""
+        return JEV_OPENROUTER_REQUEST_UTF8_LIMIT if self._provider == "openrouter" else None
+
+    def _request_fits(self, request: dict[str, Any]) -> bool:
+        """Apply byte admission only to the transport covered by this policy."""
+        limit = self._request_size_limit()
+        return limit is None or self._request_utf8_size(request) <= limit
+
+    def _check_request_size(self, request: dict[str, Any], *, context: str = "request") -> None:
+        """Reject an oversized payload before dispatch, including correction retries."""
+        limit = self._request_size_limit()
+        if limit is None:
+            return
+        size = self._request_utf8_size(request)
+        if size > limit:
+            raise JevInputSizeError(
+                f"Jev {context} is {size} UTF-8 JSON bytes, above the client budget of {limit}. "
+                "No request was sent for this input. Evidence was not truncated. "
+                "A smaller complete record or an explicitly revised evidence protocol is required. "
+                "This byte budget is not a provider token count."
+            )
+
+    def _evidence_groups(self, request: dict[str, Any]) -> list[tuple[int, int, dict[str, Any]]]:
+        """Plan all size-bounded groups before dispatch without shortening records.
 
         Return no groups for inputs that retain the single-request path. The
         solver's evaluation minibatch and the Manifestor's evidence are unchanged.
+        The client byte budget reduces context risk; only the provider can count
+        its tokens. An indivisible input over budget fails before any group runs.
         """
         try:
             evidence = json.loads(request["state"].get("training_evidence", ""))
         except (TypeError, ValueError):
+            self._check_request_size(request)
             return []
-        if not isinstance(evidence, list) or len(evidence) <= JEV_EVIDENCE_GROUP_SIZE:
+        if not isinstance(evidence, list) or not evidence:
+            self._check_request_size(request)
             return []
+        if len(evidence) <= JEV_EVIDENCE_GROUP_SIZE and self._request_fits(request):
+            return []
+
         groups = []
-        for start in range(0, len(evidence), JEV_EVIDENCE_GROUP_SIZE):
-            records = evidence[start : start + JEV_EVIDENCE_GROUP_SIZE]
-            grouped = deepcopy(request)
-            grouped["state"]["training_evidence"] = json.dumps(records, sort_keys=True, ensure_ascii=False)
-            groups.append((start, len(records), grouped))
+        start = 0
+        while start < len(evidence):
+            grouped = None
+            count = 0
+            for end in range(start + 1, min(start + JEV_EVIDENCE_GROUP_SIZE, len(evidence)) + 1):
+                candidate = deepcopy(request)
+                candidate["state"]["training_evidence"] = json.dumps(
+                    evidence[start:end], sort_keys=True, ensure_ascii=False, allow_nan=False
+                )
+                if not self._request_fits(candidate):
+                    if grouped is None:
+                        self._check_request_size(candidate, context=f"evidence record {start}")
+                    break
+                grouped, count = candidate, end - start
+            assert grouped is not None
+            groups.append((start, count, grouped))
+            start += count
         return groups
 
     def _grouped_distribution(
@@ -807,7 +879,15 @@ class JevController:
                     self._journal.store(group_scope, 0, digest, payload)
                 physical_attempts += payload["physical_attempts"]
             self._validate(payload["response"], choices, expected_model=self._response_model)
-            results.append({"start": start, "count": count, "request_sha256": digest, "payload": payload})
+            results.append(
+                {
+                    "start": start,
+                    "count": count,
+                    "request_sha256": digest,
+                    "request_utf8_bytes": self._request_utf8_size(request),
+                    "payload": payload,
+                }
+            )
         return {
             "groups": results,
             "request_id": f"evidence-pool:{decision_digest}",
@@ -953,6 +1033,10 @@ class JevController:
             "distribution_argmax": max(probabilities, key=lambda key: probabilities[key]),
             "confidence": answer["confidence"] if answer else None,
             "request_sha256": digest,
+            "request_sizing": {
+                **self.run_contract()["request_sizing"],
+                "original_request_utf8_bytes": self._request_utf8_size(request),
+            },
             "request_id": payload["request_id"],
             "replayed": replayed,
             "physical_attempts": 0 if replayed else payload["physical_attempts"],

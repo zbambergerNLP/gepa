@@ -574,7 +574,10 @@ class JevController:
                 or cannot be persisted.
             SystemExit: The configured handoff times out waiting for a response.
         """
-        self._check_request_size(recovery[1] if recovery else request)
+        self._check_request_size(
+            recovery[1] if recovery else request,
+            context="response correction" if recovery else "request",
+        )
         if os.environ.get(HANDOFF_ENV):
             if self._provider != "typesafe":
                 raise JevControllerError("OpenRouter Jev cannot use a Typesafe Della mailbox")
@@ -704,7 +707,7 @@ class JevController:
                 }
             if not will_retry:
                 if retry_blocked:
-                    self._check_request_size(next_request)
+                    self._check_request_size(next_request, context="response correction")
                 raise JevControllerError(f"Jev request failed ({type(error).__name__}); see its attempt log.") from None
             current_request = next_request
             time.sleep(delay)
@@ -793,10 +796,15 @@ class JevController:
             return
         size = self._request_utf8_size(request)
         if size > limit:
+            dispatch_detail = (
+                "No corrected request was sent. Earlier physical attempts were sent and can still incur charges. "
+                if context == "response correction"
+                else "No request was sent for this input. "
+                "A smaller complete record or an explicitly revised evidence protocol is required. "
+            )
             raise JevInputSizeError(
                 f"Jev {context} is {size} UTF-8 JSON bytes, above the client budget of {limit}. "
-                "No request was sent for this input. Evidence was not truncated. "
-                "A smaller complete record or an explicitly revised evidence protocol is required. "
+                f"{dispatch_detail}Evidence was not truncated. "
                 "This byte budget is not a provider token count."
             )
 

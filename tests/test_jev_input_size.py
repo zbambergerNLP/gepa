@@ -144,8 +144,10 @@ def test_oversized_correction_stops_before_retry(setup_controller, monkeypatch):
 
     replies.append(invalid)
     monkeypatch.setattr(jev_module.time, "sleep", lambda seconds: None)
-    with pytest.raises(JevControllerError, match="client budget"):
+    with pytest.raises(JevControllerError, match="response correction") as error:
         select(controller)
+    assert "Earlier physical attempts were sent" in str(error.value)
+    assert "smaller complete record" not in str(error.value)
     assert len(requests) == 1
     finished = json.loads(controller._attempt_log.read_text().splitlines()[-1])
     assert finished["event"] == "finished" and finished["will_retry"] is False
@@ -256,6 +258,8 @@ def test_manual_response_recovery_cannot_bypass_size_check(setup_controller):
         "request": request,
         "response": invalid,
     }
-    with response_journal_scope("manual-size"), pytest.raises(JevControllerError, match="client budget"):
+    with response_journal_scope("manual-size"), pytest.raises(JevControllerError, match="response correction") as error:
         controller.retry_failed_response(request, [prior])
+    assert "Earlier physical attempts were sent" in str(error.value)
+    assert "smaller complete record" not in str(error.value)
     assert len(requests) == 1

@@ -827,7 +827,7 @@ class JevController:
             for end in range(start + 1, min(start + JEV_EVIDENCE_GROUP_SIZE, len(evidence)) + 1):
                 candidate = deepcopy(request)
                 candidate["state"]["training_evidence"] = json.dumps(
-                    evidence[start:end], sort_keys=True, ensure_ascii=False, allow_nan=False
+                    evidence[start:end], sort_keys=True, ensure_ascii=False
                 )
                 if not self._request_fits(candidate):
                     if grouped is None:

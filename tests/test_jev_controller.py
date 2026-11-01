@@ -118,6 +118,18 @@ def select(controller, rng=None, traces="full training evidence"):
     )
 
 
+@pytest.mark.parametrize("score", [float("nan"), float("inf"), float("-inf")])
+def test_evidence_pool_preserves_nonfinite_feedback(setup_controller, score):
+    """Preserve existing feedback serialization on the direct TypeSafe path."""
+    controller, requests, _ = setup_controller
+    records = [{"id": index, "feedback": {"score": score}} for index in range(4)]
+    _, metadata = select(controller, traces=json.dumps(records))
+    observed = [row for request in requests for row in json.loads(request["state"]["training_evidence"])]
+    assert json.dumps(observed, sort_keys=True) == json.dumps(records, sort_keys=True)
+    assert [group["count"] for group in metadata["evidence_groups"]] == [3, 1]
+    assert metadata["physical_attempts"] == 2
+
+
 def recovery_strategy(controller, roles):
     return ThreeRoleReflectionLM(
         roles,

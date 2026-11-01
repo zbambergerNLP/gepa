@@ -74,19 +74,25 @@ the actual allocation; the launcher does not change Slurm device permissions.
 
 ## Jev evidence pooling
 
-Jev controller policy `jev_joint_action_section_v5_evidence_pool` addresses the
-provider's 32k state-plus-question limit for large single-component reflection
-minibatches. It sends contiguous groups of at most three complete training
-records with the full component and choice constraints in every request. Each
+Jev controller policy `jev_joint_action_section_v6_size_bounded_evidence_pool`
+plans contiguous groups of at most three complete training records. OpenRouter
+also applies a 524,288-byte client JSON budget, so even three records can need
+separate requests. This byte budget is a heuristic, not a provider token count
+or guaranteed context bound. Direct TypeSafe keeps count-only grouping, including
+one request for three or fewer records. Every request retains the full component
+and choice constraints. Each
 group's validated, normalized probability distribution is weighted by its record
 count; their arithmetic mean receives one exploration mixture and one sampled
 choice. This preserves every supplied record, including repeated text and error
 records, but changes the controller's statistical policy. It requires a fresh
-source-bound campaign and cannot continue a v4 checkpoint. Solver minibatch
+source-bound campaign and cannot continue a v5 or earlier checkpoint. Solver minibatch
 size, candidate admission, Manifestor evidence, and evaluation budgets do not
-change. Inputs of three or fewer records and joint-component selection retain
-their single-request behavior. An individual oversized group still fails closed;
-there is no truncation, model fallback, or adaptive retry with less evidence.
+change. Joint-component selection retains its single-request behavior. OpenRouter
+checks every planned group before dispatch. An indivisible input over its budget
+raises `JevInputSizeError` before any group runs. There is no truncation, model
+fallback, or adaptive retry with less evidence. See the
+[request sizing policy](../../docs/jev-request-sizing.md) for transport limits,
+correction retries, and the required protocol approval.
 
 Every group has its own response journal entry, provider request identity,
 attempt ledger, and native retry allowance. A completed group is reused after

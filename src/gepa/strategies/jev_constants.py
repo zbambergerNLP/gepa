@@ -9,8 +9,11 @@ JEV_TIMEOUT_SECONDS = 30.0
 JEV_MAX_CHOICES = 255
 JEV_CHOICE_TYPE = "choice"
 JEV_QUESTION_NAME = "edit"
-JEV_POLICY_ID = "jev_joint_action_section_v5_evidence_pool"
+JEV_POLICY_ID = "jev_joint_action_section_v6_size_bounded_evidence_pool"
 JEV_EVIDENCE_GROUP_SIZE = 3
+# Client admission budgets, not token counts or guaranteed provider context bounds.
+JEV_OPENROUTER_REQUEST_UTF8_LIMIT = 524_288
+JEV_REQUEST_SIZING_POLICY = "sorted_json_utf8_bytes_v1"
 JEV_DECISION_JOURNAL_NAMESPACE = "jev-controller-evidence-pool"
 JEV_NORMALIZATION_POLICY = "bounded_sum_v1"
 JEV_PROBABILITY_SUM_TOLERANCE = 0.01

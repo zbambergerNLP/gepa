@@ -104,7 +104,7 @@ def test_pinned_data_and_seed_equal_official_runtime(source):
     assert upstream_system_prompt(source) == agent.system_prompt
     assert "KB_search" in {tool.name for tool in env.get_tools()}
     assert "shell" not in {tool.name for tool in env.get_tools()}
-    assert sum(map(len, splits.values())) == 93 and manifest["knowledge"]["count"] == 698
+    assert sum(map(len, splits.values())) == 92 and manifest["knowledge"]["count"] == 698
 
 
 def test_every_retained_task_initializes_without_model_calls(source, monkeypatch):

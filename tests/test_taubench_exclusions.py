@@ -15,8 +15,9 @@ from examples.taubench import benchmark_settings as settings
 from examples.taubench import main, utils
 from examples.taubench.adapter import TauBankingAdapter, trial_seed
 
-EXCLUDED = {"task_024", "task_075", "task_084", "task_094"}
+EXCLUDED = {"task_017", "task_024", "task_075", "task_084", "task_094"}
 V1_SHA256 = "2586a7f390abfe96977583029b58e9cbaa0c0767fbb8e5ec92222d4c8699e6f1"
+V2_SHA256 = "7186155ddb09c126376361cc7d4aec8b66e413ae0aa37afad7629765831738b2"
 
 
 @pytest.fixture
@@ -42,21 +43,34 @@ def historical_v1_manifest(source_manifest, monkeypatch):
     return manifest
 
 
+@pytest.fixture
+def historical_v2_manifest(source_manifest, monkeypatch):
+    path = settings.MANIFEST_PATH.with_name("banking-exclusions-v2.json")
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == V2_SHA256
+    with monkeypatch.context() as previous:
+        previous.setattr(utils, "DATASET_VERSION", "tau-banking-ambiguity-exclusions-v2")
+        previous.setattr(utils, "EXCLUSIONS_MANIFEST_PATH", path)
+        previous.setattr(utils, "EXCLUSIONS_MANIFEST_SHA256", V2_SHA256)
+        _, manifest = utils.load_data(Path("unused"))
+    assert len(manifest["records"]) == 93
+    return manifest
+
+
 def test_only_approved_tasks_are_removed_without_resplitting(source_manifest):
     before = deepcopy(source_manifest)
     splits, manifest = utils.load_data(Path("unused"))
     retained = [record for record in before["records"] if record["task_id"] not in EXCLUDED]
 
-    assert len(manifest["records"]) == 93
+    assert len(manifest["records"]) == 92
     assert manifest["records"] == retained
-    assert {name: len(rows) for name, rows in splits.items()} == {"train": 53, "val": 19, "test": 21}
+    assert {name: len(rows) for name, rows in splits.items()} == {"train": 52, "val": 19, "test": 21}
     for name, rows in splits.items():
         assert rows == [record for record in retained if record["split"] == name]
     assert source_manifest == before == json.loads(settings.MANIFEST_PATH.read_text())
 
 
-def test_v2_extends_v1_without_changing_surviving_records(historical_v1_manifest):
-    _, current = utils.load_data(Path("unused"))
+def test_v2_extends_v1_without_changing_surviving_records(historical_v1_manifest, historical_v2_manifest):
+    current = historical_v2_manifest
     retained = [row for row in historical_v1_manifest["records"] if row["task_id"] not in {"task_024", "task_094"}]
     assert current["records"] == retained
     old_exclusions = historical_v1_manifest["exclusion_manifest"]["excluded_records"]
@@ -67,6 +81,18 @@ def test_v2_extends_v1_without_changing_surviving_records(historical_v1_manifest
         assert [row for row in current["records"] if row["split"] == split] == [
             row for row in historical_v1_manifest["records"] if row["split"] == split
         ]
+
+
+def test_v3_extends_v2_without_changing_surviving_records(historical_v2_manifest):
+    splits, current = utils.load_data(Path("unused"))
+    assert current["records"] == [row for row in historical_v2_manifest["records"] if row["task_id"] != "task_017"]
+    old_exclusions = historical_v2_manifest["exclusion_manifest"]["excluded_records"]
+    assert [
+        item for item in current["exclusion_manifest"]["excluded_records"] if item in old_exclusions
+    ] == old_exclusions
+    for split in ("val", "test"):
+        assert splits[split] == [row for row in historical_v2_manifest["records"] if row["split"] == split]
+    assert [row["task_id"] for row in splits["train"][:3]] == ["task_005", "task_004", "task_065"]
 
 
 @pytest.mark.parametrize("task_id", sorted(EXCLUDED))
@@ -119,8 +145,10 @@ def test_removed_pilot_record_cannot_reach_runtime(source_manifest, task_id):
         adapter.evaluate([removed], {"system_prompt": "Frozen pilot prompt"})
 
 
-@pytest.mark.parametrize("worker_dataset", ["unfiltered", "v1", "v2"])
-def test_retained_record_requires_matching_worker_manifest(source_manifest, historical_v1_manifest, worker_dataset):
+@pytest.mark.parametrize("worker_dataset", ["unfiltered", "v1", "v2", "v3"])
+def test_retained_record_requires_matching_worker_manifest(
+    source_manifest, historical_v1_manifest, historical_v2_manifest, worker_dataset
+):
     splits, manifest = utils.load_data(Path("unused"))
     selected = splits["train"][:1]
     calls = []
@@ -129,7 +157,12 @@ def test_retained_record_requires_matching_worker_manifest(source_manifest, hist
         calls.append(deepcopy(records))
         return {
             "manifest_sha256": utils.digest(
-                {"unfiltered": source_manifest, "v1": historical_v1_manifest, "v2": manifest}[worker_dataset]
+                {
+                    "unfiltered": source_manifest,
+                    "v1": historical_v1_manifest,
+                    "v2": historical_v2_manifest,
+                    "v3": manifest,
+                }[worker_dataset]
             ),
             "outputs": [
                 {
@@ -149,7 +182,7 @@ def test_retained_record_requires_matching_worker_manifest(source_manifest, hist
         }
 
     adapter = TauBankingAdapter(SimpleNamespace(run=run), manifest)
-    if worker_dataset != "v2":
+    if worker_dataset != "v3":
         with pytest.raises(ValueError, match="Worker ran another tau source or data revision"):
             adapter.evaluate(selected, {"system_prompt": "Fixed test prompt"})
     else:
@@ -158,9 +191,9 @@ def test_retained_record_requires_matching_worker_manifest(source_manifest, hist
     assert calls == [selected]
 
 
-@pytest.mark.parametrize("previous_dataset", ["unfiltered", "v1"])
+@pytest.mark.parametrize("previous_dataset", ["unfiltered", "v1", "v2"])
 def test_both_methods_share_retained_data_and_reject_legacy_resume(
-    source_manifest, historical_v1_manifest, monkeypatch, tmp_path, previous_dataset
+    source_manifest, historical_v1_manifest, historical_v2_manifest, monkeypatch, tmp_path, previous_dataset
 ):
     monkeypatch.setattr(main, "upstream_system_prompt", lambda source: "Fixed upstream system instructions")
     models = BenchmarkModels("unused/solver", "unused/proposer", None, None, {}, {})
@@ -175,7 +208,7 @@ def test_both_methods_share_retained_data_and_reject_legacy_resume(
         )
         definition = main.build_benchmark(args, models)
         definitions.append(definition)
-        assert definition.runtime["dataset_version"] == "tau-banking-ambiguity-exclusions-v2"
+        assert definition.runtime["dataset_version"] == "tau-banking-ambiguity-exclusions-v3"
         assert definition.source["dataset_version"] == definition.runtime["dataset_version"]
         assert definition.runtime["manifest_sha256"] == utils.digest(definition.source)
         assert definition.runtime["exclusion_manifest_sha256"] == settings.EXCLUSIONS_MANIFEST_SHA256
@@ -186,7 +219,11 @@ def test_both_methods_share_retained_data_and_reject_legacy_resume(
             "valset": definition.valset[:1],
             "testset": definition.testset[:1],
         }
-        old_source = {"unfiltered": source_manifest, "v1": historical_v1_manifest}[previous_dataset]
+        old_source = {
+            "unfiltered": source_manifest,
+            "v1": historical_v1_manifest,
+            "v2": historical_v2_manifest,
+        }[previous_dataset]
         previous = benchmark_data_identity(source=old_source, **subsets)
         current = benchmark_data_identity(source=definition.source, **subsets)
         assert previous["splits"] == current["splits"]
@@ -197,9 +234,9 @@ def test_both_methods_share_retained_data_and_reject_legacy_resume(
             if key not in {"dataset_version", "exclusion_manifest_sha256"}
         }
         old_runtime["manifest_sha256"] = utils.digest(old_source)
-        if previous_dataset == "v1":
+        if previous_dataset != "unfiltered":
             old_runtime["dataset_version"] = old_source["dataset_version"]
-            old_runtime["exclusion_manifest_sha256"] = V1_SHA256
+            old_runtime["exclusion_manifest_sha256"] = old_source["exclusion_manifest_sha256"]
         directory = tmp_path / condition
         ensure_contract(directory, "benchmark-run-contract.json", {"data": previous, "runtime": old_runtime})
         original = (directory / "benchmark-run-contract.json").read_bytes()

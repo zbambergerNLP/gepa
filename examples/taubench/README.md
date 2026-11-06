@@ -49,8 +49,9 @@ The small integration changes are explicit:
   mismatched required NL-assertion results abort even when upstream would treat
   an empty result list as vacuously successful.
 
-The official reward is the product of the task's `reward_basis`: 87 tasks use DB
-end-state grading, nine require ACTION grading, and one uses DB + NL_ASSERTION.
+The official reward is the product of the task's `reward_basis`. In the preserved
+97-task source, 87 tasks use DB end-state grading, nine require ACTION grading,
+and one uses DB + NL_ASSERTION.
 Reference actions are consumed by the official grader; they are not given to the
 solver or the reflection dataset. We do not substitute matching tool-call strings
 for DB evaluation. See the [official evaluation specification](https://github.com/sierra-research/tau2-bench/blob/5bfa7e37b36656b37dc6d022156be6563c1007f3/docs/evaluation.md).
@@ -59,11 +60,35 @@ for DB evaluation. See the [official evaluation specification](https://github.co
 
 `banking-manifest.json` pins all 97 ordered task-record fingerprints, the 698
 knowledge documents, database, prompt files, user-simulator guidelines, runtime
-source tree, dependency lock, and upstream revision. Loading rejects drift.
-Upstream provides no optimization split. This example creates **57 train / 19
-validation / 21 test** tasks, with stable globally unique IDs.
+source tree, dependency lock, and upstream revision. This original file remains
+unchanged. Loading verifies its full identity before filtering any record.
+Upstream provides no optimization split. The original manifest defines **57 train /
+19 validation / 21 test** tasks, with stable globally unique IDs.
 
-Local grouping joins tasks with an explicit shared `user_id` or `customer_name`,
+Future experiments use `tau-banking-ambiguity-exclusions-v1`, pinned in
+`banking-exclusions-v1.json`. It removes only these two confirmed ambiguous
+training records:
+
+- `task_075`: the scenario does not specify the comparison objective or opening
+  funds needed to choose the reference account unambiguously.
+- `task_084`: liability below the timing ceiling and precedence between
+  provisional-credit category and merchant-contact rules have conflicting readings.
+
+The retained dataset has **95 tasks: 55 train / 19 validation / 21 test**.
+Each remaining record keeps its exact identity, split, and relative order.
+The loader does not regroup, resplit, resample, or replace excluded records.
+The exclusion manifest pins both removed record fingerprints, plain reasons,
+the original manifest checksum, retained counts, and the ordered retained digest.
+Its own checksum is pinned in source. Any drift fails before an episode starts.
+
+Both methods and the worker use this same filtered manifest. The dataset version,
+exclusion checksum, and derived manifest enter runtime and resume identity.
+Old checkpoints cannot resume under this dataset, even when their selected records
+all survive. Use new run directories and baselines after separate run approval.
+The original three-record pilot, its attempts, and its scores remain historical
+evidence. No replacement pilot or full experiment is authorized by this change.
+
+Original grouping joins tasks with an explicit shared `user_id` or `customer_name`,
 identical user scenarios, or a task reference in the upstream notes. The resulting
 69 connected groups are ordered by SHA-256 of the fixed split salt and group ID;
 the first floor(60%) are training, the next groups through floor(80%) validation,

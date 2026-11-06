@@ -275,7 +275,9 @@ def test_shared_cli_models_full_data_and_real_optimizer_cycle(manifest, tmp_path
     from examples.common.react_v2 import structured_prompt
     from examples.taubench import main
 
-    splits = {s: [r for r in manifest["records"] if r["split"] == s] for s in ("train", "val", "test")}
+    original = deepcopy(manifest)
+    monkeypatch.setattr("examples.taubench.utils.inspect_source", lambda source: deepcopy(original))
+    splits, manifest = load_data(Path("unused"))
     monkeypatch.setattr(main, "load_data", lambda source: (deepcopy(splits), deepcopy(manifest)))
     monkeypatch.setattr(main, "upstream_system_prompt", lambda source: "Upstream instruction content")
     runtime = FakeRuntime(manifest)
@@ -296,7 +298,7 @@ def test_shared_cli_models_full_data_and_real_optimizer_cycle(manifest, tmp_path
     models = runner.resolve_models(args)
     benchmark = main.build_benchmark(args, models)
     assert models.solver_model == QWEN3_8_27B_MODEL and models.proposer_model == DEEPSEEK_V4_1_FLASH_MODEL
-    assert len(benchmark.trainset) == 57 and len(benchmark.valset) == 19 and len(benchmark.testset) == 21
+    assert len(benchmark.trainset) == 55 and len(benchmark.valset) == 19 and len(benchmark.testset) == 21
     assert models.solver_kwargs["max_tokens"] == 65536
     assert "Upstream instruction content" in benchmark.seed_candidate["system_prompt"]
     assert benchmark.test_repetitions == 4

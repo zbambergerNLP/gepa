@@ -62,6 +62,8 @@ def build_benchmark(args: argparse.Namespace, models: BenchmarkModels) -> Benchm
         source=manifest,
         runtime={
             "harness": "upstream_tau_text_llm_agent",
+            "dataset_version": manifest["dataset_version"],
+            "exclusion_manifest_sha256": manifest["exclusion_manifest_sha256"],
             "source_revision": UPSTREAM_REVISION,
             "python": PYTHON_VERSION,
             "supplements": list(RUNTIME_SUPPLEMENTS),

@@ -104,11 +104,11 @@ def test_pinned_data_and_seed_equal_official_runtime(source):
     assert upstream_system_prompt(source) == agent.system_prompt
     assert "KB_search" in {tool.name for tool in env.get_tools()}
     assert "shell" not in {tool.name for tool in env.get_tools()}
-    assert sum(map(len, splits.values())) == 97 and manifest["knowledge"]["count"] == 698
+    assert sum(map(len, splits.values())) == 95 and manifest["knowledge"]["count"] == 698
 
 
-def test_every_official_task_initializes_without_model_calls(source, monkeypatch):
-    """Load every task's initial DB, discoverable tools, histories and simulator instructions."""
+def test_every_retained_task_initializes_without_model_calls(source, monkeypatch):
+    """Load each retained task's initial DB, tools, histories and simulator instructions."""
     monkeypatch.setattr(litellm, "completion", lambda **kwargs: pytest.fail("Initialization called a model"))
     _, manifest = load_data(source)
     config = TextRunConfig(
@@ -126,7 +126,7 @@ def test_every_official_task_initializes_without_model_calls(source, monkeypatch
         orchestrator = build_text_orchestrator(config, task, seed=trial_seed(0))
         orchestrator.initialize()
         bases[tuple(sorted(task.evaluation_criteria.reward_basis))] += 1
-    assert bases == {("DB",): 87, ("ACTION",): 9, ("DB", "NL_ASSERTION"): 1}
+    assert bases == {("DB",): 85, ("ACTION",): 9, ("DB", "NL_ASSERTION"): 1}
 
 
 @pytest.mark.parametrize("correct_reason", [False, True])

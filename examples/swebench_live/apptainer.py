@@ -12,6 +12,12 @@ import tempfile
 import uuid
 from pathlib import Path
 
+from examples.swebench_live.solver_repository import (
+    SOLVER_REPOSITORY_PROTOCOL,
+    isolate_solver_repository,
+    validate_base_commit,
+)
+
 ISOLATION = [
     "--fakeroot",
     "--ignore-fakeroot-command",
@@ -59,8 +65,9 @@ def allocation_limits(memory_gib: int) -> dict:
 def runtime_identity(memory_gib: int) -> dict:
     """Freeze container transport and isolation independently of the Docker backend."""
     executable = shutil.which("apptainer")
-    if executable is None:
-        raise RuntimeError("Apptainer is not installed")
+    git = shutil.which("git")
+    if executable is None or git is None:
+        raise RuntimeError("Apptainer and Git are required for isolated solver execution")
     return {
         "backend": "apptainer-instance-v1",
         "version": subprocess.check_output([executable, "version"], text=True, timeout=30).strip(),
@@ -70,14 +77,23 @@ def runtime_identity(memory_gib: int) -> dict:
         "hosts": {"path": "/etc/hosts", "content": LOOPBACK_HOSTS},
         "resources": allocation_limits(memory_gib),
         "writable_state": "fresh sandbox, private temporary directories and persistent instance per task",
+        "solver_repository_protocol": SOLVER_REPOSITORY_PROTOCOL,
+        "solver_git": {
+            "version": subprocess.check_output([git, "--version"], text=True, timeout=30).strip(),
+            "executable_sha256": sha256(Path(git).resolve()),
+        },
     }
 
 
 class ApptainerTask:
     """Keep task writes across shell calls while excluding host files and credentials."""
 
-    def __init__(self, image: dict, memory_gib: int):
+    def __init__(self, image: dict, memory_gib: int, *, solver_base_commit: str | None = None):
+        if solver_base_commit is not None:
+            validate_base_commit(solver_base_commit)
         self.image, self.memory_gib = image, memory_gib
+        self.solver_base_commit = solver_base_commit
+        self.repository_isolation = None
         self.temporary = None
         self.name = "swebench-" + uuid.uuid4().hex
         self.start_attempted = False
@@ -116,6 +132,8 @@ class ApptainerTask:
             )
             if result["exit_code"]:
                 raise RuntimeError(f"Cannot unpack task image: {result['stderr']}")
+            if self.solver_base_commit is not None:
+                self.repository_isolation = isolate_solver_repository(self.sandbox, self.solver_base_commit)
             self.start_attempted = True
             result = self._run(
                 [

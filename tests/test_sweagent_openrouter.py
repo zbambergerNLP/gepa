@@ -117,6 +117,7 @@ def offline_rollout(tmp_path, monkeypatch):
         "Fixed instructions",
         tmp_path,
         16,
+        base_commit="a" * 40,
         max_steps=30,
     )
     assert kwargs == original

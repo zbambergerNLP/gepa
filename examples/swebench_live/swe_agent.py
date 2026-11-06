@@ -11,6 +11,7 @@ import yaml
 
 from examples.common.artifacts import atomic_json, digest
 from examples.common.react_v2 import file_sha256
+from examples.swebench_live.solver_repository import validate_base_commit
 
 AGENT_URL = "https://github.com/njukenanli/SWE-agent-for-eval.git"
 AGENT_REVISION = "824224225e1e952b48da91f2d1bde38adb2115f2"
@@ -180,9 +181,11 @@ def rollout(
     memory_gib: int,
     test_model=None,
     *,
+    base_commit: str,
     max_steps: int | None = None,
 ) -> dict:
     """Run DefaultAgent and its standard tools, then close the solver before grading."""
+    validate_base_commit(base_commit)
     activate(root)
     from sweagent.agent.agents import DefaultAgentConfig
     from sweagent.agent.problem_statement import TextProblemStatement
@@ -199,8 +202,8 @@ def rollout(
     if max_steps is not None:
         agent.model = _StepLimitedModel(agent.model, max_steps)
     env = SWEEnv(
-        deployment=ApptainerDeployment(image, memory_gib, root / "payload", trial),
-        repo=PreExistingRepoConfig(repo_name="testbed", base_commit="HEAD"),
+        deployment=ApptainerDeployment(image, memory_gib, root / "payload", trial, base_commit),
+        repo=PreExistingRepoConfig(repo_name="testbed", base_commit=base_commit),
         post_startup_commands=["export PIP_NO_INDEX=1 PIP_FIND_LINKS=/opt/gepa-swerex/wheels"],
     )
     try:

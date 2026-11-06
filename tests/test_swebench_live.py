@@ -35,7 +35,7 @@ def test_partition_refuses_ambiguous_training_or_test_tasks():
 
 @pytest.fixture
 def native(tmp_path):
-    raw = row("safe", patch="GOLD SOLUTION", test_patch="HIDDEN TEST", hints_text="SECRET HINT")
+    raw = row("safe", base_commit="a" * 40, patch="GOLD SOLUTION", test_patch="HIDDEN TEST", hints_text="SECRET HINT")
     (tmp_path / "data").mkdir()
     for name in ("train", "val", "test"):
         (tmp_path / "data" / f"{name}.jsonl").write_text(json.dumps(raw) + "\n" if name == "train" else "")
@@ -55,11 +55,12 @@ def native(tmp_path):
     )
     events = []
 
-    def upstream(root, safe_record, image, models, prompt, trial, memory, *, max_steps=None):
+    def upstream(root, safe_record, image, models, prompt, trial, memory, *, base_commit, max_steps=None):
         assert not (trial / "evaluator-record.json").exists()
         assert not any(secret in json.dumps(safe_record) for secret in ("GOLD SOLUTION", "HIDDEN TEST", "SECRET HINT"))
         assert models.solver_model == "explicit/solver"
         assert max_steps == runner.agent_max_steps
+        assert base_commit == raw["base_commit"]
         events.extend(["start", "upstream-agent", "stop"])
         return {"patch": "PATCH", "trajectory": {"history": ["upstream-history"]}, "info": {"exit_status": "submitted"}}
 

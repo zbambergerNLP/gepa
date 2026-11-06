@@ -17,6 +17,7 @@ from swerex.deployment.hooks.abstract import CombinedDeploymentHook
 from swerex.runtime.abstract import IsAliveResponse, UploadResponse, _ExceptionTransfer
 from swerex.runtime.remote import RemoteRuntime
 
+from examples.common.artifacts import atomic_json
 from examples.swebench_live.apptainer import ApptainerTask
 from examples.swebench_live.swe_agent import verify_payload
 
@@ -71,8 +72,8 @@ class PipeRuntime(RemoteRuntime):
 class ApptainerDeployment(AbstractDeployment):
     """Own one task and run upstream SWE-ReX inside its private namespaces."""
 
-    def __init__(self, image, memory_gib, payload, trial):
-        self.task = ApptainerTask(image, memory_gib)
+    def __init__(self, image, memory_gib, payload, trial, base_commit):
+        self.task = ApptainerTask(image, memory_gib, solver_base_commit=base_commit)
         self.payload, self.trial = payload, trial
         self.logger = logging.getLogger(__name__)
         self._hooks = CombinedDeploymentHook()
@@ -107,6 +108,7 @@ class ApptainerDeployment(AbstractDeployment):
     async def start(self):
         verify_payload(self.payload)
         self.task.__enter__()
+        atomic_json(self.trial / "solver-repository-isolation.json", self.task.repository_isolation)
         destination = self.task.sandbox / "opt/gepa-swerex"
         if destination.exists() or not destination.parent.resolve().is_relative_to(self.task.sandbox.resolve()):
             raise ValueError("Unexpected runtime payload destination")

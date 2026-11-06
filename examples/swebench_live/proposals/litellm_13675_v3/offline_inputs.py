@@ -1,4 +1,4 @@
-"""Supply scoped offline inputs and a deterministic clock for thirteen tests."""
+"""Supply scoped offline inputs and deterministic clocks for fourteen tests."""
 
 import base64
 import hashlib
@@ -46,9 +46,14 @@ IPV4_TEST = "tests/test_litellm/llms/custom_httpx/test_http_handler.py::test_for
 LIMITER_TEST = (
     "tests/test_litellm/proxy/hooks/test_parallel_request_limiter.py::test_pre_call_hook_rpm_limits_retry_after"
 )
-SELECTED = IMAGE_TESTS | GEMINI_TESTS | {IPV4_TEST, LIMITER_TEST}
+STREAMING_LIMITER_TEST = (
+    "tests/test_litellm/proxy/hooks/test_parallel_request_limiter.py::test_streaming_router_tpm_limit"
+)
+CLOCK_TESTS = {LIMITER_TEST, STREAMING_LIMITER_TEST}
+SELECTED = IMAGE_TESTS | GEMINI_TESTS | {IPV4_TEST} | CLOCK_TESTS
 IMAGE_SOURCE_SHA256 = "832e91ff82ae44c009a7ffe20ea79448a52a86ac8c8608f3aff4faf542e7d97d"
 LIMITER_SOURCE_SHA256 = "d16fd09f3ebe3d062fb63804faf5398fe1ad30441cd1d18b5126e7c5ebd86553"
+LIMITER_TEST_SOURCE_SHA256 = "c9036eaf895ed90183ae8ad809244d508c3e9492aeb9fc2fbc65f20ca22bb206"
 
 
 def jpeg_bytes():
@@ -130,18 +135,33 @@ def proposed_offline_inputs(request, monkeypatch):
         yield
         return
     calls = []
-    if nodeid == LIMITER_TEST:
+    if nodeid in CLOCK_TESTS:
         limiter = importlib.import_module("litellm.proxy.hooks.parallel_request_limiter")
         if hashlib.sha256(Path(limiter.__file__).read_bytes()).hexdigest() != LIMITER_SOURCE_SHA256:
             raise ValueError("Frozen rate limiter implementation changed")
+        if nodeid == STREAMING_LIMITER_TEST:
+            if (
+                hashlib.sha256(Path(request.node.module.__file__).read_bytes()).hexdigest()
+                != LIMITER_TEST_SOURCE_SHA256
+            ):
+                raise ValueError("Frozen rate limiter test module changed")
 
         class SameMinuteClock:
+            role = "limiter"
+
             @classmethod
             def now(cls):
-                calls.append({"kind": "deterministic-rate-limit-clock", "logical_time": "2025-01-01T12:00:10"})
+                calls.append(
+                    {"kind": "deterministic-rate-limit-clock", "logical_time": "2025-01-01T12:00:10", "role": cls.role}
+                )
                 return datetime(2025, 1, 1, 12, 0, 10)
 
+        class TestClock(SameMinuteClock):
+            role = "test"
+
         monkeypatch.setattr(limiter, "datetime", SameMinuteClock)
+        if nodeid == STREAMING_LIMITER_TEST:
+            monkeypatch.setattr(request.node.module, "datetime", TestClock)
         try:
             yield
         finally:

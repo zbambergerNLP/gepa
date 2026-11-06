@@ -39,7 +39,7 @@ def test_proposal_preserves_frozen_record_and_all_p2p_requirements(record_path, 
     assert manifest["proposed_p2p_count"] == 2586
     assert manifest["proposed_f2p_count"] == 6
     assert manifest["original_p2p_preserved_in_order"]
-    assert len(offline_inputs.SELECTED) == 13
+    assert len(offline_inputs.SELECTED) == 14
     assert offline_inputs.SELECTED.issubset(original["PASS_TO_PASS"])
     assert not manifest["adoption_authorized"]
     assert manifest["scientific_protocol_change"]

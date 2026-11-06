@@ -38,7 +38,7 @@ The native trace-only diagnostic, job `16983378`, confirms DNS failures in the
 four previously unexplained shared assertions. The earlier logs identify the
 other eight. The required offline network namespace stays enabled.
 
-The proposed plugin supplies inputs only for thirteen exact P2P test IDs:
+The proposed plugin supplies inputs only for fourteen exact P2P test IDs:
 
 - Nine image-dependent tests receive a pinned synthetic 8-by-6 JPEG at the HTTP
   input boundary. The JPEG format stays distinct from the requested PNG MIME
@@ -52,6 +52,9 @@ The proposed plugin supplies inputs only for thirteen exact P2P test IDs:
 - The retry-after limiter test receives a fixed clock within one minute. Its
   original two-second wait, body, and assertions stay unchanged. The fixture
   checks the frozen limiter hash and restores its previous clock afterward.
+- The streaming TPM test uses the same minute for its lookup key and success
+  callback. The fixture checks both source hashes and restores both clocks.
+  Its real router, `mock_response="hello"`, waits, and assertions stay unchanged.
 
 All original P2P source and assertion bytes remain unchanged. The plugin rejects
 unexpected calls rather than returning success for arbitrary requests. Its audit
@@ -69,6 +72,13 @@ therefore allow the second call. This reachable timing defect is separate from
 the earlier failure: that run did not record its clock, so its cause is unproven.
 The proposed fixture changes only this test's clock input, not the limiter policy.
 Boundary controls must still verify that the native limiter permits a new minute.
+
+The streaming test records a minute key before its mock stream. Its callback
+uses the current minute when it records tokens. A rollover can therefore update
+a different bucket from the test's lookup. Matrix02 logged a completed mock
+stream and 15 callback tokens while the tested bucket stayed zero. This supports
+rollover, but the test's initial clock value was not recorded. Controlled checks
+must reproduce the failure and verify both clocks return after teardown.
 
 These are proposed environment fixtures, not recordings of real public servers.
 They change external inputs and therefore form part of the proposed evaluation
@@ -110,13 +120,14 @@ Set `SWE_LITELLM_TERMINAL_ROOT` to the verified attempt10 archive and
 `SWE_LITELLM_IMAGE_SOURCE` to the verified frozen `image_handling.py` for local tests.
 
 The local clock checks execute unchanged frozen class and test bodies with
-explicit cache, auth, logger, and exception-field stubs. Set
+explicit cache, auth, logger, exception-field, and router-delivery stubs. Set
 `SWE_LITELLM_CLOCK_SOURCE_DIR` to the verified full native source copies.
 Their Git blobs are `242c013d6773c4157220f7e965016492b2e80930` for the limiter
 and `72aca19a70a1caad78931886839aea2ba53656df` for its test module.
 Native clock validation must use the actual cache, auth, and FastAPI classes.
-It must show the original test fails under forced rollover, passes with the
-fixture, and restores the prior clock. It also reruns all twelve prior fixtures.
+The streaming check must use the native router with its original mock response.
+Both original tests must fail under forced rollover, pass with the fixtures,
+and restore their prior clocks. Validation also reruns all twelve prior fixtures.
 The earlier full matrix and this focused check retain their separate head
 identities; a focused check is not a full-matrix rerun.
 

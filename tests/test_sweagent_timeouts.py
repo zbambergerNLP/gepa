@@ -191,7 +191,15 @@ def test_rollout_closes_environment_after_interrupt_failure(native_agent, agent_
     models = BenchmarkModels("openrouter/offline-check", "unused", None, None, {}, {})
     with pytest.raises(RuntimeError, match="interrupt failed"):
         swe_agent.rollout(
-            agent_root, {"id": "task", "problem_statement": "task"}, {}, models, "system", tmp_path, 16, max_steps=30
+            agent_root,
+            {"id": "task", "problem_statement": "task"},
+            {},
+            models,
+            "system",
+            tmp_path,
+            16,
+            base_commit="a" * 40,
+            max_steps=30,
         )
     assert agent._total_execution_time == pytest.approx(30.5)
     environment.close.assert_called_once_with()

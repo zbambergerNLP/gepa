@@ -142,6 +142,7 @@ class SWEBenchLiveAdapter:
                 candidate[COMPONENT],
                 trial,
                 self.memory_gib,
+                base_commit=self.evaluator_rows[record["id"]]["base_commit"],
                 max_steps=self.agent_max_steps,
             )
             messages = result["trajectory"]

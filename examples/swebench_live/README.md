@@ -148,6 +148,10 @@ and [fakeroot](https://apptainer.org/docs/user/latest/fakeroot.html) documentati
 
 ## SWE-agent runtime
 
+Solver sandboxes use [base-only Git isolation](../../docs/swe-solver-repository-isolation.md)
+before startup. This versioned protocol removes historical and future Git objects.
+It requires a new approved attempt and cannot resume an older run.
+
 The [official Live evaluation guide](https://github.com/microsoft/SWE-bench-Live/blob/main/evaluation/README.md)
 links [SWE-agent-for-eval](https://github.com/njukenanli/SWE-agent-for-eval).
 We pin commit `824224225e1e952b48da91f2d1bde38adb2115f2` (SWE-agent 1.1.0,

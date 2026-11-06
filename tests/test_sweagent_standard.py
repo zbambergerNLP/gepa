@@ -170,7 +170,15 @@ def test_rollout_installs_a_fresh_budget_and_closes_before_return(agent_root, tm
         trial = tmp_path / str(index)
         trial.mkdir()
         result = swe_agent.rollout(
-            agent_root, {"id": "task", "problem_statement": "task"}, {}, models, "system", trial, 16, max_steps=30
+            agent_root,
+            {"id": "task", "problem_statement": "task"},
+            {},
+            models,
+            "system",
+            trial,
+            16,
+            base_commit="a" * 40,
+            max_steps=30,
         )
         assert result["patch"] == "partial patch"
         assert json.loads((trial / "swe-agent-config.json").read_text())["model"]["per_instance_call_limit"] == 30
@@ -206,6 +214,49 @@ def test_swe_builder_exposes_only_the_verbatim_system_template(agent_root, tmp_p
     template = benchmark.templates["system_prompt"]
     assert isinstance(template, VerbatimPromptTemplate)
     assert template.render(template.parse(seed)) == seed
+
+
+def test_repository_isolation_failure_blocks_solver_and_worker_start(agent_root, tmp_path, monkeypatch):
+    from sweagent.environment import swe_env
+
+    from examples.swebench_live import swe_agent_rex
+
+    agent = SimpleNamespace(model=Mock(), run=Mock())
+    environment = SimpleNamespace(close=Mock())
+    task = SimpleNamespace(temporary=None, __enter__=Mock(side_effect=ValueError("frozen base mismatch")))
+
+    def new_task(image, memory, *, solver_base_commit):
+        assert solver_base_commit == "a" * 40
+        return task
+
+    def new_environment(**kwargs):
+        assert kwargs["repo"].base_commit == "a" * 40
+        environment.start = lambda: asyncio.run(kwargs["deployment"].start())
+        return environment
+
+    monkeypatch.setattr(swe_agent, "create_agent", lambda _: agent)
+    monkeypatch.setattr(swe_agent, "activate", lambda _: {})
+    monkeypatch.setattr(swe_env, "SWEEnv", new_environment)
+    monkeypatch.setattr(swe_agent_rex, "ApptainerTask", new_task)
+    monkeypatch.setattr(swe_agent_rex, "verify_payload", lambda _: {})
+    worker = Mock(side_effect=AssertionError("Worker must not start"))
+    monkeypatch.setattr(swe_agent_rex.subprocess, "Popen", worker)
+    models = BenchmarkModels("openrouter/offline-check", "unused", None, None, {}, {})
+    with pytest.raises(ValueError, match="frozen base mismatch"):
+        swe_agent.rollout(
+            agent_root,
+            {"id": "fixture", "problem_statement": "fixture"},
+            {},
+            models,
+            "system",
+            tmp_path,
+            16,
+            base_commit="a" * 40,
+        )
+    worker.assert_not_called()
+    agent.run.assert_not_called()
+    agent.model.query.assert_not_called()
+    environment.close.assert_called_once_with()
 
 
 def test_pinned_default_agent_configuration_is_preserved(agent_root):
@@ -391,7 +442,16 @@ def test_rollout_preserves_infrastructure_failures_after_autosubmission(
     models = BenchmarkModels("openrouter/offline-check", "unused", None, None, {}, {})
 
     with pytest.raises(RuntimeError, match="preserve the unresolved trial"):
-        swe_agent.rollout(agent_root, {"id": "task", "problem_statement": "task"}, {}, models, "system", tmp_path, 16)
+        swe_agent.rollout(
+            agent_root,
+            {"id": "task", "problem_statement": "task"},
+            {},
+            models,
+            "system",
+            tmp_path,
+            16,
+            base_commit="a" * 40,
+        )
 
     assert json.loads((tmp_path / "trajectory.json").read_text()) == trajectory
     environment.close.assert_called_once_with()
@@ -440,8 +500,8 @@ def owned_deployment(agent_root, tmp_path, monkeypatch):
 
     task = SimpleNamespace(temporary=object())
     task.__exit__ = Mock(side_effect=lambda: setattr(task, "temporary", None))
-    monkeypatch.setattr(swe_agent_rex, "ApptainerTask", lambda *_: task)
-    deployment = swe_agent_rex.ApptainerDeployment({}, 16, tmp_path, tmp_path)
+    monkeypatch.setattr(swe_agent_rex, "ApptainerTask", lambda *_, **__: task)
+    deployment = swe_agent_rex.ApptainerDeployment({}, 16, tmp_path, tmp_path, "a" * 40)
     runtime = SimpleNamespace(failed=False, close=AsyncMock())
     process = Mock()
     process.poll.return_value = None

@@ -65,10 +65,13 @@ unchanged. Loading verifies its full identity before filtering any record.
 Upstream provides no optimization split. The original manifest defines **57 train /
 19 validation / 21 test** tasks, with stable globally unique IDs.
 
-Future experiments use `tau-banking-ambiguity-exclusions-v2`, pinned in
-`banking-exclusions-v2.json`. It excludes four training records with material
+Future experiments use `tau-banking-ambiguity-exclusions-v3`, pinned in
+`banking-exclusions-v3.json`. It excludes five training records with material
 missing assumptions or conflicting policy readings:
 
+- `task_017`: the rewards reference omits an exact one-point over-award.
+  Policy permits disputes for discrepancies without an underpayment-only rule or tolerance.
+  Submitting that additional dispute changes the strict DB grade.
 - `task_024`: the card with the highest return changes with purchase timing.
   The scenario does not specify when the purchase must post.
 - `task_075`: the scenario does not specify the comparison objective or opening
@@ -78,17 +81,27 @@ missing assumptions or conflicting policy readings:
 - `task_094`: the exact interest credit requires an unstated conversion convention.
   Policy specifies daily compounding but does not define the period and balance basis.
 
-V1 excluded only `task_075` and `task_084`. Its manifest remains unchanged.
+V1 excluded only `task_075` and `task_084`.
 V2 adds `task_024` and `task_094` under the same material-underdetermination rule.
-The retained dataset has **93 tasks: 53 train / 19 validation / 21 test**.
+V3 adds only `task_017`. Both earlier exclusion manifests remain unchanged.
+The retained dataset has **92 tasks: 52 train / 19 validation / 21 test**.
 Each remaining record keeps its exact identity, split, and relative order.
 The loader does not regroup, resplit, resample, or replace excluded records.
-The exclusion manifest pins all four removed record fingerprints, plain reasons,
+The exclusion manifest pins all five removed record fingerprints, plain reasons,
 the original manifest checksum, retained counts, and the ordered retained digest.
 Its own checksum is pinned in source. Any drift fails before an episode starts.
 
-The additional exclusions do not depend on observed scores. `task_024` already
-received successful grades in saved episodes. For its $40,000 ordinary purchase,
+The exclusions do not depend on observed scores. For `task_017`, Hilton awards
+1,159 points on a $289.50 travel purchase. The 4% policy and one-cent point value
+give exactly 1,158 points. The floor-rounding rule cannot explain the extra point.
+The reference disputes only the Amazon and Sushi under-awards. The dispute policy
+covers differences between received and expected rewards. It does not say whether
+to ignore a favorable error. An offline fixture through the frozen native tools
+and strict DB evaluator scores the reference history at 1 and the extra-dispute
+history at 0. No model or episode runs in that fixture. This demonstrates a
+task/reference coverage issue, not a grading-code defect or a live failure cause.
+
+`task_024` already received successful grades in saved episodes. For its $40,000 ordinary purchase,
 Bronze returns $900 within two months after an eligible opening; Silver returns $800.
 After month two and within month six, Bronze returns $400 while Silver returns $800.
 These cases use the frozen Bronze bonus and Silver double-rewards policies.
@@ -104,10 +117,10 @@ the causes of failed episodes. They do not establish validity for every retained
 
 Both methods and the worker use this same filtered manifest. The dataset version,
 exclusion checksum, and derived manifest enter runtime and resume identity.
-Unfiltered and v1 checkpoints cannot resume under v2, even when their selected
-records all survive. V2 changes training coverage and the scientific protocol.
+Unfiltered, v1, and v2 checkpoints cannot resume under v3, even when their selected
+records all survive. V3 changes training coverage and the scientific protocol.
 Use new run directories and baselines after separate run approval.
-Existing v1 runs, including attempt11, finish under their original frozen contract.
+Existing v1 and v2 runs, including attempts 11 and 12, keep their original frozen contracts.
 Preserve every earlier attempt, grade, and original pilot record.
 This change does not authorize another pilot or a full experiment.
 

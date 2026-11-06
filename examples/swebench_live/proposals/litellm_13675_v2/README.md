@@ -1,8 +1,8 @@
 # Proposed LiteLLM response-boundary correction
 
-Status: **PROPOSED, NOT ADOPTED**. Variant: `litellm-13675-httpx-boundary-v1`.
+Status: **PROPOSED, NOT ADOPTED**. Variant: `litellm-13675-httpx-boundary-v2`.
 
-This packet repairs a confirmed Unicode-header boundary and supplies concrete,
+This packet repairs Unicode-header handling and stream ownership. It supplies
 offline regression checks. It does not alter the frozen SWE-bench Live record,
 official tests, images, profiles, historical scores, or campaign runner.
 
@@ -35,6 +35,55 @@ This reverses aiohttp's documented header decoding.
 This proposed reference is smaller than the saved solver's header helper.
 It makes no claim that the saved solver patch resolves the entire task.
 
+## Preserve native stream ownership
+
+The frozen transport enters an aiohttp response context and wraps it in
+`AiohttpResponseStream`. That class closes the context in its `aclose` method.
+Passing this object through `httpx.Response(content=...)` loses that callback.
+HTTPX wraps async content in `AsyncIteratorByteStream`, whose inherited close
+method does nothing. Its public client adds another wrapper that delegates to
+the same ineffective close method.
+
+The v2 patch uses `stream=AiohttpResponseStream(response)`. HTTPX retains the
+native stream and forwards closure. The header repair and native line iterators
+remain unchanged. This repairs an inherited transport defect. A fully consumed
+aiohttp response can also release its connection at EOF, so a missing context
+exit alone does not prove a real connection leak in every completed request.
+[HTTPX 0.28.1 streaming lifecycle](https://github.com/encode/httpx/blob/0.28.1/docs/async.md).
+
+`test_swebench_litellm_stream_ownership.py` exercises the public
+`AsyncClient.stream` context with HTTPX 0.28.1. It uses the exact archived response
+constructor and native stream class. Only the upstream response and exception
+mapping are simulated. Both full consumption and early closure must close the
+upstream context exactly once. No socket opens.
+
+The tracked `native_probe.py` also preserves separate `parsing` and `cleanup`
+results. The previous native probe raised a closure assertion in `finally`,
+which replaced the original parser failure in its report. The v2 diagnostic
+retains both failures. A case passes only when both stages pass. Cancellation
+still runs cleanup and propagates. The strict closure assertion remains.
+
+## Prior native evidence and remaining hold
+
+The v1 diagnostic ran in the pinned image under job 16954571. The image used
+HTTPX 0.28.1, aiohttp 3.10.11, and LiteLLM 1.75.7.
+
+| Arm | Required F2P passed | Required P2P passed |
+| --- | ---: | ---: |
+| Unmodified base | 0 / 3 | 2,568 / 2,580 |
+| Frozen reference | 3 / 3 | 2,568 / 2,580 |
+| Header-only v1 proposal | 0 / 3 | 2,567 / 2,580 |
+
+The v1 proposal passed six sync boundary cases. All six async results reported
+the closure assertion. Those results do not establish parser success because
+the assertion could mask an earlier error. The shared twelve P2P failures and
+the candidate-only `test_failure_call_hook` failure remain unresolved. Their
+presence does not establish that the header patch caused the limiter failure.
+
+The v2 proposal did not run in the native image or official suite. The one-line
+ownership repair does not establish complete validity. Preserve every previous
+result and keep the SWE experiment gate closed until the evidence supports it.
+
 ## Reproduce the offline regression
 
 Use the saved attempt10 terminal archive after its normal hash verification.
@@ -42,7 +91,7 @@ Pass its extracted root, which contains `files/swebench_live/native-trials/`.
 
 ```bash
 uv run --no-project --with httpx==0.28.1 --with multidict==7.1.0 python \
-  examples/swebench_live/proposals/litellm_13675_v1/check.py \
+  examples/swebench_live/proposals/litellm_13675_v2/check.py \
   --terminal-root /absolute/path/to/attempt10-terminal-artifacts \
   --output /absolute/path/to/new-boundary-report.json
 ```
@@ -71,18 +120,32 @@ The candidate passes 12 cases. The unchanged transport fails the Unicode header
 cases. The frozen reference fails real stream consumption. The check separately
 reproduces all three frozen mock tests on the unchanged and reference handlers.
 
+Run the focused ownership and diagnostic regressions in an existing environment
+with HTTPX 0.28.1, multidict, aiohttp, and pytest:
+
+```bash
+SWE_LITELLM_TERMINAL_ROOT=/absolute/path/to/attempt10-terminal-artifacts \
+  PYTHONPATH=.:src uv run --offline --no-project --python /absolute/path/to/python \
+  python -B -m pytest -q tests/test_swebench_litellm_stream_ownership.py
+```
+
+The two ownership cases require the preserved archive. They skip with an explicit
+reason when its path is absent. Diagnostic reporting tests need no archive.
+The existing environment remains unchanged. The native diagnostic must run only
+inside a separately approved task image; this packet does not start it.
+
 ## Adoption and coverage limits
 
 These checks propose a corrected boundary test, not a new official task score.
 The outer `ModelResponseIterator` is a transparent holder. The complete LiteLLM
 parser, task container, provider, and official P2P suite do not run here.
-HTTPX 0.28.1 matches the saved solver-shell probe. The grader's separate Poetry
-HTTPX version was not recorded. The aiohttp version is not inferred from the
-documentation version above.
+HTTPX 0.28.1 matches the saved solver-shell probe and the later v1 native check.
+The focused ownership tests do not import the full pinned LiteLLM package or run
+its HTTP session. The new native diagnostic remains unexecuted in that image.
 
 The six original LiteLLM trial scores remain zero. The five empty patches remain
 model outcomes. The saved nonempty patch still has unresolved full-suite coverage.
-The native smoke test covers Patroni, not this LiteLLM task.
+The v1 native results above remain separate from this proposed v2 correction.
 
 Before adopting a corrected evaluation variant, obtain specific approval for
 its record and grading changes. Validate the full unmodified and corrected

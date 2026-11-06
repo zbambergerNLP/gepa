@@ -143,11 +143,14 @@ campaign, verify native task execution and official negative/reference grading
 on training records; a download or an offline unit test is insufficient.
 
 The frozen `BerriAI__litellm-13675` record has confirmed mock-interface and
-reference-streaming defects. The [offline correction proposal](proposals/litellm_13675_v1/README.md)
-reproduces them and tests a separate header repair with real HTTPX byte streams.
+reference-streaming defects. The [offline correction proposal](proposals/litellm_13675_v2/README.md)
+reproduces them and tests separate header and stream-ownership repairs with real HTTPX byte streams.
 It leaves official records, tests, and scores unchanged. Its checker fails the
-official reference even when the proposed boundary repair passes. Native reference
-grading and full-suite validity remain unverified for that proposed variant.
+official reference even when the proposed boundary repair passes. The v1 native
+diagnostic also exposed lost cleanup callbacks. The v2 proposal preserves those
+callbacks and reports parser and cleanup failures separately. Its native validation
+remains pending. Official F2P/P2P failures remain unresolved; this proposal does not
+establish full-suite validity or authorize an experiment.
 
 See the [Della API runbook](../../scripts/della/API_RUNBOOK.md) and upstream
 [Apptainer instances](https://apptainer.org/docs/user/latest/running_services.html)

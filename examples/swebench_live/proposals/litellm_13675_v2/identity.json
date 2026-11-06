@@ -1,5 +1,5 @@
 {
-  "variant": "litellm-13675-httpx-boundary-v1",
+  "variant": "litellm-13675-httpx-boundary-v2",
   "status": "PROPOSED_NOT_ADOPTED",
   "instance_id": "BerriAI__litellm-13675",
   "repo": "BerriAI/litellm",
@@ -11,6 +11,6 @@
     "frozen_test_patch": "d29d002a611fe9666cb9f4132bfde956295fda11298e62d18731369182de48e1",
     "base_handler_excerpt": "5901e0d1617993de0a481b4e6cc0e7f7ec8d74391f09f53502cc71d6e6e004c3",
     "base_transport_excerpt": "071193b9285ac00b3ed980e7e577705a4c399f28083d093fb8a36105d4cc3b95",
-    "candidate_reference": "8ef7ad1f51f4595c2eda30e034cbdd6193072651766ba193a290d40324ec8559"
+    "candidate_reference": "76f50001f98a0e3559abd45b893ae8e00bff097f7cd1576d93af5ba13ca7b8a5"
   }
 }

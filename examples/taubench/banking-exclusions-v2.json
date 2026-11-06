@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "dataset_version": "tau-banking-ambiguity-exclusions-v2",
+  "original_manifest_sha256": "e988c4649b001f7faa75a2aae075d66d730d544db184c25a90b050ae50631f9a",
+  "excluded_records": [
+    {
+      "record": {
+        "group_id": "task_084",
+        "id": "tau-banking/task_084",
+        "scenario_id": "task_084",
+        "split": "train",
+        "task_id": "task_084",
+        "task_sha256": "4b6dae5afd9fbb493c79fc7d77096e3479459502e12600a29d89537dca4ee162"
+      },
+      "reason": "Liability below the timing ceiling and precedence between provisional-credit category and merchant-contact rules have conflicting interpretations."
+    },
+    {
+      "record": {
+        "group_id": "task_024",
+        "id": "tau-banking/task_024",
+        "scenario_id": "task_024",
+        "split": "train",
+        "task_id": "task_024",
+        "task_sha256": "864843028c613f39624182a6ee27ce23eba5b127dceada37c057396af0ffcbf3"
+      },
+      "reason": "The card with the highest return changes with purchase timing, but the scenario does not specify when the purchase must post."
+    },
+    {
+      "record": {
+        "group_id": "task_075",
+        "id": "tau-banking/task_075",
+        "scenario_id": "task_075",
+        "split": "train",
+        "task_id": "task_075",
+        "task_sha256": "fe5f745abaf9fc42d323baf361da814db0efe956cf254db4b3d6c6cd1846ac35"
+      },
+      "reason": "The scenario does not specify the comparison objective or opening funds needed to choose the reference account unambiguously."
+    },
+    {
+      "record": {
+        "group_id": "task_094",
+        "id": "tau-banking/task_094",
+        "scenario_id": "task_094",
+        "split": "train",
+        "task_id": "task_094",
+        "task_sha256": "1506c44d139cf214b58d71729ddfdaf097d498703ba4d90c9546446dba526747"
+      },
+      "reason": "The exact interest credit assumes a linear APY-to-month conversion, but policy specifies daily compounding without an exact conversion, period or balance convention."
+    }
+  ],
+  "retained_counts": {
+    "train": 53,
+    "val": 19,
+    "test": 21
+  },
+  "retained_total": 93,
+  "retained_records_sha256": "b7045fc0fd5fa66346d0b77c5572ff3b02a612e823d55aeaad509a91f268a9c3",
+  "policy": "Filter the verified original ordered records. Preserve every surviving record, split and relative order. Do not regroup, resplit or resample."
+}

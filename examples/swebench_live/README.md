@@ -171,9 +171,21 @@ The limit and its enforcement enter the runtime contract. Use a fresh baseline
 and output directory when changing the limit. Omitting the flag preserves the
 original configuration and stopping behavior. Benchmark tests, task records,
 tools, and the upstream starting prompt do not change.
-The default tool timeouts are also upstream's: 30 seconds per action and
-1,800 seconds of cumulative execution. The text editor's own clipping and
-file-map behavior remain active; this is not the old untruncated shell tool.
+The pinned fork declares 30 seconds per action and 1,800 seconds of cumulative
+execution. Its original implementation ignores those values and uses 5,400
+seconds per action and 18,000 seconds in total. Our explicit `agent-runtime.patch`
+enforces the configured limits. Each action receives the smaller of its configured
+timeout and the remaining total budget. Cancellation text reports that effective
+timeout. Each timeout triggers interruption before recovery or final submission.
+No model query starts once the cumulative action budget is exhausted.
+Cancellation, state checks and final patch extraction can add overhead; this is
+not a strict wall-clock limit. The patch preserves the native parser, editor,
+submission behavior and explicit model-query cap.
+
+The patch hash and `configured-command-and-total-v1` identity enter the runtime
+and resume contract. They change execution behavior and invalidate older run
+contracts. Prepare a new runtime and use a fresh run directory. Existing frozen
+runtime roots and historical results remain unchanged.
 
 Create a **new** driver environment on the visualization host. Install the
 hash-locked agent dependencies in addition to the shared runner dependencies;
@@ -189,12 +201,13 @@ uv run --no-project --python /absolute/new/venv/bin/python python -m examples.sw
   --portable-python /absolute/path/to/cpython-3.12-linux-x86_64-gnu
 ```
 
-Preparation clones and verifies the upstream commit and builds a hash-verified,
-relocatable SWE-ReX payload. It stages the upstream editor's dependency wheels
+Preparation clones and verifies the upstream commit. It applies the exact agent
+patch only to a new checkout and builds a hash-verified, relocatable SWE-ReX
+payload. It stages the upstream editor's dependency wheels
 for offline installation. It makes no model calls and starts no task container.
 A failed preparation directory is retained; inspect it and use a fresh root.
 
-The only execution adaptation is transport: a private pipe carries SWE-ReX's
+In addition to the explicit timeout patch, a private pipe carries SWE-ReX's
 requests to its **unchanged LocalRuntime** inside the Apptainer instance. This
 preserves the persistent PTY, command parsing, timeouts and error types. The
 portable Python runtime is copied into the disposable task filesystem; no host

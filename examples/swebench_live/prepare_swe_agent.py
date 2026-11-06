@@ -10,9 +10,22 @@ from pathlib import Path
 
 from examples.common.artifacts import atomic_json
 from examples.common.react_v2 import file_sha256
-from examples.swebench_live.swe_agent import AGENT_REVISION, AGENT_URL, source_identity, verify_payload
+from examples.swebench_live.swe_agent import AGENT_PATCH, AGENT_REVISION, AGENT_URL, source_identity, verify_payload
 
 HERE = Path(__file__).resolve().parent
+
+
+def prepare_source(root: Path) -> dict:
+    """Patch only a new source checkout; verify existing roots without changing them."""
+    source = root / "source"
+    if not source.exists():
+        if (root / "payload").exists():
+            raise ValueError("Existing SWE-ReX payload requires its original source; use a new runtime root")
+        root.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "clone", AGENT_URL, str(source)], check=True)
+        subprocess.run(["git", "-C", str(source), "checkout", "--detach", AGENT_REVISION], check=True)
+        subprocess.run(["git", "-C", str(source), "apply", "--unidiff-zero", str(AGENT_PATCH)], check=True)
+    return source_identity(source)
 
 
 def main():
@@ -24,13 +37,13 @@ def main():
     root = args.root.resolve()
     root.mkdir(parents=True, exist_ok=True)
     source = root / "source"
-    if not source.exists():
-        subprocess.run(["git", "clone", AGENT_URL, str(source)], check=True)
-        subprocess.run(["git", "-C", str(source), "checkout", "--detach", AGENT_REVISION], check=True)
-    identity = source_identity(source)
+    identity = prepare_source(root)
     payload = root / "payload"
     if payload.exists():
-        print(json.dumps(verify_payload(payload)))
+        verified = verify_payload(payload)
+        if verified["source"] != identity:
+            raise ValueError("SWE-ReX payload source differs; use a new runtime root")
+        print(json.dumps(verified))
         return
     building = root / "payload-building"
     building.mkdir(exist_ok=False)

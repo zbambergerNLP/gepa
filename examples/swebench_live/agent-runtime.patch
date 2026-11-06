@@ -1,0 +1,39 @@
+diff --git a/sweagent/agent/agents.py b/sweagent/agent/agents.py
+index 3a599f0..305d160 100644
+--- a/sweagent/agent/agents.py
++++ b/sweagent/agent/agents.py
+@@ -981,0 +982,4 @@ class DefaultAgent(AbstractAgent):
++        remaining_time = self.tools.config.total_execution_timeout - self._total_execution_time
++        if remaining_time <= 0:
++            raise _TotalExecutionTimeExceeded()
++        execution_timeout = min(self.tools.config.execution_timeout, remaining_time)
+@@ -989 +993 @@ class DefaultAgent(AbstractAgent):
+-                timeout=90*60, # 1.5 h limit to align with evaluation code
++                timeout=execution_timeout,
+@@ -994,6 +997,0 @@ class DefaultAgent(AbstractAgent):
+-            if self._n_consecutive_timeouts >= self.tools.config.max_consecutive_execution_timeouts:
+-                msg = "Exiting agent due to too many consecutive execution timeouts"
+-                self.logger.critical(msg)
+-                step.execution_time = time.perf_counter() - execution_t0
+-                self._total_execution_time += step.execution_time
+-                raise
+@@ -1006,0 +1005,6 @@ class DefaultAgent(AbstractAgent):
++            if self._n_consecutive_timeouts >= self.tools.config.max_consecutive_execution_timeouts:
++                msg = "Exiting agent due to too many consecutive execution timeouts"
++                self.logger.critical(msg)
++                step.execution_time = time.perf_counter() - execution_t0
++                self._total_execution_time += step.execution_time
++                raise
+@@ -1009 +1013 @@ class DefaultAgent(AbstractAgent):
+-                timeout=self.tools.config.execution_timeout,
++                timeout=execution_timeout,
+@@ -1042 +1046 @@ class DefaultAgent(AbstractAgent):
+-        if self._total_execution_time > 5*60*60:
++        if self._total_execution_time >= self.tools.config.total_execution_timeout:
+diff --git a/sweagent/tools/tools.py b/sweagent/tools/tools.py
+index 13047c5..c75ce8a 100644
+--- a/sweagent/tools/tools.py
++++ b/sweagent/tools/tools.py
+@@ -147 +147 @@ class ToolConfig(BaseModel):
+-    Note: Does not interrupt running commands, but will stop the agent for the next step.
++    Each agent action uses the remaining budget. No query starts once the budget is exhausted.

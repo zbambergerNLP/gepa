@@ -120,6 +120,7 @@ def prepare(record_path, output):
             "pythonpath_entry": "/testbed/tests/test_litellm",
             "scope": "Twelve exact original P2P test IDs; all original assertions stay unchanged.",
             "image_input": "Pinned synthetic JPEG replaces the two mutable external image responses.",
+            "image_cache": "Each selected test uses a fresh native image cache; its original cache is restored afterward.",
             "gemini_input": "Simulated missing-key HTTP400; no successful provider response or credential supplied.",
             "ipv4_input": "Actual IPv4 HTTP transport to a private loopback server instead of example.com.",
             "unexpected_requests": "Fail locally; never return a blanket success response.",

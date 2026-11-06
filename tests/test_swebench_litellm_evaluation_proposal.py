@@ -1,13 +1,15 @@
 """Keep the proposed scoring correction separate from frozen official inputs."""
 
+import ast
 import asyncio
+import base64
 import hashlib
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import aiohttp
 import httpx
@@ -105,7 +107,45 @@ def activate_inputs(nodeid, monkeypatch):
     return fixture
 
 
-def test_image_inputs_keep_decoding_bytes_and_reject_unexpected_requests(monkeypatch):
+@pytest.fixture
+def frozen_image_module(monkeypatch):
+    """Load unchanged frozen conversion functions with an explicit in-memory cache stub."""
+    source = os.environ.get("SWE_LITELLM_IMAGE_SOURCE")
+    if source is None:
+        pytest.skip("Set SWE_LITELLM_IMAGE_SOURCE to the verified frozen image_handling.py")
+    path = Path(source)
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == (
+        "832e91ff82ae44c009a7ffe20ea79448a52a86ac8c8608f3aff4faf542e7d97d"
+    )
+
+    class Cache:
+        def __init__(self, max_size_in_memory):
+            self.values = {}
+            self.max_size_in_memory = max_size_in_memory
+
+        def get_cache(self, key):
+            return self.values.get(key)
+
+        def set_cache(self, key, value):
+            self.values[key] = value
+
+    module = ModuleType("litellm.litellm_core_utils.prompt_templates.image_handling")
+    module.__file__ = str(path)
+    module.__dict__.update(
+        base64=base64,
+        Response=httpx.Response,
+        InMemoryCache=Cache,
+        litellm=SimpleNamespace(),
+        verbose_logger=SimpleNamespace(exception=lambda _: None),
+    )
+    tree = ast.parse(path.read_text())
+    tree.body = [node for node in tree.body if not isinstance(node, (ast.Import, ast.ImportFrom))]
+    exec(compile(tree, str(path), "exec"), module.__dict__)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    return module
+
+
+def test_image_inputs_keep_decoding_bytes_and_reject_unexpected_requests(monkeypatch, frozen_image_module):
     """Serve only the pinned image response through sync and async client boundaries."""
     fixture = activate_inputs(sorted(offline_inputs.IMAGE_TESTS)[0], monkeypatch)
     url = sorted(offline_inputs.IMAGE_URLS)[0]
@@ -133,6 +173,44 @@ def test_image_inputs_keep_decoding_bytes_and_reject_unexpected_requests(monkeyp
             next(fixture)
     finally:
         fixture.close()
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_image_cache_is_local_and_restored(frozen_image_module, tmp_path, mode):
+    """Require real input consumption despite an old cache, then restore unrelated state."""
+    module = frozen_image_module
+    original_cache = module.in_memory_cache
+    url = sorted(offline_inputs.IMAGE_URLS)[0]
+    original_cache.set_cache(url, "stale-image")
+    original_cache.set_cache("unrelated", "keep")
+    audit = tmp_path / "audit"
+    expected = "data:image/jpeg;base64," + base64.b64encode(offline_inputs.jpeg_bytes()).decode()
+    with pytest.MonkeyPatch.context() as scoped:
+        scoped.setenv("SWE_VARIANT_AUDIT_DIR", str(audit))
+        fixture = activate_inputs(sorted(offline_inputs.IMAGE_TESTS)[0], scoped)
+        try:
+            if mode == "sync":
+                with httpx.Client() as client:
+                    module.litellm.module_level_client = client
+                    assert module.convert_url_to_base64(url) == expected
+                    assert module.convert_url_to_base64(url) == expected
+            else:
+
+                async def consume():
+                    async with httpx.AsyncClient() as client:
+                        module.litellm.module_level_aclient = client
+                        assert await module.async_convert_url_to_base64(url) == expected
+                        assert await module.async_convert_url_to_base64(url) == expected
+
+                asyncio.run(consume())
+            with pytest.raises(StopIteration):
+                next(fixture)
+        finally:
+            fixture.close()
+    assert module.in_memory_cache is original_cache
+    assert original_cache.values == {url: "stale-image", "unrelated": "keep"}
+    receipt = json.loads(next(audit.glob("*.json")).read_text())
+    assert receipt["inputs"] == [{"kind": "synthetic-jpeg", "method": "GET", "url": url}]
 
 
 def test_gemini_fixture_only_returns_error_for_the_missing_key_request():

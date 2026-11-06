@@ -2,6 +2,7 @@
 
 import base64
 import hashlib
+import importlib
 import json
 import os
 import threading
@@ -42,6 +43,7 @@ IMAGE_TESTS = frozenset(
 )
 IPV4_TEST = "tests/test_litellm/llms/custom_httpx/test_http_handler.py::test_force_ipv4_transport"
 SELECTED = IMAGE_TESTS | GEMINI_TESTS | {IPV4_TEST}
+IMAGE_SOURCE_SHA256 = "832e91ff82ae44c009a7ffe20ea79448a52a86ac8c8608f3aff4faf542e7d97d"
 
 
 def jpeg_bytes():
@@ -123,6 +125,15 @@ def proposed_offline_inputs(request, monkeypatch):
         yield
         return
     calls = []
+    if nodeid in IMAGE_TESTS:
+        image_handling = importlib.import_module("litellm.litellm_core_utils.prompt_templates.image_handling")
+        if hashlib.sha256(Path(image_handling.__file__).read_bytes()).hexdigest() != IMAGE_SOURCE_SHA256:
+            raise ValueError("Frozen image input implementation changed")
+        monkeypatch.setattr(
+            image_handling,
+            "in_memory_cache",
+            image_handling.InMemoryCache(max_size_in_memory=image_handling.MAX_IMGS_IN_MEMORY),
+        )
     if nodeid != IPV4_TEST:
 
         def send(client, outgoing, *args, **kwargs):

@@ -55,6 +55,11 @@ unexpected calls rather than returning success for arbitrary requests. Its audit
 records omit request headers, bodies, and credential values. Fixture scope is
 per test; all other tests retain their original inputs and transport behavior.
 
+Each selected image test receives a fresh instance of the native image cache.
+The fixture restores the prior cache after the test. This forces a recorded input
+read and prevents synthetic bytes from leaking through the cache to later tests.
+The frozen image-conversion source hash is checked before cache isolation.
+
 These are proposed environment fixtures, not recordings of real public servers.
 They change external inputs and therefore form part of the proposed evaluation
 protocol. They do not establish current provider behavior or public-site access.
@@ -80,6 +85,19 @@ The original official gate remains **FAIL**. The generated pytest wrapper and
 offline inputs need a successful native validation before adoption.
 Passing the streaming boundary alone does not prove
 whole-task correctness or release a paid SWE experiment.
+
+The first v3 native packet, job `16984079`, exposed an audit defect. Four image
+test bodies passed, but their teardown audits failed after shared cache hits.
+The first packet and its failures remain preserved. The corrected fixture keeps
+the required input-use audit and isolates the native cache for each selected test.
+The diagnostic candidate is a reference control, not a model-generated solution.
+
+The local cache regressions execute the unchanged frozen conversion functions
+with real HTTPX clients and an explicit cache-class stub. They fail on the first
+proposal and pass with cache isolation. Native validation must also check the
+actual cache class and all twelve original input-dependent tests.
+Set `SWE_LITELLM_TERMINAL_ROOT` to the verified attempt10 archive and
+`SWE_LITELLM_IMAGE_SOURCE` to the verified frozen `image_handling.py` for local tests.
 
 The saved comparison is under the pilot root at
 `checks/20261106-pr102-pr103-merge-validation/native-review-tools/capture-correction01/terminal-comparison/`.

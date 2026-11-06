@@ -38,7 +38,7 @@ The native trace-only diagnostic, job `16983378`, confirms DNS failures in the
 four previously unexplained shared assertions. The earlier logs identify the
 other eight. The required offline network namespace stays enabled.
 
-The proposed plugin supplies inputs only for those twelve exact P2P test IDs:
+The proposed plugin supplies inputs only for thirteen exact P2P test IDs:
 
 - Nine image-dependent tests receive a pinned synthetic 8-by-6 JPEG at the HTTP
   input boundary. The JPEG format stays distinct from the requested PNG MIME
@@ -49,6 +49,9 @@ The proposed plugin supplies inputs only for those twelve exact P2P test IDs:
 - The IPv4 test uses its actual HTTPX transport against a private loopback HTTP
   server. It also requires the real transport to bind `0.0.0.0`. It does not use
   a mock transport or a fabricated successful connection.
+- The retry-after limiter test receives a fixed clock within one minute. Its
+  original two-second wait, body, and assertions stay unchanged. The fixture
+  checks the frozen limiter hash and restores its previous clock afterward.
 
 All original P2P source and assertion bytes remain unchanged. The plugin rejects
 unexpected calls rather than returning success for arbitrary requests. Its audit
@@ -59,6 +62,13 @@ Each selected image test receives a fresh instance of the native image cache.
 The fixture restores the prior cache after the test. This forces a recorded input
 read and prevents synthetic bytes from leaking through the cache to later tests.
 The frozen image-conversion source hash is checked before cache isolation.
+
+The limiter test expects two calls to share one rate-limit window. Its native
+limiter keys counts by calendar minute. A minute rollover during the wait can
+therefore allow the second call. This reachable timing defect is separate from
+the earlier failure: that run did not record its clock, so its cause is unproven.
+The proposed fixture changes only this test's clock input, not the limiter policy.
+Boundary controls must still verify that the native limiter permits a new minute.
 
 These are proposed environment fixtures, not recordings of real public servers.
 They change external inputs and therefore form part of the proposed evaluation
@@ -78,8 +88,8 @@ It used LiteLLM 1.75.7, HTTPX 0.28.1, aiohttp 3.10.11, and pytest 7.4.4.
 
 The candidate has no P2P failure absent from both other arms. All twelve shared
 failures show DNS-dependent inputs inside the required offline namespace.
-One extra reference-only limiter assertion also failed. Its cause remains
-unproven. None is waived or removed by this proposal.
+One extra reference-only limiter assertion also failed. Its historical cause
+remains unproven. No required assertion is waived or removed by this proposal.
 
 The original official gate remains **FAIL**. The generated pytest wrapper and
 offline inputs need a successful native validation before adoption.
@@ -98,6 +108,17 @@ proposal and pass with cache isolation. Native validation must also check the
 actual cache class and all twelve original input-dependent tests.
 Set `SWE_LITELLM_TERMINAL_ROOT` to the verified attempt10 archive and
 `SWE_LITELLM_IMAGE_SOURCE` to the verified frozen `image_handling.py` for local tests.
+
+The local clock checks execute unchanged frozen class and test bodies with
+explicit cache, auth, logger, and exception-field stubs. Set
+`SWE_LITELLM_CLOCK_SOURCE_DIR` to the verified full native source copies.
+Their Git blobs are `242c013d6773c4157220f7e965016492b2e80930` for the limiter
+and `72aca19a70a1caad78931886839aea2ba53656df` for its test module.
+Native clock validation must use the actual cache, auth, and FastAPI classes.
+It must show the original test fails under forced rollover, passes with the
+fixture, and restores the prior clock. It also reruns all twelve prior fixtures.
+The earlier full matrix and this focused check retain their separate head
+identities; a focused check is not a full-matrix rerun.
 
 The saved comparison is under the pilot root at
 `checks/20261106-pr102-pr103-merge-validation/native-review-tools/capture-correction01/terminal-comparison/`.

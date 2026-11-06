@@ -1,4 +1,4 @@
-"""Supply explicit offline inputs for twelve otherwise network-dependent tests."""
+"""Supply scoped offline inputs and a deterministic clock for thirteen tests."""
 
 import base64
 import hashlib
@@ -6,6 +6,7 @@ import importlib
 import json
 import os
 import threading
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -42,8 +43,12 @@ IMAGE_TESTS = frozenset(
     }
 )
 IPV4_TEST = "tests/test_litellm/llms/custom_httpx/test_http_handler.py::test_force_ipv4_transport"
-SELECTED = IMAGE_TESTS | GEMINI_TESTS | {IPV4_TEST}
+LIMITER_TEST = (
+    "tests/test_litellm/proxy/hooks/test_parallel_request_limiter.py::test_pre_call_hook_rpm_limits_retry_after"
+)
+SELECTED = IMAGE_TESTS | GEMINI_TESTS | {IPV4_TEST, LIMITER_TEST}
 IMAGE_SOURCE_SHA256 = "832e91ff82ae44c009a7ffe20ea79448a52a86ac8c8608f3aff4faf542e7d97d"
+LIMITER_SOURCE_SHA256 = "d16fd09f3ebe3d062fb63804faf5398fe1ad30441cd1d18b5126e7c5ebd86553"
 
 
 def jpeg_bytes():
@@ -125,6 +130,24 @@ def proposed_offline_inputs(request, monkeypatch):
         yield
         return
     calls = []
+    if nodeid == LIMITER_TEST:
+        limiter = importlib.import_module("litellm.proxy.hooks.parallel_request_limiter")
+        if hashlib.sha256(Path(limiter.__file__).read_bytes()).hexdigest() != LIMITER_SOURCE_SHA256:
+            raise ValueError("Frozen rate limiter implementation changed")
+
+        class SameMinuteClock:
+            @classmethod
+            def now(cls):
+                calls.append({"kind": "deterministic-rate-limit-clock", "logical_time": "2025-01-01T12:00:10"})
+                return datetime(2025, 1, 1, 12, 0, 10)
+
+        monkeypatch.setattr(limiter, "datetime", SameMinuteClock)
+        try:
+            yield
+        finally:
+            record_audit(nodeid, calls)
+        assert calls, "The selected test did not exercise its declared clock input"
+        return
     if nodeid in IMAGE_TESTS:
         image_handling = importlib.import_module("litellm.litellm_core_utils.prompt_templates.image_handling")
         if hashlib.sha256(Path(image_handling.__file__).read_bytes()).hexdigest() != IMAGE_SOURCE_SHA256:

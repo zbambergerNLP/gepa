@@ -11,7 +11,10 @@ from pathlib import Path
 from typing import Any
 
 from examples.taubench.benchmark_settings import (
+    DATASET_VERSION,
     DOMAIN,
+    EXCLUSIONS_MANIFEST_PATH,
+    EXCLUSIONS_MANIFEST_SHA256,
     MANIFEST_PATH,
     SPLIT_SALT,
     UPSTREAM_REPOSITORY,
@@ -143,10 +146,41 @@ def inspect_source(source: Path) -> dict[str, Any]:
 
 def load_data(source: Path) -> tuple[dict[str, list[dict]], dict]:
     """Reject source/data drift before returning ordered, disjoint public records."""
-    expected = json.loads(MANIFEST_PATH.read_text())
+    original_bytes = MANIFEST_PATH.read_bytes()
+    expected = json.loads(original_bytes)
     actual = inspect_source(source.resolve())
     if actual != expected:
         raise ValueError("Pinned tau source, corpus, task records, or split identity changed")
+    exclusion_bytes = EXCLUSIONS_MANIFEST_PATH.read_bytes()
+    if hashlib.sha256(exclusion_bytes).hexdigest() != EXCLUSIONS_MANIFEST_SHA256:
+        raise ValueError("Pinned tau exclusion manifest changed")
+    exclusions = json.loads(exclusion_bytes)
+    original_sha256 = hashlib.sha256(original_bytes).hexdigest()
+    if original_sha256 != exclusions["original_manifest_sha256"]:
+        raise ValueError("Original tau manifest bytes changed")
+    if exclusions["dataset_version"] != DATASET_VERSION:
+        raise ValueError("Tau exclusion manifest dataset version changed")
+    excluded_records = [item["record"] for item in exclusions["excluded_records"]]
+    excluded_ids = {record["task_id"] for record in excluded_records}
+    if [record for record in actual["records"] if record["task_id"] in excluded_ids] != excluded_records:
+        raise ValueError("Tau exclusion records do not match the verified original identity")
+    retained = [record for record in actual["records"] if record["task_id"] not in excluded_ids]
+    counts = {split: sum(record["split"] == split for record in retained) for split in ("train", "val", "test")}
+    if (
+        digest(retained) != exclusions["retained_records_sha256"]
+        or counts != exclusions["retained_counts"]
+        or len(retained) != exclusions["retained_total"]
+    ):
+        raise ValueError("Retained tau record identity or split order changed")
+    actual = {
+        **actual,
+        "schema_version": 2,
+        "dataset_version": DATASET_VERSION,
+        "original_manifest_sha256": original_sha256,
+        "exclusion_manifest_sha256": EXCLUSIONS_MANIFEST_SHA256,
+        "exclusion_manifest": exclusions,
+        "records": retained,
+    }
     splits = {
         split: [dict(row) for row in actual["records"] if row["split"] == split] for split in ("train", "val", "test")
     }

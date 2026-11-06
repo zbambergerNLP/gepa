@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "dataset_version": "tau-banking-ambiguity-exclusions-v1",
+  "original_manifest_sha256": "e988c4649b001f7faa75a2aae075d66d730d544db184c25a90b050ae50631f9a",
+  "excluded_records": [
+    {
+      "record": {
+        "group_id": "task_084",
+        "id": "tau-banking/task_084",
+        "scenario_id": "task_084",
+        "split": "train",
+        "task_id": "task_084",
+        "task_sha256": "4b6dae5afd9fbb493c79fc7d77096e3479459502e12600a29d89537dca4ee162"
+      },
+      "reason": "Liability below the timing ceiling and precedence between provisional-credit category and merchant-contact rules have conflicting interpretations."
+    },
+    {
+      "record": {
+        "group_id": "task_075",
+        "id": "tau-banking/task_075",
+        "scenario_id": "task_075",
+        "split": "train",
+        "task_id": "task_075",
+        "task_sha256": "fe5f745abaf9fc42d323baf361da814db0efe956cf254db4b3d6c6cd1846ac35"
+      },
+      "reason": "The scenario does not specify the comparison objective or opening funds needed to choose the reference account unambiguously."
+    }
+  ],
+  "retained_counts": {
+    "train": 55,
+    "val": 19,
+    "test": 21
+  },
+  "retained_total": 95,
+  "retained_records_sha256": "fc2ae5baf38290a0a7b0ddd09f0cab9fad80c10f519f8aedff350a031144b083",
+  "policy": "Filter the verified original ordered records. Preserve every surviving record, split and relative order. Do not regroup, resplit or resample."
+}

@@ -1,0 +1,15 @@
+{
+  "variant": "litellm-13675-native-streaming-evaluation-v3",
+  "status": "PROPOSED_NOT_ADOPTED",
+  "instance_id": "BerriAI__litellm-13675",
+  "base_commit": "1b2ec16eee5070f117d401420b8cf1ce44de9e60",
+  "inputs_sha256": {
+    "original_record": "fed30140ad827ef04e3f16c350e4a4f8983831d7e98e864d33dbb5773b7e1818",
+    "original_reference": "918e797cd33f439d3fd42935596b435639b81b8911ec8bff16406380bfb77c9f",
+    "original_test_patch": "d29d002a611fe9666cb9f4132bfde956295fda11298e62d18731369182de48e1",
+    "proposed_reference": "76f50001f98a0e3559abd45b893ae8e00bff097f7cd1576d93af5ba13ca7b8a5",
+    "native_probe": "c696e16a44b3419d4a8d3c21b254be9452c852426d18d467920fdda04124ac01",
+    "offline_inputs": "d35c75f93929bc9c7f48271274fe91381305208b74f3bd9639501c0f1f9646be",
+    "offline_image_fixture": "31a4d84b011ef4c8fbf8d7ed0aaa1f0cc5cdb21cc7cb136c4b35841f96cbc60f"
+  }
+}

@@ -1,0 +1,191 @@
+{
+  "schema_version": 1,
+  "dataset_version": "tau-banking-ambiguity-exclusions-v4",
+  "original_manifest_sha256": "e988c4649b001f7faa75a2aae075d66d730d544db184c25a90b050ae50631f9a",
+  "excluded_records": [
+    {
+      "record": {
+        "group_id": "task_084",
+        "id": "tau-banking/task_084",
+        "scenario_id": "task_084",
+        "split": "train",
+        "task_id": "task_084",
+        "task_sha256": "4b6dae5afd9fbb493c79fc7d77096e3479459502e12600a29d89537dca4ee162"
+      },
+      "reason": "Liability below the timing ceiling and precedence between provisional-credit category and merchant-contact rules have conflicting interpretations."
+    },
+    {
+      "record": {
+        "group_id": "task_024",
+        "id": "tau-banking/task_024",
+        "scenario_id": "task_024",
+        "split": "train",
+        "task_id": "task_024",
+        "task_sha256": "864843028c613f39624182a6ee27ce23eba5b127dceada37c057396af0ffcbf3"
+      },
+      "reason": "The card with the highest return changes with purchase timing, but the scenario does not specify when the purchase must post."
+    },
+    {
+      "record": {
+        "group_id": "task_075",
+        "id": "tau-banking/task_075",
+        "scenario_id": "task_075",
+        "split": "train",
+        "task_id": "task_075",
+        "task_sha256": "fe5f745abaf9fc42d323baf361da814db0efe956cf254db4b3d6c6cd1846ac35"
+      },
+      "reason": "The scenario does not specify the comparison objective or opening funds needed to choose the reference account unambiguously."
+    },
+    {
+      "record": {
+        "group_id": "task_094",
+        "id": "tau-banking/task_094",
+        "scenario_id": "task_094",
+        "split": "train",
+        "task_id": "task_094",
+        "task_sha256": "1506c44d139cf214b58d71729ddfdaf097d498703ba4d90c9546446dba526747"
+      },
+      "reason": "The exact interest credit assumes a linear APY-to-month conversion, but policy specifies daily compounding without an exact conversion, period or balance convention."
+    },
+    {
+      "record": {
+        "group_id": "task_005",
+        "id": "tau-banking/task_017",
+        "scenario_id": "task_017",
+        "split": "train",
+        "task_id": "task_017",
+        "task_sha256": "70f7fcc30a9c63147384652596ee2eb639a26819938cdc5dfbf260936e13cba0"
+      },
+      "reason": "The rewards reference omits an exact one-point over-award, while policy permits disputes for received-versus-expected discrepancies without an underpayment-only rule or tolerance. A permitted extra dispute changes the strict DB grade."
+    },
+    {
+      "record": {
+        "group_id": "task_065",
+        "id": "tau-banking/task_065",
+        "scenario_id": "task_065",
+        "split": "train",
+        "task_id": "task_065",
+        "task_sha256": "a155ec9f735db0fda3d62fd5976cd9a00f6a32314411c81b5aadaf25ea1430a9"
+      },
+      "reason": "The closure tool permits an optional reason, but the reference omits it. A policy-consistent reason changes only stored closure_reason and fails strict DB grading; policy specifies no exact wording."
+    },
+    {
+      "record": {
+        "group_id": "task_065",
+        "id": "tau-banking/task_066",
+        "scenario_id": "task_066",
+        "split": "train",
+        "task_id": "task_066",
+        "task_sha256": "45a351eae75463b758e147c9d61c6e3dca2b0692ad99940863a809d196cb12de"
+      },
+      "reason": "The closure tool permits an optional reason, but the reference omits it. A policy-consistent reason changes only stored closure_reason and fails strict DB grading; policy specifies no exact wording."
+    },
+    {
+      "record": {
+        "group_id": "task_065",
+        "id": "tau-banking/task_067",
+        "scenario_id": "task_067",
+        "split": "train",
+        "task_id": "task_067",
+        "task_sha256": "94b427382bf31ad131c80f131d750f3da9a7064be86eebbf76e4557cc5daad9f"
+      },
+      "reason": "The closure tool permits an optional reason, but the reference omits it. A policy-consistent reason changes only stored closure_reason and fails strict DB grading; policy specifies no exact wording."
+    },
+    {
+      "record": {
+        "group_id": "task_065",
+        "id": "tau-banking/task_068",
+        "scenario_id": "task_068",
+        "split": "train",
+        "task_id": "task_068",
+        "task_sha256": "41483ad35a41f905695bd36db882198c175f9df01569481fa108051c7a7b85af"
+      },
+      "reason": "The closure tool permits an optional reason, but the reference omits it. A policy-consistent reason changes only stored closure_reason and fails strict DB grading; policy specifies no exact wording."
+    },
+    {
+      "record": {
+        "group_id": "task_065",
+        "id": "tau-banking/task_069",
+        "scenario_id": "task_069",
+        "split": "train",
+        "task_id": "task_069",
+        "task_sha256": "2121a8b16aa5dc70aee819ba6c4dcc060ff325944467370cfe0c3cf1ebfd5d4f"
+      },
+      "reason": "The closure tool permits an optional reason, but the reference omits it. A policy-consistent reason changes only stored closure_reason and fails strict DB grading; policy specifies no exact wording."
+    },
+    {
+      "record": {
+        "group_id": "task_082",
+        "id": "tau-banking/task_082",
+        "scenario_id": "task_082",
+        "split": "train",
+        "task_id": "task_082",
+        "task_sha256": "055ae068b47b48434fbd7077006d434e115eb1966f0886c64c8d02bda4b373e0"
+      },
+      "reason": "The same scenario calls today both November 14 and January 9 for discovery dates. Policy requires the date first noticed, while the frozen clock and exact reference use November 14, 2025; no correction resolves the conflict."
+    },
+    {
+      "record": {
+        "group_id": "task_086",
+        "id": "tau-banking/task_086",
+        "scenario_id": "task_086",
+        "split": "train",
+        "task_id": "task_086",
+        "task_sha256": "fae8b5543d977ac709825ba9f750f81f02b4bbd2b68dc453d9364c1abfaed0c4"
+      },
+      "reason": "The same scenario calls today both November 14 and January 12 during year-end reconciliation. Policy requires the date first noticed, while the frozen clock and exact reference use November 14, 2025; no correction resolves the conflict."
+    },
+    {
+      "record": {
+        "group_id": "task_020",
+        "id": "tau-banking/task_020",
+        "scenario_id": "task_020",
+        "split": "train",
+        "task_id": "task_020",
+        "task_sha256": "bd343bc7ae8f93c8afa3727655d1c4d70cd432a46f8603d57746c9f83fbe24d0"
+      },
+      "reason": "The rewards reference omits favorable discrepancies under the shared floor-rounding rule. The dispute policy specifies no tolerance for small received-versus-expected differences. An additional permitted dispute changes the strict DB grade."
+    },
+    {
+      "record": {
+        "group_id": "task_020",
+        "id": "tau-banking/task_026",
+        "scenario_id": "task_026",
+        "split": "train",
+        "task_id": "task_026",
+        "task_sha256": "6f310fcb0530526be26bdc80f250f001dc7ad5576e7e48486999ae2c33633e79"
+      },
+      "reason": "The rewards reference omits favorable discrepancies under the shared floor-rounding rule. The dispute policy specifies no tolerance for small received-versus-expected differences. An additional permitted dispute changes the strict DB grade."
+    },
+    {
+      "record": {
+        "group_id": "task_020",
+        "id": "tau-banking/task_027",
+        "scenario_id": "task_027",
+        "split": "train",
+        "task_id": "task_027",
+        "task_sha256": "cd9b6569029e2052d920826ae406761e47ab7c3433b00543ac62ad305eed06b2"
+      },
+      "reason": "The rewards reference omits favorable discrepancies under the shared floor-rounding rule. The dispute policy specifies no tolerance for small received-versus-expected differences. An additional permitted dispute changes the strict DB grade."
+    },
+    {
+      "record": {
+        "group_id": "task_062",
+        "id": "tau-banking/task_062",
+        "scenario_id": "task_062",
+        "split": "train",
+        "task_id": "task_062",
+        "task_sha256": "a56aed67f2f6af89eaf6c6e6848dc4626e6cb43c4d0f1866c8ef651ebcbbd481"
+      },
+      "reason": "The closure tool permits an optional reason, but the reference omits it. A policy-consistent reason changes only stored closure_reason and fails strict DB grading; policy specifies no exact wording."
+    }
+  ],
+  "retained_counts": {
+    "train": 41,
+    "val": 19,
+    "test": 21
+  },
+  "retained_total": 81,
+  "retained_records_sha256": "3430f3568db185d44940579a6ad4d12364c352ac7344eff31be91da3f75ebfe4",
+  "policy": "Filter the verified original ordered records. Preserve every surviving record, split and relative order. Do not regroup, resplit or resample."
+}

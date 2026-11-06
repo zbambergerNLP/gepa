@@ -1,0 +1,16 @@
+{
+  "variant": "litellm-13675-httpx-boundary-v1",
+  "status": "PROPOSED_NOT_ADOPTED",
+  "instance_id": "BerriAI__litellm-13675",
+  "repo": "BerriAI/litellm",
+  "base_commit": "1b2ec16eee5070f117d401420b8cf1ce44de9e60",
+  "httpx_version": "0.28.1",
+  "sha256": {
+    "evaluator_record": "fed30140ad827ef04e3f16c350e4a4f8983831d7e98e864d33dbb5773b7e1818",
+    "frozen_reference": "918e797cd33f439d3fd42935596b435639b81b8911ec8bff16406380bfb77c9f",
+    "frozen_test_patch": "d29d002a611fe9666cb9f4132bfde956295fda11298e62d18731369182de48e1",
+    "base_handler_excerpt": "5901e0d1617993de0a481b4e6cc0e7f7ec8d74391f09f53502cc71d6e6e004c3",
+    "base_transport_excerpt": "071193b9285ac00b3ed980e7e577705a4c399f28083d093fb8a36105d4cc3b95",
+    "candidate_reference": "8ef7ad1f51f4595c2eda30e034cbdd6193072651766ba193a290d40324ec8559"
+  }
+}

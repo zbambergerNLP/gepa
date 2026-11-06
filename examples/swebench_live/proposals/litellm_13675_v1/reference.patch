@@ -1,0 +1,12 @@
+--- a/litellm/llms/custom_httpx/aiohttp_transport.py
++++ b/litellm/llms/custom_httpx/aiohttp_transport.py
+@@ -229,5 +229,8 @@
+         return httpx.Response(
+             status_code=response.status,
+-            headers=response.headers,
++            headers=[
++                (key.encode("utf-8", "surrogateescape"), value.encode("utf-8", "surrogateescape"))
++                for key, value in response.headers.items()
++            ],
+             content=AiohttpResponseStream(response),
+             request=request,

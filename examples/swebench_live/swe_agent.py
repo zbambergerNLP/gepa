@@ -14,6 +14,8 @@ from examples.common.react_v2 import file_sha256
 
 AGENT_URL = "https://github.com/njukenanli/SWE-agent-for-eval.git"
 AGENT_REVISION = "824224225e1e952b48da91f2d1bde38adb2115f2"
+AGENT_PATCH = Path(__file__).with_name("agent-runtime.patch")
+EXECUTION_TIMEOUT_PROTOCOL = "configured-command-and-total-v1"
 OPENROUTER_MODEL_PROTOCOL = "openrouter-tool-reasoning-and-usage-v1"
 SINGLE_TOOL_INSTRUCTION = "Call exactly one tool per response. Do not issue parallel tool calls."
 
@@ -24,19 +26,23 @@ def source_identity(source: Path) -> dict:
     def git(*args):
         return subprocess.check_output(["git", "-C", str(source), *args], text=True, timeout=30).strip()
 
-    if git("rev-parse", "HEAD") != AGENT_REVISION or git("status", "--porcelain", "--untracked-files=no"):
-        raise ValueError("SWE-agent source revision or tracked-file drift")
+    if git("rev-parse", "HEAD") != AGENT_REVISION:
+        raise ValueError("SWE-agent source revision drift")
+    patch = git("diff", "--no-ext-diff", "--no-color", "--no-renames", "HEAD", "--binary", "--unified=0")
+    if patch != AGENT_PATCH.read_text().strip():
+        raise ValueError("SWE-agent runtime patch mismatch; prepare a new runtime root")
     files = git("ls-files").splitlines()
     return {
         "repository": AGENT_URL,
         "revision": AGENT_REVISION,
         "files_sha256": digest({name: file_sha256(source / name) for name in files if (source / name).is_file()}),
         "config_sha256": file_sha256(source / "config/default.yaml"),
+        "patch_sha256": file_sha256(AGENT_PATCH),
     }
 
 
 def activate(root: Path) -> dict:
-    """Load only the pinned upstream source, retaining its bundled SWE-ReX."""
+    """Load the pinned source and timeout patch, retaining its bundled SWE-ReX."""
     source = (root / "source").resolve()
     identity = source_identity(source)
     for name in ("sweagent", "swerex"):
@@ -99,6 +105,12 @@ def runtime_identity(root: Path, models, *, max_steps: int | None = None) -> dic
         "source": identity,
         "config": config.model_dump(mode="json"),
         "transport": "apptainer-swerex-stdio-v1",
+        "execution_timeouts": {
+            "protocol": EXECUTION_TIMEOUT_PROTOCOL,
+            "command_seconds": config.tools.execution_timeout,
+            "total_seconds": config.tools.total_execution_timeout,
+            "scope": "native actions; cancellation, state checks and final patch extraction can add overhead",
+        },
         "payload": verify_payload(root / "payload"),
         "packages": {d.metadata["Name"]: d.version for d in importlib.metadata.distributions()},
     }

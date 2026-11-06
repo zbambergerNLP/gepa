@@ -8,5 +8,6 @@
 +                (key.encode("utf-8", "surrogateescape"), value.encode("utf-8", "surrogateescape"))
 +                for key, value in response.headers.items()
 +            ],
-             content=AiohttpResponseStream(response),
+-            content=AiohttpResponseStream(response),
++            stream=AiohttpResponseStream(response),
              request=request,

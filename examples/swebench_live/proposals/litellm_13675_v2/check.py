@@ -301,7 +301,7 @@ async def diagnose(terminal_root):
         "response_boundary_tests": results,
         "limits": [
             "Only exact saved handler functions and the response constructor execute; the outer parser is a transparent holder.",
-            "HTTPX 0.28.1 matches the saved solver shell. The grader's separate Poetry HTTPX version was not recorded.",
+            "This offline checker uses HTTPX 0.28.1; it does not exercise the native Poetry environment.",
             "No native task, full LiteLLM suite, provider request or corrected benchmark score is established.",
         ],
     }

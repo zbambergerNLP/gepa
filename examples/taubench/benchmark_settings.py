@@ -14,9 +14,9 @@ TEST_REPETITIONS = 4
 TRIAL_SEED = 300
 SPLIT_SALT = "gepa-tau-banking-group-split-v1"
 MANIFEST_PATH = Path(__file__).with_name("banking-manifest.json")
-DATASET_VERSION = "tau-banking-ambiguity-exclusions-v1"
-EXCLUSIONS_MANIFEST_PATH = Path(__file__).with_name("banking-exclusions-v1.json")
-EXCLUSIONS_MANIFEST_SHA256 = "2586a7f390abfe96977583029b58e9cbaa0c0767fbb8e5ec92222d4c8699e6f1"
+DATASET_VERSION = "tau-banking-ambiguity-exclusions-v2"
+EXCLUSIONS_MANIFEST_PATH = Path(__file__).with_name("banking-exclusions-v2.json")
+EXCLUSIONS_MANIFEST_SHA256 = "7186155ddb09c126376361cc7d4aec8b66e413ae0aa37afad7629765831738b2"
 DEFAULT_SOURCE = Path(__file__).parent / ".cache" / "tau2-bench"
 # This upstream text import reaches a voice module that imports websockets.
 RUNTIME_SUPPLEMENTS = ("websockets==15.0.1",)

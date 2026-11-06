@@ -65,28 +65,51 @@ unchanged. Loading verifies its full identity before filtering any record.
 Upstream provides no optimization split. The original manifest defines **57 train /
 19 validation / 21 test** tasks, with stable globally unique IDs.
 
-Future experiments use `tau-banking-ambiguity-exclusions-v1`, pinned in
-`banking-exclusions-v1.json`. It removes only these two confirmed ambiguous
-training records:
+Future experiments use `tau-banking-ambiguity-exclusions-v2`, pinned in
+`banking-exclusions-v2.json`. It excludes four training records with material
+missing assumptions or conflicting policy readings:
 
+- `task_024`: the card with the highest return changes with purchase timing.
+  The scenario does not specify when the purchase must post.
 - `task_075`: the scenario does not specify the comparison objective or opening
   funds needed to choose the reference account unambiguously.
 - `task_084`: liability below the timing ceiling and precedence between
   provisional-credit category and merchant-contact rules have conflicting readings.
+- `task_094`: the exact interest credit requires an unstated conversion convention.
+  Policy specifies daily compounding but does not define the period and balance basis.
 
-The retained dataset has **95 tasks: 55 train / 19 validation / 21 test**.
+V1 excluded only `task_075` and `task_084`. Its manifest remains unchanged.
+V2 adds `task_024` and `task_094` under the same material-underdetermination rule.
+The retained dataset has **93 tasks: 53 train / 19 validation / 21 test**.
 Each remaining record keeps its exact identity, split, and relative order.
 The loader does not regroup, resplit, resample, or replace excluded records.
-The exclusion manifest pins both removed record fingerprints, plain reasons,
+The exclusion manifest pins all four removed record fingerprints, plain reasons,
 the original manifest checksum, retained counts, and the ordered retained digest.
 Its own checksum is pinned in source. Any drift fails before an episode starts.
 
+The additional exclusions do not depend on observed scores. `task_024` already
+received successful grades in saved episodes. For its $40,000 ordinary purchase,
+Bronze returns $900 within two months after an eligible opening; Silver returns $800.
+After month two and within month six, Bronze returns $400 while Silver returns $800.
+These cases use the frozen Bronze bonus and Silver double-rewards policies.
+The reference Bronze choice fits the first case. The scenario does not require it.
+
+For `task_094`, policy supports the 6.85% annual rate. The reference computes
+`96000 * 0.0685 / 12 - 408 = 140`. Daily compounding does not establish that formula.
+With a constant balance and effective annual yield, an equal-month conversion
+gives $123.51; a 31-day interval in a 365-day year gives $133.73.
+Those examples show the effect of missing assumptions. Neither becomes a new
+reference answer. These findings do not prove either reference wrong or explain
+the causes of failed episodes. They do not establish validity for every retained task.
+
 Both methods and the worker use this same filtered manifest. The dataset version,
 exclusion checksum, and derived manifest enter runtime and resume identity.
-Old checkpoints cannot resume under this dataset, even when their selected records
-all survive. Use new run directories and baselines after separate run approval.
-The original three-record pilot, its attempts, and its scores remain historical
-evidence. No replacement pilot or full experiment is authorized by this change.
+Unfiltered and v1 checkpoints cannot resume under v2, even when their selected
+records all survive. V2 changes training coverage and the scientific protocol.
+Use new run directories and baselines after separate run approval.
+Existing v1 runs, including attempt11, finish under their original frozen contract.
+Preserve every earlier attempt, grade, and original pilot record.
+This change does not authorize another pilot or a full experiment.
 
 Original grouping joins tasks with an explicit shared `user_id` or `customer_name`,
 identical user scenarios, or a task reference in the upstream notes. The resulting

@@ -65,9 +65,10 @@ unchanged. Loading verifies its full identity before filtering any record.
 Upstream provides no optimization split. The original manifest defines **57 train /
 19 validation / 21 test** tasks, with stable globally unique IDs.
 
-Future experiments use `tau-banking-ambiguity-exclusions-v3`, pinned in
-`banking-exclusions-v3.json`. It excludes five training records with material
-missing assumptions or conflicting policy readings:
+Future experiments use `tau-banking-ambiguity-exclusions-v4`, pinned in
+`banking-exclusions-v4.json`. It excludes 16 training records with material
+missing assumptions, policy conflicts, or strict-reference conflicts.
+The first five exclusions remain unchanged:
 
 - `task_017`: the rewards reference omits an exact one-point over-award.
   Policy permits disputes for discrepancies without an underpayment-only rule or tolerance.
@@ -83,11 +84,24 @@ missing assumptions or conflicting policy readings:
 
 V1 excluded only `task_075` and `task_084`.
 V2 adds `task_024` and `task_094` under the same material-underdetermination rule.
-V3 adds only `task_017`. Both earlier exclusion manifests remain unchanged.
-The retained dataset has **92 tasks: 52 train / 19 validation / 21 test**.
+V3 adds only `task_017`. V4 adds these 11 training records:
+
+- `task_062` and `task_065`–`task_069`: account closure accepts an optional reason.
+  Policy requires no exact wording, but the reference omits the reason.
+  A permitted descriptive reason changes the stored `closure_reason` and fails DB grading.
+- `task_020`, `task_026`, and `task_027`: the rewards references omit favorable discrepancies
+  under the shared floor-rounding rule. Policy permits disputes for received-versus-expected
+  differences without a tolerance for small errors. A permitted extra dispute fails DB grading.
+- `task_082` and `task_086`: each scenario gives two incompatible dates for "today."
+  Both identify November 14. Task 082 also specifies January 9; task 086 specifies January 12.
+  Policy requires the date first noticed. The frozen clock and reference use November 14, 2025.
+  Neither scenario gives a correction that resolves the conflict.
+
+All three earlier exclusion manifests remain unchanged.
+The retained dataset has **81 tasks: 41 train / 19 validation / 21 test**.
 Each remaining record keeps its exact identity, split, and relative order.
 The loader does not regroup, resplit, resample, or replace excluded records.
-The exclusion manifest pins all five removed record fingerprints, plain reasons,
+The exclusion manifest pins all 16 removed record fingerprints, plain reasons,
 the original manifest checksum, retained counts, and the ordered retained digest.
 Its own checksum is pinned in source. Any drift fails before an episode starts.
 
@@ -100,6 +114,37 @@ to ignore a favorable error. An offline fixture through the frozen native tools
 and strict DB evaluator scores the reference history at 1 and the extra-dispute
 history at 0. No model or episode runs in that fixture. This demonstrates a
 task/reference coverage issue, not a grading-code defect or a live failure cause.
+
+The v4 audit screened all 52 v3 training records for the identified closure-note,
+discovery-date, and rewards-dispute defects. It did not inspect held-out task content.
+Native counterfactuals ran only the identified training references in fresh in-memory databases.
+They used unchanged tools and strict DB grading, with model, network, and episode calls blocked.
+No original task, policy, tool, grade, or reference action changes.
+
+The closure policy is `doc_bank_accounts_bank_accounts_(general)_005`.
+It defines closure conditions but does not prescribe a reason string.
+`close_bank_account_7392` stores the optional reason and defaults to `Customer requested closure`.
+Six reference histories score 1. Seven single-reason variants score 0.
+Each variant changes only one account's `closure_reason`.
+Task 062 has two closures, so each receives a separate variant.
+
+The rounding policy is `doc_credit_cards_credit_cards_(general)_007`.
+The dispute policy is `doc_credit_cards_credit_cards_(general)_003`.
+In tasks 020, 026, and 027, Netflix earns 23 points on $22.99 at 1%.
+The conversion and floor rule require 22 points. None of the three references disputes it.
+Each reference scores 1; each history with that extra dispute scores 0.
+For task 026, the variant also updates the automatically approved dispute to 22 points.
+These fixtures retain native dispute logs and all other reference behavior.
+
+The discovery-date policy is `doc_bank_accounts_bank_accounts_(general)_031`.
+`file_debit_card_transaction_dispute_6281` stores the supplied discovery date in the graded database.
+Two reference replays score 1. Two illustrative next-January variants score 0 and change only that field.
+The scenarios omit the January year and contradict the frozen clock.
+Those variants prove DB sensitivity; they do not establish valid replacement dates or new answers.
+
+After filtering, the deterministic training prefix is `task_005`, `task_004`, `task_059`.
+The audit found no matching defect in that prefix. It does not establish validity for every policy dimension.
+Exclusion choices do not use observed scores. Difficult but consistent tasks remain eligible.
 
 `task_024` already received successful grades in saved episodes. For its $40,000 ordinary purchase,
 Bronze returns $900 within two months after an eligible opening; Silver returns $800.
@@ -117,10 +162,10 @@ the causes of failed episodes. They do not establish validity for every retained
 
 Both methods and the worker use this same filtered manifest. The dataset version,
 exclusion checksum, and derived manifest enter runtime and resume identity.
-Unfiltered, v1, and v2 checkpoints cannot resume under v3, even when their selected
-records all survive. V3 changes training coverage and the scientific protocol.
+Unfiltered, v1, v2, and v3 checkpoints cannot resume under v4, even when their selected
+records all survive. V4 changes training coverage and the scientific protocol.
 Use new run directories and baselines after separate run approval.
-Existing v1 and v2 runs, including attempts 11 and 12, keep their original frozen contracts.
+Existing v1, v2, and v3 runs, including attempts 11, 12, and 13, keep their original frozen contracts.
 Preserve every earlier attempt, grade, and original pilot record.
 This change does not authorize another pilot or a full experiment.
 

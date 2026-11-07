@@ -25,6 +25,7 @@ from examples.taubench.benchmark_settings import (
 )
 from examples.taubench.runtime import TauRuntime
 from examples.taubench.utils import digest, load_data, upstream_system_prompt
+from gepa.strategies.jev_evidence import TAU_KB_REFERENCE_FORMAT
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
@@ -77,6 +78,7 @@ def build_benchmark(args: argparse.Namespace, models: BenchmarkModels) -> Benchm
             "judge_kwargs": auxiliary["kwargs"],
             **({"auxiliary_protocol": auxiliary["protocol"]} if "protocol" in auxiliary else {}),
             "evaluator": "EvaluationType.ALL; required reward_basis product",
+            "jev_evidence_representation": TAU_KB_REFERENCE_FORMAT,
             "max_steps": MAX_STEPS,
             "max_errors": MAX_ERRORS,
             "enforce_communication_protocol": False,

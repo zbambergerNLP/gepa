@@ -145,6 +145,7 @@ def build_react_v2_strategy(
     templates: Mapping[str, DocumentTemplate] | None = None,
     controller_selection: str = VERBALIZED_SELECTION,
     jev_provider: str = "typesafe",
+    jev_evidence_representation: str | None = None,
     editor_mode: str = REACT_EDITOR_MODE,
     proposal_policy: str = "real_edit",
     react_max_iterations: int | None = None,
@@ -171,6 +172,8 @@ def build_react_v2_strategy(
         templates: Explicit document representations for particular component kinds.
         controller_selection: ``"verbalized"``, ``"uniform_random"``, or ``"jev"``.
         jev_provider: Explicit typed decision transport, typesafe or openrouter.
+        jev_evidence_representation: Explicit benchmark evidence protocol, or
+            ``None`` for unchanged verbatim v6 evidence.
         editor_mode: Multi-turn ``react`` or one-response ``single_call`` editing.
         proposal_policy: Required real edits with generation recovery, or independent historical proposals.
         react_max_iterations: Optional bound on observation-loop editor responses.
@@ -205,6 +208,7 @@ def build_react_v2_strategy(
         provider_log = lm_kwargs.get(PROVIDER_RETRY_KEY, {}).get("log_path")
         jev_controller = JevController(
             provider=jev_provider,
+            evidence_representation=jev_evidence_representation,
             response_journal_path=journal_path,
             attempt_log_path=Path(provider_log).with_name(JEV_ATTEMPT_LOG) if provider_log else None,
         )

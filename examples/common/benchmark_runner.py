@@ -621,6 +621,7 @@ def _run_condition_locked(
                 edit_tool_set=settings["edit_tool_set"] or BROAD_EDIT_TOOL_SET,
                 controller_selection=settings["controller_selection"] or "verbalized",
                 jev_provider="openrouter" if definition.runtime.get("hosted_api") else "typesafe",
+                jev_evidence_representation=definition.runtime.get("jev_evidence_representation"),
                 editor_mode=settings["editor_mode"] or "react",
                 proposal_policy=settings["proposal_policy"] or "independent",
                 react_max_iterations=settings["react_max_iterations"],

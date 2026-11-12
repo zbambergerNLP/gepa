@@ -26,6 +26,7 @@ TAU_KB_REFERENCE_CONTRACT = {
     "scope": "JEV only; native traces and other optimizer roles remain unchanged",
     "reconstruction": "exact original structured record, including all message strings and occurrence order",
     "unsupported_tool_format": "retain verbatim; unchanged size guard still applies",
+    "unsupported_evidence_shape": "retain non-array evidence verbatim; unchanged size guard still applies",
     "record_boundaries": "unchanged; one encoded record counts as one original record",
     "model_equivalence": "not claimed; model-visible evidence representation changes",
     "guidance": TAU_KB_REFERENCE_GUIDANCE,
@@ -177,9 +178,11 @@ def factor_tau_evidence(traces: str) -> tuple[str, bool]:
 
     try:
         records = json.loads(traces, object_pairs_hook=unique_keys)
-    except (TypeError, json.JSONDecodeError) as exc:
-        raise EvidenceReferenceError("Tau KB references require a JSON record array") from exc
-    if not isinstance(records, list) or not records:
+    except (TypeError, json.JSONDecodeError):
+        return traces, False
+    if not isinstance(records, list):
+        return traces, False
+    if not records:
         raise EvidenceReferenceError("Tau KB references require a nonempty record array")
     encoded = [encode_tau_record(record) for record in records]
     changed = encoded != records

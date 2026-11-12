@@ -132,7 +132,6 @@ def test_unknown_tool_formats_remain_verbatim(alter):
 @pytest.mark.parametrize(
     "traces",
     [
-        '{"id": 1}',
         "[]",
         '[{"Inputs": {}, "Inputs": {"domain": "banking_knowledge"}, "Generated Outputs": []}]',
         '[{"Inputs": {"domain": "swebench"}, "Generated Outputs": []}]',
@@ -157,6 +156,78 @@ def opt_in(controller):
     configured = JevController(provider="openrouter", evidence_representation=TAU_KB_REFERENCE_FORMAT)
     configured._client = controller._client
     return configured
+
+
+@pytest.mark.parametrize("traces", ["(no traces available)", '{"id": 1}'])
+def test_nonarray_evidence_remains_verbatim(traces):
+    assert factor_tau_evidence(traces) == (traces, False)
+
+
+def test_independent_tau_selection_preserves_labeled_records(setup_controller):
+    original, requests, _ = setup_controller
+    controller = opt_in(original)
+    reflection, _ = strategy(
+        2,
+        controller_selection="jev",
+        jev_controller=controller,
+        react_replies=["<finish>No supported edit.</finish>"],
+    )
+    records = [record(), record(task_id="second_task")]
+    preserved = deepcopy(records)
+    reflection.reflect({"sys": PROMPT}, {"sys": records}, ["sys"])
+    assert records == preserved
+    assert len(requests) == 1
+    expected = "\n\n".join(f"[example {index + 1}]\n{json.dumps(row)}" for index, row in enumerate(records))
+    assert requests[0]["state"]["training_evidence"] == expected
+    assert "training_evidence_representation" not in requests[0]["state"]
+
+
+def test_independent_tau_oversized_evidence_still_fails_before_dispatch(setup_controller):
+    original, requests, _ = setup_controller
+    reflection, lm = strategy(2, controller_selection="jev", jev_controller=opt_in(original))
+    records = [record([("doc_big", "x" * 600_000)], repeats=1)]
+    rng_before = reflection.rng.getstate()
+    with pytest.raises(JevControllerError, match="client budget"):
+        reflection.reflect({"sys": PROMPT}, {"sys": records}, ["sys"])
+    assert requests == [] and lm.roles == []
+    assert reflection.rng.getstate() == rng_before
+
+
+def test_tau_joint_mode_rejects_at_bind_while_v6_still_binds(setup_controller):
+    original, requests, _ = setup_controller
+    current, _ = strategy(2, controller_selection="jev", jev_controller=opt_in(original))
+    with pytest.raises(ValueError, match="single-component"):
+        current.bind_module_selector("controller")
+    assert not current.controller_selects_component
+    old, _ = strategy(2, controller_selection="jev", jev_controller=original)
+    old.bind_module_selector("controller")
+    assert old.controller_selects_component and requests == []
+
+
+def test_tau_joint_runner_rejects_before_evaluation(tmp_path):
+    benchmark = local_definition(tmp_path)
+    benchmark.runtime["jev_evidence_representation"] = TAU_KB_REFERENCE_FORMAT
+    with pytest.raises(ValueError, match="single-component"):
+        runner.run_cli(
+            benchmark_name="local",
+            build_benchmark=lambda *args: benchmark,
+            add_arguments=lambda parser: None,
+            argv=[
+                "--run-dir",
+                str(tmp_path / "run"),
+                "--mode",
+                "optimizer-pilot",
+                "--condition",
+                "react_v2",
+                "--controller-selection",
+                "jev",
+                "--module-selector",
+                "controller",
+                "--pilot-size",
+                "2",
+            ],
+        )
+    assert benchmark.adapter.calls == []
 
 
 def test_complete_request_counts_guidance_and_preserves_component_criteria(setup_controller, monkeypatch):

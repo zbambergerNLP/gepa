@@ -70,6 +70,9 @@ document bodies and IDs. Titles, ranks, scores, timing text, queries, messages,
 grades, the component, and action criteria remain complete. A decoder verifies
 exact record reconstruction before admission. Unknown KB formats remain verbatim.
 Native traces and Manifestor/editor evidence remain unchanged.
+Independent proposals keep their labeled, non-array evidence verbatim under the same size guard.
+The reference protocol requires single-component selection. `--module-selector controller`
+fails during strategy setup, before evaluation. Other benchmarks keep their existing joint-selection support.
 
 The model-visible reference instructions count toward the same 524,288-byte
 logical JSON budget. The existing planner keeps each record intact, groups at

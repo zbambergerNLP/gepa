@@ -22,6 +22,10 @@ def grade(request: dict) -> dict:
     spec = make_test_spec(record, namespace="starryzhang")
     Path("eval.sh").write_text(spec.eval_script)
     with ApptainerTask(request["image"], request["memory_gib"]) as task:
+        if record.get("evaluation_variant") == "swe-haystack-9742-offline-environment-v1":
+            from examples.swebench_live.proposals.haystack_9742_v1.environment import install_in_grader
+
+            install_in_grader(task, record, Path(request["evaluation_environment"]))
         task.write_text("/tmp/patch.diff", prediction["model_patch"] or "")
         attempts = []
         for command in GIT_APPLY_CMDS:

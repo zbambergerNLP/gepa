@@ -48,6 +48,13 @@ def grade(root: Path, trial: Path, record: dict, image: dict, memory_gib: int, t
         "timeout_seconds": timeout,
     }
     apptainer = image.get("backend") == "apptainer"
+    evaluator_record = json.loads((trial / "evaluator-record.json").read_text())
+    if evaluator_record.get("evaluation_variant") == "swe-haystack-9742-offline-environment-v1":
+        from examples.swebench_live.proposals.haystack_9742_v1.environment import environment_assets
+
+        if not apptainer:
+            raise ValueError("The proposed Haystack environment requires the Apptainer grader")
+        request["evaluation_environment"] = str(environment_assets(evaluator_record, root))
     worker = [str(Path(__file__).with_name("grader_worker.py"))]
     env = None
     if apptainer:

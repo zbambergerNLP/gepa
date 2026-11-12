@@ -56,6 +56,36 @@ Reference actions are consumed by the official grader; they are not given to the
 solver or the reflection dataset. We do not substitute matching tool-call strings
 for DB evaluation. See the [official evaluation specification](https://github.com/sierra-research/tau2-bench/blob/5bfa7e37b36656b37dc6d022156be6563c1007f3/docs/evaluation.md).
 
+## Tau JEV document references
+
+Tau opts into `jev_joint_action_section_v7_tau_kb_document_references` through
+the runtime field `jev_evidence_representation=tau_kb_document_references_v1`.
+Other benchmarks retain verbatim JEV v6 evidence.
+
+The JEV-only encoder stores repeated `(document ID, exact content)` pairs once
+within each original record. A tool message keeps its position and all fields.
+Its `content.parts` contains ordered literal strings and `{ "document": N }`
+references into that record's `documents` table, using zero-based indexes. The table retains complete
+document bodies and IDs. Titles, ranks, scores, timing text, queries, messages,
+grades, the component, and action criteria remain complete. A decoder verifies
+exact record reconstruction before admission. Unknown KB formats remain verbatim.
+Native traces and Manifestor/editor evidence remain unchanged.
+Independent proposals keep their labeled, non-array evidence verbatim under the same size guard.
+The reference protocol requires single-component selection. `--module-selector controller`
+fails during strategy setup, before evaluation. Other benchmarks keep their existing joint-selection support.
+
+The model-visible reference instructions count toward the same 524,288-byte
+logical JSON budget. The existing planner keeps each record intact, groups at
+most three records, weights probabilities by original record count, and draws
+once. Unique oversized records still fail before dispatch. Smaller encoded
+records can fit together where v6 needed separate groups.
+
+This is a new evidence protocol, not proof of equivalent JEV decisions.
+Runtime and reflection contracts reject old checkpoints, including v6 runs with
+the same records. Use a new run directory after explicit protocol approval.
+The byte limit remains a heuristic; offline replay does not prove live provider
+acceptance or task-solving quality.
+
 ## Data and repetitions
 
 `banking-manifest.json` pins all 97 ordered task-record fingerprints, the 698

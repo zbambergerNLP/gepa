@@ -58,6 +58,7 @@ from gepa.strategies.intervention import (
     summarize_feedback,
 )
 from gepa.strategies.jev_controller import JevController
+from gepa.strategies.jev_evidence import TAU_KB_REFERENCE_FORMAT
 from gepa.strategies.reflection_context import (
     CONTROLLER_AUTHORITY_GUIDANCE,
     FOREST_REFLECTION_CONTRACT,
@@ -626,6 +627,10 @@ class ThreeRoleReflectionLM:
             self.level != SEMANTIC_REFLECTION_LEVEL or self.controller_selection not in {VERBALIZED_SELECTION, "jev"}
         ):
             raise ValueError("Controller component selection requires level 2 and a verbalized or Jev Controller.")
+        if enabled and self.jev_controller is not None:
+            representation = self.jev_controller.run_contract().get("evidence_representation", {})
+            if representation.get("format") == TAU_KB_REFERENCE_FORMAT:
+                raise ValueError("Tau KB references require single-component evidence; use a fixed module selector.")
         self.controller_selects_component = enabled
         if self.recovery_planner is not None:
             self.recovery_planner.contract = deepcopy(RECOVERY_POLICY_CONTRACT)

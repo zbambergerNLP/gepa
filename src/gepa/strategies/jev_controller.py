@@ -62,6 +62,14 @@ from gepa.strategies.jev_constants import (
     JEV_TIMEOUT_SECONDS,
     TOKENS_PER_MILLION,
 )
+from gepa.strategies.jev_evidence import (
+    TAU_KB_JEV_POLICY,
+    TAU_KB_REFERENCE_CONTRACT,
+    TAU_KB_REFERENCE_FORMAT,
+    TAU_KB_REFERENCE_GUIDANCE,
+    EvidenceReferenceError,
+    factor_tau_evidence,
+)
 from gepa.strategies.jev_handoff import HANDOFF_ENV, exchange
 from gepa.strategies.reflection_context import GENERALIZATION_GUIDANCE, REAL_EDIT_GUIDANCE
 
@@ -212,6 +220,7 @@ class JevController:
         *,
         api_key: str | None = None,
         provider: str = "typesafe",
+        evidence_representation: str | None = None,
         response_journal_path: str | Path | None = None,
         attempt_log_path: str | Path | None = None,
     ) -> None:
@@ -221,6 +230,8 @@ class JevController:
             api_key: Explicit credential, or ``None`` to read the configured
                 environment variable when the client first connects.
             provider: Explicit typesafe or openrouter typed decision transport.
+            evidence_representation: Explicit Tau KB reference protocol, or
+                ``None`` to retain the verbatim v6 evidence protocol.
             response_journal_path: Optional SQLite journal for deterministic
                 replay of completed logical requests.
             attempt_log_path: Optional append-only ledger of physical requests.
@@ -232,6 +243,9 @@ class JevController:
         """
         if provider not in {"typesafe", "openrouter"}:
             raise ValueError("Unsupported Jev provider")
+        if evidence_representation not in {None, TAU_KB_REFERENCE_FORMAT}:
+            raise ValueError("Unsupported Jev evidence representation")
+        self._evidence_representation = evidence_representation
         self._provider = provider
         self._model = "typesafe/jev-1.13" if provider == "openrouter" else JEV_MODEL
         self._response_model = "typesafe/jev-1.13-20260917" if provider == "openrouter" else JEV_MODEL
@@ -279,6 +293,12 @@ class JevController:
             )
             contract["cost_estimate"]["source"] = "https://openrouter.ai/typesafe/jev-1.13"
         contract["request_sizing"]["max_request_utf8_bytes"] = self._request_size_limit()
+        if self._evidence_representation is not None:
+            contract["policy"] = TAU_KB_JEV_POLICY
+            contract["evidence_representation"] = deepcopy(TAU_KB_REFERENCE_CONTRACT)
+            contract["evidence_groups"]["compatibility"] = (
+                "new Tau evidence representation; incompatible with verbatim v6 and earlier checkpoints"
+            )
         return contract
 
     def response_journal_cursor_state(self) -> dict[str, int]:
@@ -931,6 +951,19 @@ class JevController:
     ) -> tuple[ControllerChoice, dict[str, Any]]:
         """Share feasibility, API validation, journaling and sampling across menus."""
         joint_components = "components" in state
+        if self._evidence_representation is not None:
+            if joint_components:
+                raise JevControllerError("Tau KB references require single-component evidence")
+            try:
+                evidence, changed = factor_tau_evidence(state["training_evidence"])
+            except EvidenceReferenceError as exc:
+                raise JevControllerError(str(exc)) from exc
+            state = {**state, "training_evidence": evidence}
+            if changed:
+                state["training_evidence_representation"] = {
+                    "format": TAU_KB_REFERENCE_FORMAT,
+                    "guidance": TAU_KB_REFERENCE_GUIDANCE,
+                }
         feasible, excluded, criteria = [], {}, {}
         for choice in menu:
             spec = choice.semantic_action
@@ -1013,7 +1046,7 @@ class JevController:
             }
             action = rng.choices(feasible, weights=[sampling[c.menu_id] for c in feasible], k=1)[0]
         return action, {
-            "policy": JEV_CONTROLLER_POLICY_CONTRACT["policy"],
+            "policy": self.run_contract()["policy"],
             "model": self._model,
             "raw_probs": deepcopy(answer["probabilities"]) if answer else None,
             "probs": probabilities,

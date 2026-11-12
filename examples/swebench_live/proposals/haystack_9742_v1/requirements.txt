@@ -1,0 +1,26 @@
+# Python 3.9, Linux x86_64 binary wheels. Existing packages remain frozen.
+annotated-doc==0.0.5 --hash=sha256:117bac03a25ede5df5440e855b32d556049ca169ead221505badf432fed4b101
+blis==1.2.0 --hash=sha256:7d94255f50f54c98727e57d12beeb3cb9d8879fd895d2e8c61d1b975ac87685f
+catalogue==2.0.10 --hash=sha256:58c2de0020aa90f4a2da7dfad161bf7b3b054c86a5f09fcedc0b2b740c109a9f
+cloudpathlib==0.25.0 --hash=sha256:8faef3ed3a0dd71d134e8617b4fdc5ce56a12a6b485c080cfe80106e5f1d1f5d
+confection==0.1.5 --hash=sha256:e29d3c3f8eac06b3f77eb9dfb4bf2fc6bcc9622a98ca00a698e3d019c6430b14
+curated-tokenizers==0.0.9 --hash=sha256:4307cab745488937b66948a1ce4bf86ad978c9fed29c93f2a72882b32d344689
+curated-transformers==0.1.1 --hash=sha256:d716063d73d803c6925d2dab56fde9b9ab8e89e663c2c0587804944ba488ff01
+cymem==2.0.16 --hash=sha256:6d5289d177c43d5ca05cdf837658d61391125794f298fa3535eb4b2cb87edd51
+en-core-web-trf @ https://github.com/explosion/spacy-models/releases/download/en_core_web_trf-3.8.0/en_core_web_trf-3.8.0-py3-none-any.whl --hash=sha256:272a31e9d8530d1e075351d30a462d7e80e31da23574f1b274e200f3fff35bf5
+langcodes==3.5.1 --hash=sha256:b6a9c25c603804e2d169165091d0cdb23934610524a21d226e4f463e8e958a72
+murmurhash==1.0.16 --hash=sha256:ae0f3c9488ca97c66ea009609932244ff23e9f652abdff5ea6ccb7689aad9599
+preshed==3.0.15 --hash=sha256:b0c086b84f32c057e7537b5b539d55bb66ca1ad5b90d911f91c24c4f44050d42
+rich==15.0.0 --hash=sha256:33bd4ef74232fb73fe9279a257718407f169c09b78a87ad3d296f548e27de0bb
+shellingham==1.5.4 --hash=sha256:7ecfff8f2fd72616f7481040475a65b2bf8af90a56c89140852d1120324e8686
+smart-open==7.5.0 --hash=sha256:87e695c5148bbb988f15cec00971602765874163be85acb1c9fb8abc012e6599
+spacy==3.8.7 --hash=sha256:e1406fde475900c8340c917c71b2e3e8077a027ce9b4d373315cee9dc37322eb
+spacy-curated-transformers==0.3.1 --hash=sha256:503559b6a1d6e44ec2c978e18ed871ce5c3d56871dc9216c0e1523428204e610
+spacy-legacy==3.0.12 --hash=sha256:476e3bd0d05f8c339ed60f40986c07387c0a71479245d6d0f4298dbd52cda55f
+spacy-loggers==1.0.5 --hash=sha256:196284c9c446cc0cdb944005384270d775fdeaf4f494d8e269466cfa497ef645
+srsly==2.5.6 --hash=sha256:7215a4db9b2b360ff153b55817cb8041b6536a9e88a9d0f7e20c5d5beed5ae8d
+thinc==8.3.4 --hash=sha256:8791c87857c474499455bfdd3f58432e2dc1e2cdadf46eb2f3c2293851a8a837
+typer==0.23.2 --hash=sha256:e9c8dc380f82450b3c851a9b9d5a0edf95d1d6456ae70c517d8b06a50c7a9978
+typer-slim==0.23.2 --hash=sha256:2bc3f67ac58fe40763b414c3c65f6fcc92c6b81393d0d89339663aa69252c688
+wasabi==1.1.3 --hash=sha256:f76e16e8f7e79f8c4c8be49b4024ac725713ab10cd7f19350ad18a8e3f71728c
+weasel==0.4.3 --hash=sha256:08f65b5d0dbded4879e08a64882de9b9514753d9eaa4c4e2a576e33666ac12cf

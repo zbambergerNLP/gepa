@@ -1,0 +1,9 @@
+{
+  "variant": "swe-haystack-9742-offline-environment-v1",
+  "instance_id": "deepset-ai__haystack-9742",
+  "base_commit": "4275fed8c4486093801aff884ec7b76f2db694d8",
+  "original_record_digest": "787f0223dfdcb173010b12d8bf2c90d75526cb70d4dfe3035c2f36a38b943631",
+  "original_image_sha256": "8f4aed0448a0e7b3f1bd8acbd30e762bc879d629a553118f6f314b1e3d262beb",
+  "original_test_commands": ["hatch run test:unit -rA"],
+  "offline_environment": {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
+}

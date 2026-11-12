@@ -84,6 +84,9 @@ def implementation_identity(benchmark_name: str) -> dict[str, Any]:
         sorted((root / "src" / "gepa").rglob("*.py"))
         + sorted((root / "examples" / "common").glob("*.py"))
         + sorted((root / "examples" / benchmark_name).glob("*.py"))
+        + sorted((root / "examples" / benchmark_name).glob("proposals/*/*.py"))
+        + sorted((root / "examples" / benchmark_name).glob("proposals/*/identity.json"))
+        + sorted((root / "examples" / benchmark_name).glob("proposals/*/environment.json"))
         + sorted((root / "examples" / "local_api").glob("*.py"))
     )
     return {

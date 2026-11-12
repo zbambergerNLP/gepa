@@ -12,6 +12,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from examples.common import benchmark_runner
 from examples.common.artifacts import digest
 from examples.common.benchmark_runner import ensure_contract
 from examples.swebench_live import adapter
@@ -284,3 +285,47 @@ def test_actual_grader_installs_before_patch_and_preserves_default_constructor(
         else ["enter", "/tmp/patch.diff", "/eval.sh", "exit"]
     )
     assert events == expected
+
+
+@pytest.fixture
+def isolated_implementation(tmp_path, monkeypatch):
+    common = tmp_path / "examples/common"
+    common.mkdir(parents=True)
+    (common / "benchmark_runner.py").write_text("# stable harness")
+    (tmp_path / "src/gepa").mkdir(parents=True)
+    (tmp_path / "src/gepa/engine.py").write_text("# stable engine")
+    (tmp_path / "uv.lock").write_text("stable lock")
+    proposal = tmp_path / "examples/swebench_live/proposals/haystack_9742_v1"
+    proposal.mkdir(parents=True)
+    monkeypatch.setattr(benchmark_runner, "__file__", str(common / "benchmark_runner.py"))
+    return proposal
+
+
+@pytest.mark.parametrize("name", ["environment.py", "install_dependencies.py", "identity.json", "environment.json"])
+def test_runtime_helper_or_config_drift_rejects_checkpoint_reuse(isolated_implementation, tmp_path, name):
+    source = isolated_implementation / name
+    source.write_text("original bytes")
+    before = benchmark_runner.implementation_identity("swebench_live")
+    checkpoint = tmp_path / "checkpoint"
+    ensure_contract(checkpoint, "contract.json", before)
+    source.write_text("changed bytes")
+    after = benchmark_runner.implementation_identity("swebench_live")
+    assert after != before
+    with pytest.raises(ValueError, match="use a new run directory"):
+        ensure_contract(checkpoint, "contract.json", after)
+
+
+def test_mutable_outputs_do_not_change_implementation_identity(isolated_implementation, tmp_path):
+    (isolated_implementation / "environment.py").write_text("# stable runtime helper")
+    (isolated_implementation / "environment.json").write_text('{"stable": true}')
+    before = benchmark_runner.implementation_identity("swebench_live")
+    outputs = isolated_implementation / "outputs"
+    outputs.mkdir()
+    (outputs / "generated.py").write_text("changed output")
+    (outputs / "environment.json").write_text('{"changed": true}')
+    (isolated_implementation / "result.json").write_text('{"changed": true}')
+    benchmark_outputs = tmp_path / "examples/swebench_live/outputs"
+    benchmark_outputs.mkdir()
+    (benchmark_outputs / "generated.py").write_text("changed output")
+    (benchmark_outputs / "result.json").write_text('{"changed": true}')
+    assert benchmark_runner.implementation_identity("swebench_live") == before

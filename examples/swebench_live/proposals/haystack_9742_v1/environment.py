@@ -10,7 +10,6 @@ from examples.swebench_live.proposals.haystack_9742_v1.install_dependencies impo
 from examples.swebench_live.proposals.haystack_9742_v1.prepare import validate_proposed_record
 
 PACKET = Path(__file__).parent
-VARIANT = "swe-haystack-9742-offline-environment-v1"
 
 
 def environment_assets(record: dict, assets_root: Path) -> Path:
